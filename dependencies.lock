@@ -1,0 +1,54 @@
+dependencies:
+  ankayca/esp32-wifi-manager:
+    component_hash: 24264c8cc4d618d2c94eb2ba55dd3f0d2f5143e89e05f9afe3ae3087b4adc78e
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.0.4
+  espressif/led_strip:
+    component_hash: f0d1b7f93eb3ee57bcfd220656176b0b5616e1947f89ed44364555cf910c4840
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 3.0.2
+  espressif/mdns:
+    component_hash: 29e47564b1a7ee778135e17fbbf2a2773f71c97ebabfe626c8eda7c958a7ad16
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.9.1
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+  jgromes/radiolib:
+    component_hash: 22aedd462cd81a653a74371e86230d7b3f40c32ba33fd1e50e0ad10fc415607b
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 7.5.0
+direct_dependencies:
+- ankayca/esp32-wifi-manager
+- espressif/led_strip
+- espressif/mdns
+- idf
+- jgromes/radiolib
+manifest_hash: 6af76b63e78cbecf77a573620bb4d3ab8c90dc570ce37795d143951285f9aef3
+target: esp32s3
+version: 2.0.0
