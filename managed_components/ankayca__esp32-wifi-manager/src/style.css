@@ -1,0 +1,297 @@
+:root{
+    --bg-0: #0b1220;
+    --bg-1: #0f1b2d;
+    --card: rgba(255,255,255,0.08);
+    --card-solid: #ffffff;
+    --border-soft: rgba(255,255,255,0.08);
+    --text-0: #0f172a;
+    --text-1: #334155;
+    --muted: #94a3b8;
+    --accent: #1f6feb;
+    --accent-2: #16a34a;
+    --danger: #dc2626;
+    --shadow-1: 0 8px 30px rgba(0,0,0,0.18);
+    --radius-1: 14px;
+    --radius-2: 22px;
+}
+
+/* Base */
+body {
+    background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(31,111,235,0.22), transparent 60%),
+        radial-gradient(1200px 600px at 90% 10%, rgba(22,163,74,0.18), transparent 60%),
+        linear-gradient(180deg, var(--bg-0), var(--bg-1));
+    border: 0;
+    margin: 0;
+    font: 1.03em system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: white;
+}
+
+/* Links */
+a {
+    color: white;
+    transition: opacity .2s ease-out, transform .2s ease-out;
+    text-decoration: none;
+}
+a:hover {
+    opacity: 0.85;
+    transform: translateY(-1px);
+}
+
+/* Inputs default hidden (library behavior) */
+input {
+    display: none;
+    font: 1.05em system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+input:focus,
+select:focus,
+textarea:focus,
+button:focus {
+    outline: none;
+}
+
+/* Buttons */
+input[type="button"] {
+    width: auto;
+    min-width: 110px;
+    padding: 10px 14px;
+    text-align: center;
+    display: inline-block;
+    border-radius: 999px;
+    border: 1px solid rgba(0,0,0,0.08);
+    background: linear-gradient(135deg, #ffffff, #f3f4f6);
+    color: #0f172a;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    transition: transform .15s ease, box-shadow .15s ease, opacity .15s ease;
+}
+input[type="button"]:hover{
+    transform: translateY(-1px);
+    box-shadow: 0 10px 24px rgba(0,0,0,0.14);
+}
+input[type="button"]:active{
+    transform: translateY(0);
+    opacity: 0.9;
+}
+
+p {
+    padding: 10px;
+}
+
+/* Layout container */
+#app {
+    padding: 18px 14px 40px;
+}
+#app-wrap {
+    max-width: 520px;
+    margin: 0 auto;
+}
+
+/* Brand bar */
+#brand-bar{
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 18px;
+    border-radius: var(--radius-2);
+    background: linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04));
+    border: 1px solid var(--border-soft);
+    box-shadow: var(--shadow-1);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    margin-bottom: 14px;
+}
+.brand-badge{
+    width: 48px;
+    height: 48px;
+    border-radius: 14px;
+    display: grid;
+    place-items: center;
+    font-weight: 800;
+    letter-spacing: 1px;
+    background: linear-gradient(135deg, rgba(31,111,235,0.35), rgba(255,255,255,0.08));
+    border: 1px solid rgba(255,255,255,0.18);
+}
+.brand-text{
+    line-height: 1.1;
+}
+.brand-name{
+    font-size: 1.25em;
+    font-weight: 750;
+}
+.brand-powered{
+    font-size: 0.88em;
+    color: rgba(255,255,255,0.75);
+    margin-top: 3px;
+}
+
+/* Panels */
+.panel-header{
+    background: transparent;
+    border-bottom: 0;
+    padding: 10px 6px 2px;
+}
+.panel-subtitle{
+    margin: 0 0 8px;
+    padding: 0 4px 6px;
+    font-size: 0.92em;
+    color: rgba(255,255,255,0.7);
+    text-align: center;
+}
+
+/* Section card styling */
+section {
+    background-color: var(--card-solid);
+    color: var(--text-0);
+    border: 1px solid rgba(15, 23, 42, 0.06);
+    border-radius: var(--radius-1);
+    margin: 8px 0 14px;
+    box-shadow: 0 8px 24px rgba(2,6,23,0.06);
+}
+
+/* Headings inside views */
+h1 {
+    display: block;
+    text-align: center;
+    margin: 0;
+    padding: 6px 0 2px;
+    font-size: 1.35em;
+    font-weight: 750;
+    color: white;
+}
+h2 {
+    margin: 0;
+    margin-top: 18px;
+    padding: 6px 6px 8px;
+    text-transform: uppercase;
+    color: rgba(255,255,255,0.65);
+    font-size: 0.9em;
+    letter-spacing: 0.08em;
+}
+h3 {
+    margin: 0;
+    text-align: center;
+    padding: 20px 0;
+}
+
+/* Status colors */
+.gr { color: var(--accent-2); }
+.rd { color: var(--danger); }
+
+/* Lists / AP entries */
+.ape {
+    margin: 0;
+    padding: 14px 14px 14px 16px;
+    border-bottom: 1px solid rgba(15, 23, 42, 0.06);
+    transition: background .15s ease, transform .1s ease;
+}
+.ape:last-child{
+    border-bottom: 0;
+}
+.ape:hover {
+    cursor: pointer;
+    background: rgba(2,6,23,0.04);
+}
+.ape-row{
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.ape-label{
+    font-size: 0.95em;
+    color: var(--text-1);
+}
+
+/* Divider (legacy class) */
+.brdb {
+    border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+/* Buttons container */
+.buttons {
+    padding: 14px 12px 18px;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+    background: transparent;
+}
+.ctr {
+    margin: 0 auto !important;
+}
+
+/* Layout states (library-controlled) */
+#wifi-status { display: none; }
+#connect { display: none; }
+#connect_manual { display: none; }
+#connect-wait { display: none; }
+#connect-success { display: none; }
+#connect-fail { display: none; }
+#connect-details { display: none; }
+#credits { display: none; }
+
+/* Text inputs */
+#manual_ssid,
+#manual_pwd,
+#pwd {
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    width: calc(100% - 40px);
+    margin: 14px 20px 0;
+    padding: 12px 12px;
+    display: block;
+    border-radius: 10px;
+    background: #f8fafc;
+    font-size: 1.0em;
+}
+
+/* Footer credits line */
+#pwrdby{
+    text-align: center;
+    font-size: 0.9em;
+    color: rgba(255,255,255,0.7);
+    margin: 8px 2px 0;
+}
+#pwrdby em{
+    font-style: normal;
+    opacity: 0.9;
+}
+
+/* Disconnect modal */
+.diag-box {
+    position: absolute;
+    top: 0; left: 0; bottom: 0; right: 0;
+    height: 100%; width: 100%;
+    display: none;
+    background: rgba(2, 6, 23, 0.45);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+}
+.diag-box-win {
+    position: absolute;
+    left: 6%;
+    width: 88%;
+    text-align: center;
+    border: 1px solid rgba(0,0,0,0.06);
+    background-color: #fff;
+    border-radius: var(--radius-1);
+    top: 20%;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.18);
+}
+
+/* Helpers */
+.blur {
+    -webkit-filter: blur(2px);
+    -moz-filter: blur(2px);
+    -ms-filter: blur(2px);
+    -o-filter: blur(2px);
+    filter: blur(2px);
+}
+.tctr { text-align: center; }
+.fr {
+    float: right;
+    margin-right: 20px;
+}
+
+/* Icon rows (keep original SVG backgrounds) */
+.w0 {
+    background: url('data:image/svg+xml;base64,PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiIHN0YW5kYWxvbmU9Im5vIj8+CjwhRE9DVFlQRSBzdmcgUFVCTElDICItLy9XM0MvL0RURCBTVkcgMS4xLy9FTiIgImh0dHA6Ly93d3cudzMub3JnL0dyYXBoaWNzL1NWRy8xLjEvRFREL3N2ZzExLmR0ZCI+Cjxzdmcgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiB2ZXJzaW9uPSIxLjEiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgeG1sOnNwYWNlPSJwcmVzZXJ2ZSI+CjxwYXRoIGQ9Ik0xLDlMMywxMUM3Ljk3LDYuMD

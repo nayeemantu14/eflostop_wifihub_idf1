@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8"/>
+		<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+		<meta name="apple-mobile-web-app-capable" content="yes" />
+		<meta name="theme-color" content="#0b1220">
+		<link rel="stylesheet" href="style.css">
+		<script async src="code.js"></script>
+		<title>AVG Home Hub</title>
+	</head>
+
+	<body>
+		<div id="app">
+			<div id="app-wrap">
+
+				<!-- Brand bar (always visible, doesn't change existing view IDs) -->
+				<div id="brand-bar">
+					<div class="brand-badge" aria-hidden="true">AVG</div>
+					<div class="brand-text">
+						<div class="brand-name">AVG Home Hub</div>
+						<div class="brand-powered">Powered by <strong>Watts Home</strong></div>
+					</div>
+				</div>
+
+				<div id="wifi">
+					<header class="panel-header">
+						<h1>Wi-Fi Setup</h1>
+						<p class="panel-subtitle">Connect your hub to your home network</p>
+					</header>
+
+					<div id="wifi-status">
+						<h2>Connected to:</h2>
+						<section id="connected-to">
+							<div class="ape">
+								<div class="ape-row">
+									<div class="w0">
+										<div class="pw"><span></span></div>
+									</div>
+									<div class="ape-label">Current network</div>
+								</div>
+							</div>
+						</section>
+					</div>
+
+					<h2>Manual connect</h2>
+					<section id="manual_add">
+						<div class="ape">ADD (HIDDEN) SSID</div>
+					</section>
+
+					<h2>or choose a network...</h2>
+					<section id="wifi-list">
+					</section>
+
+					<!-- Keep #acredits for JS click hook -->
+					<div id="pwrdby">
+						<em>Powered by </em>
+						<a id="acredits" href="#"><strong>Watts Home</strong></a>.
+					</div>
+				</div>
+
+				<div id="connect_manual">
+					<header class="panel-header">
+						<h1>Enter Details</h1>
+						<p class="panel-subtitle">Manual connection</p>
+					</header>
+
+					<h2>Manual Connection</h2>
+					<section>
+						<input id="manual_ssid" type="text" placeholder="SSID" value="">
+						<input id="manual_pwd" type="password" placeholder="Password" value="">
+					</section>
+
+					<div class="buttons">
+						<input id="manual_join" type="button" value="Join" data-connect="manual" />
+						<input id="manual_cancel" type="button" value="Cancel"/>
+					</div>
+				</div>
+
+				<div id="connect">
+					<header class="panel-header">
+						<h1>Enter Password</h1>
+						<p class="panel-subtitle">Secure connection</p>
+					</header>
+
+					<h2>Password for <span id="ssid-pwd"></span></h2>
+					<section>
+						<input id="pwd" type="password" placeholder="Password" value="">
+					</section>
+
+					<div class="buttons">
+						<input id="join" type="button" value="Join" />
+						<input id="cancel" type="button" value="Cancel"/>
+					</div>
+				</div>
+
+				<div id="connect-wait">
+					<header class="panel-header">
+						<h1>Please wait...</h1>
+						<p class="panel-subtitle">Configuring wireless radio</p>
+					</header>
+
+					<h2>Connecting to <span id="ssid-wait"></span></h2>
+					<section>
+						<div id="loading">
+							<div class="spinner">
+								<div class="double-bounce1"></div>
+								<div class="double-bounce2"></div>
+							</div>
+							<p class="tctr">
+								You may lose Wi-Fi access while the hub calibrates its radio.
+								Please wait until your device automatically reconnects.
+								This can take up to 30s.
+							</p>
+						</div>
+
+						<div id="connect-success">
+							<h3 class="gr">Success!</h3>
+						</div>
+
+						<div id="connect-fail">
+							<h3 class="rd">Connection failed</h3>
+							<p class="tctr">
+								Please double-check the Wi-Fi password and make sure the access point has good signal.
+							</p>
+						</div>
+					</section>
+
+					<div class="buttons">
+						<input id="ok-connect" type="button" value="OK" class="ctr" />
+					</div>
+				</div>
+
+				<div id="connect-details">
+					<div id="connect-details-wrap">
+						<header class="panel-header">
+							<h1>Connection Details</h1>
+							<p class="panel-subtitle">Network information</p>
+						</header>
+
+						<h2></h2>
+						<section>
+							<div class="buttons">
+								<input id="disconnect" type="button" value="Disconnect" class="ctr"/>
+							</div>
+						</section>
+
+						<h2>IP Address</h2>
+						<section>
+							<div class="ape brdb">IP Address:<div id="ip" class="fr"></div></div>
+							<div class="ape brdb">Subnet Mask:<div id="netmask" class="fr"></div></div>
+							<div class="ape">Default Gateway:<div id="gw" class="fr"></div></div>
+						</section>
+
+						<div class="buttons">
+							<input id="ok-details" type="button" value="OK" class="ctr" />
+						</div>
+					</div>
+
+					<div id="diag-disconnect" class="diag-box">
+						<div class="diag-box-win">
+							<p>Are you sure you would like to disconnect from this Wi-Fi?</p>
+							<div class="buttons">
+								<input id="no-disconnect" type="button" value="No" />
+								<input id="yes-disconnect" type="button" value="Yes" />
+							</div>
+						</div>
+					</div>
+				</div>
+
+			</div>
+		</div>
+
+		<div id="credits">
+			<header class="panel-header">
+				<h1>About AVG Home Hub</h1>
+				<p class="panel-subtitle">Powered by Watts Home</p>
+			</header>
+
+			<h2></h2>
+			<section>
+				<p>
+					<strong>AVG Home Hub</strong> setup portal.<br/>
+					Powered by <strong>Watts Home</strong>.
+				</p>
+				<p>
+					This experience is built on <strong>esp32-wifi-manager</strong>, &copy; 2017-2020, Tony Pottier<br />
+					Licensed under the MIT License.
+				</p>
+				<p>
+					This app would not be possible without the following libraries:
+				</p>
+				<ul>
+					<li>SpinKit, &copy; 2015, Tobias Ahlin. Licensed under the MIT License.</li>
+					<li>jQuery, The jQuery Foundation. Licensed under the MIT License.</li>
+					<li>cJSON, &copy; 2009-2017, Dave Gamble and cJSON contributors. Licensed under the MIT License.</li>
+				</ul>
+			</section>
+
+			<div class="buttons">
+				<input id="ok-credits" type="button" value="OK" class="ctr" />
+			</div>
+		</div>
+	</body>
+</html>
