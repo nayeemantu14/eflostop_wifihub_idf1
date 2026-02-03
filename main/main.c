@@ -20,6 +20,7 @@
 #include "app_uart.h"
 #include "app_lora.h"
 #include "iothub/app_iothub.h"
+#include "ble_valve/app_ble_valve.h"
 
 /* ---------------------------------------------------------
  * Tags
@@ -48,6 +49,7 @@ void app_main(void)
     app_wifi_start();
 	configurelora();
 	initialize_iothub();
+	app_ble_valve_init();
 #if CONFIG_SOC_CPU_CORES_NUM > 1
 	/* create a task on core 1 that monitors free heap memory */
 	xTaskCreate(&monitoring_task, "monitoring_task", 4096, NULL, 1, NULL);

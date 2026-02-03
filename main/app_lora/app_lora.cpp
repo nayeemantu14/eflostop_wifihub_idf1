@@ -308,5 +308,5 @@ extern "C" void lora_task(void* param)
 
 void configurelora(void)
 {
-    xTaskCreate(lora_task, "lora_task", 10240, NULL, 5, NULL);
+    xTaskCreate(lora_task, "lora_task", 10240, NULL, 4, NULL);
 }
