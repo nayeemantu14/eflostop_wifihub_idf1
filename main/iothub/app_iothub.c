@@ -282,24 +282,51 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 
                 ESP_LOGI(IOTHUB_TAG, "Payload: %s", data_copy);
                 
-                // Check for valve commands first
-                if (strstr(data_copy, "VALVE_OPEN"))
+                // Trim leading whitespace for command detection
+                char *trimmed = data_copy;
+                while (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\n' || *trimmed == '\r') {
+                    trimmed++;
+                }
+                
+                // Check for DECOMMISSION command (text or JSON format)
+                if (strstr(trimmed, "DECOMMISSION") || strstr(trimmed, "decommission"))
+                {
+                    ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION COMMAND RECEIVED !!!");
+                    
+                    // Call decommission function
+                    if (provisioning_decommission()) {
+                        ESP_LOGI(IOTHUB_TAG, "Decommissioning successful - restarting device in 3 seconds...");
+                        
+                        // Clear BLE target MAC
+                        ble_valve_set_target_mac(NULL);
+                        
+                        // Give time for MQTT ack and logs to flush
+                        vTaskDelay(pdMS_TO_TICKS(3000));
+                        
+                        // Restart the device to clean state
+                        esp_restart();
+                    } else {
+                        ESP_LOGE(IOTHUB_TAG, "Decommissioning failed!");
+                    }
+                }
+                // Check for valve commands
+                else if (strstr(trimmed, "VALVE_OPEN"))
                 {
                     ESP_LOGI(IOTHUB_TAG, "Command: VALVE_OPEN");
                     ble_valve_connect();
                     ble_valve_open();
                 }
-                else if (strstr(data_copy, "VALVE_CLOSE"))
+                else if (strstr(trimmed, "VALVE_CLOSE"))
                 {
                     ESP_LOGI(IOTHUB_TAG, "Command: VALVE_CLOSE");
                     ble_valve_connect();
                     ble_valve_close();
                 }
                 // Check if it's a JSON provisioning payload
-                else if (data_copy[0] == '{')
+                else if (trimmed[0] == '{')
                 {
                     ESP_LOGI(IOTHUB_TAG, "Provisioning JSON detected");
-                    if (provisioning_handle_azure_payload_json(data_copy, event->data_len)) {
+                    if (provisioning_handle_azure_payload_json(trimmed, strlen(trimmed))) {
                         ESP_LOGI(IOTHUB_TAG, "Provisioning successful!");
                         
                         // Apply provisioned valve MAC to BLE
@@ -451,6 +478,19 @@ void iothub_task(void *param)
 
         if (g_iot_hub_connected)
         {
+            // CRITICAL: Only publish telemetry if device is provisioned
+            if (!provisioning_is_provisioned()) {
+                // Drain queues but don't publish when UNPROVISIONED
+                if (active_queue == lora_rx_queue) {
+                    xQueueReceive(lora_rx_queue, &pkt, 0);
+                    ESP_LOGD(IOTHUB_TAG, "LoRa packet received but device UNPROVISIONED - not publishing");
+                } else if (active_queue == ble_update_queue) {
+                    xQueueReceive(ble_update_queue, &ble_upd_type, 0);
+                    ESP_LOGD(IOTHUB_TAG, "BLE update received but device UNPROVISIONED - not publishing");
+                }
+                continue; // Skip publishing
+            }
+            
             char *json_payload = NULL;
 
             if (active_queue == lora_rx_queue)
@@ -459,12 +499,11 @@ void iothub_task(void *param)
                 {
                     ESP_LOGI(IOTHUB_TAG, "Event: LoRa Packet from 0x%08lX", pkt.sensorId);
                     
-                    // Check if sensor is provisioned (optional filtering)
-                    // For now, we publish all sensors. If you want filtering:
-                    // if (!provisioning_is_lora_sensor_provisioned(pkt.sensorId)) {
-                    //     ESP_LOGW(IOTHUB_TAG, "Sensor 0x%08lX not provisioned, skipping", pkt.sensorId);
-                    //     continue;
-                    // }
+                    // Check if this specific sensor is provisioned
+                    if (!provisioning_is_lora_sensor_provisioned(pkt.sensorId)) {
+                        ESP_LOGW(IOTHUB_TAG, "Sensor 0x%08lX not provisioned, skipping", pkt.sensorId);
+                        continue;
+                    }
                     
                     // Check for duplicates
                     if (!is_lora_duplicate(&pkt)) {
@@ -479,6 +518,22 @@ void iothub_task(void *param)
                 if (xQueueReceive(ble_update_queue, &ble_upd_type, 0))
                 {
                     ESP_LOGI(IOTHUB_TAG, "Event: BLE Update type=%d", ble_upd_type);
+                    
+                    // DEFENSE-IN-DEPTH: Verify connected valve MAC matches provisioned MAC
+                    char connected_mac[18];
+                    char provisioned_mac[18];
+                    if (ble_valve_get_mac(connected_mac) && 
+                        provisioning_get_valve_mac(provisioned_mac)) {
+                        if (strcasecmp(connected_mac, provisioned_mac) != 0) {
+                            ESP_LOGW(IOTHUB_TAG, "Connected valve MAC %s doesn't match provisioned MAC %s, skipping",
+                                     connected_mac, provisioned_mac);
+                            continue;
+                        }
+                    } else {
+                        // Either not connected or no provisioned MAC - skip
+                        ESP_LOGD(IOTHUB_TAG, "BLE not connected or no provisioned MAC, skipping");
+                        continue;
+                    }
                     
                     // Only publish if it's a meaningful update and data changed
                     if (ble_upd_type == BLE_UPD_BATTERY || 

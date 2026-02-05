@@ -335,6 +335,47 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 }
 
+/* HEAD method handler - many browsers send HEAD requests to check connectivity */
+static esp_err_t http_server_head_handler(httpd_req_t *req){
+    char* host = NULL;
+    size_t buf_len;
+
+    ESP_LOGD(TAG, "HEAD %s", req->uri);
+
+    /* Get Host header */
+    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
+    if (buf_len > 1) {
+        host = malloc(buf_len);
+        if(httpd_req_get_hdr_value_str(req, "Host", host, buf_len) != ESP_OK){
+            memset(host, 0x00, buf_len);
+        }
+    }
+
+    /* determine if Host is from the STA IP address */
+    wifi_manager_lock_sta_ip_string(portMAX_DELAY);
+    bool access_from_sta_ip = host != NULL?strstr(host, wifi_manager_get_sta_ip_string()):false;
+    wifi_manager_unlock_sta_ip_string();
+
+    if (host != NULL && !strstr(host, DEFAULT_AP_IP) && !access_from_sta_ip) {
+        /* Captive Portal - redirect */
+        httpd_resp_set_status(req, http_302_hdr);
+        httpd_resp_set_hdr(req, http_location_hdr, http_redirect_url);
+        httpd_resp_send(req, NULL, 0);
+    }
+    else{
+        /* Respond with 200 OK but no body (HEAD request) */
+        httpd_resp_set_status(req, http_200_hdr);
+        httpd_resp_set_type(req, http_content_type_html);
+        httpd_resp_send(req, NULL, 0);
+    }
+
+    if(host != NULL){
+        free(host);
+    }
+
+    return ESP_OK;
+}
+
 /* URI wild card for any GET request */
 static const httpd_uri_t http_server_get_request = {
     .uri       = "*",
@@ -352,6 +393,13 @@ static const httpd_uri_t http_server_delete_request = {
 	.uri	= "*",
 	.method = HTTP_DELETE,
 	.handler = http_server_delete_handler
+};
+
+/* HEAD method handler registration */
+static const httpd_uri_t http_server_head_request = {
+    .uri       = "*",
+    .method    = HTTP_HEAD,
+    .handler   = http_server_head_handler
 };
 
 
@@ -423,10 +471,22 @@ void http_app_start(bool lru_purge_enable){
 
 		httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
-		/* this is an important option that isn't set up by default.
-		 * We could register all URLs one by one, but this would not work while the fake DNS is active */
+		/* CRITICAL FIXES FOR CAPTIVE PORTAL */
 		config.uri_match_fn = httpd_uri_match_wildcard;
 		config.lru_purge_enable = lru_purge_enable;
+		
+		/* Increase header buffer to handle large User-Agent strings */
+		config.max_uri_handlers = 12;  // Increased from default 8
+		config.max_resp_headers = 8;   // Default is fine
+		config.recv_wait_timeout = 5;  // 5 seconds (default 5)
+		config.send_wait_timeout = 5;  // 5 seconds (default 5)
+		
+		/* CRITICAL: Increase stack size to prevent memory issues */
+		config.stack_size = 8192;  // Increased from default 4096
+		
+		/* Server port */
+		config.server_port = 80;
+		config.ctrl_port = 32768;
 
 		/* generate the URLs */
 		if(http_root_url == NULL){
@@ -473,6 +533,7 @@ void http_app_start(bool lru_purge_enable){
 	        httpd_register_uri_handler(httpd_handle, &http_server_get_request);
 	        httpd_register_uri_handler(httpd_handle, &http_server_post_request);
 	        httpd_register_uri_handler(httpd_handle, &http_server_delete_request);
+	        httpd_register_uri_handler(httpd_handle, &http_server_head_request);  // FIX: Register HEAD handler
 	    }
 	}
 

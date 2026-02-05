@@ -1,4 +1,4 @@
-#include "provisioning_manager.h"
+#include "provisioning_manager/provisioning_manager.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -482,6 +482,60 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
     ESP_LOGI(PROV_TAG, "LoRa sensors: %d", g_config.lora_sensor_count);
     ESP_LOGI(PROV_TAG, "BLE leak sensors: %d", g_config.ble_leak_sensor_count);
 
+    return true;
+}
+
+bool provisioning_decommission(void)
+{
+    if (!g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGE(PROV_TAG, "Provisioning manager not initialized");
+        return false;
+    }
+
+    ESP_LOGW(PROV_TAG, "=== DECOMMISSIONING DEVICE ===");
+
+    // Acquire mutex for thread-safe access
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex for decommissioning");
+        return false;
+    }
+
+    // Clear in-memory config
+    memset(&g_config, 0, sizeof(provisioning_config_t));
+    g_config.config_version = CURRENT_CONFIG_VERSION;
+    g_config.state = PROV_STATE_UNPROVISIONED;
+
+    xSemaphoreGive(g_prov_mutex);
+
+    // Erase from NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to open NVS for erase: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    // Erase all keys in the namespace
+    err = nvs_erase_all(nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to erase NVS: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        return false;
+    }
+
+    // Commit the erase
+    err = nvs_commit(nvs_handle);
+    nvs_close(nvs_handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to commit NVS erase: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    ESP_LOGI(PROV_TAG, "Decommissioning successful!");
+    ESP_LOGI(PROV_TAG, "Device state: UNPROVISIONED");
+    ESP_LOGI(PROV_TAG, "All provisioning data erased from NVS");
+    
     return true;
 }
 

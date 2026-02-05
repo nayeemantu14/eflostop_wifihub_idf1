@@ -75,6 +75,19 @@ bool provisioning_save_to_nvs(const provisioning_config_t *config);
 bool provisioning_handle_azure_payload_json(const char *json, size_t len);
 
 /**
+ * @brief Decommission device - erase all provisioning data and return to UNPROVISIONED state
+ * 
+ * This function:
+ * - Clears all provisioning data from memory
+ * - Erases provisioning data from NVS
+ * - Returns device to UNPROVISIONED state
+ * - Thread-safe (uses mutex)
+ * 
+ * @return true if decommissioning successful
+ */
+bool provisioning_decommission(void);
+
+/**
  * @brief Get valve MAC address
  * 
  * @param mac_out Output buffer (must be at least 18 bytes)
