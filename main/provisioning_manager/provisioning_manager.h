@@ -88,6 +88,51 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len);
 bool provisioning_decommission(void);
 
 /**
+ * @brief Remove valve from provisioning (selective decommission)
+ * 
+ * Removes valve MAC and updates state to UNPROVISIONED if no other devices remain
+ * 
+ * @return true if removal successful
+ */
+bool provisioning_remove_valve(void);
+
+/**
+ * @brief Remove specific LoRa sensor from provisioning (selective decommission)
+ * 
+ * Removes sensor from list and updates state to UNPROVISIONED if no other devices remain
+ * 
+ * @param sensor_id Sensor ID to remove
+ * @return true if removal successful
+ */
+bool provisioning_remove_lora_sensor(uint32_t sensor_id);
+
+/**
+ * @brief Remove specific BLE leak sensor from provisioning (selective decommission)
+ * 
+ * Removes sensor from list and updates state to UNPROVISIONED if no other devices remain
+ * 
+ * @param mac MAC address to remove (format: "XX:XX:XX:XX:XX:XX")
+ * @return true if removal successful
+ */
+bool provisioning_remove_ble_sensor(const char *mac);
+
+/**
+ * @brief Add a LoRa sensor to existing provisioning
+ * 
+ * @param sensor_id Sensor ID to add
+ * @return true if addition successful
+ */
+bool provisioning_add_lora_sensor(uint32_t sensor_id);
+
+/**
+ * @brief Add a BLE leak sensor to existing provisioning
+ * 
+ * @param mac MAC address to add (format: "XX:XX:XX:XX:XX:XX")
+ * @return true if addition successful
+ */
+bool provisioning_add_ble_sensor(const char *mac);
+
+/**
  * @brief Get valve MAC address
  * 
  * @param mac_out Output buffer (must be at least 18 bytes)

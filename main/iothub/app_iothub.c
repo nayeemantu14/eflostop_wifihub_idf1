@@ -288,10 +288,103 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     trimmed++;
                 }
                 
-                // Check for DECOMMISSION command (text or JSON format)
-                if (strstr(trimmed, "DECOMMISSION") || strstr(trimmed, "decommission"))
+                // ============================================================
+                // DECOMMISSION COMMANDS
+                // ============================================================
+                
+                // Check for DECOMMISSION_VALVE command
+                if (strstr(trimmed, "DECOMMISSION_VALVE"))
                 {
-                    ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION COMMAND RECEIVED !!!");
+                    ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE COMMAND RECEIVED !!!");
+                    
+                    if (provisioning_remove_valve()) {
+                        ESP_LOGI(IOTHUB_TAG, "Valve decommissioned successfully");
+                        
+                        // Clear BLE target MAC
+                        ble_valve_set_target_mac(NULL);
+                        
+                        // Disconnect active BLE connection to old valve
+                        ESP_LOGI(IOTHUB_TAG, "Disconnecting BLE connection...");
+                        ble_valve_disconnect();
+                        
+                        if (!provisioning_is_provisioned()) {
+                            ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED - BLE stopped");
+                        }
+                    } else {
+                        ESP_LOGE(IOTHUB_TAG, "Valve decommissioning failed!");
+                    }
+                }
+                // Check for DECOMMISSION_LORA:0xXXXXXXXX command
+                else if (strstr(trimmed, "DECOMMISSION_LORA:"))
+                {
+                    char *id_str = strstr(trimmed, "DECOMMISSION_LORA:") + strlen("DECOMMISSION_LORA:");
+                    uint32_t sensor_id = 0;
+                    
+                    // Parse hex ID (supports 0x prefix or raw hex)
+                    if (strncmp(id_str, "0x", 2) == 0 || strncmp(id_str, "0X", 2) == 0) {
+                        sensor_id = (uint32_t)strtoul(id_str, NULL, 16);
+                    } else {
+                        sensor_id = (uint32_t)strtoul(id_str, NULL, 16);
+                    }
+                    
+                    ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_LORA COMMAND: 0x%08lX !!!", sensor_id);
+                    
+                    if (provisioning_remove_lora_sensor(sensor_id)) {
+                        ESP_LOGI(IOTHUB_TAG, "LoRa sensor 0x%08lX decommissioned successfully", sensor_id);
+                        
+                        if (!provisioning_is_provisioned()) {
+                            ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
+                        }
+                    } else {
+                        ESP_LOGE(IOTHUB_TAG, "LoRa sensor decommissioning failed!");
+                    }
+                }
+                // Check for DECOMMISSION_LORA without colon (user error - show help)
+                else if (strstr(trimmed, "DECOMMISSION_LORA"))
+                {
+                    ESP_LOGE(IOTHUB_TAG, "Invalid command format!");
+                    ESP_LOGE(IOTHUB_TAG, "Usage: DECOMMISSION_LORA:0xSENSORID");
+                    ESP_LOGE(IOTHUB_TAG, "Example: DECOMMISSION_LORA:0x754A6237");
+                }
+                // Check for DECOMMISSION_BLE:MAC command
+                else if (strstr(trimmed, "DECOMMISSION_BLE:"))
+                {
+                    char *mac_str = strstr(trimmed, "DECOMMISSION_BLE:") + strlen("DECOMMISSION_BLE:");
+                    
+                    // Trim any trailing whitespace from MAC
+                    char mac_clean[18] = {0};
+                    int mac_len = 0;
+                    while (*mac_str && mac_len < 17 && 
+                           (*mac_str != ' ' && *mac_str != '\t' && *mac_str != '\n' && *mac_str != '\r')) {
+                        mac_clean[mac_len++] = *mac_str++;
+                    }
+                    mac_clean[mac_len] = '\0';
+                    
+                    ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_BLE COMMAND: %s !!!", mac_clean);
+                    
+                    if (provisioning_remove_ble_sensor(mac_clean)) {
+                        ESP_LOGI(IOTHUB_TAG, "BLE sensor %s decommissioned successfully", mac_clean);
+                        
+                        if (!provisioning_is_provisioned()) {
+                            ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
+                        }
+                    } else {
+                        ESP_LOGE(IOTHUB_TAG, "BLE sensor decommissioning failed!");
+                    }
+                }
+                // Check for DECOMMISSION_BLE without colon (user error - show help)
+                else if (strstr(trimmed, "DECOMMISSION_BLE"))
+                {
+                    ESP_LOGE(IOTHUB_TAG, "Invalid command format!");
+                    ESP_LOGE(IOTHUB_TAG, "Usage: DECOMMISSION_BLE:MAC_ADDRESS");
+                    ESP_LOGE(IOTHUB_TAG, "Example: DECOMMISSION_BLE:AA:BB:CC:DD:EE:FF");
+                }
+                // Check for DECOMMISSION_ALL or plain DECOMMISSION command (full factory reset)
+                // Must check AFTER all specific DECOMMISSION_* commands
+                else if (strstr(trimmed, "DECOMMISSION_ALL") || 
+                         (strcmp(trimmed, "DECOMMISSION") == 0))
+                {
+                    ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_ALL COMMAND RECEIVED !!!");
                     
                     // Call decommission function
                     if (provisioning_decommission()) {
@@ -299,6 +392,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                         
                         // Clear BLE target MAC
                         ble_valve_set_target_mac(NULL);
+                        
+                        // Disconnect BLE connection (will be terminated by restart anyway, but explicit is better)
+                        ble_valve_disconnect();
                         
                         // Give time for MQTT ack and logs to flush
                         vTaskDelay(pdMS_TO_TICKS(3000));
@@ -309,6 +405,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                         ESP_LOGE(IOTHUB_TAG, "Decommissioning failed!");
                     }
                 }
+                // ============================================================
+                // VALVE CONTROL COMMANDS
+                // ============================================================
                 // Check for valve commands
                 else if (strstr(trimmed, "VALVE_OPEN"))
                 {
@@ -353,6 +452,10 @@ void iothub_apply_provisioned_mac(void)
     if (provisioning_get_valve_mac(valve_mac)) {
         ESP_LOGI(IOTHUB_TAG, "Applying provisioned valve MAC: %s", valve_mac);
         ble_valve_set_target_mac(valve_mac);
+        
+        // Start BLE now that we're provisioned
+        ESP_LOGI(IOTHUB_TAG, "Starting BLE with provisioned MAC...");
+        app_ble_valve_signal_start();
         
         // If we're already connected to wrong device, disconnect
         char current_mac[18];
@@ -417,11 +520,15 @@ void iothub_task(void *param)
     // Check provisioning state
     if (provisioning_is_provisioned()) {
         ESP_LOGI(IOTHUB_TAG, "Hub is PROVISIONED");
-        // Apply provisioned MAC to BLE (will be used when BLE starts)
+        // Apply provisioned MAC to BLE and start BLE
         char valve_mac[18];
         if (provisioning_get_valve_mac(valve_mac)) {
             ESP_LOGI(IOTHUB_TAG, "Provisioned valve MAC: %s", valve_mac);
             ble_valve_set_target_mac(valve_mac);
+            
+            // Start BLE with provisioned MAC
+            ESP_LOGI(IOTHUB_TAG, "Starting BLE with provisioned MAC...");
+            app_ble_valve_signal_start();
         }
     } else {
         ESP_LOGI(IOTHUB_TAG, "Hub is UNPROVISIONED - waiting for provisioning JSON from Azure");

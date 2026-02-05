@@ -984,6 +984,7 @@ static void ble_valve_task(void *pvParameters)
 
         case BLE_CMD_DISCONNECT:
             ESP_LOGI(BLE_TAG, "CMD: DISCONNECT");
+            g_connect_requested = false;  // Stop auto-reconnection
             if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE)
                 ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             break;
@@ -1104,6 +1105,12 @@ bool ble_valve_connect(void)
     return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
 }
 
+bool ble_valve_disconnect(void)
+{
+    ble_valve_msg_t m = {.command = BLE_CMD_DISCONNECT};
+    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+}
+
 bool ble_valve_get_mac(char *b)
 {
     if (b == NULL)
@@ -1147,6 +1154,7 @@ void ble_valve_set_target_mac(const char *mac_str)
     if (!mac_str) {
         g_has_target_mac = false;
         g_target_valve_mac[0] = '\0';
+        g_connect_requested = false;  // Stop auto-reconnection
         ESP_LOGI(BLE_TAG, "Target MAC cleared");
         return;
     }
@@ -1162,4 +1170,3 @@ bool ble_valve_has_target_mac(void)
 {
     return g_has_target_mac;
 }
-

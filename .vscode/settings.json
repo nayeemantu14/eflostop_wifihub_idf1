@@ -16,5 +16,6 @@
     "--query-driver=**",
     "--compile-commands-dir=c:\\Work\\Projects\\EfloStop 2\\Firmware\\Production\\eFloStop_WiFiHub_idf1\\build"
   ],
-  "idf.flashType": "UART"
+  "idf.flashType": "UART",
+  "idf.currentSetup": "C:\\Users\\antun\\esp\\v5.5.1\\esp-idf"
 }

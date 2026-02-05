@@ -57,6 +57,7 @@ extern "C"
     bool ble_valve_open(void);
     bool ble_valve_close(void);
     bool ble_valve_connect(void);
+    bool ble_valve_disconnect(void);
 
     // Provisioning support
     void ble_valve_set_target_mac(const char *mac_str);

@@ -1,4 +1,4 @@
-#include "provisioning_manager/provisioning_manager.h"
+#include "provisioning_manager.h"
 #include <string.h>
 #include <stdio.h>
 #include "esp_log.h"
@@ -632,4 +632,303 @@ bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out)
     }
     
     return result;
+}
+
+// ============================================================================
+// Selective Decommissioning Functions
+// ============================================================================
+
+/**
+ * @brief Helper function to check if device should remain provisioned
+ * 
+ * Device stays provisioned if it has at least one device:
+ * - Valve MAC is set, OR
+ * - At least one LoRa sensor, OR
+ * - At least one BLE leak sensor
+ */
+static bool should_remain_provisioned(const provisioning_config_t *config)
+{
+    return (config->valve_mac[0] != '\0' ||
+            config->lora_sensor_count > 0 ||
+            config->ble_leak_sensor_count > 0);
+}
+
+bool provisioning_remove_valve(void)
+{
+    if (!g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGE(PROV_TAG, "Provisioning manager not initialized");
+        return false;
+    }
+
+    ESP_LOGW(PROV_TAG, "=== REMOVING VALVE ===");
+
+    // Acquire mutex for thread-safe access
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex");
+        return false;
+    }
+
+    // Clear valve MAC
+    memset(g_config.valve_mac, 0, sizeof(g_config.valve_mac));
+    
+    // Check if device should stay provisioned
+    if (!should_remain_provisioned(&g_config)) {
+        g_config.state = PROV_STATE_UNPROVISIONED;
+        ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
+    }
+
+    // Save updated config to NVS
+    bool save_result = provisioning_save_to_nvs(&g_config);
+    
+    xSemaphoreGive(g_prov_mutex);
+
+    if (save_result) {
+        ESP_LOGI(PROV_TAG, "Valve removed successfully");
+        ESP_LOGI(PROV_TAG, "State: %s", 
+                 g_config.state == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+    }
+
+    return save_result;
+}
+
+bool provisioning_remove_lora_sensor(uint32_t sensor_id)
+{
+    if (!g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGE(PROV_TAG, "Provisioning manager not initialized");
+        return false;
+    }
+
+    ESP_LOGW(PROV_TAG, "=== REMOVING LORA SENSOR 0x%08lX ===", sensor_id);
+
+    // Acquire mutex for thread-safe access
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex");
+        return false;
+    }
+
+    // Find and remove the sensor
+    bool found = false;
+    for (int i = 0; i < g_config.lora_sensor_count; i++) {
+        if (g_config.lora_sensor_ids[i] == sensor_id) {
+            // Shift remaining sensors down
+            for (int j = i; j < g_config.lora_sensor_count - 1; j++) {
+                g_config.lora_sensor_ids[j] = g_config.lora_sensor_ids[j + 1];
+            }
+            g_config.lora_sensor_count--;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        ESP_LOGW(PROV_TAG, "Sensor 0x%08lX not found in provisioned list", sensor_id);
+        xSemaphoreGive(g_prov_mutex);
+        return false;
+    }
+
+    // Check if device should stay provisioned
+    if (!should_remain_provisioned(&g_config)) {
+        g_config.state = PROV_STATE_UNPROVISIONED;
+        ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
+    }
+
+    // Save updated config to NVS
+    bool save_result = provisioning_save_to_nvs(&g_config);
+    
+    xSemaphoreGive(g_prov_mutex);
+
+    if (save_result) {
+        ESP_LOGI(PROV_TAG, "LoRa sensor 0x%08lX removed successfully", sensor_id);
+        ESP_LOGI(PROV_TAG, "Remaining LoRa sensors: %d", g_config.lora_sensor_count);
+        ESP_LOGI(PROV_TAG, "State: %s", 
+                 g_config.state == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+    }
+
+    return save_result;
+}
+
+bool provisioning_remove_ble_sensor(const char *mac)
+{
+    if (!mac || !g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGE(PROV_TAG, "Invalid parameters");
+        return false;
+    }
+
+    if (!validate_mac_string(mac)) {
+        ESP_LOGE(PROV_TAG, "Invalid MAC format: %s", mac);
+        return false;
+    }
+
+    ESP_LOGW(PROV_TAG, "=== REMOVING BLE LEAK SENSOR %s ===", mac);
+
+    // Acquire mutex for thread-safe access
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex");
+        return false;
+    }
+
+    // Find and remove the sensor
+    bool found = false;
+    for (int i = 0; i < g_config.ble_leak_sensor_count; i++) {
+        if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
+            // Shift remaining sensors down
+            for (int j = i; j < g_config.ble_leak_sensor_count - 1; j++) {
+                strncpy(g_config.ble_leak_sensors[j], g_config.ble_leak_sensors[j + 1], 18);
+            }
+            g_config.ble_leak_sensor_count--;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        ESP_LOGW(PROV_TAG, "BLE sensor %s not found in provisioned list", mac);
+        xSemaphoreGive(g_prov_mutex);
+        return false;
+    }
+
+    // Check if device should stay provisioned
+    if (!should_remain_provisioned(&g_config)) {
+        g_config.state = PROV_STATE_UNPROVISIONED;
+        ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
+    }
+
+    // Save updated config to NVS
+    bool save_result = provisioning_save_to_nvs(&g_config);
+    
+    xSemaphoreGive(g_prov_mutex);
+
+    if (save_result) {
+        ESP_LOGI(PROV_TAG, "BLE leak sensor %s removed successfully", mac);
+        ESP_LOGI(PROV_TAG, "Remaining BLE sensors: %d", g_config.ble_leak_sensor_count);
+        ESP_LOGI(PROV_TAG, "State: %s", 
+                 g_config.state == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+    }
+
+    return save_result;
+}
+
+bool provisioning_add_lora_sensor(uint32_t sensor_id)
+{
+    if (!g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGE(PROV_TAG, "Provisioning manager not initialized");
+        return false;
+    }
+
+    ESP_LOGI(PROV_TAG, "=== ADDING LORA SENSOR 0x%08lX ===", sensor_id);
+
+    // Acquire mutex for thread-safe access
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex");
+        return false;
+    }
+
+    // Check if already exists
+    for (int i = 0; i < g_config.lora_sensor_count; i++) {
+        if (g_config.lora_sensor_ids[i] == sensor_id) {
+            ESP_LOGW(PROV_TAG, "Sensor 0x%08lX already provisioned", sensor_id);
+            xSemaphoreGive(g_prov_mutex);
+            return true; // Not an error - already exists
+        }
+    }
+
+    // Check capacity
+    if (g_config.lora_sensor_count >= MAX_LORA_SENSORS) {
+        ESP_LOGE(PROV_TAG, "Maximum LoRa sensors (%d) reached", MAX_LORA_SENSORS);
+        xSemaphoreGive(g_prov_mutex);
+        return false;
+    }
+
+    // Add sensor
+    g_config.lora_sensor_ids[g_config.lora_sensor_count++] = sensor_id;
+    
+    // Ensure device is provisioned
+    if (g_config.state != PROV_STATE_PROVISIONED) {
+        g_config.state = PROV_STATE_PROVISIONED;
+        g_config.config_version = CURRENT_CONFIG_VERSION;
+        ESP_LOGI(PROV_TAG, "State changed to PROVISIONED");
+    }
+
+    // Save updated config to NVS
+    bool save_result = provisioning_save_to_nvs(&g_config);
+    
+    xSemaphoreGive(g_prov_mutex);
+
+    if (save_result) {
+        ESP_LOGI(PROV_TAG, "LoRa sensor 0x%08lX added successfully", sensor_id);
+        ESP_LOGI(PROV_TAG, "Total LoRa sensors: %d", g_config.lora_sensor_count);
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+    }
+
+    return save_result;
+}
+
+bool provisioning_add_ble_sensor(const char *mac)
+{
+    if (!mac || !g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGE(PROV_TAG, "Invalid parameters");
+        return false;
+    }
+
+    if (!validate_mac_string(mac)) {
+        ESP_LOGE(PROV_TAG, "Invalid MAC format: %s", mac);
+        return false;
+    }
+
+    ESP_LOGI(PROV_TAG, "=== ADDING BLE LEAK SENSOR %s ===", mac);
+
+    // Acquire mutex for thread-safe access
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex");
+        return false;
+    }
+
+    // Check if already exists
+    for (int i = 0; i < g_config.ble_leak_sensor_count; i++) {
+        if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
+            ESP_LOGW(PROV_TAG, "BLE sensor %s already provisioned", mac);
+            xSemaphoreGive(g_prov_mutex);
+            return true; // Not an error - already exists
+        }
+    }
+
+    // Check capacity
+    if (g_config.ble_leak_sensor_count >= MAX_BLE_LEAK_SENSORS) {
+        ESP_LOGE(PROV_TAG, "Maximum BLE sensors (%d) reached", MAX_BLE_LEAK_SENSORS);
+        xSemaphoreGive(g_prov_mutex);
+        return false;
+    }
+
+    // Add sensor
+    strncpy(g_config.ble_leak_sensors[g_config.ble_leak_sensor_count], mac, 18);
+    g_config.ble_leak_sensors[g_config.ble_leak_sensor_count][17] = '\0';
+    g_config.ble_leak_sensor_count++;
+    
+    // Ensure device is provisioned
+    if (g_config.state != PROV_STATE_PROVISIONED) {
+        g_config.state = PROV_STATE_PROVISIONED;
+        g_config.config_version = CURRENT_CONFIG_VERSION;
+        ESP_LOGI(PROV_TAG, "State changed to PROVISIONED");
+    }
+
+    // Save updated config to NVS
+    bool save_result = provisioning_save_to_nvs(&g_config);
+    
+    xSemaphoreGive(g_prov_mutex);
+
+    if (save_result) {
+        ESP_LOGI(PROV_TAG, "BLE leak sensor %s added successfully", mac);
+        ESP_LOGI(PROV_TAG, "Total BLE sensors: %d", g_config.ble_leak_sensor_count);
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+    }
+
+    return save_result;
 }
