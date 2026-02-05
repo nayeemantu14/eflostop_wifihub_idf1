@@ -14,13 +14,48 @@
 #include "wifi_manager.h"
 #include "rgb.h"
 
-// Note: We don't need to include app_iothub.h here, only in the .c file
 #define WIFI_TAG "APP_WIFI"
 
-void app_wifi_start();
+// =============================================================================
+// WATCHDOG CONFIGURATION
+// =============================================================================
 
-// These don't strictly need to be public, but it helps if you need to debug them
+// Maximum disconnection time before forcing AP mode (in seconds)
+// Adjust this based on your network environment:
+// - 30 seconds: Aggressive (quick failover to AP mode)
+// - 60 seconds: Balanced (default)
+// - 120 seconds: Conservative (gives more time for flaky networks)
+#define MAX_DISCONNECT_TIME_SEC 60
+
+// Maximum number of watchdog-triggered reboots before halting
+// This prevents infinite reboot loops if there's a deeper issue
+// Set to 0 to disable this safety check (not recommended)
+#define MAX_WATCHDOG_TRIGGERS 3
+
+// NVS namespace for watchdog boot counter
+#define WIFI_WATCHDOG_NVS_NAMESPACE "app_wifi"
+#define WIFI_WATCHDOG_BOOT_COUNT_KEY "boot_count"
+
+// =============================================================================
+// PUBLIC API
+// =============================================================================
+
+/**
+ * Initialize and start Wi-Fi manager with watchdog protection
+ * Call this once during app initialization
+ */
+void app_wifi_start(void);
+
+/**
+ * Callback when Wi-Fi connection is established
+ * Triggers Azure IoT Hub and BLE initialization
+ */
 void cb_connection_ok(void *pvParameter);
+
+/**
+ * Callback when Wi-Fi connection is lost
+ * Tracks disconnect events for watchdog
+ */
 void cb_connection_lost(void *pvParameter);
 
-#endif
+#endif // APP_WIFI_H

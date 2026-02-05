@@ -2,9 +2,13 @@
 #define APP_IOTHUB_H
 #pragma once
 
-#include "app_lora.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
+#ifdef __cplusplus
+extern "C"
+{
+#endif
 
 #define IOTHUB_TAG "IOTHUB"
 
@@ -18,7 +22,17 @@
 // Global Handle (Exposed so Wi-Fi can notify it)
 extern TaskHandle_t iothub_task_handle;
 
-// Just starts the task (which will immediately block)
+// Task entry point
+void iothub_task(void *param);
+
+// Initialize and start the IoT Hub task
 void initialize_iothub(void);
 
+// Trigger provisioning MAC application to BLE
+void iothub_apply_provisioned_mac(void);
+
+#ifdef __cplusplus
+}
 #endif
+
+#endif // APP_IOTHUB_H

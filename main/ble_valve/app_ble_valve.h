@@ -15,6 +15,17 @@ extern "C"
     // Queue for sending updates TO the IoT Hub Task
     extern QueueHandle_t ble_update_queue;
 
+    // BLE update event types for delta forwarding
+    typedef enum
+    {
+        BLE_UPD_NONE = 0,
+        BLE_UPD_BATTERY,
+        BLE_UPD_LEAK,
+        BLE_UPD_STATE,
+        BLE_UPD_CONNECTED,
+        BLE_UPD_DISCONNECTED
+    } ble_update_type_t;
+
     typedef enum
     {
         BLE_CMD_CONNECT = 0,
@@ -46,6 +57,10 @@ extern "C"
     bool ble_valve_open(void);
     bool ble_valve_close(void);
     bool ble_valve_connect(void);
+
+    // Provisioning support
+    void ble_valve_set_target_mac(const char *mac_str);
+    bool ble_valve_has_target_mac(void);
 
     // Getters
     bool ble_valve_get_mac(char *mac_buffer);

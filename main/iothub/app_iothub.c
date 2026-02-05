@@ -17,7 +17,9 @@
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
 
-#include "app_ble_valve.h"
+#include "app_lora/app_lora.h" 
+#include "ble_valve/app_ble_valve.h"
+#include "provisioning_manager/provisioning_manager.h"
 
 // External Queue from LoRa app
 extern QueueHandle_t lora_rx_queue;
@@ -26,6 +28,28 @@ TaskHandle_t iothub_task_handle = NULL;
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool g_iot_hub_connected = false;
 static char g_gateway_id[32] = {0};
+
+// Last sent values for duplicate detection
+typedef struct {
+    uint8_t battery;
+    bool leak_state;
+    int valve_state;
+    bool valid;
+} valve_cache_t;
+
+static valve_cache_t g_last_valve = {0};
+
+// LoRa sensor cache (simple last-sent tracking)
+#define MAX_LORA_CACHE 16
+typedef struct {
+    uint32_t sensor_id;
+    uint8_t battery;
+    uint8_t leak_status;
+    int8_t rssi;
+    bool valid;
+} lora_cache_entry_t;
+
+static lora_cache_entry_t g_lora_cache[MAX_LORA_CACHE] = {0};
 
 void url_encode(const char *src, char *dst, size_t dst_len)
 {
@@ -82,7 +106,77 @@ char *generate_sas_token(const char *resource_uri, const char *key, long expiry_
     return sas_token;
 }
 
-static char *generate_json_telemetry(lora_packet_t *pkt)
+// Check if LoRa packet is a duplicate
+static bool is_lora_duplicate(const lora_packet_t *pkt)
+{
+    for (int i = 0; i < MAX_LORA_CACHE; i++) {
+        if (g_lora_cache[i].valid && g_lora_cache[i].sensor_id == pkt->sensorId) {
+            // Found cached entry - check if values changed
+            if (g_lora_cache[i].battery == pkt->batteryPercentage &&
+                g_lora_cache[i].leak_status == pkt->leakStatus &&
+                g_lora_cache[i].rssi == pkt->rssi) {
+                return true; // Duplicate
+            }
+            // Values changed, update cache
+            g_lora_cache[i].battery = pkt->batteryPercentage;
+            g_lora_cache[i].leak_status = pkt->leakStatus;
+            g_lora_cache[i].rssi = pkt->rssi;
+            return false;
+        }
+    }
+    
+    // Not in cache, add it
+    for (int i = 0; i < MAX_LORA_CACHE; i++) {
+        if (!g_lora_cache[i].valid) {
+            g_lora_cache[i].sensor_id = pkt->sensorId;
+            g_lora_cache[i].battery = pkt->batteryPercentage;
+            g_lora_cache[i].leak_status = pkt->leakStatus;
+            g_lora_cache[i].rssi = pkt->rssi;
+            g_lora_cache[i].valid = true;
+            return false;
+        }
+    }
+    
+    // Cache full, overwrite oldest (index 0)
+    g_lora_cache[0].sensor_id = pkt->sensorId;
+    g_lora_cache[0].battery = pkt->batteryPercentage;
+    g_lora_cache[0].leak_status = pkt->leakStatus;
+    g_lora_cache[0].rssi = pkt->rssi;
+    g_lora_cache[0].valid = true;
+    return false;
+}
+
+// Check if valve data changed
+static bool valve_data_changed(void)
+{
+    uint8_t batt = ble_valve_get_battery();
+    bool leak = ble_valve_get_leak();
+    int state = ble_valve_get_state();
+    
+    if (!g_last_valve.valid) {
+        // First time
+        g_last_valve.battery = batt;
+        g_last_valve.leak_state = leak;
+        g_last_valve.valve_state = state;
+        g_last_valve.valid = true;
+        return true;
+    }
+    
+    if (g_last_valve.battery != batt || 
+        g_last_valve.leak_state != leak || 
+        g_last_valve.valve_state != state) {
+        // Changed
+        g_last_valve.battery = batt;
+        g_last_valve.leak_state = leak;
+        g_last_valve.valve_state = state;
+        return true;
+    }
+    
+    return false; // No change
+}
+
+// Build valve delta JSON
+static char *build_valve_delta_json(void)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "gatewayID", g_gateway_id);
@@ -96,7 +190,6 @@ static char *generate_json_telemetry(lora_packet_t *pkt)
     cJSON *valveObj = cJSON_CreateObject();
     cJSON_AddItemToObject(deviceObj, "valve", valveObj);
 
-    // --- VALVE DATA ---
     char valve_mac[18];
     if (ble_valve_get_mac(valve_mac))
     {
@@ -105,7 +198,6 @@ static char *generate_json_telemetry(lora_packet_t *pkt)
         cJSON_AddBoolToObject(valveObj, "leak_state", ble_valve_get_leak());
 
         int state = ble_valve_get_state();
-        // LOGIC: 1=Open, 0=Closed
         if (state == 1)
             cJSON_AddStringToObject(valveObj, "valve_state", "open");
         else if (state == 0)
@@ -119,23 +211,38 @@ static char *generate_json_telemetry(lora_packet_t *pkt)
         cJSON_AddStringToObject(valveObj, "valve_state", "disconnected");
     }
 
-    // --- SENSOR DATA ---
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str;
+}
+
+// Build LoRa delta JSON
+static char *build_lora_delta_json(const lora_packet_t *pkt)
+{
+    if (!pkt) return NULL;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "gatewayID", g_gateway_id);
+
+    cJSON *devicesArr = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "devices", devicesArr);
+
+    cJSON *deviceObj = cJSON_CreateObject();
+    cJSON_AddItemToArray(devicesArr, deviceObj);
+
+    // NOTE: leak_sensors is now a sibling to valve, not nested under it
     cJSON *sensorsObj = cJSON_CreateObject();
-    cJSON_AddItemToObject(valveObj, "leak_sensors", sensorsObj);
+    cJSON_AddItemToObject(deviceObj, "leak_sensors", sensorsObj);
 
-    if (pkt != NULL)
-    {
-        char sensorKey[32];
-        snprintf(sensorKey, sizeof(sensorKey), "sensor_0x%08lX", pkt->sensorId);
+    char sensorKey[32];
+    snprintf(sensorKey, sizeof(sensorKey), "sensor_0x%08lX", pkt->sensorId);
 
-        cJSON *thisSensor = cJSON_CreateObject();
-        cJSON_AddItemToObject(sensorsObj, sensorKey, thisSensor);
+    cJSON *thisSensor = cJSON_CreateObject();
+    cJSON_AddItemToObject(sensorsObj, sensorKey, thisSensor);
 
-        cJSON_AddNumberToObject(thisSensor, "battery", pkt->batteryPercentage);
-        // LOGIC: 1=Leak, 0=No Leak
-        cJSON_AddBoolToObject(thisSensor, "leak_state", (pkt->leakStatus == 1));
-        cJSON_AddNumberToObject(thisSensor, "rssi", pkt->rssi);
-    }
+    cJSON_AddNumberToObject(thisSensor, "battery", pkt->batteryPercentage);
+    cJSON_AddBoolToObject(thisSensor, "leak_state", (pkt->leakStatus == 1));
+    cJSON_AddNumberToObject(thisSensor, "rssi", pkt->rssi);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -154,25 +261,86 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         snprintf(sub_topic, sizeof(sub_topic), "devices/%s/messages/devicebound/#", AZURE_DEVICE_ID);
         esp_mqtt_client_subscribe(mqtt_client, sub_topic, 1);
         break;
+        
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(IOTHUB_TAG, "Disconnected.");
         g_iot_hub_connected = false;
         break;
+        
     case MQTT_EVENT_DATA:
+    {
         ESP_LOGI(IOTHUB_TAG, "Received C2D Message!");
-        if (strstr(event->data, "VALVE_OPEN"))
-        {
-            ble_valve_connect();
-            ble_valve_open();
-        }
-        else if (strstr(event->data, "VALVE_CLOSE"))
-        {
-            ble_valve_connect();
-            ble_valve_close();
+        
+        // CRITICAL: event->data is NOT null-terminated
+        // Create a safe null-terminated copy
+        char *data_copy = NULL;
+        if (event->data_len > 0) {
+            data_copy = (char *)malloc(event->data_len + 1);
+            if (data_copy) {
+                memcpy(data_copy, event->data, event->data_len);
+                data_copy[event->data_len] = '\0';
+                
+                ESP_LOGI(IOTHUB_TAG, "Payload: %s", data_copy);
+                
+                // Check for valve commands first
+                if (strstr(data_copy, "VALVE_OPEN"))
+                {
+                    ESP_LOGI(IOTHUB_TAG, "Command: VALVE_OPEN");
+                    ble_valve_connect();
+                    ble_valve_open();
+                }
+                else if (strstr(data_copy, "VALVE_CLOSE"))
+                {
+                    ESP_LOGI(IOTHUB_TAG, "Command: VALVE_CLOSE");
+                    ble_valve_connect();
+                    ble_valve_close();
+                }
+                // Check if it's a JSON provisioning payload
+                else if (data_copy[0] == '{')
+                {
+                    ESP_LOGI(IOTHUB_TAG, "Provisioning JSON detected");
+                    if (provisioning_handle_azure_payload_json(data_copy, event->data_len)) {
+                        ESP_LOGI(IOTHUB_TAG, "Provisioning successful!");
+                        
+                        // Apply provisioned valve MAC to BLE
+                        iothub_apply_provisioned_mac();
+                    } else {
+                        ESP_LOGW(IOTHUB_TAG, "Provisioning failed or incomplete");
+                    }
+                }
+                
+                free(data_copy);
+            }
         }
         break;
+    }
+    
     default:
         break;
+    }
+}
+
+void iothub_apply_provisioned_mac(void)
+{
+    char valve_mac[18];
+    if (provisioning_get_valve_mac(valve_mac)) {
+        ESP_LOGI(IOTHUB_TAG, "Applying provisioned valve MAC: %s", valve_mac);
+        ble_valve_set_target_mac(valve_mac);
+        
+        // If we're already connected to wrong device, disconnect
+        char current_mac[18];
+        if (ble_valve_get_mac(current_mac)) {
+            if (strcasecmp(current_mac, valve_mac) != 0) {
+                ESP_LOGW(IOTHUB_TAG, "Connected to wrong MAC, will reconnect to: %s", valve_mac);
+                // Trigger reconnection by sending disconnect then connect
+                // The BLE module will use the new target MAC on next connect
+                ble_valve_connect();
+            }
+        } else {
+            // Not connected, trigger connection
+            ESP_LOGI(IOTHUB_TAG, "Not connected, triggering connection to: %s", valve_mac);
+            ble_valve_connect();
+        }
     }
 }
 
@@ -187,7 +355,6 @@ static void initialize_sntp(void)
     struct tm timeinfo = {0};
     int retry = 0;
 
-    // Block until time is valid (Year > 2020)
     while (timeinfo.tm_year < (2020 - 1900))
     {
         ESP_LOGI(IOTHUB_TAG, "Waiting for time... (%d)", ++retry);
@@ -195,7 +362,7 @@ static void initialize_sntp(void)
         time(&now);
         localtime_r(&now, &timeinfo);
         if (retry > 60)
-            break; // 2 minutes timeout
+            break;
     }
     ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
 }
@@ -214,6 +381,24 @@ void iothub_task(void *param)
     ESP_LOGI(IOTHUB_TAG, "Waiting for Wi-Fi...");
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     ESP_LOGI(IOTHUB_TAG, "Starting IOT Hub Task...");
+
+    // Initialize provisioning manager
+    if (!provisioning_init()) {
+        ESP_LOGE(IOTHUB_TAG, "Failed to initialize provisioning manager");
+    }
+
+    // Check provisioning state
+    if (provisioning_is_provisioned()) {
+        ESP_LOGI(IOTHUB_TAG, "Hub is PROVISIONED");
+        // Apply provisioned MAC to BLE (will be used when BLE starts)
+        char valve_mac[18];
+        if (provisioning_get_valve_mac(valve_mac)) {
+            ESP_LOGI(IOTHUB_TAG, "Provisioned valve MAC: %s", valve_mac);
+            ble_valve_set_target_mac(valve_mac);
+        }
+    } else {
+        ESP_LOGI(IOTHUB_TAG, "Hub is UNPROVISIONED - waiting for provisioning JSON from Azure");
+    }
 
     init_gateway_id();
     initialize_sntp();
@@ -242,10 +427,10 @@ void iothub_task(void *param)
 
     // Drain queues
     lora_packet_t dummy_pkt;
-    uint8_t dummy_byte;
+    ble_update_type_t dummy_upd;
     while (xQueueReceive(lora_rx_queue, &dummy_pkt, 0) == pdTRUE)
         ;
-    while (xQueueReceive(ble_update_queue, &dummy_byte, 0) == pdTRUE)
+    while (xQueueReceive(ble_update_queue, &dummy_upd, 0) == pdTRUE)
         ;
 
     QueueSetHandle_t evt_queue_set = xQueueCreateSet(15);
@@ -253,11 +438,12 @@ void iothub_task(void *param)
     xQueueAddToSet(ble_update_queue, evt_queue_set);
 
     lora_packet_t pkt;
+    ble_update_type_t ble_upd_type;
     QueueSetMemberHandle_t active_queue;
     char topic[128];
     snprintf(topic, sizeof(topic), "devices/%s/messages/events/", AZURE_DEVICE_ID);
 
-    ESP_LOGI(IOTHUB_TAG, "QueueSet Initialized.");
+    ESP_LOGI(IOTHUB_TAG, "QueueSet Initialized. Event loop starting...");
 
     while (1)
     {
@@ -271,22 +457,48 @@ void iothub_task(void *param)
             {
                 if (xQueueReceive(lora_rx_queue, &pkt, 0))
                 {
-                    ESP_LOGI(IOTHUB_TAG, "Event: LoRa Packet");
-                    json_payload = generate_json_telemetry(&pkt);
+                    ESP_LOGI(IOTHUB_TAG, "Event: LoRa Packet from 0x%08lX", pkt.sensorId);
+                    
+                    // Check if sensor is provisioned (optional filtering)
+                    // For now, we publish all sensors. If you want filtering:
+                    // if (!provisioning_is_lora_sensor_provisioned(pkt.sensorId)) {
+                    //     ESP_LOGW(IOTHUB_TAG, "Sensor 0x%08lX not provisioned, skipping", pkt.sensorId);
+                    //     continue;
+                    // }
+                    
+                    // Check for duplicates
+                    if (!is_lora_duplicate(&pkt)) {
+                        json_payload = build_lora_delta_json(&pkt);
+                    } else {
+                        ESP_LOGD(IOTHUB_TAG, "LoRa data unchanged, skipping publish");
+                    }
                 }
             }
             else if (active_queue == ble_update_queue)
             {
-                if (xQueueReceive(ble_update_queue, &dummy_byte, 0))
+                if (xQueueReceive(ble_update_queue, &ble_upd_type, 0))
                 {
-                    ESP_LOGI(IOTHUB_TAG, "Event: BLE Change");
-                    json_payload = generate_json_telemetry(NULL);
+                    ESP_LOGI(IOTHUB_TAG, "Event: BLE Update type=%d", ble_upd_type);
+                    
+                    // Only publish if it's a meaningful update and data changed
+                    if (ble_upd_type == BLE_UPD_BATTERY || 
+                        ble_upd_type == BLE_UPD_LEAK || 
+                        ble_upd_type == BLE_UPD_STATE ||
+                        ble_upd_type == BLE_UPD_CONNECTED) 
+                    {
+                        if (valve_data_changed()) {
+                            json_payload = build_valve_delta_json();
+                        } else {
+                            ESP_LOGD(IOTHUB_TAG, "Valve data unchanged, skipping publish");
+                        }
+                    }
+                    // Don't publish on DISCONNECTED
                 }
             }
 
             if (json_payload)
             {
-                ESP_LOGI(IOTHUB_TAG, "Uploading: %s", json_payload);
+                ESP_LOGI(IOTHUB_TAG, "Publishing: %s", json_payload);
                 esp_mqtt_client_publish(mqtt_client, topic, json_payload, 0, 1, 0);
                 free(json_payload);
             }
@@ -297,7 +509,7 @@ void iothub_task(void *param)
             if (active_queue == lora_rx_queue)
                 xQueueReceive(lora_rx_queue, &pkt, 0);
             if (active_queue == ble_update_queue)
-                xQueueReceive(ble_update_queue, &dummy_byte, 0);
+                xQueueReceive(ble_update_queue, &ble_upd_type, 0);
         }
     }
 }

@@ -93,6 +93,10 @@ static int g_security_retry_count = 0;
 // Track if we've seen connection parameter update (L2CAP negotiation complete)
 static bool g_conn_params_updated = false;
 
+// Provisioning support - target MAC filtering
+static char g_target_valve_mac[18] = {0};
+static bool g_has_target_mac = false;
+
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static void start_scan(void);
 static void start_discovery_chain(void);
@@ -116,12 +120,11 @@ static void print_hex_dump(const char *prefix, const uint8_t *data, uint16_t len
 // -----------------------------------------------------------------------------
 // UPDATE NOTIFY
 // -----------------------------------------------------------------------------
-static void notify_hub_update(void)
+static void notify_hub_update(ble_update_type_t update_type)
 {
     if (ble_update_queue != NULL)
     {
-        uint8_t dummy = 1;
-        (void)xQueueSend(ble_update_queue, &dummy, 0);
+        (void)xQueueSend(ble_update_queue, &update_type, 0);
     }
 }
 
@@ -142,21 +145,30 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
 
     if (attr_handle == h_valve_char)
     {
+        int old_state = g_val_state;
         g_val_state = data[0];
         ESP_LOGI(BLE_TAG, "UPDATE: Valve State=%d (%s)", g_val_state, g_val_state ? "OPEN" : "CLOSED");
-        notify_hub_update();
+        if (old_state != g_val_state) {
+            notify_hub_update(BLE_UPD_STATE);
+        }
     }
     else if (attr_handle == h_flood_char)
     {
+        bool old_leak = g_val_leak;
         g_val_leak = (data[0] != 0);
         ESP_LOGI(BLE_TAG, "UPDATE: Leak=%d (%s)", g_val_leak, g_val_leak ? "LEAK" : "OK");
-        notify_hub_update();
+        if (old_leak != g_val_leak) {
+            notify_hub_update(BLE_UPD_LEAK);
+        }
     }
     else if (attr_handle == h_batt_char)
     {
+        uint8_t old_batt = g_val_battery;
         g_val_battery = data[0];
         ESP_LOGI(BLE_TAG, "UPDATE: Battery=%u%% (raw=0x%02X)", g_val_battery, g_val_battery);
-        notify_hub_update();
+        if (old_batt != g_val_battery) {
+            notify_hub_update(BLE_UPD_BATTERY);
+        }
     }
     else
     {
@@ -280,7 +292,7 @@ static void apply_pending_valve_cmd_if_any(void)
         if (rc == 0)
         {
             g_val_state = v;
-            notify_hub_update();
+            notify_hub_update(BLE_UPD_STATE);
         }
         g_pending_valve_cmd = -1;
     }
@@ -408,7 +420,7 @@ static void setup_next_step(void)
              g_val_battery,
              g_val_leak ? "LEAK" : "OK",
              g_val_state == 1 ? "OPEN" : (g_val_state == 0 ? "CLOSED" : "UNKNOWN"));
-    notify_hub_update();
+    notify_hub_update(BLE_UPD_CONNECTED);
     apply_pending_valve_cmd_if_any();
 }
 
@@ -637,14 +649,41 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         if (ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data) != 0)
             return 0;
 
+        // Build MAC string from discovered device
+        char discovered_mac[18];
+        snprintf(discovered_mac, sizeof(discovered_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 event->disc.addr.val[5], event->disc.addr.val[4], event->disc.addr.val[3],
+                 event->disc.addr.val[2], event->disc.addr.val[1], event->disc.addr.val[0]);
+
+        // If we have a target MAC, match by MAC (authoritative)
+        bool mac_match = false;
+        if (g_has_target_mac) {
+            if (strcasecmp(discovered_mac, g_target_valve_mac) == 0) {
+                mac_match = true;
+                ESP_LOGI(BLE_TAG, "Target MAC matched: %s", discovered_mac);
+            }
+        }
+        
+        // Also check name as secondary filter (optional)
+        bool name_match = false;
         if (fields.name &&
             fields.name_len == strlen(VALVE_DEVICE_NAME) &&
             strncmp((const char *)fields.name, VALVE_DEVICE_NAME, fields.name_len) == 0)
         {
-            ESP_LOGI(BLE_TAG, "Target '%s' found. Connecting...", VALVE_DEVICE_NAME);
-            ESP_LOGI(BLE_TAG, "  Peer: %02X:%02X:%02X:%02X:%02X:%02X",
-                     event->disc.addr.val[5], event->disc.addr.val[4], event->disc.addr.val[3],
-                     event->disc.addr.val[2], event->disc.addr.val[1], event->disc.addr.val[0]);
+            name_match = true;
+        }
+
+        // Connect if:
+        // - We have target MAC and it matches, OR
+        // - We don't have target MAC but name matches (backward compatibility)
+        if ((g_has_target_mac && mac_match) || (!g_has_target_mac && name_match))
+        {
+            if (g_has_target_mac) {
+                ESP_LOGI(BLE_TAG, "Connecting to provisioned valve: %s", discovered_mac);
+            } else {
+                ESP_LOGI(BLE_TAG, "Connecting to valve by name: %s (MAC: %s)", 
+                         VALVE_DEVICE_NAME, discovered_mac);
+            }
 
             memcpy(&g_peer_addr, &event->disc.addr, sizeof(ble_addr_t));
             g_peer_addr_valid = true;
@@ -692,7 +731,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
                 memcpy(&g_peer_addr, &desc.peer_id_addr, sizeof(ble_addr_t));
                 g_peer_addr_valid = true;
-                notify_hub_update();
+                notify_hub_update(BLE_UPD_CONNECTED);
             }
 
             // Start timeout for discovery (no pairing needed)
@@ -737,7 +776,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         g_conn_params_updated = false;
 
         memset(g_valve_mac, 0, sizeof(g_valve_mac));
-        notify_hub_update();
+        notify_hub_update(BLE_UPD_DISCONNECTED);
 
         if (sec_timeout_timer)
             xTimerStop(sec_timeout_timer, 0);
@@ -847,7 +886,7 @@ static void write_valve_command(uint8_t val)
     if (rc == 0)
     {
         g_val_state = val;
-        notify_hub_update();
+        notify_hub_update(BLE_UPD_STATE);
     }
 }
 
@@ -1024,7 +1063,7 @@ void app_ble_valve_init(void)
         return;
     }
 
-    ble_update_queue = xQueueCreate(5, sizeof(uint8_t));
+    ble_update_queue = xQueueCreate(5, sizeof(ble_update_type_t));
     if (ble_update_queue == NULL)
     {
         ESP_LOGE(BLE_TAG, "Failed to create update queue");
@@ -1102,3 +1141,25 @@ bool ble_valve_is_secured(void)
 {
     return g_secured;
 }
+
+void ble_valve_set_target_mac(const char *mac_str)
+{
+    if (!mac_str) {
+        g_has_target_mac = false;
+        g_target_valve_mac[0] = '\0';
+        ESP_LOGI(BLE_TAG, "Target MAC cleared");
+        return;
+    }
+    
+    strncpy(g_target_valve_mac, mac_str, sizeof(g_target_valve_mac) - 1);
+    g_target_valve_mac[sizeof(g_target_valve_mac) - 1] = '\0';
+    g_has_target_mac = true;
+    
+    ESP_LOGI(BLE_TAG, "Target MAC set to: %s", g_target_valve_mac);
+}
+
+bool ble_valve_has_target_mac(void)
+{
+    return g_has_target_mac;
+}
+
