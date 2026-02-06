@@ -54,7 +54,6 @@ static struct {
     uint32_t rxCount;
     uint32_t ackSentCount;
     uint32_t lastRxTimeMs;
-    bool triedAltSync;
     uint64_t startTime;
 } lora_state = {
     .syncWord = 0x12,
@@ -63,7 +62,6 @@ static struct {
     .rxCount = 0,
     .ackSentCount = 0,
     .lastRxTimeMs = 0,
-    .triedAltSync = false,
     .startTime = 0
 };
 
@@ -87,7 +85,7 @@ static bool decode_frame(const uint8_t* buf, int len, lora_packet_t* out_packet)
     /* Decrypt + verify + replay-check via AES-128-CCM */
     lora_crypto_payload_t crypto_out;
     if (!lora_crypto_decrypt_packet(buf, len, &crypto_out)) {
-        ESP_LOGW(TAG, "Crypto verification FAILED — dropping packet");
+        ESP_LOGW(TAG, "Crypto verification FAILED â€” dropping packet");
         return false;
     }
 
@@ -298,7 +296,7 @@ extern "C" void lora_task(void* param)
                     uint8_t ledCmd = 'G';
                     if (ledQueue != NULL) xQueueSend(ledQueue, &ledCmd, 0);
                 } else {
-                    // Packet failed crypto — log raw hex for debugging
+                    // Packet failed crypto â€” log raw hex for debugging
                     ESP_LOGW(TAG, "Rejected packet (%d bytes):", idx);
                     char hex_line[128];
                     int pos = 0;
@@ -314,14 +312,6 @@ extern "C" void lora_task(void* param)
             xSemaphoreGive(lora_mutex);
         }
 
-        // Auto-switch Sync Word Logic (Timeout Check)
-        if (lora_state.rxCount == 0 && !lora_state.triedAltSync) {
-            uint32_t elapsed = (get_millis() - (uint32_t)(lora_state.startTime / 1000));
-            if (elapsed > 30000) {
-                lora_state.triedAltSync = true;
-                switch_sync_word((lora_state.syncWord == 0x12) ? 0x34 : 0x12);
-            }
-        }
 
         // Yield to other tasks
         vTaskDelay(pdMS_TO_TICKS(10));
