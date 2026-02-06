@@ -1,5 +1,6 @@
 #include "app_lora.h"
 #include "lora.h"
+#include "lora_crypto.h"
 #include "rgb/rgb.h"
 
 #include <stdio.h>
@@ -78,21 +79,29 @@ static uint32_t get_millis() {
 // -----------------------------------------------------------------------------
 
 static bool decode_frame(const uint8_t* buf, int len, lora_packet_t* out_packet) {
-    if (len < 10) {
-        ESP_LOGE(TAG, "Packet too short (%d bytes)", len);
+    if (len < LORA_CRYPTO_PKT_LEN) {
+        ESP_LOGE(TAG, "Packet too short (%d bytes, need %d)", len, LORA_CRYPTO_PKT_LEN);
         return false;
     }
 
-    // Decode Payload
-    out_packet->sensorId = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) | ((uint32_t)buf[2] << 8) | (uint32_t)buf[3];
-    out_packet->batteryPercentage = buf[4];
-    out_packet->leakStatus = buf[5];
-    out_packet->frameSent = (buf[6] << 8) | buf[7];
-    out_packet->frameAck = (buf[8] << 8) | buf[9];
-    out_packet->timestamp = esp_timer_get_time(); // High res timestamp
+    /* Decrypt + verify + replay-check via AES-128-CCM */
+    lora_crypto_payload_t crypto_out;
+    if (!lora_crypto_decrypt_packet(buf, len, &crypto_out)) {
+        ESP_LOGW(TAG, "Crypto verification FAILED — dropping packet");
+        return false;
+    }
 
-    ESP_LOGI(TAG, "Decoded: ID=0x%lX, Batt=%d%%, Leak=0x%X", 
-             out_packet->sensorId, out_packet->batteryPercentage, out_packet->leakStatus);
+    /* Map decrypted payload into the lora_packet_t structure */
+    out_packet->sensorId          = crypto_out.sensor_id;
+    out_packet->batteryPercentage = crypto_out.battery;
+    out_packet->leakStatus        = crypto_out.leak_status;
+    out_packet->frameSent         = crypto_out.frame_sent_cnt;
+    out_packet->frameAck          = crypto_out.frame_ack_cnt;
+    out_packet->timestamp         = esp_timer_get_time();
+
+    ESP_LOGI(TAG, "Verified: ID=0x%lX, Batt=%d%%, Leak=0x%X, Sent=%u, Ack=%u",
+             (unsigned long)out_packet->sensorId, out_packet->batteryPercentage,
+             out_packet->leakStatus, out_packet->frameSent, out_packet->frameAck);
 
     return true;
 }
@@ -241,10 +250,13 @@ extern "C" void lora_task(void* param)
     lora_driver->receive(0);
     lora_state.startTime = esp_timer_get_time();
 
-    // 3. Start Aux Task
+    // 3. Initialize Crypto Module
+    lora_crypto_init();
+
+    // 4. Start Aux Task
     xTaskCreate(uart_command_task, "uart_cmd_task", 4096, NULL, 5, NULL);
 
-    ESP_LOGI(TAG, "LoRa Task Started. Listening...");
+    ESP_LOGI(TAG, "LoRa Task Started. Listening (encrypted mode)...");
 
     uint8_t buffer[256];
     
@@ -268,11 +280,11 @@ extern "C" void lora_task(void* param)
 
                 // 2. Read Payload
                 int idx = 0;
-                while(lora_driver->available() && idx < sizeof(buffer)) {
+                while(lora_driver->available() && idx < (int)sizeof(buffer)) {
                     buffer[idx++] = (uint8_t)lora_driver->read();
                 }
 
-                // 3. Decode & Process
+                // 3. Decrypt, Verify & Process
                 if (decode_frame(buffer, idx, &packet)) {
                     // Send Physical ACK immediately (Time critical)
                     send_ack(&packet);
@@ -285,6 +297,16 @@ extern "C" void lora_task(void* param)
                     // Trigger LED
                     uint8_t ledCmd = 'G';
                     if (ledQueue != NULL) xQueueSend(ledQueue, &ledCmd, 0);
+                } else {
+                    // Packet failed crypto — log raw hex for debugging
+                    ESP_LOGW(TAG, "Rejected packet (%d bytes):", idx);
+                    char hex_line[128];
+                    int pos = 0;
+                    int print_len = (idx < 20) ? idx : 20;
+                    for (int i = 0; i < print_len; i++) {
+                        pos += snprintf(hex_line + pos, sizeof(hex_line) - pos, "%02X ", buffer[i]);
+                    }
+                    ESP_LOGW(TAG, "  %s", hex_line);
                 }
             }
             
