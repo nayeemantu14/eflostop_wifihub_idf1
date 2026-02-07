@@ -65,6 +65,8 @@ static char* http_css_url = NULL;
 static char* http_connect_url = NULL;
 static char* http_ap_url = NULL;
 static char* http_status_url = NULL;
+static char* http_watts_logo_url = NULL;
+static char* http_avg_logo_url = NULL;
 
 /**
  * @brief embedded binary data.
@@ -77,6 +79,10 @@ extern const uint8_t code_js_start[] asm("_binary_code_js_start");
 extern const uint8_t code_js_end[] asm("_binary_code_js_end");
 extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
+extern const uint8_t watts_logo_png_start[] asm("_binary_Watts_Logo_png_start");
+extern const uint8_t watts_logo_png_end[] asm("_binary_Watts_Logo_png_end");
+extern const uint8_t avg_logo_png_start[] asm("_binary_AVG_Logo_png_start");
+extern const uint8_t avg_logo_png_end[] asm("_binary_AVG_Logo_png_end");
 
 
 /* const httpd related values stored in ROM */
@@ -90,6 +96,7 @@ const static char http_content_type_html[] = "text/html";
 const static char http_content_type_js[] = "text/javascript";
 const static char http_content_type_css[] = "text/css";
 const static char http_content_type_json[] = "application/json";
+const static char http_content_type_png[] = "image/png";
 const static char http_cache_control_hdr[] = "Cache-Control";
 const static char http_cache_control_no_cache[] = "no-store, no-cache, must-revalidate, max-age=0";
 const static char http_cache_control_cache[] = "public, max-age=31536000";
@@ -264,6 +271,20 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
 			httpd_resp_send(req, (char*)style_css_start, style_css_end - style_css_start);
 		}
+		/* GET /Watts_Logo.png */
+		else if(strcmp(req->uri, http_watts_logo_url) == 0){
+			httpd_resp_set_status(req, http_200_hdr);
+			httpd_resp_set_type(req, http_content_type_png);
+			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
+			httpd_resp_send(req, (char*)watts_logo_png_start, watts_logo_png_end - watts_logo_png_start);
+		}
+		/* GET /AVG_Logo.png */
+		else if(strcmp(req->uri, http_avg_logo_url) == 0){
+			httpd_resp_set_status(req, http_200_hdr);
+			httpd_resp_set_type(req, http_content_type_png);
+			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
+			httpd_resp_send(req, (char*)avg_logo_png_start, avg_logo_png_end - avg_logo_png_start);
+		}
 		/* GET /ap.json */
 		else if(strcmp(req->uri, http_ap_url) == 0){
 
@@ -335,47 +356,6 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 }
 
-/* HEAD method handler - many browsers send HEAD requests to check connectivity */
-static esp_err_t http_server_head_handler(httpd_req_t *req){
-    char* host = NULL;
-    size_t buf_len;
-
-    ESP_LOGD(TAG, "HEAD %s", req->uri);
-
-    /* Get Host header */
-    buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
-    if (buf_len > 1) {
-        host = malloc(buf_len);
-        if(httpd_req_get_hdr_value_str(req, "Host", host, buf_len) != ESP_OK){
-            memset(host, 0x00, buf_len);
-        }
-    }
-
-    /* determine if Host is from the STA IP address */
-    wifi_manager_lock_sta_ip_string(portMAX_DELAY);
-    bool access_from_sta_ip = host != NULL?strstr(host, wifi_manager_get_sta_ip_string()):false;
-    wifi_manager_unlock_sta_ip_string();
-
-    if (host != NULL && !strstr(host, DEFAULT_AP_IP) && !access_from_sta_ip) {
-        /* Captive Portal - redirect */
-        httpd_resp_set_status(req, http_302_hdr);
-        httpd_resp_set_hdr(req, http_location_hdr, http_redirect_url);
-        httpd_resp_send(req, NULL, 0);
-    }
-    else{
-        /* Respond with 200 OK but no body (HEAD request) */
-        httpd_resp_set_status(req, http_200_hdr);
-        httpd_resp_set_type(req, http_content_type_html);
-        httpd_resp_send(req, NULL, 0);
-    }
-
-    if(host != NULL){
-        free(host);
-    }
-
-    return ESP_OK;
-}
-
 /* URI wild card for any GET request */
 static const httpd_uri_t http_server_get_request = {
     .uri       = "*",
@@ -395,11 +375,14 @@ static const httpd_uri_t http_server_delete_request = {
 	.handler = http_server_delete_handler
 };
 
-/* HEAD method handler registration */
+/**
+ * @brief HEAD handler – needed for captive portal detection (iOS sends HEAD to probe connectivity).
+ * Delegates to the GET handler; ESP-IDF httpd automatically suppresses the response body for HEAD.
+ */
 static const httpd_uri_t http_server_head_request = {
-    .uri       = "*",
-    .method    = HTTP_HEAD,
-    .handler   = http_server_head_handler
+	.uri	= "*",
+	.method = HTTP_HEAD,
+	.handler = http_server_get_handler
 };
 
 
@@ -437,6 +420,14 @@ void http_app_stop(){
 			free(http_status_url);
 			http_status_url = NULL;
 		}
+		if(http_watts_logo_url){
+			free(http_watts_logo_url);
+			http_watts_logo_url = NULL;
+		}
+		if(http_avg_logo_url){
+			free(http_avg_logo_url);
+			http_avg_logo_url = NULL;
+		}
 
 		/* stop server */
 		httpd_stop(httpd_handle);
@@ -471,22 +462,17 @@ void http_app_start(bool lru_purge_enable){
 
 		httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
-		/* CRITICAL FIXES FOR CAPTIVE PORTAL */
+		/* this is an important option that isn't set up by default.
+		 * We could register all URLs one by one, but this would not work while the fake DNS is active */
 		config.uri_match_fn = httpd_uri_match_wildcard;
 		config.lru_purge_enable = lru_purge_enable;
-		
-		/* Increase header buffer to handle large User-Agent strings */
-		config.max_uri_handlers = 12;  // Increased from default 8
-		config.max_resp_headers = 8;   // Default is fine
-		config.recv_wait_timeout = 5;  // 5 seconds (default 5)
-		config.send_wait_timeout = 5;  // 5 seconds (default 5)
-		
-		/* CRITICAL: Increase stack size to prevent memory issues */
-		config.stack_size = 8192;  // Increased from default 4096
-		
-		/* Server port */
-		config.server_port = 80;
-		config.ctrl_port = 32768;
+
+		/* Captive portals generate many simultaneous requests from the OS
+		 * (probes, DNS, parallel asset loads). Increase socket capacity and
+		 * shorten timeouts so stale connections are recycled quickly. */
+		config.max_open_sockets = 10;
+		config.recv_wait_timeout = 4;
+		config.send_wait_timeout = 4;
 
 		/* generate the URLs */
 		if(http_root_url == NULL){
@@ -498,6 +484,8 @@ void http_app_start(bool lru_purge_enable){
 			const char page_connect[] = "connect.json";
 			const char page_ap[] = "ap.json";
 			const char page_status[] = "status.json";
+			const char page_watts_logo[] = "Watts_Logo.png";
+			const char page_avg_logo[] = "AVG_Logo.png";
 
 			/* root url, eg "/"   */
 			const size_t http_root_url_sz = sizeof(char) * (root_len+1);
@@ -523,6 +511,8 @@ void http_app_start(bool lru_purge_enable){
 			http_connect_url = http_app_generate_url(page_connect);
 			http_ap_url = http_app_generate_url(page_ap);
 			http_status_url = http_app_generate_url(page_status);
+			http_watts_logo_url = http_app_generate_url(page_watts_logo);
+			http_avg_logo_url = http_app_generate_url(page_avg_logo);
 
 		}
 
@@ -533,7 +523,7 @@ void http_app_start(bool lru_purge_enable){
 	        httpd_register_uri_handler(httpd_handle, &http_server_get_request);
 	        httpd_register_uri_handler(httpd_handle, &http_server_post_request);
 	        httpd_register_uri_handler(httpd_handle, &http_server_delete_request);
-	        httpd_register_uri_handler(httpd_handle, &http_server_head_request);  // FIX: Register HEAD handler
+	        httpd_register_uri_handler(httpd_handle, &http_server_head_request);
 	    }
 	}
 

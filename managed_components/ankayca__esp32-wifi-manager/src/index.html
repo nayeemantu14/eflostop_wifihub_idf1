@@ -1,205 +1,264 @@
 <!DOCTYPE html>
 <html lang="en">
-	<head>
-		<meta charset="utf-8"/>
-		<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-		<meta name="apple-mobile-web-app-capable" content="yes" />
-		<meta name="theme-color" content="#0b1220">
-		<link rel="stylesheet" href="style.css">
-		<script async src="code.js"></script>
-		<title>AVG Home Hub</title>
-	</head>
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+	<meta name="apple-mobile-web-app-capable" content="yes">
+	<meta name="theme-color" content="#0a1628">
+	<link rel="stylesheet" href="style.css">
+	<script defer src="code.js"></script>
+	<title>WiFiHub Setup</title>
+</head>
+<body>
+<div id="app">
 
-	<body>
-		<div id="app">
-			<div id="app-wrap">
+	<!-- Brand Header -->
+	<header id="brand">
+		<div class="brand-row">
+			<img class="brand-logo" src="Watts_Logo.png" alt="Watts Water Technologies" width="100" height="48">
+			<div class="brand-text">
+				<div class="brand-name">WiFiHub</div>
+				<div class="brand-sub">Watts Water Technologies Australia</div>
+			</div>
+		</div>
+	</header>
 
-				<!-- Brand bar (always visible, doesn't change existing view IDs) -->
-				<div id="brand-bar">
-					<div class="brand-badge" aria-hidden="true">AVG</div>
-					<div class="brand-text">
-						<div class="brand-name">AVG Home Hub</div>
-						<div class="brand-powered">Powered by <strong>Vision+</strong></div>
-					</div>
+	<!-- Step Progress -->
+	<nav id="steps" aria-label="Setup progress">
+		<div class="step active" data-step="1"><span class="step-num">1</span><span class="step-lbl">Select</span></div>
+		<div class="step-line"><div class="step-line-fill"></div></div>
+		<div class="step" data-step="2"><span class="step-num">2</span><span class="step-lbl">Connect</span></div>
+		<div class="step-line"><div class="step-line-fill"></div></div>
+		<div class="step" data-step="3"><span class="step-num">3</span><span class="step-lbl">Done</span></div>
+	</nav>
+
+	<!-- ════════════════════════════════════════ -->
+	<!-- VIEW 1: Wi-Fi Network Selection         -->
+	<!-- ════════════════════════════════════════ -->
+	<div id="view-scan" class="view active">
+
+		<!-- Connected banner (hidden until connected) -->
+		<button id="connected-banner" class="card card-connected" style="display:none"
+			aria-label="View connection details" type="button">
+			<div class="banner-row">
+				<svg class="icon-sm" viewBox="0 0 20 20" aria-hidden="true">
+					<circle cx="10" cy="10" r="10" fill="#16a34a"/>
+					<path d="M6 10l3 3 5-6" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+				</svg>
+				<div class="banner-body">
+					<div class="banner-label">Connected to</div>
+					<div id="connected-ssid" class="banner-value"></div>
 				</div>
+				<svg class="icon-chevron" viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+					<path d="M7 4l6 6-6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+				</svg>
+			</div>
+		</button>
 
-				<div id="wifi">
-					<header class="panel-header">
-						<h1>Wi-Fi Setup</h1>
-						<p class="panel-subtitle">Connect your hub to your home network</p>
-					</header>
+		<h1 class="view-title">Select Wi-Fi Network</h1>
+		<p class="view-sub">Choose your home network to connect the WiFiHub</p>
 
-					<div id="wifi-status">
-						<h2>Connected to:</h2>
-						<section id="connected-to">
-							<div class="ape">
-								<div class="ape-row">
-									<div class="w0">
-										<div class="pw"><span></span></div>
-									</div>
-									<div class="ape-label">Current network</div>
-								</div>
-							</div>
-						</section>
-					</div>
-
-					<h2>Manual connect</h2>
-					<section id="manual_add">
-						<div class="ape">ADD (HIDDEN) SSID</div>
-					</section>
-
-					<h2>or choose a network...</h2>
-					<section id="wifi-list">
-					</section>
-
-					<!-- Keep #acredits for JS click hook -->
-					<div id="pwrdby">
-						<em>Powered by </em>
-						<a id="acredits" href="#"><strong>Watts Home</strong></a>.
-					</div>
-				</div>
-
-				<div id="connect_manual">
-					<header class="panel-header">
-						<h1>Enter Details</h1>
-						<p class="panel-subtitle">Manual connection</p>
-					</header>
-
-					<h2>Manual Connection</h2>
-					<section>
-						<input id="manual_ssid" type="text" placeholder="SSID" value="">
-						<input id="manual_pwd" type="password" placeholder="Password" value="">
-					</section>
-
-					<div class="buttons">
-						<input id="manual_join" type="button" value="Join" data-connect="manual" />
-						<input id="manual_cancel" type="button" value="Cancel"/>
-					</div>
-				</div>
-
-				<div id="connect">
-					<header class="panel-header">
-						<h1>Enter Password</h1>
-						<p class="panel-subtitle">Secure connection</p>
-					</header>
-
-					<h2>Password for <span id="ssid-pwd"></span></h2>
-					<section>
-						<input id="pwd" type="password" placeholder="Password" value="">
-					</section>
-
-					<div class="buttons">
-						<input id="join" type="button" value="Join" />
-						<input id="cancel" type="button" value="Cancel"/>
-					</div>
-				</div>
-
-				<div id="connect-wait">
-					<header class="panel-header">
-						<h1>Please wait...</h1>
-						<p class="panel-subtitle">Configuring wireless radio</p>
-					</header>
-
-					<h2>Connecting to <span id="ssid-wait"></span></h2>
-					<section>
-						<div id="loading">
-							<div class="spinner">
-								<div class="double-bounce1"></div>
-								<div class="double-bounce2"></div>
-							</div>
-							<p class="tctr">
-								You may lose Wi-Fi access while the hub calibrates its radio.
-								Please wait until your device automatically reconnects.
-								This can take up to 30s.
-							</p>
-						</div>
-
-						<div id="connect-success">
-							<h3 class="gr">Success!</h3>
-						</div>
-
-						<div id="connect-fail">
-							<h3 class="rd">Connection failed</h3>
-							<p class="tctr">
-								Please double-check the Wi-Fi password and make sure the access point has good signal.
-							</p>
-						</div>
-					</section>
-
-					<div class="buttons">
-						<input id="ok-connect" type="button" value="OK" class="ctr" />
-					</div>
-				</div>
-
-				<div id="connect-details">
-					<div id="connect-details-wrap">
-						<header class="panel-header">
-							<h1>Connection Details</h1>
-							<p class="panel-subtitle">Network information</p>
-						</header>
-
-						<h2></h2>
-						<section>
-							<div class="buttons">
-								<input id="disconnect" type="button" value="Disconnect" class="ctr"/>
-							</div>
-						</section>
-
-						<h2>IP Address</h2>
-						<section>
-							<div class="ape brdb">IP Address:<div id="ip" class="fr"></div></div>
-							<div class="ape brdb">Subnet Mask:<div id="netmask" class="fr"></div></div>
-							<div class="ape">Default Gateway:<div id="gw" class="fr"></div></div>
-						</section>
-
-						<div class="buttons">
-							<input id="ok-details" type="button" value="OK" class="ctr" />
-						</div>
-					</div>
-
-					<div id="diag-disconnect" class="diag-box">
-						<div class="diag-box-win">
-							<p>Are you sure you would like to disconnect from this Wi-Fi?</p>
-							<div class="buttons">
-								<input id="no-disconnect" type="button" value="No" />
-								<input id="yes-disconnect" type="button" value="Yes" />
-							</div>
-						</div>
-					</div>
-				</div>
-
+		<!-- Network list -->
+		<div id="network-list" class="card" role="list" aria-label="Available Wi-Fi networks">
+			<div id="scan-msg" class="scan-placeholder">
+				<div class="spinner-sm"></div>
+				<span>Scanning for networks&hellip;</span>
 			</div>
 		</div>
 
-		<div id="credits">
-			<header class="panel-header">
-				<h1>About AVG Home Hub</h1>
-				<p class="panel-subtitle">Powered by Watts Home</p>
-			</header>
+		<!-- Hidden network link -->
+		<button id="btn-hidden" class="btn-link" type="button">
+			<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+				<circle cx="10" cy="10" r="8" stroke="currentColor" stroke-width="1.5" fill="none"/>
+				<path d="M10 6v8M6 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+			</svg>
+			Connect to hidden network
+		</button>
+	</div>
 
-			<h2></h2>
-			<section>
-				<p>
-					<strong>AVG Home Hub</strong> setup portal.<br/>
-					Powered by <strong>Watts Home</strong>.
-				</p>
-				<p>
-					This experience is built on <strong>esp32-wifi-manager</strong>, &copy; 2017-2020, Tony Pottier<br />
-					Licensed under the MIT License.
-				</p>
-				<p>
-					This app would not be possible without the following libraries:
-				</p>
-				<ul>
-					<li>SpinKit, &copy; 2015, Tobias Ahlin. Licensed under the MIT License.</li>
-					<li>jQuery, The jQuery Foundation. Licensed under the MIT License.</li>
-					<li>cJSON, &copy; 2009-2017, Dave Gamble and cJSON contributors. Licensed under the MIT License.</li>
-				</ul>
-			</section>
+	<!-- ════════════════════════════════════════ -->
+	<!-- VIEW 2a: Password Entry                 -->
+	<!-- ════════════════════════════════════════ -->
+	<div id="view-password" class="view" style="display:none">
+		<button class="btn-back" type="button" data-back="scan" aria-label="Go back">
+			<svg viewBox="0 0 20 20" width="20" height="20"><path d="M13 4l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+			Back
+		</button>
 
-			<div class="buttons">
-				<input id="ok-credits" type="button" value="OK" class="ctr" />
+		<h1 class="view-title">Enter Password</h1>
+		<p class="view-sub">for <strong id="pwd-net-name"></strong></p>
+
+		<div class="card form-card">
+			<label class="field">
+				<span class="field-label">Wi-Fi Password</span>
+				<div class="field-input-wrap">
+					<input id="input-pwd" type="password" placeholder="Enter password" autocomplete="off" autocapitalize="off">
+					<button class="btn-eye" type="button" data-toggle-pwd="input-pwd" aria-label="Show password">
+						<svg class="eye-show" viewBox="0 0 24 24" width="22" height="22"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+						<svg class="eye-hide" viewBox="0 0 24 24" width="22" height="22"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="1" y1="1" x2="23" y2="23" stroke="currentColor" stroke-width="1.5"/></svg>
+					</button>
+				</div>
+				<div id="pwd-error" class="field-error" role="alert"></div>
+			</label>
+		</div>
+
+		<div class="btn-row">
+			<button id="btn-connect" class="btn btn-primary" type="button">Connect</button>
+		</div>
+	</div>
+
+	<!-- ════════════════════════════════════════ -->
+	<!-- VIEW 2b: Manual / Hidden SSID Entry     -->
+	<!-- ════════════════════════════════════════ -->
+	<div id="view-manual" class="view" style="display:none">
+		<button class="btn-back" type="button" data-back="scan" aria-label="Go back">
+			<svg viewBox="0 0 20 20" width="20" height="20"><path d="M13 4l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+			Back
+		</button>
+
+		<h1 class="view-title">Hidden Network</h1>
+		<p class="view-sub">Enter the network name and password</p>
+
+		<div class="card form-card">
+			<label class="field">
+				<span class="field-label">Network Name (SSID)</span>
+				<div class="field-input-wrap">
+					<input id="input-manual-ssid" type="text" placeholder="Enter network name" autocomplete="off" autocapitalize="off">
+				</div>
+				<div id="ssid-error" class="field-error" role="alert"></div>
+			</label>
+			<label class="field">
+				<span class="field-label">Password <span class="field-opt">(optional for open networks)</span></span>
+				<div class="field-input-wrap">
+					<input id="input-manual-pwd" type="password" placeholder="Enter password" autocomplete="off" autocapitalize="off">
+					<button class="btn-eye" type="button" data-toggle-pwd="input-manual-pwd" aria-label="Show password">
+						<svg class="eye-show" viewBox="0 0 24 24" width="22" height="22"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" stroke="currentColor" stroke-width="1.5" fill="none"/><circle cx="12" cy="12" r="3" stroke="currentColor" stroke-width="1.5" fill="none"/></svg>
+						<svg class="eye-hide" viewBox="0 0 24 24" width="22" height="22"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" stroke="currentColor" stroke-width="1.5" fill="none"/><line x1="1" y1="1" x2="23" y2="23" stroke="currentColor" stroke-width="1.5"/></svg>
+					</button>
+				</div>
+			</label>
+		</div>
+
+		<div class="btn-row">
+			<button id="btn-manual-connect" class="btn btn-primary" type="button">Connect</button>
+		</div>
+	</div>
+
+	<!-- ════════════════════════════════════════ -->
+	<!-- VIEW 3: Connecting / Result             -->
+	<!-- ════════════════════════════════════════ -->
+	<div id="view-connecting" class="view" style="display:none">
+		<div class="state-wrap">
+
+			<!-- Loading state -->
+			<div id="state-loading" class="state-panel">
+				<div class="spinner-lg"></div>
+				<h1 class="view-title">Connecting&hellip;</h1>
+				<p class="view-sub">to <strong id="connecting-ssid"></strong></p>
+				<p class="hint-text">Your device may briefly lose Wi-Fi while the hub configures its radio. This usually takes 10&ndash;30&thinsp;seconds.</p>
+			</div>
+
+			<!-- Success state -->
+			<div id="state-success" class="state-panel" style="display:none">
+				<div class="result-icon">
+					<svg viewBox="0 0 56 56" width="56" height="56">
+						<circle cx="28" cy="28" r="26" fill="none" stroke="#16a34a" stroke-width="2.5" class="anim-circle"/>
+						<path d="M17 28l8 8 14-15" stroke="#16a34a" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round" class="anim-check"/>
+					</svg>
+				</div>
+				<h1 class="view-title clr-success">Connected!</h1>
+				<p class="view-sub">Your WiFiHub is now on your home network</p>
+				<div class="card next-step-card">
+					<img class="vplus-icon" src="AVG_Logo.png" alt="AVG - A Watts Brand" width="48" height="48">
+					<div>
+						<strong>Return to Vision+ app</strong>
+						<div class="next-step-sub">to complete your WiFiHub setup</div>
+					</div>
+				</div>
+			</div>
+
+			<!-- Failure state -->
+			<div id="state-fail" class="state-panel" style="display:none">
+				<div class="result-icon">
+					<svg viewBox="0 0 56 56" width="56" height="56">
+						<circle cx="28" cy="28" r="26" fill="none" stroke="#dc2626" stroke-width="2.5"/>
+						<path d="M20 20l16 16M36 20l-16 16" stroke="#dc2626" stroke-width="3" fill="none" stroke-linecap="round"/>
+					</svg>
+				</div>
+				<h1 class="view-title clr-danger">Connection Failed</h1>
+				<p class="view-sub">Unable to connect to the network</p>
+				<div class="card hint-card">
+					<ul class="hint-list">
+						<li>Double-check the Wi-Fi password</li>
+						<li>Ensure you are near your router</li>
+						<li>Verify the network is 2.4&thinsp;GHz compatible</li>
+					</ul>
+				</div>
 			</div>
 		</div>
-	</body>
+
+		<div class="btn-row">
+			<button id="btn-retry" class="btn btn-secondary" type="button" style="display:none">Try Again</button>
+			<button id="btn-done" class="btn btn-primary" type="button" disabled>Done</button>
+		</div>
+	</div>
+
+	<!-- ════════════════════════════════════════ -->
+	<!-- VIEW: Connection Details                -->
+	<!-- ════════════════════════════════════════ -->
+	<div id="view-details" class="view" style="display:none">
+		<button class="btn-back" type="button" data-back="scan" aria-label="Go back">
+			<svg viewBox="0 0 20 20" width="20" height="20"><path d="M13 4l-6 6 6 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+			Back
+		</button>
+
+		<h1 class="view-title">Connection Details</h1>
+		<p class="view-sub" id="details-ssid-label"></p>
+
+		<div class="card details-card">
+			<div class="detail-row">
+				<span class="detail-k">IP Address</span>
+				<span class="detail-v" id="detail-ip">&mdash;</span>
+			</div>
+			<div class="detail-row">
+				<span class="detail-k">Subnet Mask</span>
+				<span class="detail-v" id="detail-netmask">&mdash;</span>
+			</div>
+			<div class="detail-row">
+				<span class="detail-k">Gateway</span>
+				<span class="detail-v" id="detail-gw">&mdash;</span>
+			</div>
+		</div>
+
+		<div class="btn-row">
+			<button id="btn-disconnect" class="btn btn-danger-outline" type="button">Disconnect</button>
+		</div>
+	</div>
+
+	<!-- Disconnect Confirmation Modal -->
+	<div id="modal-disconnect" class="modal-overlay" style="display:none">
+		<div class="modal-box" role="alertdialog" aria-labelledby="modal-title">
+			<svg class="modal-icon" viewBox="0 0 24 24" width="32" height="32" aria-hidden="true">
+				<circle cx="12" cy="12" r="10" fill="none" stroke="#dc2626" stroke-width="1.5"/>
+				<path d="M12 8v4M12 14.5v.5" stroke="#dc2626" stroke-width="2" stroke-linecap="round"/>
+			</svg>
+			<h2 id="modal-title" class="modal-heading">Disconnect Wi-Fi?</h2>
+			<p class="modal-text">Your WiFiHub will lose its network connection and you will need to set it up again.</p>
+			<div class="btn-row modal-btns">
+				<button id="btn-cancel-dc" class="btn btn-secondary" type="button">Cancel</button>
+				<button id="btn-confirm-dc" class="btn btn-danger" type="button">Disconnect</button>
+			</div>
+		</div>
+	</div>
+
+	<!-- Footer -->
+	<footer id="footer">
+		<span>Powered by</span>
+		<strong>Vision+</strong>
+		<span>&middot;</span>
+		<img class="footer-logo" src="AVG_Logo.png" alt="AVG" width="40" height="20">
+	</footer>
+
+</div>
+</body>
 </html>

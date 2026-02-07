@@ -1,0 +1,9 @@
+# WiFiHub captive portal – tuned defaults
+# Increase lwIP sockets for captive portal (iOS/Android send many parallel probes)
+CONFIG_LWIP_MAX_SOCKETS=16
+
+# Increase HTTP request header buffer (modern browsers send long headers)
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1536
+
+# Fast error responses for rejected connections
+CONFIG_HTTPD_ERR_RESP_NO_DELAY=y

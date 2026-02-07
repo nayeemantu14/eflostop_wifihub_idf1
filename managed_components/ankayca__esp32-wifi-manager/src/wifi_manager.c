@@ -178,8 +178,13 @@ void wifi_manager_start(){
 	/* disable the default wifi logging */
 	esp_log_level_set("wifi", ESP_LOG_NONE);
 
-	/* initialize flash memory */
-	nvs_flash_init();
+	/* initialize flash memory (idempotent if already done in app_main) */
+	esp_err_t nvs_ret = nvs_flash_init();
+	if (nvs_ret == ESP_ERR_NVS_NO_FREE_PAGES || nvs_ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		nvs_flash_erase();
+		nvs_ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(nvs_ret);
 	ESP_ERROR_CHECK(nvs_sync_create()); /* semaphore for thread synchronization on NVS memory */
 
 	/* memory allocation */

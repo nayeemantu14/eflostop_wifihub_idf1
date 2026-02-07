@@ -14,6 +14,7 @@
 #include "freertos/task.h"
 #include "esp_system.h"
 #include "esp_log.h"
+#include "nvs_flash.h"
 #include "wifi_manager.h"
 #include "rgb.h"
 #include "app_wifi.h"
@@ -42,7 +43,15 @@ static void monitoring_task(void *pvParameter);
  * Main Application
  * --------------------------------------------------------- */
 void app_main(void)
-{	
+{
+	/* initialize NVS — required by Wi-Fi, BLE, and other subsystems */
+	esp_err_t ret = nvs_flash_init();
+	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		ESP_ERROR_CHECK(nvs_flash_erase());
+		ret = nvs_flash_init();
+	}
+	ESP_ERROR_CHECK(ret);
+
 	/* start the wifi manager */
     setupLEDTask();
 	configureUART();
@@ -52,7 +61,7 @@ void app_main(void)
 	app_ble_valve_init();
 #if CONFIG_SOC_CPU_CORES_NUM > 1
 	/* create a task on core 1 that monitors free heap memory */
-	xTaskCreate(&monitoring_task, "monitoring_task", 4096, NULL, 1, NULL);
+	xTaskCreate(&monitoring_task, "monitoring_task", 2046, NULL, 1, NULL);
 #endif
 }
 
