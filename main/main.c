@@ -22,6 +22,7 @@
 #include "app_lora.h"
 #include "iothub/app_iothub.h"
 #include "ble_valve/app_ble_valve.h"
+#include "ble_leak_scanner/app_ble_leak.h"
 
 /* ---------------------------------------------------------
  * Tags
@@ -59,9 +60,10 @@ void app_main(void)
 	configurelora();
 	initialize_iothub();
 	app_ble_valve_init();
+	app_ble_leak_init();
 #if CONFIG_SOC_CPU_CORES_NUM > 1
 	/* create a task on core 1 that monitors free heap memory */
-	xTaskCreate(&monitoring_task, "monitoring_task", 2046, NULL, 1, NULL);
+	xTaskCreate(&monitoring_task, "monitoring_task", 4096, NULL, 1, NULL);
 #endif
 }
 

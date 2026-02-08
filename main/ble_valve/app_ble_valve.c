@@ -1,4 +1,5 @@
 #include "app_ble_valve.h"
+#include "ble_leak_scanner/app_ble_leak.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -1206,6 +1207,9 @@ static void start_scan(void)
         .window = 80,
     };
 
+    // Cancel any active scan (e.g. BLE leak scanner) before starting valve scan
+    ble_gap_disc_cancel();
+
     ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for '%s'...", VALVE_DEVICE_NAME);
     int rc = ble_gap_disc(g_own_addr_type, BLE_HS_FOREVER, &disc_params, ble_gap_event, NULL);
     if (rc == 0)
@@ -1421,6 +1425,9 @@ static void ble_starter_task(void *param)
     nimble_port_freertos_init(nimble_host_task);
     xTaskCreate(ble_valve_task, "ble_valve", 4096, NULL, 5, NULL);
     ble_valve_connect();
+
+    // Signal BLE leak scanner that NimBLE stack is ready
+    app_ble_leak_signal_start();
 
     vTaskDelete(NULL);
 }

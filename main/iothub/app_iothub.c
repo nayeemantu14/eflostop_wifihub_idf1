@@ -17,8 +17,9 @@
 #include "mbedtls/md.h"
 #include "mbedtls/sha256.h"
 
-#include "app_lora/app_lora.h" 
+#include "app_lora/app_lora.h"
 #include "ble_valve/app_ble_valve.h"
+#include "ble_leak_scanner/app_ble_leak.h"
 #include "provisioning_manager/provisioning_manager.h"
 
 // External Queue from LoRa app
@@ -50,6 +51,18 @@ typedef struct {
 } lora_cache_entry_t;
 
 static lora_cache_entry_t g_lora_cache[MAX_LORA_CACHE] = {0};
+
+// BLE leak sensor cache (for duplicate detection)
+#define MAX_BLE_LEAK_CACHE 16
+typedef struct {
+    char mac_str[18];
+    uint8_t battery;
+    bool leak_state;
+    int8_t rssi;
+    bool valid;
+} ble_leak_cache_entry_t;
+
+static ble_leak_cache_entry_t g_ble_leak_cache[MAX_BLE_LEAK_CACHE] = {0};
 
 void url_encode(const char *src, char *dst, size_t dst_len)
 {
@@ -243,6 +256,38 @@ static char *build_lora_delta_json(const lora_packet_t *pkt)
     cJSON_AddNumberToObject(thisSensor, "battery", pkt->batteryPercentage);
     cJSON_AddBoolToObject(thisSensor, "leak_state", (pkt->leakStatus == 1));
     cJSON_AddNumberToObject(thisSensor, "rssi", pkt->rssi);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return json_str;
+}
+
+// Build BLE leak sensor delta JSON
+static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
+{
+    if (!evt) return NULL;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "gatewayID", g_gateway_id);
+
+    cJSON *devicesArr = cJSON_CreateArray();
+    cJSON_AddItemToObject(root, "devices", devicesArr);
+
+    cJSON *deviceObj = cJSON_CreateObject();
+    cJSON_AddItemToArray(devicesArr, deviceObj);
+
+    cJSON *sensorsObj = cJSON_CreateObject();
+    cJSON_AddItemToObject(deviceObj, "ble_leak_sensors", sensorsObj);
+
+    char sensorKey[32];
+    snprintf(sensorKey, sizeof(sensorKey), "BLE_%s", evt->sensor_mac_str);
+
+    cJSON *thisSensor = cJSON_CreateObject();
+    cJSON_AddItemToObject(sensorsObj, sensorKey, thisSensor);
+
+    cJSON_AddNumberToObject(thisSensor, "battery", evt->battery);
+    cJSON_AddBoolToObject(thisSensor, "leak_state", evt->leak_detected);
+    cJSON_AddNumberToObject(thisSensor, "rssi", evt->rssi);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -562,17 +607,27 @@ void iothub_task(void *param)
     // Drain queues
     lora_packet_t dummy_pkt;
     ble_update_type_t dummy_upd;
+    ble_leak_event_t dummy_leak;
     while (xQueueReceive(lora_rx_queue, &dummy_pkt, 0) == pdTRUE)
         ;
     while (xQueueReceive(ble_update_queue, &dummy_upd, 0) == pdTRUE)
         ;
+    while (ble_leak_rx_queue && xQueueReceive(ble_leak_rx_queue, &dummy_leak, 0) == pdTRUE)
+        ;
+    // Reset BLE leak sensor tracking so next advertisement triggers a fresh event
+    // (the drain above discards early events before MQTT is connected)
+    app_ble_leak_reset_tracking();
 
-    QueueSetHandle_t evt_queue_set = xQueueCreateSet(15);
+    QueueSetHandle_t evt_queue_set = xQueueCreateSet(25);
     xQueueAddToSet(lora_rx_queue, evt_queue_set);
     xQueueAddToSet(ble_update_queue, evt_queue_set);
+    if (ble_leak_rx_queue) {
+        xQueueAddToSet(ble_leak_rx_queue, evt_queue_set);
+    }
 
     lora_packet_t pkt;
     ble_update_type_t ble_upd_type;
+    ble_leak_event_t ble_leak_evt;
     QueueSetMemberHandle_t active_queue;
     char topic[128];
     snprintf(topic, sizeof(topic), "devices/%s/messages/events/", AZURE_DEVICE_ID);
@@ -594,6 +649,9 @@ void iothub_task(void *param)
                 } else if (active_queue == ble_update_queue) {
                     xQueueReceive(ble_update_queue, &ble_upd_type, 0);
                     ESP_LOGD(IOTHUB_TAG, "BLE update received but device UNPROVISIONED - not publishing");
+                } else if (active_queue == ble_leak_rx_queue) {
+                    xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0);
+                    ESP_LOGD(IOTHUB_TAG, "BLE leak event received but device UNPROVISIONED - not publishing");
                 }
                 continue; // Skip publishing
             }
@@ -657,6 +715,15 @@ void iothub_task(void *param)
                     // Don't publish on DISCONNECTED
                 }
             }
+            else if (active_queue == ble_leak_rx_queue)
+            {
+                if (xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0))
+                {
+                    ESP_LOGI(IOTHUB_TAG, "Event: BLE Leak Sensor %s leak=%d batt=%d",
+                             ble_leak_evt.sensor_mac_str, ble_leak_evt.leak_detected, ble_leak_evt.battery);
+                    json_payload = build_ble_leak_delta_json(&ble_leak_evt);
+                }
+            }
 
             if (json_payload)
             {
@@ -670,8 +737,10 @@ void iothub_task(void *param)
             // Must drain even if disconnected
             if (active_queue == lora_rx_queue)
                 xQueueReceive(lora_rx_queue, &pkt, 0);
-            if (active_queue == ble_update_queue)
+            else if (active_queue == ble_update_queue)
                 xQueueReceive(ble_update_queue, &ble_upd_type, 0);
+            else if (active_queue == ble_leak_rx_queue)
+                xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0);
         }
     }
 }
