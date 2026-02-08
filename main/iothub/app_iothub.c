@@ -21,6 +21,8 @@
 #include "ble_valve/app_ble_valve.h"
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "provisioning_manager/provisioning_manager.h"
+#include "rules_engine/rules_engine.h"
+#include "sensor_meta/sensor_meta.h"
 
 // External Queue from LoRa app
 extern QueueHandle_t lora_rx_queue;
@@ -257,6 +259,16 @@ static char *build_lora_delta_json(const lora_packet_t *pkt)
     cJSON_AddBoolToObject(thisSensor, "leak_state", (pkt->leakStatus == 1));
     cJSON_AddNumberToObject(thisSensor, "rssi", pkt->rssi);
 
+    // Enrich with location metadata
+    char lora_id[16];
+    snprintf(lora_id, sizeof(lora_id), "0x%08lX", pkt->sensorId);
+    const sensor_meta_entry_t *meta = sensor_meta_find(SENSOR_TYPE_LORA, lora_id);
+    cJSON *locObj = cJSON_CreateObject();
+    cJSON_AddStringToObject(locObj, "code",
+        sensor_meta_location_code_to_str(meta ? meta->location_code : LOC_UNKNOWN));
+    cJSON_AddStringToObject(locObj, "label", meta ? meta->label : "");
+    cJSON_AddItemToObject(thisSensor, "location", locObj);
+
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return json_str;
@@ -288,6 +300,14 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
     cJSON_AddNumberToObject(thisSensor, "battery", evt->battery);
     cJSON_AddBoolToObject(thisSensor, "leak_state", evt->leak_detected);
     cJSON_AddNumberToObject(thisSensor, "rssi", evt->rssi);
+
+    // Enrich with location metadata
+    const sensor_meta_entry_t *meta = sensor_meta_find(SENSOR_TYPE_BLE_LEAK, evt->sensor_mac_str);
+    cJSON *locObj = cJSON_CreateObject();
+    cJSON_AddStringToObject(locObj, "code",
+        sensor_meta_location_code_to_str(meta ? meta->location_code : LOC_UNKNOWN));
+    cJSON_AddStringToObject(locObj, "label", meta ? meta->label : "");
+    cJSON_AddItemToObject(thisSensor, "location", locObj);
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -376,7 +396,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     
                     if (provisioning_remove_lora_sensor(sensor_id)) {
                         ESP_LOGI(IOTHUB_TAG, "LoRa sensor 0x%08lX decommissioned successfully", sensor_id);
-                        
+
+                        // Remove associated metadata
+                        char lora_id_str[16];
+                        snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX", sensor_id);
+                        sensor_meta_remove(SENSOR_TYPE_LORA, lora_id_str);
+
                         if (!provisioning_is_provisioned()) {
                             ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
                         }
@@ -409,7 +434,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     
                     if (provisioning_remove_ble_sensor(mac_clean)) {
                         ESP_LOGI(IOTHUB_TAG, "BLE sensor %s decommissioned successfully", mac_clean);
-                        
+
+                        // Remove associated metadata
+                        sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac_clean);
+
                         if (!provisioning_is_provisioned()) {
                             ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
                         }
@@ -433,6 +461,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     
                     // Call decommission function
                     if (provisioning_decommission()) {
+                        // Clear all sensor metadata
+                        sensor_meta_clear_all();
+
                         ESP_LOGI(IOTHUB_TAG, "Decommissioning successful - restarting device in 3 seconds...");
                         
                         // Clear BLE target MAC
@@ -465,6 +496,54 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                     ESP_LOGI(IOTHUB_TAG, "Command: VALVE_CLOSE");
                     ble_valve_connect();
                     ble_valve_close();
+                }
+                // ============================================================
+                // CONFIGURATION COMMANDS
+                // ============================================================
+                else if (strstr(trimmed, "RULES_CONFIG:"))
+                {
+                    char *json_str = strstr(trimmed, "RULES_CONFIG:") + strlen("RULES_CONFIG:");
+                    ESP_LOGI(IOTHUB_TAG, "Command: RULES_CONFIG");
+                    if (rules_engine_handle_config_command(json_str)) {
+                        ESP_LOGI(IOTHUB_TAG, "Rules config updated successfully");
+                    } else {
+                        ESP_LOGE(IOTHUB_TAG, "Rules config update failed");
+                    }
+                }
+                else if (strstr(trimmed, "SENSOR_META:"))
+                {
+                    char *json_str = strstr(trimmed, "SENSOR_META:") + strlen("SENSOR_META:");
+                    ESP_LOGI(IOTHUB_TAG, "Command: SENSOR_META");
+                    if (sensor_meta_handle_command(json_str)) {
+                        ESP_LOGI(IOTHUB_TAG, "Sensor metadata updated successfully");
+
+                        // Publish ack telemetry
+                        cJSON *ack_root = cJSON_Parse(json_str);
+                        if (ack_root) {
+                            cJSON_AddStringToObject(ack_root, "gatewayID", g_gateway_id);
+                            cJSON_AddStringToObject(ack_root, "event", "sensor_meta_updated");
+                            char *ack_json = cJSON_PrintUnformatted(ack_root);
+                            cJSON_Delete(ack_root);
+                            if (ack_json) {
+                                char ack_topic[128];
+                                snprintf(ack_topic, sizeof(ack_topic),
+                                         "devices/%s/messages/events/", AZURE_DEVICE_ID);
+                                esp_mqtt_client_publish(mqtt_client, ack_topic, ack_json, 0, 1, 0);
+                                free(ack_json);
+                            }
+                        }
+                    } else {
+                        ESP_LOGE(IOTHUB_TAG, "Sensor metadata update failed");
+                    }
+                }
+                // ============================================================
+                // LEAK INCIDENT RESET
+                // ============================================================
+                else if (strstr(trimmed, "LEAK_RESET"))
+                {
+                    ESP_LOGI(IOTHUB_TAG, "Command: LEAK_RESET");
+                    rules_engine_reset_leak_incident();
+                    ESP_LOGI(IOTHUB_TAG, "Leak incident cleared, RMLEAK reset");
                 }
                 // Check if it's a JSON provisioning payload
                 else if (trimmed[0] == '{')
@@ -562,6 +641,10 @@ void iothub_task(void *param)
         ESP_LOGE(IOTHUB_TAG, "Failed to initialize provisioning manager");
     }
 
+    // Initialize sensor metadata and rules engine
+    sensor_meta_init();
+    rules_engine_init();
+
     // Check provisioning state
     if (provisioning_is_provisioned()) {
         ESP_LOGI(IOTHUB_TAG, "Hub is PROVISIONED");
@@ -638,109 +721,132 @@ void iothub_task(void *param)
     {
         active_queue = xQueueSelectFromSet(evt_queue_set, portMAX_DELAY);
 
-        if (g_iot_hub_connected)
-        {
-            // CRITICAL: Only publish telemetry if device is provisioned
-            if (!provisioning_is_provisioned()) {
-                // Drain queues but don't publish when UNPROVISIONED
-                if (active_queue == lora_rx_queue) {
-                    xQueueReceive(lora_rx_queue, &pkt, 0);
-                    ESP_LOGD(IOTHUB_TAG, "LoRa packet received but device UNPROVISIONED - not publishing");
-                } else if (active_queue == ble_update_queue) {
-                    xQueueReceive(ble_update_queue, &ble_upd_type, 0);
-                    ESP_LOGD(IOTHUB_TAG, "BLE update received but device UNPROVISIONED - not publishing");
-                } else if (active_queue == ble_leak_rx_queue) {
-                    xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0);
-                    ESP_LOGD(IOTHUB_TAG, "BLE leak event received but device UNPROVISIONED - not publishing");
-                }
-                continue; // Skip publishing
-            }
-            
-            char *json_payload = NULL;
+        // =================================================================
+        // Phase 1: RECEIVE (always — regardless of connection state)
+        // =================================================================
+        bool has_lora = false, has_valve = false, has_ble_leak = false;
 
-            if (active_queue == lora_rx_queue)
-            {
-                if (xQueueReceive(lora_rx_queue, &pkt, 0))
-                {
-                    ESP_LOGI(IOTHUB_TAG, "Event: LoRa Packet from 0x%08lX", pkt.sensorId);
-                    
-                    // Check if this specific sensor is provisioned
-                    if (!provisioning_is_lora_sensor_provisioned(pkt.sensorId)) {
-                        ESP_LOGW(IOTHUB_TAG, "Sensor 0x%08lX not provisioned, skipping", pkt.sensorId);
-                        continue;
-                    }
-                    
-                    // Check for duplicates
-                    if (!is_lora_duplicate(&pkt)) {
-                        json_payload = build_lora_delta_json(&pkt);
-                    } else {
-                        ESP_LOGD(IOTHUB_TAG, "LoRa data unchanged, skipping publish");
-                    }
-                }
-            }
-            else if (active_queue == ble_update_queue)
-            {
-                if (xQueueReceive(ble_update_queue, &ble_upd_type, 0))
-                {
-                    ESP_LOGI(IOTHUB_TAG, "Event: BLE Update type=%d", ble_upd_type);
-                    
-                    // DEFENSE-IN-DEPTH: Verify connected valve MAC matches provisioned MAC
-                    char connected_mac[18];
-                    char provisioned_mac[18];
-                    if (ble_valve_get_mac(connected_mac) && 
-                        provisioning_get_valve_mac(provisioned_mac)) {
-                        if (strcasecmp(connected_mac, provisioned_mac) != 0) {
-                            ESP_LOGW(IOTHUB_TAG, "Connected valve MAC %s doesn't match provisioned MAC %s, skipping",
-                                     connected_mac, provisioned_mac);
-                            continue;
-                        }
-                    } else {
-                        // Either not connected or no provisioned MAC - skip
-                        ESP_LOGD(IOTHUB_TAG, "BLE not connected or no provisioned MAC, skipping");
-                        continue;
-                    }
-                    
-                    // Only publish if it's a meaningful update and data changed
-                    if (ble_upd_type == BLE_UPD_BATTERY || 
-                        ble_upd_type == BLE_UPD_LEAK || 
-                        ble_upd_type == BLE_UPD_STATE ||
-                        ble_upd_type == BLE_UPD_CONNECTED) 
-                    {
-                        if (valve_data_changed()) {
-                            json_payload = build_valve_delta_json();
-                        } else {
-                            ESP_LOGD(IOTHUB_TAG, "Valve data unchanged, skipping publish");
-                        }
-                    }
-                    // Don't publish on DISCONNECTED
-                }
-            }
-            else if (active_queue == ble_leak_rx_queue)
-            {
-                if (xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0))
-                {
-                    ESP_LOGI(IOTHUB_TAG, "Event: BLE Leak Sensor %s leak=%d batt=%d",
-                             ble_leak_evt.sensor_mac_str, ble_leak_evt.leak_detected, ble_leak_evt.battery);
-                    json_payload = build_ble_leak_delta_json(&ble_leak_evt);
-                }
-            }
+        if (active_queue == lora_rx_queue) {
+            has_lora = xQueueReceive(lora_rx_queue, &pkt, 0);
+        } else if (active_queue == ble_update_queue) {
+            has_valve = xQueueReceive(ble_update_queue, &ble_upd_type, 0);
+        } else if (active_queue == ble_leak_rx_queue) {
+            has_ble_leak = xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0);
+        }
 
-            if (json_payload)
-            {
-                ESP_LOGI(IOTHUB_TAG, "Publishing: %s", json_payload);
-                esp_mqtt_client_publish(mqtt_client, topic, json_payload, 0, 1, 0);
-                free(json_payload);
+        // =================================================================
+        // Phase 2: RULES (always — works offline, no MQTT needed)
+        // =================================================================
+        if (has_lora) {
+            char lora_id_str[16];
+            snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX", pkt.sensorId);
+            rules_engine_evaluate_leak(LEAK_SOURCE_LORA, (pkt.leakStatus == 1), lora_id_str);
+        }
+        if (has_ble_leak) {
+            rules_engine_evaluate_leak(LEAK_SOURCE_BLE, ble_leak_evt.leak_detected,
+                                       ble_leak_evt.sensor_mac_str);
+        }
+        if (has_valve && ble_upd_type == BLE_UPD_LEAK && ble_valve_get_leak()) {
+            rules_engine_evaluate_leak(LEAK_SOURCE_VALVE_FLOOD, true, "valve");
+        }
+
+        // Re-assert RMLEAK on valve reconnection if leak incident is active
+        if (has_valve && ble_upd_type == BLE_UPD_CONNECTED) {
+            rules_engine_reassert_rmleak_if_needed();
+        }
+
+        // Check for pending rules engine telemetry (auto-close, rmleak events)
+        char *auto_close_json = rules_engine_take_pending_telemetry();
+
+        // =================================================================
+        // Phase 3: PUBLISH (only when connected + provisioned)
+        // =================================================================
+        if (!g_iot_hub_connected || !provisioning_is_provisioned()) {
+            if (auto_close_json) free(auto_close_json);
+            continue;
+        }
+
+        // Publish rules engine telemetry if pending (auto-close, rmleak events)
+        if (auto_close_json) {
+            cJSON *ac_obj = cJSON_Parse(auto_close_json);
+            free(auto_close_json);
+            if (ac_obj) {
+                cJSON_AddStringToObject(ac_obj, "gatewayID", g_gateway_id);
+                char *ac_full = cJSON_PrintUnformatted(ac_obj);
+                cJSON_Delete(ac_obj);
+                if (ac_full) {
+                    ESP_LOGI(IOTHUB_TAG, "Publishing rules event: %s", ac_full);
+                    esp_mqtt_client_publish(mqtt_client, topic, ac_full, 0, 1, 0);
+                    free(ac_full);
+                }
             }
         }
-        else
+
+        // Build and publish sensor telemetry
+        char *json_payload = NULL;
+
+        if (has_lora)
         {
-            // Must drain even if disconnected
-            if (active_queue == lora_rx_queue)
-                xQueueReceive(lora_rx_queue, &pkt, 0);
-            else if (active_queue == ble_update_queue)
-                xQueueReceive(ble_update_queue, &ble_upd_type, 0);
-            else if (active_queue == ble_leak_rx_queue)
-                xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0);
+            ESP_LOGI(IOTHUB_TAG, "Event: LoRa Packet from 0x%08lX", pkt.sensorId);
+
+            // Check if this specific sensor is provisioned
+            if (!provisioning_is_lora_sensor_provisioned(pkt.sensorId)) {
+                ESP_LOGW(IOTHUB_TAG, "Sensor 0x%08lX not provisioned, skipping", pkt.sensorId);
+            }
+            // Check for duplicates
+            else if (!is_lora_duplicate(&pkt)) {
+                json_payload = build_lora_delta_json(&pkt);
+            } else {
+                ESP_LOGD(IOTHUB_TAG, "LoRa data unchanged, skipping publish");
+            }
+        }
+        else if (has_valve)
+        {
+            ESP_LOGI(IOTHUB_TAG, "Event: BLE Update type=%d", ble_upd_type);
+
+            // DEFENSE-IN-DEPTH: Verify connected valve MAC matches provisioned MAC
+            char connected_mac[18];
+            char provisioned_mac[18];
+            bool mac_ok = false;
+            if (ble_valve_get_mac(connected_mac) &&
+                provisioning_get_valve_mac(provisioned_mac)) {
+                if (strcasecmp(connected_mac, provisioned_mac) == 0) {
+                    mac_ok = true;
+                } else {
+                    ESP_LOGW(IOTHUB_TAG, "Connected valve MAC %s doesn't match provisioned MAC %s, skipping",
+                             connected_mac, provisioned_mac);
+                }
+            } else {
+                ESP_LOGD(IOTHUB_TAG, "BLE not connected or no provisioned MAC, skipping");
+            }
+
+            if (mac_ok) {
+                // Only publish if it's a meaningful update and data changed
+                if (ble_upd_type == BLE_UPD_BATTERY ||
+                    ble_upd_type == BLE_UPD_LEAK ||
+                    ble_upd_type == BLE_UPD_STATE ||
+                    ble_upd_type == BLE_UPD_CONNECTED)
+                {
+                    if (valve_data_changed()) {
+                        json_payload = build_valve_delta_json();
+                    } else {
+                        ESP_LOGD(IOTHUB_TAG, "Valve data unchanged, skipping publish");
+                    }
+                }
+            }
+        }
+        else if (has_ble_leak)
+        {
+            ESP_LOGI(IOTHUB_TAG, "Event: BLE Leak Sensor %s leak=%d batt=%d",
+                     ble_leak_evt.sensor_mac_str, ble_leak_evt.leak_detected, ble_leak_evt.battery);
+            json_payload = build_ble_leak_delta_json(&ble_leak_evt);
+        }
+
+        if (json_payload)
+        {
+            ESP_LOGI(IOTHUB_TAG, "Publishing: %s", json_payload);
+            esp_mqtt_client_publish(mqtt_client, topic, json_payload, 0, 1, 0);
+            free(json_payload);
         }
     }
 }

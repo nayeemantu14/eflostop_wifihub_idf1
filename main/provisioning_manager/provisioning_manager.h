@@ -18,6 +18,17 @@ typedef enum {
     PROV_STATE_PROVISIONED = 1
 } provisioning_state_t;
 
+// D2D Rules Engine trigger source bitmask
+#define RULES_TRIGGER_BLE_LEAK    (1 << 0)
+#define RULES_TRIGGER_LORA        (1 << 1)
+#define RULES_TRIGGER_VALVE_FLOOD (1 << 2)
+#define RULES_TRIGGER_ALL         (RULES_TRIGGER_BLE_LEAK | RULES_TRIGGER_LORA | RULES_TRIGGER_VALVE_FLOOD)
+
+typedef struct {
+    bool auto_close_enabled;    // Master enable/disable (default: true)
+    uint8_t trigger_mask;       // Bitmask of sensor types that trigger auto-close
+} rules_config_t;
+
 typedef struct {
     char valve_mac[18];                              // "XX:XX:XX:XX:XX:XX"
     uint32_t lora_sensor_ids[MAX_LORA_SENSORS];      // Array of sensor IDs
@@ -26,6 +37,7 @@ typedef struct {
     uint8_t ble_leak_sensor_count;                   // Number of valid leak sensor MACs
     uint8_t config_version;                          // Config schema version
     provisioning_state_t state;                      // Provisioned or not
+    rules_config_t rules;                            // D2D rules engine config
 } provisioning_config_t;
 
 /**
@@ -165,6 +177,16 @@ bool provisioning_get_lora_sensors(uint32_t *ids_out, uint8_t *count_out);
  * @return true if sensor list is available
  */
 bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out);
+
+/**
+ * @brief Get current rules engine configuration
+ */
+bool provisioning_get_rules_config(rules_config_t *rules_out);
+
+/**
+ * @brief Set rules engine configuration and persist to NVS
+ */
+bool provisioning_set_rules_config(const rules_config_t *rules);
 
 #ifdef __cplusplus
 }

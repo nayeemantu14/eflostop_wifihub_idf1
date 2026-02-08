@@ -67,6 +67,10 @@ static const ble_uuid128_t UUID_SVC_FLOOD =
 static const ble_uuid128_t UUID_CHR_FLOOD =
     BLE_UUID128_INIT(0x19, 0xed, 0x82, 0xae, 0xed, 0x21, 0x4c, 0x9d, 0x41, 0x45, 0x22, 0x8e, 0x01, 0x00, 0x00, 0x00);
 
+// RMLEAK characteristic (in FLOOD service) — Remote Leak Interlock
+static const ble_uuid128_t UUID_CHR_RMLEAK =
+    BLE_UUID128_INIT(0x19, 0xed, 0x82, 0xae, 0xed, 0x21, 0x4c, 0x9d, 0x41, 0x45, 0x22, 0x8e, 0x00, 0x00, 0x00, 0x00);
+
 static const ble_uuid128_t UUID_SVC_BATT =
     BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x0f, 0x18, 0x00, 0x00);
 
@@ -106,14 +110,16 @@ static char g_valve_mac[18] = {0};
 static ble_addr_t g_peer_addr;
 static bool g_peer_addr_valid = false;
 
-static uint16_t h_valve_char = 0, h_flood_char = 0, h_batt_char = 0;
+static uint16_t h_valve_char = 0, h_flood_char = 0, h_rmleak_char = 0, h_batt_char = 0;
 static uint16_t h_valve_svc_end = 0, h_flood_svc_end = 0, h_batt_svc_end = 0;
 
 static uint8_t g_val_battery = 0;
 static bool g_val_leak = false;
 static int g_val_state = -1;
+static bool g_val_rmleak = false;
 
 static int g_pending_valve_cmd = -1;
+static int g_pending_rmleak_cmd = -1;
 
 static TimerHandle_t sec_timeout_timer = NULL;
 static TimerHandle_t discovery_timeout_timer = NULL;
@@ -437,6 +443,11 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
         if (old_leak != g_val_leak && !g_setup_in_progress)
             notify_hub_update(BLE_UPD_LEAK);
     }
+    else if (attr_handle == h_rmleak_char)
+    {
+        g_val_rmleak = (data[0] != 0);
+        ESP_LOGI(BLE_TAG, "[DATA] RMLEAK=%d (%s)", g_val_rmleak, g_val_rmleak ? "ACTIVE" : "CLEAR");
+    }
     else if (attr_handle == h_batt_char)
     {
         uint8_t old_batt = g_val_battery;
@@ -602,6 +613,31 @@ static void apply_pending_valve_cmd_if_any(void)
     }
 }
 
+static void apply_pending_rmleak_cmd_if_any(void)
+{
+    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0)
+        return;
+
+    if (g_pending_rmleak_cmd == 0 || g_pending_rmleak_cmd == 1)
+    {
+        uint8_t v = (uint8_t)g_pending_rmleak_cmd;
+
+        ESP_LOGI(BLE_TAG, "[CMD] Applying pending RMLEAK command=%d", g_pending_rmleak_cmd);
+
+        if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
+        {
+            int rc = ble_gattc_write_flat(valve_conn_handle, h_rmleak_char, &v, 1, NULL, NULL);
+            ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d", rc);
+            if (rc == 0)
+            {
+                g_val_rmleak = (v != 0);
+            }
+            xSemaphoreGive(gatt_mutex);
+        }
+        g_pending_rmleak_cmd = -1;
+    }
+}
+
 static void setup_next_step(void)
 {
     if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
@@ -638,6 +674,17 @@ static void setup_next_step(void)
         break;
 
     case 3:
+        if (h_rmleak_char && h_flood_svc_end)
+        {
+            ESP_LOGI(BLE_TAG, "[SETUP] Subscribe RMLEAK (chr=%u, end=%u)", h_rmleak_char, h_flood_svc_end);
+            int rc = ble_gattc_disc_all_dscs(valve_conn_handle, h_rmleak_char, h_flood_svc_end, on_dsc_disc_cb, NULL);
+            if (rc == 0) return;
+            ESP_LOGE(BLE_TAG, "[SETUP] disc dsc rmleak rc=%d", rc);
+        }
+        setup_next_step();
+        break;
+
+    case 4:
         if (h_batt_char && h_batt_svc_end)
         {
             ESP_LOGI(BLE_TAG, "[SETUP] Subscribe BATT (chr=%u, end=%u)", h_batt_char, h_batt_svc_end);
@@ -648,7 +695,7 @@ static void setup_next_step(void)
         setup_next_step();
         break;
 
-    case 4:
+    case 5:
         if (h_valve_char)
         {
             ESP_LOGI(BLE_TAG, "[SETUP] Read VALVE");
@@ -659,7 +706,7 @@ static void setup_next_step(void)
         setup_next_step();
         break;
 
-    case 5:
+    case 6:
         if (h_flood_char)
         {
             ESP_LOGI(BLE_TAG, "[SETUP] Read FLOOD");
@@ -670,7 +717,18 @@ static void setup_next_step(void)
         setup_next_step();
         break;
 
-    case 6:
+    case 7:
+        if (h_rmleak_char)
+        {
+            ESP_LOGI(BLE_TAG, "[SETUP] Read RMLEAK");
+            int rc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_read_cb, NULL);
+            if (rc == 0) return;
+            ESP_LOGE(BLE_TAG, "[SETUP] read rmleak rc=%d", rc);
+        }
+        setup_next_step();
+        break;
+
+    case 8:
         if (h_batt_char)
         {
             ESP_LOGI(BLE_TAG, "[SETUP] Read BATT");
@@ -695,16 +753,19 @@ static void setup_next_step(void)
         ESP_LOGI(BLE_TAG, "╔══════════════════════════════════════════════════════════════╗");
         ESP_LOGI(BLE_TAG, "║            SETUP COMPLETE - READY FOR GATT                   ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
-        ESP_LOGI(BLE_TAG, "[READY] Valve=%u, Flood=%u, Batt=%u", h_valve_char, h_flood_char, h_batt_char);
-        ESP_LOGI(BLE_TAG, "[READY] Battery=%u%%, Leak=%s, Valve=%s",
+        ESP_LOGI(BLE_TAG, "[READY] Valve=%u, Flood=%u, RMLEAK=%u, Batt=%u",
+                 h_valve_char, h_flood_char, h_rmleak_char, h_batt_char);
+        ESP_LOGI(BLE_TAG, "[READY] Battery=%u%%, Leak=%s, Valve=%s, RMLEAK=%s",
                  g_val_battery,
                  g_val_leak ? "LEAK" : "OK",
-                 g_val_state == 1 ? "OPEN" : (g_val_state == 0 ? "CLOSED" : "UNKNOWN"));
+                 g_val_state == 1 ? "OPEN" : (g_val_state == 0 ? "CLOSED" : "UNKNOWN"),
+                 g_val_rmleak ? "ACTIVE" : "CLEAR");
         ESP_LOGI(BLE_TAG, "[READY] State: %s", state_bits_to_str(get_state_bits()));
 
         g_setup_in_progress = false;
         notify_hub_update(BLE_UPD_CONNECTED);
         apply_pending_valve_cmd_if_any();
+        apply_pending_rmleak_cmd_if_any();
         break;
     }
 }
@@ -762,6 +823,29 @@ static int on_disc_batt_svc(uint16_t conn, const struct ble_gatt_error *err,
     return 0;
 }
 
+static int on_disc_rmleak_chr(uint16_t conn, const struct ble_gatt_error *err,
+                               const struct ble_gatt_chr *chr, void *arg)
+{
+    (void)arg;
+
+    if (err->status == 0)
+    {
+        h_rmleak_char = chr->val_handle;
+        ESP_LOGI(BLE_TAG, "[DISC] Found RMLEAK char: val_handle=%u, props=0x%02X", chr->val_handle, chr->properties);
+        ble_gattc_disc_svc_by_uuid(conn, &UUID_SVC_BATT.u, on_disc_batt_svc, NULL);
+        return BLE_HS_EDONE;
+    }
+
+    if (err->status == BLE_HS_EDONE)
+    {
+        ESP_LOGW(BLE_TAG, "[DISC] RMLEAK char not found (optional, continuing)");
+        h_rmleak_char = 0;
+        ble_gattc_disc_svc_by_uuid(conn, &UUID_SVC_BATT.u, on_disc_batt_svc, NULL);
+    }
+
+    return 0;
+}
+
 static int on_disc_flood_chr(uint16_t conn, const struct ble_gatt_error *err,
                              const struct ble_gatt_chr *chr, void *arg)
 {
@@ -771,7 +855,15 @@ static int on_disc_flood_chr(uint16_t conn, const struct ble_gatt_error *err,
     {
         h_flood_char = chr->val_handle;
         ESP_LOGI(BLE_TAG, "[DISC] Found FLOOD char: val_handle=%u, props=0x%02X", chr->val_handle, chr->properties);
-        ble_gattc_disc_svc_by_uuid(conn, &UUID_SVC_BATT.u, on_disc_batt_svc, NULL);
+        // Discover RMLEAK char in same FLOOD service (registered after FLOOD)
+        int rc = ble_gattc_disc_chrs_by_uuid(conn, h_flood_char + 1, h_flood_svc_end,
+                                              &UUID_CHR_RMLEAK.u, on_disc_rmleak_chr, NULL);
+        if (rc != 0)
+        {
+            ESP_LOGW(BLE_TAG, "[DISC] RMLEAK char discovery failed rc=%d, skipping", rc);
+            h_rmleak_char = 0;
+            ble_gattc_disc_svc_by_uuid(conn, &UUID_SVC_BATT.u, on_disc_batt_svc, NULL);
+        }
         return BLE_HS_EDONE;
     }
 
@@ -867,6 +959,7 @@ static void start_discovery_chain(void)
 
     h_valve_char = 0;
     h_flood_char = 0;
+    h_rmleak_char = 0;
     h_batt_char = 0;
     h_valve_svc_end = 0;
     h_flood_svc_end = 0;
@@ -953,6 +1046,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
             h_valve_char = 0;
             h_flood_char = 0;
+            h_rmleak_char = 0;
             h_batt_char = 0;
             h_valve_svc_end = 0;
             h_flood_svc_end = 0;
@@ -1003,6 +1097,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
         h_valve_char = 0;
         h_flood_char = 0;
+        h_rmleak_char = 0;
         h_batt_char = 0;
         h_valve_svc_end = 0;
         h_flood_svc_end = 0;
@@ -1252,6 +1347,38 @@ static void write_valve_command(uint8_t val)
 }
 
 // -----------------------------------------------------------------------------
+// RMLEAK WRITE COMMAND
+// -----------------------------------------------------------------------------
+static void write_rmleak_command(uint8_t val)
+{
+    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0)
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] RMLEAK write not ready. Queuing val=%u", val);
+        g_pending_rmleak_cmd = (int)val;
+        g_connect_requested = true;
+        start_scan();
+        return;
+    }
+
+    if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
+    {
+        ESP_LOGI(BLE_TAG, "[CMD] Writing RMLEAK=%u", val);
+        int rc = ble_gattc_write_flat(valve_conn_handle, h_rmleak_char, &val, 1, NULL, NULL);
+        ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d", rc);
+        if (rc == 0)
+        {
+            g_val_rmleak = (val != 0);
+        }
+        xSemaphoreGive(gatt_mutex);
+    }
+    else
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] Failed to acquire mutex for RMLEAK. Queuing val=%u", val);
+        g_pending_rmleak_cmd = (int)val;
+    }
+}
+
+// -----------------------------------------------------------------------------
 // NIMBLE HOST TASK
 // -----------------------------------------------------------------------------
 static void nimble_host_task(void *param)
@@ -1349,6 +1476,16 @@ static void ble_valve_task(void *pvParameters)
             ESP_LOGI(BLE_TAG, "[TASK] CMD: SECURE");
             if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE && !is_link_encrypted())
                 initiate_security();
+            break;
+
+        case BLE_CMD_SET_RMLEAK:
+            ESP_LOGI(BLE_TAG, "[TASK] CMD: SET_RMLEAK");
+            write_rmleak_command(1);
+            break;
+
+        case BLE_CMD_CLEAR_RMLEAK:
+            ESP_LOGI(BLE_TAG, "[TASK] CMD: CLEAR_RMLEAK");
+            write_rmleak_command(0);
             break;
 
         default:
@@ -1586,4 +1723,15 @@ void ble_valve_clear_bonds(void)
     ESP_LOGI(BLE_TAG, "[API] Clearing all BLE bonds...");
     int rc = ble_store_clear();
     ESP_LOGI(BLE_TAG, "[API] ble_store_clear() rc=%d", rc);
+}
+
+bool ble_valve_set_rmleak(bool enabled)
+{
+    ble_valve_msg_t m = {.command = enabled ? BLE_CMD_SET_RMLEAK : BLE_CMD_CLEAR_RMLEAK};
+    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+}
+
+bool ble_valve_get_rmleak_state(void)
+{
+    return g_val_rmleak;
 }

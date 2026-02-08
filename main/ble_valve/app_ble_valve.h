@@ -33,7 +33,9 @@ extern "C"
         BLE_CMD_DISCONNECT,
         BLE_CMD_OPEN_VALVE,
         BLE_CMD_CLOSE_VALVE,
-        BLE_CMD_SECURE
+        BLE_CMD_SECURE,
+        BLE_CMD_SET_RMLEAK,
+        BLE_CMD_CLEAR_RMLEAK
     } ble_valve_cmd_t;
 
     typedef struct
@@ -102,6 +104,17 @@ extern "C"
      * Use this for decommissioning or troubleshooting pairing issues.
      */
     void ble_valve_clear_bonds(void);
+
+    /**
+     * @brief Write RMLEAK characteristic on the valve (1=assert interlock, 0=clear).
+     * Non-blocking: queues a BLE command. If disconnected, queues pending and triggers reconnect.
+     */
+    bool ble_valve_set_rmleak(bool enabled);
+
+    /**
+     * @brief Get the last-known RMLEAK value read/notified from the valve.
+     */
+    bool ble_valve_get_rmleak_state(void);
 
 #ifdef __cplusplus
 }

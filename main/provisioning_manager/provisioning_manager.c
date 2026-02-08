@@ -17,8 +17,10 @@
 #define NVS_KEY_LORA_IDS "lora_ids"
 #define NVS_KEY_LEAK_COUNT "leak_cnt"
 #define NVS_KEY_LEAK_MACS "leak_macs"
+#define NVS_KEY_RULES_EN "rules_en"
+#define NVS_KEY_RULES_TRIG "rules_trig"
 
-#define CURRENT_CONFIG_VERSION 1
+#define CURRENT_CONFIG_VERSION 2
 
 static provisioning_config_t g_config = {0};
 static bool g_initialized = false;
@@ -63,6 +65,8 @@ bool provisioning_init(void)
     memset(&g_config, 0, sizeof(g_config));
     g_config.config_version = CURRENT_CONFIG_VERSION;
     g_config.state = PROV_STATE_UNPROVISIONED;
+    g_config.rules.auto_close_enabled = true;
+    g_config.rules.trigger_mask = RULES_TRIGGER_ALL;
 
     if (provisioning_load_from_nvs(&g_config)) {
         ESP_LOGI(PROV_TAG, "Loaded existing config from NVS");
@@ -73,6 +77,9 @@ bool provisioning_init(void)
             ESP_LOGI(PROV_TAG, "LoRa sensors: %d", g_config.lora_sensor_count);
             ESP_LOGI(PROV_TAG, "BLE leak sensors: %d", g_config.ble_leak_sensor_count);
         }
+        ESP_LOGI(PROV_TAG, "Rules: auto_close=%s triggers=0x%02X",
+                 g_config.rules.auto_close_enabled ? "enabled" : "disabled",
+                 g_config.rules.trigger_mask);
     } else {
         ESP_LOGI(PROV_TAG, "No existing config found, starting UNPROVISIONED");
     }
@@ -196,6 +203,17 @@ bool provisioning_load_from_nvs(provisioning_config_t *config)
         }
     }
 
+    // Load rules config (backward compatible — defaults if missing)
+    {
+        uint8_t rules_en = 1;
+        err = nvs_get_u8(nvs_handle, NVS_KEY_RULES_EN, &rules_en);
+        config->rules.auto_close_enabled = (err == ESP_OK) ? (rules_en != 0) : true;
+
+        uint8_t rules_trig = RULES_TRIGGER_ALL;
+        err = nvs_get_u8(nvs_handle, NVS_KEY_RULES_TRIG, &rules_trig);
+        config->rules.trigger_mask = (err == ESP_OK) ? rules_trig : RULES_TRIGGER_ALL;
+    }
+
 cleanup:
     nvs_close(nvs_handle);
     return success;
@@ -270,14 +288,28 @@ bool provisioning_save_to_nvs(const provisioning_config_t *config)
 
     // Save BLE leak sensor MACs
     if (config->ble_leak_sensor_count > 0) {
-        err = nvs_set_blob(nvs_handle, NVS_KEY_LEAK_MACS, 
-                          config->ble_leak_sensors, 
+        err = nvs_set_blob(nvs_handle, NVS_KEY_LEAK_MACS,
+                          config->ble_leak_sensors,
                           18 * config->ble_leak_sensor_count);
         if (err != ESP_OK) {
             ESP_LOGE(PROV_TAG, "Failed to save leak MACs");
             success = false;
             goto cleanup;
         }
+    }
+
+    // Save rules config
+    err = nvs_set_u8(nvs_handle, NVS_KEY_RULES_EN, config->rules.auto_close_enabled ? 1 : 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to save rules_en");
+        success = false;
+        goto cleanup;
+    }
+    err = nvs_set_u8(nvs_handle, NVS_KEY_RULES_TRIG, config->rules.trigger_mask);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to save rules_trig");
+        success = false;
+        goto cleanup;
     }
 
     // Commit
@@ -452,6 +484,23 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
         has_updates = true;
     }
 
+    // Parse optional rules config
+    cJSON *rules_json = cJSON_GetObjectItem(root, "rules");
+    if (rules_json && cJSON_IsObject(rules_json)) {
+        cJSON *auto_close = cJSON_GetObjectItem(rules_json, "auto_close_enabled");
+        if (auto_close && cJSON_IsBool(auto_close)) {
+            new_config.rules.auto_close_enabled = cJSON_IsTrue(auto_close);
+        }
+        cJSON *trigger_mask = cJSON_GetObjectItem(rules_json, "trigger_mask");
+        if (trigger_mask && cJSON_IsNumber(trigger_mask)) {
+            new_config.rules.trigger_mask = (uint8_t)trigger_mask->valueint;
+        }
+        ESP_LOGI(PROV_TAG, "Rules: auto_close=%s triggers=0x%02X",
+                 new_config.rules.auto_close_enabled ? "enabled" : "disabled",
+                 new_config.rules.trigger_mask);
+        has_updates = true;
+    }
+
     cJSON_Delete(root);
 
     if (!has_updates) {
@@ -504,6 +553,8 @@ bool provisioning_decommission(void)
     memset(&g_config, 0, sizeof(provisioning_config_t));
     g_config.config_version = CURRENT_CONFIG_VERSION;
     g_config.state = PROV_STATE_UNPROVISIONED;
+    g_config.rules.auto_close_enabled = true;
+    g_config.rules.trigger_mask = RULES_TRIGGER_ALL;
 
     xSemaphoreGive(g_prov_mutex);
 
@@ -931,4 +982,69 @@ bool provisioning_add_ble_sensor(const char *mac)
     }
 
     return save_result;
+}
+
+bool provisioning_get_rules_config(rules_config_t *rules_out)
+{
+    if (!rules_out || !g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        *rules_out = g_config.rules;
+        xSemaphoreGive(g_prov_mutex);
+        return true;
+    }
+
+    ESP_LOGW(PROV_TAG, "Failed to take mutex in get_rules_config");
+    return false;
+}
+
+bool provisioning_set_rules_config(const rules_config_t *rules)
+{
+    if (!rules || !g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    ESP_LOGI(PROV_TAG, "Setting rules config: auto_close=%s triggers=0x%02X",
+             rules->auto_close_enabled ? "enabled" : "disabled",
+             rules->trigger_mask);
+
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex for set_rules_config");
+        return false;
+    }
+
+    g_config.rules = *rules;
+
+    // Persist just the rules keys to NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to open NVS: %s", esp_err_to_name(err));
+        xSemaphoreGive(g_prov_mutex);
+        return false;
+    }
+
+    bool ok = true;
+    err = nvs_set_u8(nvs_handle, NVS_KEY_RULES_EN, rules->auto_close_enabled ? 1 : 0);
+    if (err != ESP_OK) { ok = false; }
+    err = nvs_set_u8(nvs_handle, NVS_KEY_RULES_TRIG, rules->trigger_mask);
+    if (err != ESP_OK) { ok = false; }
+
+    if (ok) {
+        err = nvs_commit(nvs_handle);
+        if (err != ESP_OK) { ok = false; }
+    }
+
+    nvs_close(nvs_handle);
+    xSemaphoreGive(g_prov_mutex);
+
+    if (ok) {
+        ESP_LOGI(PROV_TAG, "Rules config saved to NVS");
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save rules config to NVS");
+    }
+
+    return ok;
 }
