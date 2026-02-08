@@ -37,6 +37,7 @@ typedef struct {
     uint8_t battery;
     bool leak_state;
     int valve_state;
+    bool rmleak;
     bool valid;
 } valve_cache_t;
 
@@ -167,26 +168,30 @@ static bool valve_data_changed(void)
     uint8_t batt = ble_valve_get_battery();
     bool leak = ble_valve_get_leak();
     int state = ble_valve_get_state();
-    
+    bool rmleak = ble_valve_get_rmleak_state();
+
     if (!g_last_valve.valid) {
         // First time
         g_last_valve.battery = batt;
         g_last_valve.leak_state = leak;
         g_last_valve.valve_state = state;
+        g_last_valve.rmleak = rmleak;
         g_last_valve.valid = true;
         return true;
     }
-    
-    if (g_last_valve.battery != batt || 
-        g_last_valve.leak_state != leak || 
-        g_last_valve.valve_state != state) {
+
+    if (g_last_valve.battery != batt ||
+        g_last_valve.leak_state != leak ||
+        g_last_valve.valve_state != state ||
+        g_last_valve.rmleak != rmleak) {
         // Changed
         g_last_valve.battery = batt;
         g_last_valve.leak_state = leak;
         g_last_valve.valve_state = state;
+        g_last_valve.rmleak = rmleak;
         return true;
     }
-    
+
     return false; // No change
 }
 
@@ -211,6 +216,7 @@ static char *build_valve_delta_json(void)
         cJSON_AddStringToObject(valveObj, "valve_mac", valve_mac);
         cJSON_AddNumberToObject(valveObj, "battery", ble_valve_get_battery());
         cJSON_AddBoolToObject(valveObj, "leak_state", ble_valve_get_leak());
+        cJSON_AddBoolToObject(valveObj, "rmleak", ble_valve_get_rmleak_state());
 
         int state = ble_valve_get_state();
         if (state == 1)
@@ -719,7 +725,10 @@ void iothub_task(void *param)
 
     while (1)
     {
-        active_queue = xQueueSelectFromSet(evt_queue_set, portMAX_DELAY);
+        active_queue = xQueueSelectFromSet(evt_queue_set, pdMS_TO_TICKS(30000));
+
+        // Periodic rules engine tick (auto-clear timeout, valve override detection)
+        rules_engine_tick();
 
         // =================================================================
         // Phase 1: RECEIVE (always — regardless of connection state)
@@ -746,8 +755,8 @@ void iothub_task(void *param)
             rules_engine_evaluate_leak(LEAK_SOURCE_BLE, ble_leak_evt.leak_detected,
                                        ble_leak_evt.sensor_mac_str);
         }
-        if (has_valve && ble_upd_type == BLE_UPD_LEAK && ble_valve_get_leak()) {
-            rules_engine_evaluate_leak(LEAK_SOURCE_VALVE_FLOOD, true, "valve");
+        if (has_valve && ble_upd_type == BLE_UPD_LEAK) {
+            rules_engine_evaluate_leak(LEAK_SOURCE_VALVE_FLOOD, ble_valve_get_leak(), "valve");
         }
 
         // Re-assert RMLEAK on valve reconnection if leak incident is active
@@ -825,6 +834,7 @@ void iothub_task(void *param)
                 if (ble_upd_type == BLE_UPD_BATTERY ||
                     ble_upd_type == BLE_UPD_LEAK ||
                     ble_upd_type == BLE_UPD_STATE ||
+                    ble_upd_type == BLE_UPD_RMLEAK ||
                     ble_upd_type == BLE_UPD_CONNECTED)
                 {
                     if (valve_data_changed()) {

@@ -62,6 +62,13 @@ void rules_engine_reset_leak_incident(void);
  */
 void rules_engine_reassert_rmleak_if_needed(void);
 
+/**
+ * @brief Periodic tick — call from event loop (every ~30s).
+ *        Checks auto-clear timeout when all sensors report clear,
+ *        and detects valve-side physical override.
+ */
+void rules_engine_tick(void);
+
 #ifdef __cplusplus
 }
 #endif

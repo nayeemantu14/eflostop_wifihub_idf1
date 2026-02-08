@@ -445,8 +445,11 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
     }
     else if (attr_handle == h_rmleak_char)
     {
+        bool old_rmleak = g_val_rmleak;
         g_val_rmleak = (data[0] != 0);
         ESP_LOGI(BLE_TAG, "[DATA] RMLEAK=%d (%s)", g_val_rmleak, g_val_rmleak ? "ACTIVE" : "CLEAR");
+        if (old_rmleak != g_val_rmleak && !g_setup_in_progress)
+            notify_hub_update(BLE_UPD_RMLEAK);
     }
     else if (attr_handle == h_batt_char)
     {

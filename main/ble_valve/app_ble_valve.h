@@ -23,6 +23,7 @@ extern "C"
         BLE_UPD_BATTERY,
         BLE_UPD_LEAK,
         BLE_UPD_STATE,
+        BLE_UPD_RMLEAK,
         BLE_UPD_CONNECTED,
         BLE_UPD_DISCONNECTED
     } ble_update_type_t;
