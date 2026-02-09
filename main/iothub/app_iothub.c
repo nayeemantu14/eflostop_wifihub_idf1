@@ -317,7 +317,7 @@ static char *build_lora_delta_json(const lora_packet_t *pkt)
     cJSON_AddItemToObject(sensorsObj, sensorKey, thisSensor);
 
     cJSON_AddNumberToObject(thisSensor, "battery", pkt->batteryPercentage);
-    cJSON_AddBoolToObject(thisSensor, "leak_state", (pkt->leakStatus == 1));
+    cJSON_AddBoolToObject(thisSensor, "leak_state", (pkt->leakStatus != 0));
     cJSON_AddNumberToObject(thisSensor, "rssi", pkt->rssi);
 
     char lora_id[16];
@@ -793,7 +793,7 @@ void iothub_task(void *param)
             snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
                      (unsigned long)pkt.sensorId);
             rules_engine_evaluate_leak(LEAK_SOURCE_LORA,
-                                       (pkt.leakStatus == 1), lora_id_str);
+                                       (pkt.leakStatus != 0), lora_id_str);
         }
         if (has_ble_leak) {
             rules_engine_evaluate_leak(LEAK_SOURCE_BLE,
@@ -856,7 +856,7 @@ void iothub_task(void *param)
                     telemetry_v2_publish_leak_event(
                         pkt.leakStatus ? "leak_detected" : "leak_cleared",
                         "lora", lora_id,
-                        pkt.leakStatus == 1, pkt.batteryPercentage, pkt.rssi);
+                        (pkt.leakStatus != 0), pkt.batteryPercentage, pkt.rssi);
                 }
             }
         }

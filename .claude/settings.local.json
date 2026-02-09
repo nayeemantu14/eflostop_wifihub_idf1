@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(cmd.exe /c \"cd /d \"\"c:\\\\Work\\\\Projects\\\\EfloStop 2\\\\Firmware\\\\Production\\\\eFloStop_WiFiHub_idf1\"\" && set IDF_PATH=C:\\\\Users\\\\antun\\\\esp\\\\v5.5.1\\\\esp-idf && C:\\\\Users\\\\antun\\\\.espressif\\\\python_env\\\\idf5.5_py3.11_env\\\\Scripts\\\\python.exe C:\\\\Users\\\\antun\\\\esp\\\\v5.5.1\\\\esp-idf\\\\tools\\\\idf.py build\")",
-      "Bash(powershell -NoProfile -Command:*)"
+      "Bash(powershell -NoProfile -Command:*)",
+      "Bash(git add:*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

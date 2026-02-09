@@ -1,33 +1,33 @@
-# eFloStop WiFi Hub — Cloud-to-Device (C2D) Command Reference
+# eFloStop WiFi Hub - Cloud-to-Device (C2D) Command Reference
 
-## Overview
+# 1 Overview
 
-The eFloStop WiFi Hub receives commands from the cloud via **Azure IoT Hub Cloud-to-Device (C2D) messages**. Commands are delivered as MQTT messages on the standard Azure C2D topic and processed by the hub's IoT task event loop.
+The hub gets commands from the cloud through Azure IoT Hub C2D messages. They come in over MQTT and the hub's IoT task picks them up.
 
-### How It Works
+## 1.1 How it works
 
-1. **Cloud sends** a C2D message to the hub's Azure IoT Hub device identity.
-2. **Hub receives** the message via MQTT, parses it, and dispatches the command.
-3. **Hub executes** the command (valve control, provisioning, config update, etc.).
-4. **Hub publishes** a `cmd_ack` telemetry event (for envelope commands) so the cloud knows the result.
+1. Cloud sends a C2D message to the hub's device identity on Azure.
+2. Hub receives it over MQTT, parses it, figures out what command it is.
+3. Hub runs the command (valve control, provisioning, config change, etc).
+4. Hub sends back a `cmd_ack` telemetry event so the cloud knows what happened.
 
-### Message Formats (Priority Order)
+## 1.2 Message formats
 
 The parser tries these formats in order:
 
-| Priority | Format | Detection |
-|----------|--------|-----------|
-| 1 | **Canonical envelope** | JSON with `"schema": "eflostop.cmd"` |
-| 2 | **Legacy envelope** | JSON with `"schema": "eflostop.cmd.v1"` |
-| 3 | **Legacy text** | Plain text keywords (`VALVE_OPEN`, `DECOMMISSION_ALL`, etc.) |
+| Priority | Format | How it's detected |
+|----------|--------|-------------------|
+| 1 | Canonical envelope | JSON with `"schema": "eflostop.cmd"` |
+| 2 | Legacy envelope | JSON with `"schema": "eflostop.cmd.v1"` |
+| 3 | Legacy text | Plain text keywords like `VALVE_OPEN`, `DECOMMISSION_ALL`, etc. |
 
-**Recommendation:** Always use the canonical envelope format for new integrations.
+For anything new, use the canonical envelope format.
 
 ---
 
-## Command Envelope
+# 2 Command Envelope
 
-### Canonical Format
+## 2.1 Canonical format
 
 ```json
 {
@@ -39,24 +39,24 @@ The parser tries these formats in order:
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `schema` | string | **yes** | Must be `"eflostop.cmd"` |
-| `ver` | integer | no | Envelope version. Defaults to `1` if omitted. |
-| `id` | string | no | Correlation ID. If present, the hub sends a `cmd_ack` response. Use a unique value (UUID, counter, timestamp) to correlate requests with responses. |
-| `cmd` | string | **yes** | Normalized command name (see command list below). |
-| `payload` | object | varies | Command-specific payload. Some commands require it, others don't. |
+| Field | Type | Required | What it does |
+|-------|------|----------|--------------|
+| `schema` | string | yes | Has to be `"eflostop.cmd"` |
+| `ver` | integer | no | Envelope version. Defaults to `1` if you leave it out. |
+| `id` | string | no | Correlation ID. If you include this, the hub sends back a `cmd_ack`. Use something unique (UUID, counter, timestamp) so you can match requests to responses. |
+| `cmd` | string | yes | The command name (see list below). |
+| `payload` | object | depends | Some commands need it, some don't. |
 
-### Why No Version in the Schema String
+## 2.2 Why the schema string doesn't have a version in it
 
-The schema identifier `"eflostop.cmd"` is intentionally stable and version-free. Versioning is handled by the separate `ver` field, which:
-- Avoids string-matching overhead for version checks on the ESP32.
-- Allows the cloud to explicitly request a specific protocol version.
-- Keeps the schema string constant across protocol revisions (no `v1`/`v2`/`v3` string proliferation).
+We keep `"eflostop.cmd"` as a fixed string on purpose. The version goes in the `ver` field instead. This way:
+- We don't waste time doing string comparisons for version checks on the ESP32.
+- The cloud can ask for a specific protocol version if needed.
+- We don't end up with `v1`/`v2`/`v3` strings everywhere.
 
-### Legacy Envelope (Backward Compatible)
+## 2.3 Legacy envelope (still works)
 
-The hub also accepts the older format where the version was embedded in the schema string:
+The hub also accepts the older format where the version was baked into the schema string:
 
 ```json
 {
@@ -67,15 +67,15 @@ The hub also accepts the older format where the version was embedded in the sche
 }
 ```
 
-This is treated identically to the canonical format with `ver: 1`. Both formats produce the same internal result.
+This gets treated the same as the canonical format with `ver: 1`. No difference internally.
 
 ---
 
-## Command Acknowledgment (cmd_ack)
+# 3 Command Acknowledgment (cmd_ack)
 
-When a command includes an `id` field (or uses the envelope format), the hub publishes a telemetry event confirming the result.
+When a command has an `id` field, the hub sends back a telemetry event to confirm what happened.
 
-### Success Response
+## 3.1 Success
 
 ```json
 {
@@ -92,7 +92,7 @@ When a command includes an `id` field (or uses the envelope format), the hub pub
 }
 ```
 
-### Error Response
+## 3.2 Error
 
 ```json
 {
@@ -113,27 +113,27 @@ When a command includes an `id` field (or uses the envelope format), the hub pub
 }
 ```
 
-### Ack Fields
+## 3.3 Ack fields
 
-| Field | Type | Description |
-|-------|------|-------------|
+| Field | Type | What it is |
+|-------|------|------------|
 | `event` | string | Always `"cmd_ack"` |
-| `id` | string | Same correlation ID from the request (omitted if request had no `id`) |
-| `cmd` | string | The command name that was executed |
+| `id` | string | Same correlation ID you sent in the request. Left out if the request didn't have one. |
+| `cmd` | string | Which command ran |
 | `status` | string | `"ok"` or `"error"` |
-| `error` | object | Present only on error. Contains `code` (command name) and `detail` (human-readable message). |
+| `error` | object | Only shows up on errors. Has `code` (the command name) and `detail` (a readable message). |
 
-### Correlation ID Behavior
+## 3.4 How correlation IDs behave
 
-- If the same `id` is sent twice, the command executes again and a new ack is published. Commands are **not idempotent** by default — sending `valve_close` twice will attempt to close the valve twice.
-- The hub does not deduplicate based on `id`. The correlation ID is purely for request-response matching.
-- If `id` is omitted, no `cmd_ack` is published (fire-and-forget mode).
+- If you send the same `id` twice, the command runs again and you get another ack. Commands are not idempotent. Sending `valve_close` twice tries to close the valve twice.
+- The hub doesn't deduplicate by `id`. It's just for matching requests to responses.
+- If you leave out `id`, no `cmd_ack` gets published. Fire and forget.
 
 ---
 
-## Command Reference
+# 4 Command Reference
 
-### valve_open
+## 4.1 valve_open
 
 Opens the water valve.
 
@@ -142,7 +142,7 @@ Opens the water valve.
 | `cmd` | `"valve_open"` |
 | `payload` | none |
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -152,13 +152,13 @@ Opens the water valve.
 }
 ```
 
-**Side effects:** Initiates BLE connection to the valve (if not connected), then sends the open command. The valve state change is published as a `valve_state_changed` telemetry event.
+What happens: the hub connects to the valve over BLE (if not already connected) and sends the open command. A `valve_state_changed` telemetry event gets published.
 
-**Legacy equivalent:** `VALVE_OPEN`
+Legacy text: `VALVE_OPEN`
 
 ---
 
-### valve_close
+## 4.2 valve_close
 
 Closes the water valve.
 
@@ -167,7 +167,7 @@ Closes the water valve.
 | `cmd` | `"valve_close"` |
 | `payload` | none |
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -177,22 +177,22 @@ Closes the water valve.
 }
 ```
 
-**Side effects:** Same as `valve_open` but closes. Published as `valve_state_changed` event.
+Same as `valve_open` but closes. Published as a `valve_state_changed` event.
 
-**Legacy equivalent:** `VALVE_CLOSE`
+Legacy text: `VALVE_CLOSE`
 
 ---
 
-### valve_set_state
+## 4.3 valve_set_state
 
-Unified valve control — opens or closes based on the `state` field in the payload.
+Single command that can open or close the valve depending on the `state` you pass.
 
 | Field | Value |
 |-------|-------|
 | `cmd` | `"valve_set_state"` |
 | `payload.state` | `"open"` or `"closed"` (required) |
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -203,26 +203,26 @@ Unified valve control — opens or closes based on the `state` field in the payl
 }
 ```
 
-**Error conditions:**
-| Detail | Cause |
-|--------|-------|
-| `missing 'state' field (expected "open" or "closed")` | Payload missing or no `state` key |
-| `invalid state value (expected "open" or "closed")` | `state` is not `"open"` or `"closed"` |
+Errors:
+| Detail | Why |
+|--------|-----|
+| `missing 'state' field (expected "open" or "closed")` | Payload is missing or has no `state` key |
+| `invalid state value (expected "open" or "closed")` | `state` is something other than `"open"` or `"closed"` |
 
-**No legacy equivalent** — this is an envelope-only command.
+No legacy equivalent. This only works with the envelope format.
 
 ---
 
-### leak_reset
+## 4.4 leak_reset
 
-Resets the leak incident latch and clears the RMLEAK interlock on the valve. Does **not** open the valve — that requires a separate `valve_open` or `valve_set_state` command.
+Resets the leak incident latch and clears the RMLEAK interlock on the valve. This does not open the valve. You need to send a separate `valve_open` or `valve_set_state` for that.
 
 | Field | Value |
 |-------|-------|
 | `cmd` | `"leak_reset"` |
 | `payload` | none |
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -232,32 +232,32 @@ Resets the leak incident latch and clears the RMLEAK interlock on the valve. Doe
 }
 ```
 
-**Side effects:** Clears the rules engine leak incident. Sends RMLEAK=0 to the valve over BLE. Published as `rmleak_cleared` telemetry event by the rules engine.
+What happens: clears the rules engine leak incident, sends RMLEAK=0 to the valve over BLE. The rules engine publishes an `rmleak_cleared` telemetry event.
 
-**Legacy equivalent:** `LEAK_RESET`
+Legacy text: `LEAK_RESET`
 
 ---
 
-### provision
+## 4.5 provision
 
-Provisions the hub with device identities (valve MAC, sensor IDs). This is the primary onboarding command.
+Tells the hub which devices it should talk to (valve MAC, sensor IDs). This is the main onboarding command.
 
 | Field | Value |
 |-------|-------|
 | `cmd` | `"provision"` |
 | `payload` | Provisioning object (see below) |
 
-**Payload schema:**
+Payload fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
+| Field | Type | Required | What it is |
+|-------|------|----------|------------|
 | `valve_mac` | string | no | BLE MAC of the valve, e.g. `"00:80:E1:27:F7:BB"` |
 | `lora_sensors` | string[] | no | Array of LoRa sensor hex IDs, e.g. `["0x754A6237"]` |
 | `ble_leak_sensors` | string[] | no | Array of BLE leak sensor MACs, e.g. `["00:80:E1:27:99:E7"]` |
 
-At least one field must be present. Fields use **replace** semantics for each category present — e.g. sending `ble_leak_sensors` replaces all BLE leak sensors, but does not affect `valve_mac` or `lora_sensors` if those fields are absent.
+You need at least one field. Each field replaces that whole category. So if you send `ble_leak_sensors`, it replaces all the BLE leak sensors. But it won't touch `valve_mac` or `lora_sensors` if you didn't include those.
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -272,29 +272,29 @@ At least one field must be present. Fields use **replace** semantics for each ca
 }
 ```
 
-**Limits:**
-- Max 16 LoRa sensors
-- Max 16 BLE leak sensors
+Limits:
+- Up to 16 LoRa sensors
+- Up to 16 BLE leak sensors
 - 1 valve
 
-**Side effects:** Stores config in NVS. Triggers BLE valve connection if valve MAC is set. Publishes lifecycle + snapshot after provisioning completes.
+What happens: config gets saved to NVS. If a valve MAC was set, the hub starts connecting to it over BLE. A lifecycle + snapshot telemetry gets published after provisioning finishes.
 
-**Legacy equivalent:** Any JSON object starting with `{` that doesn't match the envelope schema is treated as a provisioning payload.
+Legacy: any bare JSON object (starts with `{`) that doesn't match the envelope schema gets treated as a provisioning payload.
 
 ---
 
-### decommission
+## 4.6 decommission
 
-Removes provisioned devices. The `target` field in the payload controls what is removed.
+Removes devices from the hub. The `target` field says what to remove.
 
 | Field | Value |
 |-------|-------|
 | `cmd` | `"decommission"` |
 | `payload.target` | `"valve"`, `"lora"`, `"ble"`, or `"all"` (required) |
 
-#### target: "valve"
+### 4.6.1 target: "valve"
 
-Removes the valve from provisioning. Disconnects BLE.
+Removes the valve and disconnects BLE.
 
 ```json
 {
@@ -306,11 +306,11 @@ Removes the valve from provisioning. Disconnects BLE.
 }
 ```
 
-**Legacy equivalent:** `DECOMMISSION_VALVE`
+Legacy text: `DECOMMISSION_VALVE`
 
-#### target: "lora"
+### 4.6.2 target: "lora"
 
-Removes a specific LoRa sensor. Requires `sensor_id`.
+Removes one LoRa sensor. You have to pass the `sensor_id`.
 
 ```json
 {
@@ -322,11 +322,11 @@ Removes a specific LoRa sensor. Requires `sensor_id`.
 }
 ```
 
-**Legacy equivalent:** `DECOMMISSION_LORA:0x754A6237`
+Legacy text: `DECOMMISSION_LORA:0x754A6237`
 
-#### target: "ble"
+### 4.6.3 target: "ble"
 
-Removes a specific BLE leak sensor. Requires `sensor_id`.
+Removes one BLE leak sensor. You have to pass the `sensor_id`.
 
 ```json
 {
@@ -338,11 +338,11 @@ Removes a specific BLE leak sensor. Requires `sensor_id`.
 }
 ```
 
-**Legacy equivalent:** `DECOMMISSION_BLE:00:80:E1:27:99:E7`
+Legacy text: `DECOMMISSION_BLE:00:80:E1:27:99:E7`
 
-#### target: "all"
+### 4.6.4 target: "all"
 
-**DANGEROUS:** Full factory decommission. Erases all provisioning data, sensor metadata, and restarts the hub.
+CAREFUL: this is a full factory reset. Wipes everything and restarts the hub.
 
 ```json
 {
@@ -354,35 +354,35 @@ Removes a specific BLE leak sensor. Requires `sensor_id`.
 }
 ```
 
-**Side effects:**
+What happens, in order:
 1. Erases all NVS provisioning data
 2. Clears all sensor metadata
-3. Disconnects valve BLE
-4. Sends `cmd_ack` (if `id` present)
-5. **Restarts the device** after 3 seconds
-6. Hub boots into unprovisioned state (captive portal mode)
+3. Disconnects the valve BLE
+4. Sends `cmd_ack` (if `id` was included)
+5. Restarts the device after 3 seconds
+6. Hub boots up unprovisioned and goes into captive portal mode
 
-**Legacy equivalent:** `DECOMMISSION_ALL` or `DECOMMISSION`
+Legacy text: `DECOMMISSION_ALL` or `DECOMMISSION`
 
 ---
 
-### rules_config
+## 4.7 rules_config
 
-Updates the auto-close rules engine configuration. Uses **merge semantics** — only fields present in the payload are changed; others keep their current values.
+Changes the auto-close rules engine settings. Uses merge logic, so only the fields you send get updated. Everything else stays the same.
 
 | Field | Value |
 |-------|-------|
 | `cmd` | `"rules_config"` |
 | `payload` | Rules config object (see below) |
 
-**Payload schema:**
+Payload fields:
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `auto_close_enabled` | bool | Enable/disable automatic valve close on leak detection |
-| `trigger_mask` | integer | Bitmask of leak sources that trigger auto-close: bit 0 = BLE leak, bit 1 = LoRa, bit 2 = valve flood. Value `7` (0x07) = all sources. |
+| Field | Type | What it does |
+|-------|------|--------------|
+| `auto_close_enabled` | bool | Turn on/off automatic valve close when a leak is detected |
+| `trigger_mask` | integer | Bitmask for which leak sources trigger auto-close: bit 0 = BLE leak, bit 1 = LoRa, bit 2 = valve flood. Set to `7` (0x07) for all sources. |
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -396,31 +396,31 @@ Updates the auto-close rules engine configuration. Uses **merge semantics** — 
 }
 ```
 
-**Side effects:** Persisted to NVS. Takes effect immediately for subsequent leak events.
+What happens: saved to NVS. Takes effect right away for the next leak event.
 
-**Legacy equivalent:** `RULES_CONFIG:{"auto_close_enabled":true,"trigger_mask":7}`
+Legacy text: `RULES_CONFIG:{"auto_close_enabled":true,"trigger_mask":7}`
 
 ---
 
-### sensor_meta
+## 4.8 sensor_meta
 
-Sets location metadata for a sensor. Used to associate human-readable labels and location codes with sensors for telemetry enrichment.
+Assigns location info to a sensor. This is how you tag sensors with a room name or label so telemetry makes more sense.
 
 | Field | Value |
 |-------|-------|
 | `cmd` | `"sensor_meta"` |
 | `payload` | Sensor metadata object (see below) |
 
-**Payload schema:**
+Payload fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `sensor_type` | string | **yes** | `"ble"` or `"lora"` |
-| `sensor_id` | string | **yes** | MAC address (BLE) or hex ID (LoRa) |
-| `location_code` | string | no | Location enum: `"bathroom"`, `"kitchen"`, `"laundry"`, `"garage"`, `"garden"`, `"basement"`, `"utility"`, `"hallway"`, `"bedroom"`, `"living_room"`, `"attic"`, `"outdoor"` |
-| `label` | string | no | Free-text label (max 31 chars), e.g. `"Downstairs laundry"` |
+| Field | Type | Required | What it is |
+|-------|------|----------|------------|
+| `sensor_type` | string | yes | `"ble"` or `"lora"` |
+| `sensor_id` | string | yes | MAC address (BLE) or hex ID (LoRa) |
+| `location_code` | string | no | One of: `"bathroom"`, `"kitchen"`, `"laundry"`, `"garage"`, `"garden"`, `"basement"`, `"utility"`, `"hallway"`, `"bedroom"`, `"living_room"`, `"attic"`, `"outdoor"` |
+| `label` | string | no | Free text label, max 31 chars. Like `"Downstairs laundry"` |
 
-**Example:**
+Example:
 ```json
 {
   "schema": "eflostop.cmd",
@@ -436,90 +436,88 @@ Sets location metadata for a sensor. Used to associate human-readable labels and
 }
 ```
 
-**Side effects:** Persisted to NVS. Location data appears in subsequent telemetry events and snapshots for this sensor.
+What happens: saved to NVS. The location data shows up in telemetry events and snapshots for that sensor from then on.
 
-**Legacy equivalent:** `SENSOR_META:{"sensor_type":"ble","sensor_id":"00:80:E1:27:99:E7","location_code":"laundry","label":"Downstairs laundry"}`
+Legacy text: `SENSOR_META:{"sensor_type":"ble","sensor_id":"00:80:E1:27:99:E7","location_code":"laundry","label":"Downstairs laundry"}`
 
 ---
 
-## Legacy Text Commands
+# 5 Legacy Text Commands
 
-These plain-text commands are supported for backward compatibility. They do **not** produce a `cmd_ack` response (no correlation ID).
+These are the old plain-text commands. They still work but you won't get a `cmd_ack` back since there's no correlation ID.
 
-| Legacy Text | Mapped Command | Mapped Payload |
-|-------------|---------------|----------------|
-| `VALVE_OPEN` | `valve_open` | _(none)_ |
-| `VALVE_CLOSE` | `valve_close` | _(none)_ |
-| `LEAK_RESET` | `leak_reset` | _(none)_ |
+| Legacy text | Maps to command | Maps to payload |
+|-------------|-----------------|-----------------|
+| `VALVE_OPEN` | `valve_open` | (none) |
+| `VALVE_CLOSE` | `valve_close` | (none) |
+| `LEAK_RESET` | `leak_reset` | (none) |
 | `DECOMMISSION_VALVE` | `decommission` | `{"target":"valve"}` |
 | `DECOMMISSION_LORA:0x754A6237` | `decommission` | `{"target":"lora","sensor_id":"0x754A6237"}` |
 | `DECOMMISSION_BLE:00:80:E1:27:99:E7` | `decommission` | `{"target":"ble","sensor_id":"00:80:E1:27:99:E7"}` |
 | `DECOMMISSION_ALL` | `decommission` | `{"target":"all"}` |
 | `DECOMMISSION` | `decommission` | `{"target":"all"}` |
-| `RULES_CONFIG:{json}` | `rules_config` | _(json after colon)_ |
-| `SENSOR_META:{json}` | `sensor_meta` | _(json after colon)_ |
-| `{json}` _(bare JSON)_ | `provision` | _(the JSON itself)_ |
+| `RULES_CONFIG:{json}` | `rules_config` | (the json after the colon) |
+| `SENSOR_META:{json}` | `sensor_meta` | (the json after the colon) |
+| `{json}` (bare JSON) | `provision` | (the JSON itself) |
 
 ---
 
-## Error Reference
+# 6 Error Reference
 
-### Common Error Details
+## 6.1 Common errors
 
-| Command | Error Detail | Cause |
-|---------|-------------|-------|
-| `provision` | `provisioning failed` | Invalid MAC format, NVS write failure, or empty payload |
-| `decommission` | `missing decommission target` | Payload missing or no `target` field |
-| `decommission` | `unknown decommission target` | `target` is not `valve`, `lora`, `ble`, or `all` |
-| `decommission` | `valve decommission failed` | Valve not provisioned or NVS error |
-| `decommission` | `lora sensor decommission failed` | Sensor ID not found or NVS error |
-| `decommission` | `ble sensor decommission failed` | Sensor MAC not found or NVS error |
+| Command | Error detail | What went wrong |
+|---------|-------------|-----------------|
+| `provision` | `provisioning failed` | Bad MAC format, NVS write failed, or the payload was empty |
+| `decommission` | `missing decommission target` | Payload is missing or doesn't have a `target` field |
+| `decommission` | `unknown decommission target` | `target` isn't `valve`, `lora`, `ble`, or `all` |
+| `decommission` | `valve decommission failed` | Valve wasn't provisioned, or NVS error |
+| `decommission` | `lora sensor decommission failed` | Sensor ID not found, or NVS error |
+| `decommission` | `ble sensor decommission failed` | Sensor MAC not found, or NVS error |
 | `decommission` | `full decommission failed` | NVS erase failed |
-| `rules_config` | `rules config update failed` | Invalid JSON or NVS write error |
+| `rules_config` | `rules config update failed` | Bad JSON or NVS write error |
 | `sensor_meta` | `sensor metadata update failed` | Missing required fields or NVS error |
-| `valve_set_state` | `missing 'state' field ...` | No `state` in payload |
-| `valve_set_state` | `invalid state value ...` | `state` is not `"open"` or `"closed"` |
-| _(any)_ | `unknown command` | `cmd` field not recognized |
+| `valve_set_state` | `missing 'state' field ...` | No `state` in the payload |
+| `valve_set_state` | `invalid state value ...` | `state` isn't `"open"` or `"closed"` |
+| (any) | `unknown command` | `cmd` field isn't recognized |
 
-### Parse Failures
+## 6.2 Parse failures
 
-If the message cannot be parsed at all (invalid JSON, unrecognized text, no schema match), the hub logs a warning but does **not** publish any ack — there is no correlation ID to respond to.
-
----
-
-## Security Notes
-
-### Dangerous Commands
-
-| Command | Risk | Notes |
-|---------|------|-------|
-| `decommission` (target: `all`) | **High** | Erases all config and restarts. Device becomes unprovisioned. |
-| `decommission` (target: `valve`) | Medium | Removes valve — auto-close protection is lost. |
-| `provision` | Medium | Replaces device identities. Can redirect valve control to a different device. |
-
-Currently, commands are authenticated via the Azure IoT Hub device identity (SAS token or X.509 certificate). There is no additional command-level authentication or confirmation dialog on the device. The security boundary is the Azure IoT Hub connection itself.
-
-### Recommendations for App Developers
-
-- Require user confirmation in the app UI before sending `decommission` (especially `target: "all"`).
-- Use correlation IDs for all commands so you can confirm execution.
-- Do not expose raw C2D command construction to end users — validate inputs in the app/backend.
+If the message can't be parsed at all (broken JSON, random text, nothing matches), the hub just logs a warning. No ack gets sent because there's no correlation ID to respond to.
 
 ---
 
-## Quick Reference Card
+# 7 Security notes
+
+## 7.1 Dangerous commands
+
+| Command | Risk level | Notes |
+|---------|------------|-------|
+| `decommission` (target: `all`) | High | Wipes all config and restarts. Device goes back to unprovisioned. |
+| `decommission` (target: `valve`) | Medium | Removes the valve, which means auto-close protection is gone. |
+| `provision` | Medium | Replaces device identities. Could point valve control at a different device. |
+
+Right now, commands are authenticated through the Azure IoT Hub device identity (SAS token or X.509 cert). There's no extra command-level auth or confirmation on the device side. The security boundary is the Azure IoT Hub connection.
+
+## 7.2 Things to keep in mind for the app side
+
+- Show a confirmation dialog in the app before sending `decommission`, especially `target: "all"`.
+- Always use correlation IDs so you can confirm the command actually ran.
+- Don't let end users build raw C2D commands. Validate inputs in the app or backend first.
+
+---
+
+# 8 Quick Reference
 
 ```
-┌─────────────────────┬──────────────────────────────────────────┐
-│ Command             │ Payload                                  │
-├─────────────────────┼──────────────────────────────────────────┤
-│ valve_open          │ (none)                                   │
-│ valve_close         │ (none)                                   │
-│ valve_set_state     │ { "state": "open"|"closed" }             │
-│ leak_reset          │ (none)                                   │
-│ provision           │ { valve_mac, lora_sensors, ble_leak_... }│
-│ decommission        │ { "target": "valve|lora|ble|all", ... }  │
-│ rules_config        │ { auto_close_enabled, trigger_mask }     │
-│ sensor_meta         │ { sensor_type, sensor_id, location_...}  │
-└─────────────────────┴──────────────────────────────────────────┘
+Command              Payload
+-----------------    ----------------------------------------
+valve_open           (none)
+valve_close          (none)
+valve_set_state      { "state": "open"|"closed" }
+leak_reset           (none)
+provision            { valve_mac, lora_sensors, ble_leak_... }
+decommission         { "target": "valve|lora|ble|all", ... }
+rules_config         { auto_close_enabled, trigger_mask }
+sensor_meta          { sensor_type, sensor_id, location_... }
 ```
