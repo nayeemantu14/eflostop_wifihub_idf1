@@ -45,7 +45,7 @@ static uint8_t source_to_trigger_bit(leak_source_t source)
 static const char *source_to_str(leak_source_t source)
 {
     switch (source) {
-        case LEAK_SOURCE_BLE:         return "ble_leak";
+        case LEAK_SOURCE_BLE:         return "ble_leak_sensor";
         case LEAK_SOURCE_LORA:        return "lora";
         case LEAK_SOURCE_VALVE_FLOOD: return "valve_flood";
         default:                      return "unknown";
@@ -111,8 +111,8 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
     if (!root) return;
 
     cJSON_AddStringToObject(root, "event", "auto_close");
-    cJSON_AddStringToObject(root, "trigger_source", source_to_str(source));
-    cJSON_AddStringToObject(root, "trigger_sensor", source_id ? source_id : "unknown");
+    cJSON_AddStringToObject(root, "source_type", source_to_str(source));
+    cJSON_AddStringToObject(root, "sensor_id", source_id ? source_id : "unknown");
     cJSON_AddBoolToObject(root, "rmleak_asserted", true);
 
     // Add location if available

@@ -1,7 +1,9 @@
 #include "app_uart.h"
 
 QueueHandle_t uartQueueHandler = NULL;
-TaskHandle_t uartTaskHandler = NULL;    
+TaskHandle_t uartTaskHandler = NULL;
+
+static void uart_event_task(void *params);
 
 void configureUART(void)
 {

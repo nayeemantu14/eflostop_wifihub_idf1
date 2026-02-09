@@ -17,28 +17,19 @@
 #include "nvs_flash.h"
 #include "wifi_manager.h"
 #include "rgb.h"
-#include "app_wifi.h"
-#include "app_uart.h"
-#include "app_lora.h"
+#include "app_wifi/app_wifi.h"
+#include "app_uart/app_uart.h"
+#include "app_lora/app_lora.h"
 #include "iothub/app_iothub.h"
 #include "ble_valve/app_ble_valve.h"
 #include "ble_leak_scanner/app_ble_leak.h"
+#include "systemservices/monitoring.h"
 
 /* ---------------------------------------------------------
  * Tags
  * --------------------------------------------------------- */
 /* @brief tag used for ESP serial console messages */
-static const char TAG[] = "main";
-
-/* ---------------------------------------------------------
- * Globals
- * --------------------------------------------------------- */
-
-/* ---------------------------------------------------------
- * Function Prototypes
- * --------------------------------------------------------- */
-
-static void monitoring_task(void *pvParameter);
+__attribute__((unused)) static const char TAG[] = "main";
 
 /* ---------------------------------------------------------
  * Main Application
@@ -53,7 +44,7 @@ void app_main(void)
 	}
 	ESP_ERROR_CHECK(ret);
 
-	/* start the wifi manager */
+	/* start subsystems */
     setupLEDTask();
 	configureUART();
     app_wifi_start();
@@ -61,31 +52,7 @@ void app_main(void)
 	initialize_iothub();
 	app_ble_valve_init();
 	app_ble_leak_init();
-#if CONFIG_SOC_CPU_CORES_NUM > 1
-	/* create a task on core 1 that monitors free heap memory */
-	xTaskCreate(&monitoring_task, "monitoring_task", 4096, NULL, 1, NULL);
-#endif
-}
 
-/* ---------------------------------------------------------
- * Callback Functions
- * --------------------------------------------------------- */
-
-
-/* ---------------------------------------------------------
- * RTOS Tasks
- * --------------------------------------------------------- */
-/**
- * @brief RTOS task that periodically prints the heap memory available.
- * @note Debug information only; avoid in production.
- */
-static void monitoring_task(void *pvParameter)
-{
-	(void)pvParameter;
-
-	for (;;)
-	{
-		ESP_LOGI(TAG, "free heap: %lu", (unsigned long)esp_get_free_heap_size());
-		vTaskDelay(pdMS_TO_TICKS(10000));
-	}
+	/* start system monitoring (heap, uptime, diagnostics) */
+	monitoring_init();
 }

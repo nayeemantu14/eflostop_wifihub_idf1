@@ -17,6 +17,5 @@
 #define RXBUFSIZE 1024
 
 void configureUART(void);
-static void uart_event_task(void *params);
 
 #endif
