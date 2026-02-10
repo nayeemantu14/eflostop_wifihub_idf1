@@ -5,7 +5,13 @@
       "Bash(powershell -NoProfile -Command:*)",
       "Bash(git add:*)",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "WebFetch(domain:media.jaycar.com.au)",
+      "WebFetch(domain:manuals.plus)",
+      "WebFetch(domain:device.report)",
+      "WebFetch(domain:floatingintheclouds.com)",
+      "WebFetch(domain:www.jaycar.com.au)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

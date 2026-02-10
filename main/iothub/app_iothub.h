@@ -16,8 +16,8 @@ extern "C"
 // AZURE CONFIGURATION
 // =============================================================================
 #define AZURE_HUB_NAME      "wd-core-iothub-poc"
-#define AZURE_DEVICE_ID     "esp32"
-#define AZURE_PRIMARY_KEY   "fnCtWP8Spn/4OYyIf00lItjAhT0q2IqqR4IY63HnqZY="
+#define AZURE_DEVICE_ID     "WiFi-Hub-Enware"
+#define AZURE_PRIMARY_KEY   "RLI+ccdGK4XrViw0jr0+sO3Pn9t/2jL2Rea28MwWHGE="
 
 // Global Handle (Exposed so Wi-Fi can notify it)
 extern TaskHandle_t iothub_task_handle;
