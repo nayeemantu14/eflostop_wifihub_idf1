@@ -1,5 +1,6 @@
 #include "app_ble_valve.h"
 #include "ble_leak_scanner/app_ble_leak.h"
+#include "health_engine/health_engine.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -410,6 +411,11 @@ static void notify_hub_update(ble_update_type_t update_type)
     {
         (void)xQueueSend(ble_update_queue, &update_type, 0);
     }
+    // Health engine: track valve connectivity
+    if (update_type == BLE_UPD_CONNECTED)
+        health_post_valve_event(true);
+    else if (update_type == BLE_UPD_DISCONNECTED)
+        health_post_valve_event(false);
 }
 
 static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf *om, void *arg)

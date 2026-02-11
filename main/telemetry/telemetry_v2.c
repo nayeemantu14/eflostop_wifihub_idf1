@@ -12,6 +12,7 @@
 #include "app_ble_valve.h"
 #include "provisioning_manager.h"
 #include "sensor_meta.h"
+#include "health_engine.h"
 
 #define TELEM_TAG "TELEMETRY_V2"
 
@@ -93,6 +94,84 @@ static void add_location_obj(cJSON *parent, sensor_type_t type,
             meta ? meta->location_code : LOC_UNKNOWN));
     cJSON_AddStringToObject(loc, "label", meta ? meta->label : "");
     cJSON_AddItemToObject(parent, "location", loc);
+}
+
+// ---- System health reason builder ----------------------------------------
+
+static void build_system_health_reason(const health_device_status_t *health,
+                                       health_rating_t sys_rating,
+                                       char *buf, size_t buf_len)
+{
+    if (sys_rating == HEALTH_EXCELLENT) {
+        snprintf(buf, buf_len, "All devices healthy");
+        return;
+    }
+
+    // Count devices at system rating level, categorized by root cause
+    int offline_count = 0;
+    int batt_count    = 0;
+    int signal_count  = 0;
+    bool valve_offline = false;
+    bool valve_grace   = false;
+    bool valve_batt    = false;
+
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        if (!health[i].in_use || health[i].rating != sys_rating)
+            continue;
+
+        const health_device_status_t *d = &health[i];
+
+        if (d->dev_type == HEALTH_DEV_VALVE) {
+            if (!d->connected) {
+                if (sys_rating == HEALTH_CRITICAL) valve_offline = true;
+                else                               valve_grace   = true;
+            } else {
+                // Connected valve at degraded rating → battery issue
+                valve_batt = true;
+            }
+        } else {
+            // Sensor: determine root cause of this rating
+            if (!d->connected) {
+                offline_count++;
+            } else if (d->last_battery != 0xFF &&
+                       d->last_battery <= HEALTH_BATTERY_GOOD_PCT) {
+                batt_count++;
+            } else {
+                signal_count++;
+            }
+        }
+    }
+
+    // Build comma-separated reason string (most critical issues first)
+    char parts[5][64];
+    int n = 0;
+
+    if (valve_offline)
+        snprintf(parts[n++], 64, "Valve offline");
+    if (valve_grace)
+        snprintf(parts[n++], 64, "Valve disconnected");
+    if (valve_batt)
+        snprintf(parts[n++], 64, "Valve battery low");
+    if (offline_count > 0)
+        snprintf(parts[n++], 64, "%d sensor%s offline",
+                 offline_count, offline_count > 1 ? "s" : "");
+    if (batt_count > 0 && n < 5)
+        snprintf(parts[n++], 64, "%d sensor%s battery low",
+                 batt_count, batt_count > 1 ? "s" : "");
+    if (signal_count > 0 && n < 5)
+        snprintf(parts[n++], 64, "%d sensor%s signal weak",
+                 signal_count, signal_count > 1 ? "s" : "");
+
+    if (n == 0) {
+        snprintf(buf, buf_len, "Degraded");
+        return;
+    }
+
+    buf[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        if (i > 0) strncat(buf, ", ", buf_len - strlen(buf) - 1);
+        strncat(buf, parts[i], buf_len - strlen(buf) - 1);
+    }
 }
 
 // ---- Snapshot timer callback (runs in timer-daemon context) ---------------
@@ -196,12 +275,49 @@ void telemetry_v2_publish_snapshot(void)
 
     cJSON *data = cJSON_CreateObject();
 
+    // ---- Fetch health device status for all provisioned devices ----
+    health_device_status_t health[HEALTH_MAX_DEVICES];
+    uint8_t health_count = 0;
+    bool have_health = health_get_device_status_all(health, &health_count);
+
+    // ---- system_health (worst rating + human-readable reason) ----
+    health_rating_t sys_rating = health_get_system_rating();
+    cJSON *sys_health = cJSON_CreateObject();
+    cJSON_AddStringToObject(sys_health, "rating",
+        health_rating_to_str(sys_rating));
+    char reason[128];
+    if (have_health) {
+        build_system_health_reason(health, sys_rating, reason, sizeof(reason));
+    } else {
+        snprintf(reason, sizeof(reason), "Health data unavailable");
+    }
+    cJSON_AddStringToObject(sys_health, "reason", reason);
+    cJSON_AddItemToObject(data, "system_health", sys_health);
+
     // ---- valve ----
     cJSON *valve = cJSON_CreateObject();
     char vmac[18];
     bool vconn = ble_valve_get_mac(vmac);
+
+    // Find valve health entry for MAC / rating / last_seen
+    const health_device_status_t *valve_hs = NULL;
+    if (have_health) {
+        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+            if (health[i].in_use && health[i].dev_type == HEALTH_DEV_VALVE) {
+                valve_hs = &health[i];
+                break;
+            }
+        }
+    }
+
+    // MAC: prefer live BLE, fall back to health (provisioned) entry
     if (vconn) {
         cJSON_AddStringToObject(valve, "mac", vmac);
+    } else if (valve_hs) {
+        cJSON_AddStringToObject(valve, "mac", valve_hs->dev_id);
+    }
+
+    if (vconn) {
         int st = ble_valve_get_state();
         cJSON_AddStringToObject(valve, "state",
             st == 1 ? "open" : st == 0 ? "closed" : "unknown");
@@ -213,40 +329,119 @@ void telemetry_v2_publish_snapshot(void)
         cJSON_AddStringToObject(valve, "state", "disconnected");
         cJSON_AddBoolToObject(valve, "connected", false);
     }
+
+    // Health metadata
+    if (valve_hs) {
+        cJSON_AddStringToObject(valve, "rating",
+            health_rating_to_str(valve_hs->rating));
+        if (valve_hs->last_seen_age_s != UINT32_MAX) {
+            cJSON_AddNumberToObject(valve, "last_seen_age_s",
+                valve_hs->last_seen_age_s);
+        } else {
+            cJSON_AddNullToObject(valve, "last_seen_age_s");
+        }
+    }
+
     cJSON_AddItemToObject(data, "valve", valve);
 
-    // ---- LoRa sensors ----
+    // ---- LoRa sensors (iterate health entries, merge cache data) ----
     cJSON *lora_arr = cJSON_CreateArray();
-    if (s_lora_cache) {
-        for (int i = 0; i < TELEM_MAX_LORA_CACHE; i++) {
-            if (!s_lora_cache[i].valid) continue;
+    if (have_health) {
+        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+            if (!health[i].in_use || health[i].dev_type != HEALTH_DEV_LORA)
+                continue;
+
             cJSON *s = cJSON_CreateObject();
-            char id[16];
-            snprintf(id, sizeof(id), "0x%08lX",
-                     (unsigned long)s_lora_cache[i].sensor_id);
-            cJSON_AddStringToObject(s, "sensor_id", id);
-            cJSON_AddNumberToObject(s, "battery", s_lora_cache[i].battery);
-            cJSON_AddBoolToObject(s, "leak_state",
-                                  s_lora_cache[i].leak_status == 1);
-            cJSON_AddNumberToObject(s, "rssi", s_lora_cache[i].rssi);
-            cJSON_AddNumberToObject(s, "snr",  s_lora_cache[i].snr);
-            add_location_obj(s, SENSOR_TYPE_LORA, id);
+            cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
+            cJSON_AddBoolToObject(s, "connected", health[i].connected);
+            cJSON_AddStringToObject(s, "rating",
+                health_rating_to_str(health[i].rating));
+
+            if (health[i].last_seen_age_s != UINT32_MAX) {
+                cJSON_AddNumberToObject(s, "last_seen_age_s",
+                    health[i].last_seen_age_s);
+            } else {
+                cJSON_AddNullToObject(s, "last_seen_age_s");
+            }
+
+            // Merge telemetry data from cache
+            const telem_lora_cache_t *cached = NULL;
+            if (s_lora_cache) {
+                for (int j = 0; j < TELEM_MAX_LORA_CACHE; j++) {
+                    if (!s_lora_cache[j].valid) continue;
+                    char cid[16];
+                    snprintf(cid, sizeof(cid), "0x%08lX",
+                             (unsigned long)s_lora_cache[j].sensor_id);
+                    if (strcasecmp(cid, health[i].dev_id) == 0) {
+                        cached = &s_lora_cache[j];
+                        break;
+                    }
+                }
+            }
+
+            if (cached) {
+                cJSON_AddNumberToObject(s, "battery", cached->battery);
+                cJSON_AddBoolToObject(s, "leak_state",
+                                      cached->leak_status == 1);
+                cJSON_AddNumberToObject(s, "rssi", cached->rssi);
+                cJSON_AddNumberToObject(s, "snr",  cached->snr);
+            } else {
+                cJSON_AddNullToObject(s, "battery");
+                cJSON_AddBoolToObject(s, "leak_state", false);
+                cJSON_AddNullToObject(s, "rssi");
+                cJSON_AddNullToObject(s, "snr");
+            }
+
+            add_location_obj(s, SENSOR_TYPE_LORA, health[i].dev_id);
             cJSON_AddItemToArray(lora_arr, s);
         }
     }
     cJSON_AddItemToObject(data, "lora_sensors", lora_arr);
 
-    // ---- BLE leak sensors ----
+    // ---- BLE leak sensors (iterate health entries, merge cache data) ----
     cJSON *ble_arr = cJSON_CreateArray();
-    if (s_ble_cache) {
-        for (int i = 0; i < TELEM_MAX_BLE_LEAK_CACHE; i++) {
-            if (!s_ble_cache[i].valid) continue;
+    if (have_health) {
+        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+            if (!health[i].in_use || health[i].dev_type != HEALTH_DEV_BLE_LEAK)
+                continue;
+
             cJSON *s = cJSON_CreateObject();
-            cJSON_AddStringToObject(s, "sensor_id", s_ble_cache[i].mac_str);
-            cJSON_AddNumberToObject(s, "battery", s_ble_cache[i].battery);
-            cJSON_AddBoolToObject(s, "leak_state", s_ble_cache[i].leak_state);
-            cJSON_AddNumberToObject(s, "rssi", s_ble_cache[i].rssi);
-            add_location_obj(s, SENSOR_TYPE_BLE_LEAK, s_ble_cache[i].mac_str);
+            cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
+            cJSON_AddBoolToObject(s, "connected", health[i].connected);
+            cJSON_AddStringToObject(s, "rating",
+                health_rating_to_str(health[i].rating));
+
+            if (health[i].last_seen_age_s != UINT32_MAX) {
+                cJSON_AddNumberToObject(s, "last_seen_age_s",
+                    health[i].last_seen_age_s);
+            } else {
+                cJSON_AddNullToObject(s, "last_seen_age_s");
+            }
+
+            // Merge telemetry data from cache
+            const telem_ble_leak_cache_t *cached = NULL;
+            if (s_ble_cache) {
+                for (int j = 0; j < TELEM_MAX_BLE_LEAK_CACHE; j++) {
+                    if (!s_ble_cache[j].valid) continue;
+                    if (strcasecmp(s_ble_cache[j].mac_str,
+                                   health[i].dev_id) == 0) {
+                        cached = &s_ble_cache[j];
+                        break;
+                    }
+                }
+            }
+
+            if (cached) {
+                cJSON_AddNumberToObject(s, "battery", cached->battery);
+                cJSON_AddBoolToObject(s, "leak_state", cached->leak_state);
+                cJSON_AddNumberToObject(s, "rssi", cached->rssi);
+            } else {
+                cJSON_AddNullToObject(s, "battery");
+                cJSON_AddBoolToObject(s, "leak_state", false);
+                cJSON_AddNullToObject(s, "rssi");
+            }
+
+            add_location_obj(s, SENSOR_TYPE_BLE_LEAK, health[i].dev_id);
             cJSON_AddItemToArray(ble_arr, s);
         }
     }
@@ -316,6 +511,25 @@ void telemetry_v2_publish_rules_event(const char *rules_json)
         cJSON *data = cJSON_CreateObject();
         cJSON_AddStringToObject(data, "event", "rules_engine");
         cJSON_AddStringToObject(data, "raw", rules_json);
+        cJSON_AddItemToObject(root, "data", data);
+    }
+
+    publish_json(root, "event");
+}
+
+void telemetry_v2_publish_health_event(const char *health_json)
+{
+    if (!health_json) return;
+    cJSON *root = build_envelope("event");
+    if (!root) return;
+
+    cJSON *parsed = cJSON_Parse(health_json);
+    if (parsed) {
+        cJSON_AddItemToObject(root, "data", parsed);
+    } else {
+        cJSON *data = cJSON_CreateObject();
+        cJSON_AddStringToObject(data, "event", "health_engine");
+        cJSON_AddStringToObject(data, "raw", health_json);
         cJSON_AddItemToObject(root, "data", data);
     }
 

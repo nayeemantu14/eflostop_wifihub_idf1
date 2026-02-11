@@ -22,6 +22,7 @@
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "provisioning_manager/provisioning_manager.h"
 #include "rules_engine/rules_engine.h"
+#include "health_engine/health_engine.h"
 #include "sensor_meta/sensor_meta.h"
 #include "telemetry/telemetry_v2.h"
 #include "commands/c2d_commands.h"
@@ -36,6 +37,9 @@ static char g_gateway_id[32] = {0};
 
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
+
+// Boot snapshot: sent once after health engine boot sync completes
+static bool g_boot_snapshot_sent = false;
 
 // ---------------------------------------------------------------------------
 // Telemetry v2 caches (shared with telemetry module for snapshot reads)
@@ -150,7 +154,7 @@ static bool update_lora_cache_check_leak(const lora_packet_t *pkt)
             g_telem_lora_cache[i].rssi        = pkt->rssi;
             g_telem_lora_cache[i].snr         = pkt->snr;
             g_telem_lora_cache[i].valid       = true;
-            return true;  // First time = treat as changed
+            return (pkt->leakStatus != 0);  // First time: only emit if actively leaking
         }
     }
 
@@ -161,7 +165,7 @@ static bool update_lora_cache_check_leak(const lora_packet_t *pkt)
     g_telem_lora_cache[0].rssi        = pkt->rssi;
     g_telem_lora_cache[0].snr         = pkt->snr;
     g_telem_lora_cache[0].valid       = true;
-    return true;
+    return (pkt->leakStatus != 0);
 }
 
 /**
@@ -191,7 +195,7 @@ static bool update_ble_leak_cache_check_leak(const ble_leak_event_t *evt)
             g_telem_ble_cache[i].leak_state = evt->leak_detected;
             g_telem_ble_cache[i].rssi       = evt->rssi;
             g_telem_ble_cache[i].valid      = true;
-            return true;
+            return evt->leak_detected;  // First time: only emit if actively leaking
         }
     }
 
@@ -202,7 +206,7 @@ static bool update_ble_leak_cache_check_leak(const ble_leak_event_t *evt)
     g_telem_ble_cache[0].leak_state = evt->leak_detected;
     g_telem_ble_cache[0].rssi       = evt->rssi;
     g_telem_ble_cache[0].valid      = true;
-    return true;
+    return evt->leak_detected;
 }
 
 // ---------------------------------------------------------------------------
@@ -441,6 +445,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
         else if (strcmp(target, "valve") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE !!!");
             if (provisioning_remove_valve()) {
+                health_engine_reload_devices();
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
                 if (!provisioning_is_provisioned())
@@ -456,6 +461,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             uint32_t sid = sid_str ? (uint32_t)strtoul(sid_str, NULL, 16) : 0;
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_LORA: 0x%08lX !!!", (unsigned long)sid);
             if (provisioning_remove_lora_sensor(sid)) {
+                health_engine_reload_devices();
                 char lora_id_str[16];
                 snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
                          (unsigned long)sid);
@@ -472,6 +478,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 cJSON_GetObjectItem(pl, "sensor_id"));
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_BLE: %s !!!", mac ? mac : "?");
             if (mac && provisioning_remove_ble_sensor(mac)) {
+                health_engine_reload_devices();
                 sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac);
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
@@ -534,6 +541,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
         if (cmd.payload_json &&
             provisioning_handle_azure_payload_json(
                 cmd.payload_json, strlen(cmd.payload_json))) {
+            health_engine_reload_devices();
             iothub_apply_provisioned_mac();
         } else {
             success = false;
@@ -632,6 +640,7 @@ static void initialize_sntp(void)
     ESP_LOGI(IOTHUB_TAG, "Initializing SNTP...");
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
+    setenv("TZ", "AEST-10", 1); tzset();
     esp_sntp_init();
 
     time_t now = 0;
@@ -677,6 +686,7 @@ void iothub_task(void *param)
     // Initialize sensor metadata and rules engine
     sensor_meta_init();
     rules_engine_init();
+    health_engine_init();
 
     // Check provisioning state
     if (provisioning_is_provisioned()) {
@@ -825,13 +835,31 @@ void iothub_task(void *param)
         if (g_needs_lifecycle) {
             g_needs_lifecycle = false;
             telemetry_v2_publish_lifecycle();
-            telemetry_v2_publish_snapshot();   // Initial state sync
+            g_boot_snapshot_sent = false;  // Wait for boot sync before first snapshot
+        }
+
+        // ---- Boot snapshot: fires once after all sensors checked in (or 2-min timeout) ----
+        if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
+            g_boot_snapshot_sent = true;
+            telemetry_v2_publish_snapshot();
         }
 
         // ---- Rules engine events (auto-close, rmleak changes) ----
         if (auto_close_json) {
             telemetry_v2_publish_rules_event(auto_close_json);
             free(auto_close_json);
+        }
+
+        // ---- Health alerts (Critical transitions) ----
+        {
+            health_alert_t alert;
+            while (health_pop_alert(&alert)) {
+                char *json = health_alert_to_json(&alert);
+                if (json) {
+                    telemetry_v2_publish_health_event(json);
+                    free(json);
+                }
+            }
         }
 
         // ---- Periodic snapshot ----

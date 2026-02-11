@@ -2,6 +2,7 @@
 #include "lora.h"
 #include "lora_crypto.h"
 #include "rgb/rgb.h"
+#include "health_engine/health_engine.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -291,6 +292,10 @@ extern "C" void lora_task(void* param)
                     if (xQueueSend(lora_rx_queue, &packet, 0) != pdTRUE) {
                         ESP_LOGW(TAG, "Rx Queue Full! Packet dropped.");
                     }
+
+                    // Health engine: sensor check-in
+                    health_post_lora_checkin(packet.sensorId, packet.batteryPercentage,
+                                            packet.rssi, packet.snr);
 
                     // Trigger LED
                     uint8_t ledCmd = 'G';

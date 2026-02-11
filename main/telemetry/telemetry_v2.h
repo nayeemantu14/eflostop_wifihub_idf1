@@ -101,6 +101,9 @@ void telemetry_v2_publish_cmd_ack(const char *correlation_id,
                                   bool success,
                                   const char *error_msg);
 
+/** Publish type="event" wrapping health engine JSON in v2 envelope. */
+void telemetry_v2_publish_health_event(const char *health_json);
+
 #ifdef __cplusplus
 }
 #endif

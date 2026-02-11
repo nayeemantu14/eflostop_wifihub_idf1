@@ -13,12 +13,14 @@
 #define RULES_TAG "RULES_ENGINE"
 #define AUTO_CLOSE_COOLDOWN_MS 10000   // 10s cooldown between auto-closes
 #define AUTO_CLEAR_TIMEOUT_MS  (5 * 60 * 1000)  // 5 min all-clear before RMLEAK auto-reset
+#define RMLEAK_GRACE_PERIOD_MS 5000    // 5s grace after RMLEAK write before checking valve state
 
 static bool g_initialized = false;
 static bool g_auto_close_triggered = false;
 static bool g_leak_incident_active = false;  // Latched: stays true until explicit LEAK_RESET
 static bool g_override_active = false;       // Suppresses re-latch after physical override
 static TickType_t g_last_auto_close_tick = 0;
+static TickType_t g_rmleak_assert_tick = 0;  // When RMLEAK was last written — grace period for override check
 static SemaphoreHandle_t g_mutex = NULL;
 
 // Pending auto-close telemetry (built by rules engine, consumed by IoT Hub)
@@ -248,6 +250,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
 
     g_auto_close_triggered = true;
     g_last_auto_close_tick = now;
+    g_rmleak_assert_tick = now;  // Grace period: don't check valve override until BLE write propagates
 
     // Build telemetry before releasing mutex
     build_auto_close_telemetry(source, source_id);
@@ -373,6 +376,7 @@ void rules_engine_reset_leak_incident(void)
     g_override_active = false;
     g_all_clear_since = 0;
     g_active_leak_count = 0;
+    g_rmleak_assert_tick = 0;
 
     // Check if valve still has RMLEAK asserted (survives hub reboot)
     bool valve_rmleak = ble_valve_get_rmleak_state();
@@ -413,6 +417,7 @@ void rules_engine_reassert_rmleak_if_needed(void)
         if (hub_active && !valve_rmleak) {
             // Hub has incident but valve lost RMLEAK (valve rebooted) — re-assert
             ESP_LOGW(RULES_TAG, "Reconnected: hub incident active, valve RMLEAK clear — re-asserting");
+            g_rmleak_assert_tick = xTaskGetTickCount();
             xSemaphoreGive(g_mutex);
             ble_valve_set_rmleak(true);
         } else if (!hub_active && valve_rmleak) {
@@ -440,9 +445,10 @@ void rules_engine_tick(void)
         return;
     }
 
+    TickType_t now = xTaskGetTickCount();
+
     // Check 1: Auto-clear timeout (all sensors clear for AUTO_CLEAR_TIMEOUT_MS)
     if (g_all_clear_since != 0) {
-        TickType_t now = xTaskGetTickCount();
         if ((now - g_all_clear_since) >= pdMS_TO_TICKS(AUTO_CLEAR_TIMEOUT_MS)) {
             ESP_LOGW(RULES_TAG, "AUTO-CLEAR: all sensors clear for %ds — clearing RMLEAK",
                      AUTO_CLEAR_TIMEOUT_MS / 1000);
@@ -468,6 +474,12 @@ void rules_engine_tick(void)
     // Check 2: Valve-side physical override (RMLEAK cleared on valve while incident active)
     // Don't require g_active_leak_count == 0 — the point of the physical override
     // is to unlock the valve even when sensors still report leaks.
+    // Grace period: skip check if RMLEAK was just written (BLE write is still in-flight)
+    if (g_rmleak_assert_tick != 0 &&
+        (now - g_rmleak_assert_tick) < pdMS_TO_TICKS(RMLEAK_GRACE_PERIOD_MS)) {
+        xSemaphoreGive(g_mutex);
+        return;
+    }
     if (!ble_valve_get_rmleak_state()) {
         ESP_LOGW(RULES_TAG, "RMLEAK cleared externally (valve override) — clearing incident latch");
         g_leak_incident_active = false;

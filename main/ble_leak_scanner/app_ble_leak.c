@@ -17,6 +17,7 @@
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "provisioning_manager/provisioning_manager.h"
+#include "health_engine/health_engine.h"
 
 /* ---------------------------------------------------------
  * Constants
@@ -29,6 +30,7 @@
 #define MAX_TRACKED_SENSORS     MAX_BLE_LEAK_SENSORS
 #define SCAN_RESTART_DELAY_MS   500
 #define WHITELIST_RELOAD_MS     10000       // Re-check provisioning every 10s
+#define BLE_LEAK_HEARTBEAT_MS   (5 * 60 * 1000)  // 5-min heartbeat for health engine
 
 /* ---------------------------------------------------------
  * Internal types
@@ -38,7 +40,8 @@ typedef struct {
     uint8_t mac[6];
     uint8_t last_battery;
     bool last_leak;
-    bool seen;          // true after first advertisement received
+    bool seen;              // true after first advertisement received
+    TickType_t last_event_tick;  // for health engine heartbeat
 } sensor_state_t;
 
 /* ---------------------------------------------------------
@@ -163,12 +166,13 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
         uint8_t battery     = fields.mfg_data[3];
         bool leak = (leak_status != 0);
 
-        // Delta check: skip if unchanged from last report
+        // Delta check: skip if unchanged from last report (unless heartbeat due)
         sensor_state_t *s = &s_sensors[idx];
-        if (s->seen &&
-            s->last_leak == leak &&
-            s->last_battery == battery) {
-            break;  // No change, skip
+        bool data_changed = !s->seen || s->last_leak != leak || s->last_battery != battery;
+        bool heartbeat_due = s->seen &&
+            ((xTaskGetTickCount() - s->last_event_tick) >= pdMS_TO_TICKS(BLE_LEAK_HEARTBEAT_MS));
+        if (!data_changed && !heartbeat_due) {
+            break;  // No change and heartbeat not due, skip
         }
 
         // Update tracked state
@@ -189,6 +193,10 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
                  evt.sensor_mac_str, leak, battery, evt.rssi);
 
         xQueueSend(ble_leak_rx_queue, &evt, 0);
+        s->last_event_tick = xTaskGetTickCount();
+
+        // Health engine: sensor check-in
+        health_post_ble_leak_checkin(evt.sensor_mac_str, evt.battery, evt.rssi);
         break;
     }
 
