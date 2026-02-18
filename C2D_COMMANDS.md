@@ -266,7 +266,7 @@ Example:
   "cmd": "provision",
   "payload": {
     "valve_mac": "00:80:E1:27:F7:BB",
-    "ble_leak_sensors": ["00:80:E1:27:99:E7"],
+    "ble_leak_sensors": ["00:80:E1:27:99:E7", "00:80:E1:2A:AD:6D", "00:80:E1:27:9A:E6", "00:80:E1:27:B4:96", "00:80:E1:27:B6:A5"],
     "lora_sensors": ["0x754A6237"]
   }
 }
@@ -402,7 +402,40 @@ Legacy text: `RULES_CONFIG:{"auto_close_enabled":true,"trigger_mask":7}`
 
 ---
 
-## 4.8 sensor_meta
+## 4.8 override_cancel
+
+Cancels the 24-hour Water Access Override window and re-enables automatic valve closure immediately. If leaks are actively being detected when this command is received, the valve will auto-close right away.
+
+The 24h override window starts when the user physically presses the valve button to override an auto-close (RMLEAK gets cleared on the valve). During this window, leaks are still reported to the cloud but the valve won't be closed automatically.
+
+| Field | Value |
+|-------|-------|
+| `cmd` | `"override_cancel"` |
+| `payload` | none |
+
+Example:
+```json
+{
+  "schema": "eflostop.cmd",
+  "ver": 1,
+  "id": "ovr-cancel-001",
+  "cmd": "override_cancel"
+}
+```
+
+What happens:
+1. The 24h override window is cleared (NVS is updated).
+2. Auto-close rules resume immediately.
+3. If any sensors are currently reporting leaks, the valve closes and RMLEAK is asserted right away.
+4. An `auto_close_reenabled` telemetry event is published with the remaining override time at cancellation.
+
+If no override window is active, the command succeeds silently (no error).
+
+Legacy text: `OVERRIDE_CANCEL`
+
+---
+
+## 4.9 sensor_meta
 
 Assigns location info to a sensor. This is how you tag sensors with a room name or label so telemetry makes more sense.
 
@@ -456,6 +489,7 @@ These are the old plain-text commands. They still work but you won't get a `cmd_
 | `DECOMMISSION_BLE:00:80:E1:27:99:E7` | `decommission` | `{"target":"ble","sensor_id":"00:80:E1:27:99:E7"}` |
 | `DECOMMISSION_ALL` | `decommission` | `{"target":"all"}` |
 | `DECOMMISSION` | `decommission` | `{"target":"all"}` |
+| `OVERRIDE_CANCEL` | `override_cancel` | (none) |
 | `RULES_CONFIG:{json}` | `rules_config` | (the json after the colon) |
 | `SENSOR_META:{json}` | `sensor_meta` | (the json after the colon) |
 | `{json}` (bare JSON) | `provision` | (the JSON itself) |
@@ -477,6 +511,7 @@ These are the old plain-text commands. They still work but you won't get a `cmd_
 | `decommission` | `full decommission failed` | NVS erase failed |
 | `rules_config` | `rules config update failed` | Bad JSON or NVS write error |
 | `sensor_meta` | `sensor metadata update failed` | Missing required fields or NVS error |
+| `override_cancel` | `override cancel failed` | Internal error (mutex timeout) |
 | `valve_set_state` | `missing 'state' field ...` | No `state` in the payload |
 | `valve_set_state` | `invalid state value ...` | `state` isn't `"open"` or `"closed"` |
 | (any) | `unknown command` | `cmd` field isn't recognized |
@@ -516,6 +551,7 @@ valve_open           (none)
 valve_close          (none)
 valve_set_state      { "state": "open"|"closed" }
 leak_reset           (none)
+override_cancel      (none)
 provision            { valve_mac, lora_sensors, ble_leak_... }
 decommission         { "target": "valve|lora|ble|all", ... }
 rules_config         { auto_close_enabled, trigger_mask }

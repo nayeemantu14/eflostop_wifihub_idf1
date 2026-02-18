@@ -11,7 +11,8 @@
       "WebFetch(domain:device.report)",
       "WebFetch(domain:floatingintheclouds.com)",
       "WebFetch(domain:www.jaycar.com.au)",
-      "WebFetch(domain:github.com)"
+      "WebFetch(domain:github.com)",
+      "Read(//c/Work/Projects/ST Workspace/DK-Servo_Motor/**)"
     ]
   }
 }
