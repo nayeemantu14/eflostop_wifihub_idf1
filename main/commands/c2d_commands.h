@@ -40,6 +40,7 @@ typedef struct {
 #define C2D_CMD_RULES_CONFIG        "rules_config"
 #define C2D_CMD_SENSOR_META         "sensor_meta"
 #define C2D_CMD_PROVISION           "provision"
+#define C2D_CMD_OVERRIDE_CANCEL     "override_cancel"
 
 // ---------------------------------------------------------------------------
 // API

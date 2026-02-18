@@ -1,7 +1,9 @@
 #include "c2d_commands.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include "esp_log.h"
 #include "cJSON.h"
 
@@ -144,18 +146,27 @@ static bool parse_legacy(const char *text, c2d_command_t *cmd_out)
     cmd_out->is_envelope = false;
     cmd_out->ver = 0;
 
+    // Create uppercase copy for case-insensitive keyword matching
+    size_t tlen = strlen(text);
+    char *upper = (char *)malloc(tlen + 1);
+    if (!upper) return false;
+    for (size_t i = 0; i <= tlen; i++)
+        upper[i] = toupper((unsigned char)text[i]);
+
     // ---- Decommission family (check specific before general) ----
 
-    if (strstr(text, "DECOMMISSION_VALVE")) {
+    if (strstr(upper, "DECOMMISSION_VALVE")) {
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_DECOMMISSION, sizeof(cmd_out->cmd) - 1);
         cmd_out->payload_json = dup_str("{\"target\":\"valve\"}");
         return true;
     }
 
-    if (strstr(text, "DECOMMISSION_LORA:")) {
-        const char *id_str = strstr(text, "DECOMMISSION_LORA:") +
-                             strlen("DECOMMISSION_LORA:");
-        // Parse hex sensor ID
+    if (strstr(upper, "DECOMMISSION_LORA:")) {
+        // Find colon position in original text using offset from upper
+        const char *id_str = text + (strstr(upper, "DECOMMISSION_LORA:") - upper)
+                             + strlen("DECOMMISSION_LORA:");
+        free(upper);
         uint32_t sid = (uint32_t)strtoul(id_str, NULL, 16);
         char payload[80];
         snprintf(payload, sizeof(payload),
@@ -166,10 +177,10 @@ static bool parse_legacy(const char *text, c2d_command_t *cmd_out)
         return true;
     }
 
-    if (strstr(text, "DECOMMISSION_BLE:")) {
-        const char *mac_start = strstr(text, "DECOMMISSION_BLE:") +
-                                strlen("DECOMMISSION_BLE:");
-        // Extract MAC (up to 17 chars, stop at whitespace)
+    if (strstr(upper, "DECOMMISSION_BLE:")) {
+        const char *mac_start = text + (strstr(upper, "DECOMMISSION_BLE:") - upper)
+                                + strlen("DECOMMISSION_BLE:");
+        free(upper);
         char mac_clean[18] = {0};
         int i = 0;
         while (*mac_start && i < 17 &&
@@ -185,45 +196,50 @@ static bool parse_legacy(const char *text, c2d_command_t *cmd_out)
         return true;
     }
 
-    if (strstr(text, "DECOMMISSION_ALL") ||
-        strcmp(text, "DECOMMISSION") == 0) {
+    if (strstr(upper, "DECOMMISSION_ALL") ||
+        strcasecmp(text, "DECOMMISSION") == 0) {
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_DECOMMISSION, sizeof(cmd_out->cmd) - 1);
         cmd_out->payload_json = dup_str("{\"target\":\"all\"}");
         return true;
     }
 
-    // Invalid DECOMMISSION_LORA / DECOMMISSION_BLE without colon
-    if (strstr(text, "DECOMMISSION_LORA") ||
-        strstr(text, "DECOMMISSION_BLE")) {
+    if (strstr(upper, "DECOMMISSION_LORA") ||
+        strstr(upper, "DECOMMISSION_BLE")) {
+        free(upper);
         ESP_LOGE(C2D_TAG, "Invalid decommission format (missing ':')");
         return false;
     }
 
     // ---- Valve control ----
 
-    if (strstr(text, "VALVE_OPEN")) {
+    if (strstr(upper, "VALVE_OPEN")) {
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_VALVE_OPEN, sizeof(cmd_out->cmd) - 1);
         return true;
     }
 
-    if (strstr(text, "VALVE_CLOSE")) {
+    if (strstr(upper, "VALVE_CLOSE")) {
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_VALVE_CLOSE, sizeof(cmd_out->cmd) - 1);
         return true;
     }
 
     // ---- Configuration commands (with JSON payload after ':') ----
 
-    if (strstr(text, "RULES_CONFIG:")) {
-        const char *json_str = strstr(text, "RULES_CONFIG:") +
-                               strlen("RULES_CONFIG:");
+    if (strstr(upper, "RULES_CONFIG:")) {
+        const char *json_str = text + (strstr(upper, "RULES_CONFIG:") - upper)
+                               + strlen("RULES_CONFIG:");
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_RULES_CONFIG, sizeof(cmd_out->cmd) - 1);
         cmd_out->payload_json = dup_str(json_str);
         return true;
     }
 
-    if (strstr(text, "SENSOR_META:")) {
-        const char *json_str = strstr(text, "SENSOR_META:") +
-                               strlen("SENSOR_META:");
+    if (strstr(upper, "SENSOR_META:")) {
+        const char *json_str = text + (strstr(upper, "SENSOR_META:") - upper)
+                               + strlen("SENSOR_META:");
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_SENSOR_META, sizeof(cmd_out->cmd) - 1);
         cmd_out->payload_json = dup_str(json_str);
         return true;
@@ -231,10 +247,21 @@ static bool parse_legacy(const char *text, c2d_command_t *cmd_out)
 
     // ---- Leak reset ----
 
-    if (strstr(text, "LEAK_RESET")) {
+    if (strstr(upper, "LEAK_RESET")) {
+        free(upper);
         strncpy(cmd_out->cmd, C2D_CMD_LEAK_RESET, sizeof(cmd_out->cmd) - 1);
         return true;
     }
+
+    // ---- Override cancel (re-enable auto-close) ----
+
+    if (strstr(upper, "OVERRIDE_CANCEL")) {
+        free(upper);
+        strncpy(cmd_out->cmd, C2D_CMD_OVERRIDE_CANCEL, sizeof(cmd_out->cmd) - 1);
+        return true;
+    }
+
+    free(upper);
 
     // ---- JSON provisioning payload (fallback) ----
 

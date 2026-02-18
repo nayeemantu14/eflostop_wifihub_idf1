@@ -517,6 +517,14 @@ static void handle_c2d_command(const char *data, size_t data_len)
 
         if (pl) cJSON_Delete(pl);
     }
+    // ---- Override cancel (re-enable auto-close, cancel 24h override window) ----
+    else if (strcmp(cmd.cmd, C2D_CMD_OVERRIDE_CANCEL) == 0) {
+        ESP_LOGI(IOTHUB_TAG, "Command: OVERRIDE_CANCEL");
+        if (!rules_engine_cancel_override()) {
+            success = false;
+            error_msg = "override cancel failed";
+        }
+    }
     // ---- Rules config ----
     else if (strcmp(cmd.cmd, C2D_CMD_RULES_CONFIG) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: RULES_CONFIG");
@@ -815,9 +823,9 @@ void iothub_task(void *param)
                                        ble_valve_get_leak(), "valve");
         }
 
-        // Re-assert RMLEAK on valve reconnection if leak incident is active
+        // Valve reconnect reconciliation: re-evaluate active leaks and hub/valve sync
         if (has_valve && ble_upd_type == BLE_UPD_CONNECTED) {
-            rules_engine_reassert_rmleak_if_needed();
+            rules_engine_on_valve_connected();
         }
 
         // Check for pending rules engine telemetry (auto-close, rmleak events)

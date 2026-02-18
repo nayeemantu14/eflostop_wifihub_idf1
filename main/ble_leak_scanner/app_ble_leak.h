@@ -43,6 +43,15 @@ void app_ble_leak_signal_start(void);
  */
 void app_ble_leak_reset_tracking(void);
 
+/**
+ * @brief Process a BLE advertisement for possible leak sensor data.
+ * Can be called from any scan callback (e.g. the valve module's GAP
+ * handler) so leak sensors are detected even while the valve module
+ * owns the active scan.
+ */
+void app_ble_leak_process_adv(const void *addr, int8_t rssi,
+                              const uint8_t *data, uint8_t data_len);
+
 #ifdef __cplusplus
 }
 #endif

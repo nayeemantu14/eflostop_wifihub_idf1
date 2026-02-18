@@ -983,6 +983,60 @@ static void start_discovery_chain(void)
 // -----------------------------------------------------------------------------
 // GAP EVENTS
 // -----------------------------------------------------------------------------
+
+// Forward-declare so handle_valve_disc can reference it via ble_gap_connect callback
+static int ble_gap_event(struct ble_gap_event *event, void *arg);
+
+// Common handler for valve discovery from both legacy and extended scan events
+static void handle_valve_disc(const ble_addr_t *addr, const uint8_t *data,
+                              uint8_t data_len)
+{
+    struct ble_hs_adv_fields fields;
+    if (ble_hs_adv_parse_fields(&fields, data, data_len) != 0)
+        return;
+
+    char discovered_mac[18];
+    snprintf(discovered_mac, sizeof(discovered_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+             addr->val[5], addr->val[4], addr->val[3],
+             addr->val[2], addr->val[1], addr->val[0]);
+
+    bool mac_match = false;
+    if (g_has_target_mac && strcasecmp(discovered_mac, g_target_valve_mac) == 0)
+    {
+        mac_match = true;
+        ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched: %s", discovered_mac);
+    }
+
+    bool name_match = false;
+    if (fields.name &&
+        fields.name_len == strlen(VALVE_DEVICE_NAME) &&
+        strncmp((const char *)fields.name, VALVE_DEVICE_NAME, fields.name_len) == 0)
+    {
+        name_match = true;
+    }
+
+    if ((g_has_target_mac && mac_match) || (!g_has_target_mac && name_match))
+    {
+        if (g_has_target_mac)
+            ESP_LOGI(BLE_TAG, "[SCAN] Connecting to provisioned valve: %s", discovered_mac);
+        else
+            ESP_LOGI(BLE_TAG, "[SCAN] Connecting to valve by name: %s", VALVE_DEVICE_NAME);
+
+        memcpy(&g_peer_addr, addr, sizeof(ble_addr_t));
+        g_peer_addr_valid = true;
+
+        ble_gap_disc_cancel();
+        is_scanning = false;
+
+        int rc = ble_gap_connect(g_own_addr_type, addr, 30000, NULL, ble_gap_event, NULL);
+        if (rc != 0)
+        {
+            ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
+            start_scan();
+        }
+    }
+}
+
 static int ble_gap_event(struct ble_gap_event *event, void *arg)
 {
     (void)arg;
@@ -992,53 +1046,24 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type)
     {
     case BLE_GAP_EVENT_DISC:
-    {
-        struct ble_hs_adv_fields fields;
-        if (ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data) != 0)
-            return 0;
+        // Forward to leak scanner so leak sensors are detected during valve scan
+        app_ble_leak_process_adv(&event->disc.addr, event->disc.rssi,
+                                 event->disc.data, event->disc.length_data);
+        handle_valve_disc(&event->disc.addr, event->disc.data,
+                          event->disc.length_data);
+        return 0;
 
-        char discovered_mac[18];
-        snprintf(discovered_mac, sizeof(discovered_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
-                 event->disc.addr.val[5], event->disc.addr.val[4], event->disc.addr.val[3],
-                 event->disc.addr.val[2], event->disc.addr.val[1], event->disc.addr.val[0]);
-
-        bool mac_match = false;
-        if (g_has_target_mac && strcasecmp(discovered_mac, g_target_valve_mac) == 0)
-        {
-            mac_match = true;
-            ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched: %s", discovered_mac);
-        }
-
-        bool name_match = false;
-        if (fields.name &&
-            fields.name_len == strlen(VALVE_DEVICE_NAME) &&
-            strncmp((const char *)fields.name, VALVE_DEVICE_NAME, fields.name_len) == 0)
-        {
-            name_match = true;
-        }
-
-        if ((g_has_target_mac && mac_match) || (!g_has_target_mac && name_match))
-        {
-            if (g_has_target_mac)
-                ESP_LOGI(BLE_TAG, "[SCAN] Connecting to provisioned valve: %s", discovered_mac);
-            else
-                ESP_LOGI(BLE_TAG, "[SCAN] Connecting to valve by name: %s", VALVE_DEVICE_NAME);
-
-            memcpy(&g_peer_addr, &event->disc.addr, sizeof(ble_addr_t));
-            g_peer_addr_valid = true;
-
-            ble_gap_disc_cancel();
-            is_scanning = false;
-
-            rc = ble_gap_connect(g_own_addr_type, &event->disc.addr, 30000, NULL, ble_gap_event, NULL);
-            if (rc != 0)
-            {
-                ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
-                start_scan();
-            }
+#if MYNEWT_VAL(BLE_EXT_ADV)
+    case BLE_GAP_EVENT_EXT_DISC:
+        if (event->ext_disc.data_status == BLE_GAP_EXT_ADV_DATA_STATUS_COMPLETE) {
+            // Forward to leak scanner so leak sensors are detected during valve scan
+            app_ble_leak_process_adv(&event->ext_disc.addr, event->ext_disc.rssi,
+                                     event->ext_disc.data, event->ext_disc.length_data);
+            handle_valve_disc(&event->ext_disc.addr, event->ext_disc.data,
+                              event->ext_disc.length_data);
         }
         return 0;
-    }
+#endif
 
     case BLE_GAP_EVENT_CONNECT:
         ESP_LOGI(BLE_TAG, "╔══════════════════════════════════════════════════════════════╗");
@@ -1304,18 +1329,45 @@ static void start_scan(void)
     if (is_scanning)
         return;
 
+    // Cancel any active scan (e.g. BLE leak scanner) before starting valve scan
+    ble_gap_disc_cancel();
+
+    ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for '%s'...", VALVE_DEVICE_NAME);
+
+#if MYNEWT_VAL(BLE_EXT_ADV)
+    // Extended scan: 1M PHY (valve + legacy leak sensors) + Coded PHY (long-range leak sensors)
+    struct ble_gap_ext_disc_params uncoded_params = {0};
+    uncoded_params.itvl = 160;      // 100ms interval
+    uncoded_params.window = 80;     // 50ms window
+    uncoded_params.passive = 0;     // Active scan for valve name resolution
+
+    struct ble_gap_ext_disc_params coded_params = {0};
+    coded_params.itvl = 160;
+    coded_params.window = 80;
+    coded_params.passive = 1;       // Passive for Coded PHY (leak sensors only)
+
+    int rc = ble_gap_ext_disc(
+        g_own_addr_type,
+        0,                          // duration: 0 = continuous
+        0,                          // period: 0 = no periodic restart
+        1,                          // filter_duplicates: enabled for valve discovery
+        0,                          // filter_policy: accept all
+        0,                          // limited: disabled
+        &uncoded_params,            // 1M PHY scan params
+        &coded_params,              // Coded PHY scan params
+        ble_gap_event,
+        NULL
+    );
+#else
     struct ble_gap_disc_params disc_params = {
         .filter_duplicates = 1,
         .passive = 0,
         .itvl = 160,
         .window = 80,
     };
-
-    // Cancel any active scan (e.g. BLE leak scanner) before starting valve scan
-    ble_gap_disc_cancel();
-
-    ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for '%s'...", VALVE_DEVICE_NAME);
     int rc = ble_gap_disc(g_own_addr_type, BLE_HS_FOREVER, &disc_params, ble_gap_event, NULL);
+#endif
+
     if (rc == 0)
         is_scanning = true;
     else
@@ -1743,4 +1795,21 @@ bool ble_valve_set_rmleak(bool enabled)
 bool ble_valve_get_rmleak_state(void)
 {
     return g_val_rmleak;
+}
+
+bool ble_valve_is_connected(void)
+{
+    return valve_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+}
+
+void ble_valve_cancel_pending_close(void)
+{
+    if (g_pending_valve_cmd == 0) {
+        g_pending_valve_cmd = -1;
+        ESP_LOGI(BLE_TAG, "[CMD] Pending valve CLOSE cancelled (leak resolved)");
+    }
+    if (g_pending_rmleak_cmd == 1) {
+        g_pending_rmleak_cmd = -1;
+        ESP_LOGI(BLE_TAG, "[CMD] Pending RMLEAK SET cancelled (leak resolved)");
+    }
 }

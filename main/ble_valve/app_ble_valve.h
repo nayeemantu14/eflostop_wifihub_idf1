@@ -117,6 +117,20 @@ extern "C"
      */
     bool ble_valve_get_rmleak_state(void);
 
+    /**
+     * @brief Check if the valve BLE connection is established.
+     * Returns true when a GAP connection exists (conn_handle != NONE).
+     * Does NOT guarantee GATT is ready — use ble_valve_is_ready() for that.
+     */
+    bool ble_valve_is_connected(void);
+
+    /**
+     * @brief Cancel any pending auto-close commands (valve CLOSE + RMLEAK SET).
+     * Called by the rules engine when all leak sources clear before the valve
+     * reconnects, so stale close commands are not applied on reconnect.
+     */
+    void ble_valve_cancel_pending_close(void);
+
 #ifdef __cplusplus
 }
 #endif

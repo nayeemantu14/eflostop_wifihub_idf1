@@ -13,6 +13,7 @@
 #include "provisioning_manager.h"
 #include "sensor_meta.h"
 #include "health_engine.h"
+#include "rules_engine.h"
 
 #define TELEM_TAG "TELEMETRY_V2"
 
@@ -446,6 +447,16 @@ void telemetry_v2_publish_snapshot(void)
         }
     }
     cJSON_AddItemToObject(data, "ble_leak_sensors", ble_arr);
+
+    // ---- Override window status ----
+    bool ovr_active = rules_engine_is_override_window_active();
+    cJSON_AddBoolToObject(data, "override_active", ovr_active);
+    if (ovr_active) {
+        int32_t remaining = rules_engine_get_override_remaining_s();
+        if (remaining >= 0) {
+            cJSON_AddNumberToObject(data, "override_remaining_s", remaining);
+        }
+    }
 
     cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "snapshot");
