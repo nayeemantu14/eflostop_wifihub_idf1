@@ -11,6 +11,7 @@
 #include "esp_sntp.h"
 #include "mqtt_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 #include "esp_mac.h"
 #include "mbedtls/base64.h"
@@ -26,6 +27,7 @@
 #include "sensor_meta/sensor_meta.h"
 #include "telemetry/telemetry_v2.h"
 #include "commands/c2d_commands.h"
+#include "offline_buffer/offline_buffer.h"
 
 // External Queue from LoRa app
 extern QueueHandle_t lora_rx_queue;
@@ -40,6 +42,9 @@ static bool g_needs_lifecycle = false;
 
 // Boot snapshot: sent once after health engine boot sync completes
 static bool g_boot_snapshot_sent = false;
+
+// Device Twin: request ID counter for twin GET/PATCH operations
+static int g_twin_rid = 0;
 
 // ---------------------------------------------------------------------------
 // Telemetry v2 caches (shared with telemetry module for snapshot reads)
@@ -571,6 +576,96 @@ static void handle_c2d_command(const char *data, size_t data_len)
 }
 
 // ---------------------------------------------------------------------------
+// Device Twin — reported properties
+// ---------------------------------------------------------------------------
+
+static void publish_twin_reported(void)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+
+    cJSON_AddStringToObject(root, "fw_version", TELEMETRY_FW_VERSION);
+    cJSON_AddStringToObject(root, "gateway_id", g_gateway_id);
+    cJSON_AddBoolToObject(root, "provisioned", provisioning_is_provisioned());
+
+    char valve_mac[18];
+    if (provisioning_get_valve_mac(valve_mac))
+        cJSON_AddStringToObject(root, "valve_mac", valve_mac);
+
+    uint32_t ids[MAX_LORA_SENSORS];
+    uint8_t cnt = 0;
+    provisioning_get_lora_sensors(ids, &cnt);
+    cJSON_AddNumberToObject(root, "lora_sensor_count", cnt);
+
+    char macs[MAX_BLE_LEAK_SENSORS][18];
+    uint8_t bcnt = 0;
+    provisioning_get_ble_leak_sensors(macs, &bcnt);
+    cJSON_AddNumberToObject(root, "ble_leak_sensor_count", bcnt);
+
+    rules_config_t rules;
+    if (provisioning_get_rules_config(&rules)) {
+        cJSON_AddBoolToObject(root, "auto_close_enabled", rules.auto_close_enabled);
+        cJSON_AddNumberToObject(root, "trigger_mask", rules.trigger_mask);
+    }
+
+    cJSON_AddNumberToObject(root, "uptime_s",
+                            (double)(esp_timer_get_time() / 1000000));
+    cJSON_AddNumberToObject(root, "free_heap",
+                            (double)esp_get_free_heap_size());
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!json) return;
+
+    char topic[128];
+    int rid = ++g_twin_rid;
+    snprintf(topic, sizeof(topic),
+             "$iothub/twin/PATCH/properties/reported/?$rid=%d", rid);
+
+    ESP_LOGI(IOTHUB_TAG, "Twin reported (%d): %s", rid, json);
+    esp_mqtt_client_publish(mqtt_client, topic, json, 0, 1, 0);
+    free(json);
+}
+
+// ---------------------------------------------------------------------------
+// Device Twin — handle desired property patches
+// ---------------------------------------------------------------------------
+
+static void handle_twin_desired(const char *data, int data_len)
+{
+    char *buf = malloc(data_len + 1);
+    if (!buf) return;
+    memcpy(buf, data, data_len);
+    buf[data_len] = '\0';
+
+    ESP_LOGI(IOTHUB_TAG, "Twin desired patch: %s", buf);
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) {
+        ESP_LOGW(IOTHUB_TAG, "Twin desired: invalid JSON");
+        return;
+    }
+
+    // Handle snapshot_interval_s
+    cJSON *interval = cJSON_GetObjectItem(root, "snapshot_interval_s");
+    if (interval && cJSON_IsNumber(interval)) {
+        int val = interval->valueint;
+        if (val >= 60 && val <= 3600) {
+            ESP_LOGI(IOTHUB_TAG, "Twin: snapshot_interval_s = %d", val);
+            telemetry_v2_set_snapshot_interval(val);
+        } else {
+            ESP_LOGW(IOTHUB_TAG, "Twin: snapshot_interval_s %d out of range [60..3600]", val);
+        }
+    }
+
+    cJSON_Delete(root);
+
+    // Acknowledge: publish reported back so twin stays in sync
+    publish_twin_reported();
+}
+
+// ---------------------------------------------------------------------------
 // MQTT event handler
 // ---------------------------------------------------------------------------
 
@@ -582,33 +677,47 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(IOTHUB_TAG, "Connected to Azure IoT Hub!");
         g_iot_hub_connected = true;
+        telemetry_v2_set_connected(true);
         g_needs_lifecycle = true;  // Event loop will publish lifecycle + snapshot
         {
             char sub_topic[128];
+            // C2D messages
             snprintf(sub_topic, sizeof(sub_topic),
                      "devices/%s/messages/devicebound/#", AZURE_DEVICE_ID);
             esp_mqtt_client_subscribe(mqtt_client, sub_topic, 1);
+            // Device Twin — response to GET/PATCH requests
+            esp_mqtt_client_subscribe(mqtt_client, "$iothub/twin/res/#", 1);
+            // Device Twin — desired property change notifications
+            esp_mqtt_client_subscribe(mqtt_client,
+                                      "$iothub/twin/PATCH/properties/desired/#", 1);
         }
         break;
 
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(IOTHUB_TAG, "Disconnected.");
         g_iot_hub_connected = false;
+        telemetry_v2_set_connected(false);
         break;
 
     case MQTT_EVENT_DATA:
     {
-        ESP_LOGI(IOTHUB_TAG, "Received C2D Message!");
-        if (event->data_len > 0) {
-            // Log raw payload for debugging
-            char *dbg = (char *)malloc(event->data_len + 1);
-            if (dbg) {
-                memcpy(dbg, event->data, event->data_len);
-                dbg[event->data_len] = '\0';
-                ESP_LOGI(IOTHUB_TAG, "Payload: %s", dbg);
-                free(dbg);
+        if (event->topic_len > 0 && event->data_len > 0) {
+            // Route based on topic prefix
+            if (event->topic_len > 30 &&
+                strncmp(event->topic, "$iothub/twin/PATCH/properties/desired/",
+                        37) == 0) {
+                // Desired property change notification
+                handle_twin_desired(event->data, event->data_len);
+            } else if (event->topic_len > 17 &&
+                       strncmp(event->topic, "$iothub/twin/res/", 17) == 0) {
+                // Twin GET/PATCH response (status code in topic)
+                ESP_LOGI(IOTHUB_TAG, "Twin response: %.*s",
+                         event->topic_len, event->topic);
+            } else {
+                // C2D command
+                ESP_LOGI(IOTHUB_TAG, "Received C2D Message!");
+                handle_c2d_command(event->data, event->data_len);
             }
-            handle_c2d_command(event->data, event->data_len);
         }
         break;
     }
@@ -735,6 +844,9 @@ void iothub_task(void *param)
     esp_mqtt_client_register_event(mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
 
+    // Initialize offline event buffer (loads pending events from NVS)
+    offline_buffer_init();
+
     // Initialize telemetry v2 (creates snapshot timer + queue)
     telemetry_v2_init(mqtt_client, AZURE_DEVICE_ID, g_gateway_id,
                       g_telem_lora_cache, g_telem_ble_cache);
@@ -834,7 +946,7 @@ void iothub_task(void *param)
         // =================================================================
         // Phase 3: PUBLISH (only when connected + provisioned)
         // =================================================================
-        if (!g_iot_hub_connected || !provisioning_is_provisioned()) {
+        if (!provisioning_is_provisioned()) {
             if (auto_close_json) free(auto_close_json);
             continue;
         }
@@ -842,8 +954,10 @@ void iothub_task(void *param)
         // ---- Lifecycle on first connect / reconnect ----
         if (g_needs_lifecycle) {
             g_needs_lifecycle = false;
+            telemetry_v2_drain_offline();   // Replay buffered events before lifecycle
             telemetry_v2_publish_lifecycle();
-            g_boot_snapshot_sent = false;  // Wait for boot sync before first snapshot
+            publish_twin_reported();        // Update Device Twin reported properties
+            g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
         }
 
         // ---- Boot snapshot: fires once after all sensors checked in (or 2-min timeout) ----

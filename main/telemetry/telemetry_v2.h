@@ -104,6 +104,23 @@ void telemetry_v2_publish_cmd_ack(const char *correlation_id,
 /** Publish type="event" wrapping health engine JSON in v2 envelope. */
 void telemetry_v2_publish_health_event(const char *health_json);
 
+// ---------------------------------------------------------------------------
+// Device Twin integration
+// ---------------------------------------------------------------------------
+
+/** Change the snapshot timer period at runtime (from Device Twin desired). */
+void telemetry_v2_set_snapshot_interval(int seconds);
+
+// ---------------------------------------------------------------------------
+// Offline buffer integration
+// ---------------------------------------------------------------------------
+
+/** Set MQTT connectivity state. When false, event telemetry is buffered to NVS. */
+void telemetry_v2_set_connected(bool connected);
+
+/** Drain all NVS-buffered events via MQTT. Call on reconnect before lifecycle. */
+void telemetry_v2_drain_offline(void);
+
 #ifdef __cplusplus
 }
 #endif

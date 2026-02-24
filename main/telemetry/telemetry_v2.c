@@ -14,6 +14,7 @@
 #include "sensor_meta.h"
 #include "health_engine.h"
 #include "rules_engine.h"
+#include "offline_buffer.h"
 
 #define TELEM_TAG "TELEMETRY_V2"
 
@@ -27,6 +28,7 @@ static char s_topic[128]                 = {0};
 static const telem_lora_cache_t     *s_lora_cache = NULL;
 static const telem_ble_leak_cache_t *s_ble_cache  = NULL;
 
+static bool           s_connected      = false;
 static TimerHandle_t  s_snapshot_timer = NULL;
 static QueueHandle_t  s_snapshot_queue = NULL;
 
@@ -57,17 +59,26 @@ static cJSON *build_envelope(const char *type)
 
 static void publish_json(cJSON *root, const char *type_hint)
 {
-    if (!root || !s_mqtt) {
-        if (root) cJSON_Delete(root);
-        return;
-    }
+    if (!root) return;
+
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
-    if (json_str) {
+    if (!json_str) return;
+
+    if (s_mqtt && s_connected) {
+        // Online: publish directly
         ESP_LOGI(TELEM_TAG, "Pub %s: %s", type_hint, json_str);
         esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
-        free(json_str);
+    } else if (strcmp(type_hint, "event") == 0) {
+        // Offline: buffer critical events for replay on reconnect
+        ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
+        offline_buffer_store(json_str, strlen(json_str));
+    } else {
+        // Offline: drop lifecycle/snapshot (regenerated on reconnect)
+        ESP_LOGD(TELEM_TAG, "Offline — dropping %s (regenerated)", type_hint);
     }
+
+    free(json_str);
 }
 
 static const char *reset_reason_str(void)
@@ -227,6 +238,14 @@ void telemetry_v2_start_snapshot_timer(void)
         ESP_LOGI(TELEM_TAG, "Snapshot timer started (%ds)",
                  SNAPSHOT_INTERVAL_MS / 1000);
     }
+}
+
+void telemetry_v2_set_snapshot_interval(int seconds)
+{
+    if (!s_snapshot_timer) return;
+    TickType_t new_period = pdMS_TO_TICKS((uint32_t)seconds * 1000);
+    xTimerChangePeriod(s_snapshot_timer, new_period, 0);
+    ESP_LOGI(TELEM_TAG, "Snapshot interval changed to %ds", seconds);
 }
 
 // ---- Lifecycle ------------------------------------------------------------
@@ -570,4 +589,22 @@ void telemetry_v2_publish_cmd_ack(const char *correlation_id,
 
     cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "event");
+}
+
+// ---- Offline buffer integration -------------------------------------------
+
+void telemetry_v2_set_connected(bool connected)
+{
+    s_connected = connected;
+    ESP_LOGI(TELEM_TAG, "MQTT connected = %s", connected ? "true" : "false");
+}
+
+void telemetry_v2_drain_offline(void)
+{
+    int pending = offline_buffer_count();
+    if (pending == 0) return;
+
+    ESP_LOGI(TELEM_TAG, "Draining %d offline event(s) before lifecycle...", pending);
+    int published = offline_buffer_drain(s_mqtt, s_topic);
+    ESP_LOGI(TELEM_TAG, "Offline drain complete: %d event(s) replayed", published);
 }

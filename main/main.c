@@ -24,6 +24,7 @@
 #include "ble_valve/app_ble_valve.h"
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "systemservices/monitoring.h"
+#include "wifi_reset/reset_button.h"
 
 /* ---------------------------------------------------------
  * Tags
@@ -52,6 +53,9 @@ void app_main(void)
 	initialize_iothub();
 	app_ble_valve_init();
 	app_ble_leak_init();
+
+	/* WiFi reset button (GPIO 40, hold 5s to erase credentials + restart captive portal) */
+	reset_button_init();
 
 	/* start system monitoring (heap, uptime, diagnostics) */
 	monitoring_init();
