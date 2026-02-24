@@ -13,11 +13,14 @@ extern "C"
 #define IOTHUB_TAG "IOTHUB"
 
 // =============================================================================
-// AZURE CONFIGURATION
+// AZURE DPS CONFIGURATION
 // =============================================================================
-#define AZURE_HUB_NAME      "wd-core-iothub-poc"
-#define AZURE_DEVICE_ID     "WiFi-Hub-Enware"
-#define AZURE_PRIMARY_KEY   "RLI+ccdGK4XrViw0jr0+sO3Pn9t/2jL2Rea28MwWHGE="
+#define AZURE_DPS_ID_SCOPE   "0ne01136E89"
+#define AZURE_DPS_GROUP_KEY  "wYbUyG99DN+s8L/JvrGjpaij+9eELo1cS6YDE91aWtILn0KUX4FT8+VhyczKy1FfxLfvbVH9+DAoAIoTCeakRQ=="
+
+// SAS token helpers (used by dps_client)
+void url_encode(const char *src, char *dst, size_t dst_len);
+char *generate_sas_token(const char *resource_uri, const char *key, long expiry_seconds);
 
 // Global Handle (Exposed so Wi-Fi can notify it)
 extern TaskHandle_t iothub_task_handle;

@@ -28,6 +28,7 @@
 #include "telemetry/telemetry_v2.h"
 #include "commands/c2d_commands.h"
 #include "offline_buffer/offline_buffer.h"
+#include "dps_client/dps_client.h"
 
 // External Queue from LoRa app
 extern QueueHandle_t lora_rx_queue;
@@ -36,6 +37,11 @@ TaskHandle_t iothub_task_handle = NULL;
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool g_iot_hub_connected = false;
 static char g_gateway_id[32] = {0};
+
+// DPS-assigned credentials (populated at boot)
+static char g_hub_hostname[128] = {0};
+static char g_device_id[64] = {0};
+static char g_device_key[64] = {0};
 
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
@@ -683,7 +689,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             char sub_topic[128];
             // C2D messages
             snprintf(sub_topic, sizeof(sub_topic),
-                     "devices/%s/messages/devicebound/#", AZURE_DEVICE_ID);
+                     "devices/%s/messages/devicebound/#", g_device_id);
             esp_mqtt_client_subscribe(mqtt_client, sub_topic, 1);
             // Device Twin — response to GET/PATCH requests
             esp_mqtt_client_subscribe(mqtt_client, "$iothub/twin/res/#", 1);
@@ -822,20 +828,39 @@ void iothub_task(void *param)
     init_gateway_id();
     initialize_sntp();
 
-    char resource_uri[128];
-    snprintf(resource_uri, sizeof(resource_uri), "%s.azure-devices.net/devices/%s", AZURE_HUB_NAME, AZURE_DEVICE_ID);
-    char *sas_token = generate_sas_token(resource_uri, AZURE_PRIMARY_KEY, 31536000);
+    // ---- DPS Registration (or load from NVS cache) ----
+    dps_assignment_t dps = {0};
+    int dps_retries = 0;
+    while (dps_register(AZURE_DPS_ID_SCOPE, AZURE_DPS_GROUP_KEY,
+                        g_gateway_id, &dps) != ESP_OK) {
+        dps_retries++;
+        int backoff = (dps_retries < 5) ? dps_retries * 5 : 30;
+        ESP_LOGW(IOTHUB_TAG, "DPS failed (attempt %d), retry in %ds",
+                 dps_retries, backoff);
+        vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
+    }
+    strncpy(g_hub_hostname, dps.hub_hostname, sizeof(g_hub_hostname) - 1);
+    strncpy(g_device_id, dps.device_id, sizeof(g_device_id) - 1);
+    strncpy(g_device_key, dps.device_key, sizeof(g_device_key) - 1);
+    ESP_LOGI(IOTHUB_TAG, "DPS: hub=%s device=%s", g_hub_hostname, g_device_id);
 
-    char uri[128], username[256];
-    snprintf(uri, sizeof(uri), "mqtts://%s.azure-devices.net", AZURE_HUB_NAME);
-    snprintf(username, sizeof(username), "%s.azure-devices.net/%s/?api-version=2021-04-12", AZURE_HUB_NAME, AZURE_DEVICE_ID);
+    // ---- Connect to assigned IoT Hub ----
+    char resource_uri[256];
+    snprintf(resource_uri, sizeof(resource_uri), "%s/devices/%s",
+             g_hub_hostname, g_device_id);
+    char *sas_token = generate_sas_token(resource_uri, g_device_key, 31536000);
+
+    char uri[192], username[256];
+    snprintf(uri, sizeof(uri), "mqtts://%s", g_hub_hostname);
+    snprintf(username, sizeof(username), "%s/%s/?api-version=2021-04-12",
+             g_hub_hostname, g_device_id);
 
     const esp_mqtt_client_config_t mqtt_cfg = {
         .broker.address.uri = uri,
         .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
         .credentials = {
             .username = username,
-            .client_id = AZURE_DEVICE_ID,
+            .client_id = g_device_id,
             .authentication = {.password = sas_token}},
         .session.keepalive = 60,
     };
@@ -848,7 +873,7 @@ void iothub_task(void *param)
     offline_buffer_init();
 
     // Initialize telemetry v2 (creates snapshot timer + queue)
-    telemetry_v2_init(mqtt_client, AZURE_DEVICE_ID, g_gateway_id,
+    telemetry_v2_init(mqtt_client, g_device_id, g_gateway_id,
                       g_telem_lora_cache, g_telem_ble_cache);
 
     // Drain queues before adding to QueueSet
@@ -1064,5 +1089,5 @@ void iothub_task(void *param)
 
 void initialize_iothub(void)
 {
-    xTaskCreate(iothub_task, "iothub_task", 8192, NULL, 5, &iothub_task_handle);
+    xTaskCreate(iothub_task, "iothub_task", 10240, NULL, 5, &iothub_task_handle);
 }
