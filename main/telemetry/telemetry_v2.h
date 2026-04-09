@@ -36,6 +36,7 @@ typedef struct {
     uint8_t battery;
     bool    leak_state;
     int8_t  rssi;
+    char    fw_version[12];    // "M.m.p" or "" if not available
     bool    valid;
 } telem_ble_leak_cache_t;
 

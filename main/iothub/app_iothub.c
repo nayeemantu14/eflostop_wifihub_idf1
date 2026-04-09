@@ -193,6 +193,9 @@ static bool update_ble_leak_cache_check_leak(const ble_leak_event_t *evt)
             g_telem_ble_cache[i].battery    = evt->battery;
             g_telem_ble_cache[i].leak_state = evt->leak_detected;
             g_telem_ble_cache[i].rssi       = evt->rssi;
+            strncpy(g_telem_ble_cache[i].fw_version, evt->fw_version,
+                    sizeof(g_telem_ble_cache[i].fw_version) - 1);
+            g_telem_ble_cache[i].fw_version[sizeof(g_telem_ble_cache[i].fw_version) - 1] = '\0';
             return leak_changed;
         }
     }
@@ -205,6 +208,9 @@ static bool update_ble_leak_cache_check_leak(const ble_leak_event_t *evt)
             g_telem_ble_cache[i].battery    = evt->battery;
             g_telem_ble_cache[i].leak_state = evt->leak_detected;
             g_telem_ble_cache[i].rssi       = evt->rssi;
+            strncpy(g_telem_ble_cache[i].fw_version, evt->fw_version,
+                    sizeof(g_telem_ble_cache[i].fw_version) - 1);
+            g_telem_ble_cache[i].fw_version[sizeof(g_telem_ble_cache[i].fw_version) - 1] = '\0';
             g_telem_ble_cache[i].valid      = true;
             return evt->leak_detected;  // First time: only emit if actively leaking
         }
@@ -216,6 +222,9 @@ static bool update_ble_leak_cache_check_leak(const ble_leak_event_t *evt)
     g_telem_ble_cache[0].battery    = evt->battery;
     g_telem_ble_cache[0].leak_state = evt->leak_detected;
     g_telem_ble_cache[0].rssi       = evt->rssi;
+    strncpy(g_telem_ble_cache[0].fw_version, evt->fw_version,
+            sizeof(g_telem_ble_cache[0].fw_version) - 1);
+    g_telem_ble_cache[0].fw_version[sizeof(g_telem_ble_cache[0].fw_version) - 1] = '\0';
     g_telem_ble_cache[0].valid      = true;
     return evt->leak_detected;
 }
@@ -758,12 +767,30 @@ void iothub_apply_provisioned_mac(void)
     }
 }
 
+// Minimum epoch to consider time synced (2024-01-01 00:00:00 UTC)
+#define SNTP_EPOCH_VALID  1704067200
+
+static TimerHandle_t s_sntp_retry_timer = NULL;
+
+static void sntp_retry_cb(TimerHandle_t xTimer)
+{
+    time_t now;
+    time(&now);
+    if (now >= SNTP_EPOCH_VALID) {
+        ESP_LOGI(IOTHUB_TAG, "SNTP now synced (ts=%ld) — stopping retry timer", (long)now);
+        xTimerStop(xTimer, 0);
+        return;
+    }
+    ESP_LOGW(IOTHUB_TAG, "SNTP still not synced — restarting NTP poll");
+    esp_sntp_restart();
+}
+
 static void initialize_sntp(void)
 {
     ESP_LOGI(IOTHUB_TAG, "Initializing SNTP...");
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
-    setenv("TZ", "AEST-10", 1); tzset();
+    setenv("TZ", "UTC0", 1); tzset();
     esp_sntp_init();
 
     time_t now = 0;
@@ -779,7 +806,17 @@ static void initialize_sntp(void)
         if (retry > 60)
             break;
     }
-    ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
+
+    if (now >= SNTP_EPOCH_VALID) {
+        ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
+    } else {
+        ESP_LOGW(IOTHUB_TAG, "SNTP initial sync failed — starting 60s retry timer");
+        s_sntp_retry_timer = xTimerCreate("sntp_retry", pdMS_TO_TICKS(60000),
+                                           pdTRUE, NULL, sntp_retry_cb);
+        if (s_sntp_retry_timer) {
+            xTimerStart(s_sntp_retry_timer, 0);
+        }
+    }
 }
 
 static void init_gateway_id(void)

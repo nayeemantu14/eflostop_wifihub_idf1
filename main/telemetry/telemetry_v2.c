@@ -34,6 +34,9 @@ static QueueHandle_t  s_snapshot_queue = NULL;
 
 // ---- Helpers --------------------------------------------------------------
 
+// Minimum epoch to consider time synced (2024-01-01 00:00:00 UTC)
+#define EPOCH_VALID_THRESHOLD_TELEM  1704067200
+
 static cJSON *build_envelope(const char *type)
 {
     cJSON *root = cJSON_CreateObject();
@@ -43,6 +46,14 @@ static cJSON *build_envelope(const char *type)
 
     time_t now;
     time(&now);
+
+    /* Suppress telemetry if SNTP has not synced yet */
+    if (now < EPOCH_VALID_THRESHOLD_TELEM) {
+        ESP_LOGW(TELEM_TAG, "Time not synced (ts=%ld) — suppressing %s", (long)now, type);
+        cJSON_Delete(root);
+        return NULL;
+    }
+
     cJSON_AddNumberToObject(root, "ts", (double)now);
 
     cJSON *gw = cJSON_CreateObject();
@@ -345,6 +356,12 @@ void telemetry_v2_publish_snapshot(void)
         cJSON_AddBoolToObject(valve, "leak_state", ble_valve_get_leak());
         cJSON_AddBoolToObject(valve, "rmleak", ble_valve_get_rmleak_state());
         cJSON_AddBoolToObject(valve, "connected", true);
+
+        char valve_fw[32];
+        if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
+            cJSON_AddStringToObject(valve, "fw_version", valve_fw);
+        else
+            cJSON_AddNullToObject(valve, "fw_version");
     } else {
         cJSON_AddStringToObject(valve, "state", "disconnected");
         cJSON_AddBoolToObject(valve, "connected", false);
@@ -455,10 +472,15 @@ void telemetry_v2_publish_snapshot(void)
                 cJSON_AddNumberToObject(s, "battery", cached->battery);
                 cJSON_AddBoolToObject(s, "leak_state", cached->leak_state);
                 cJSON_AddNumberToObject(s, "rssi", cached->rssi);
+                if (cached->fw_version[0])
+                    cJSON_AddStringToObject(s, "fw_version", cached->fw_version);
+                else
+                    cJSON_AddNullToObject(s, "fw_version");
             } else {
                 cJSON_AddNullToObject(s, "battery");
                 cJSON_AddBoolToObject(s, "leak_state", false);
                 cJSON_AddNullToObject(s, "rssi");
+                cJSON_AddNullToObject(s, "fw_version");
             }
 
             add_location_obj(s, SENSOR_TYPE_BLE_LEAK, health[i].dev_id);

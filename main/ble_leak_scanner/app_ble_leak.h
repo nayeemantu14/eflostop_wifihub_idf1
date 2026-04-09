@@ -21,6 +21,7 @@ typedef struct {
     uint8_t battery;           // 0-100%
     bool leak_detected;        // true if leak
     int8_t rssi;               // Advertisement RSSI
+    char fw_version[12];       // "M.m.p" or "" if not available
 } ble_leak_event_t;
 
 /**

@@ -44,6 +44,7 @@ typedef struct {
     uint8_t mac[6];
     uint8_t last_battery;
     bool last_leak;
+    char last_fw_version[12];
     bool seen;              // true after first advertisement received
     TickType_t last_event_tick;  // for health engine heartbeat
 } sensor_state_t;
@@ -168,9 +169,17 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     uint8_t battery     = fields.mfg_data[3];
     bool leak = (leak_status != 0);
 
+    // Parse firmware version from extended mfg data bytes [4..6] if present
+    char fw_ver[12] = {0};
+    if (fields.mfg_data_len >= 7) {
+        snprintf(fw_ver, sizeof(fw_ver), "%u.%u.%u",
+                 fields.mfg_data[4], fields.mfg_data[5], fields.mfg_data[6]);
+    }
+
     // Delta check: skip if unchanged from last report (unless heartbeat due)
     sensor_state_t *s = &s_sensors[idx];
-    bool data_changed = !s->seen || s->last_leak != leak || s->last_battery != battery;
+    bool data_changed = !s->seen || s->last_leak != leak || s->last_battery != battery
+                        || strcmp(s->last_fw_version, fw_ver) != 0;
     bool heartbeat_due = s->seen &&
         ((xTaskGetTickCount() - s->last_event_tick) >= pdMS_TO_TICKS(BLE_LEAK_HEARTBEAT_MS));
     if (!data_changed && !heartbeat_due) {
@@ -181,6 +190,7 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     memcpy(s->mac, adv_mac, 6);
     s->last_leak = leak;
     s->last_battery = battery;
+    strncpy(s->last_fw_version, fw_ver, sizeof(s->last_fw_version) - 1);
     s->seen = true;
 
     // Build event and enqueue
@@ -190,9 +200,12 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     evt.battery = battery;
     evt.leak_detected = leak;
     evt.rssi = rssi;
+    strncpy(evt.fw_version, fw_ver, sizeof(evt.fw_version) - 1);
+    evt.fw_version[sizeof(evt.fw_version) - 1] = '\0';
 
-    ESP_LOGI(BLE_LEAK_TAG, "eleak %s — leak=%d batt=%d%% rssi=%d",
-             evt.sensor_mac_str, leak, battery, evt.rssi);
+    ESP_LOGI(BLE_LEAK_TAG, "eleak %s — leak=%d batt=%d%% rssi=%d fw=%s",
+             evt.sensor_mac_str, leak, battery, evt.rssi,
+             fw_ver[0] ? fw_ver : "n/a");
 
     xQueueSend(ble_leak_rx_queue, &evt, 0);
     s->last_event_tick = xTaskGetTickCount();

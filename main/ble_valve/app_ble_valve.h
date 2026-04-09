@@ -131,6 +131,14 @@ extern "C"
      */
     void ble_valve_cancel_pending_close(void);
 
+    /**
+     * @brief Get the valve's firmware revision string read from DIS (0x180A).
+     * @param buffer Output buffer for the firmware revision string.
+     * @param len    Size of the output buffer.
+     * @return true if firmware revision is available, false otherwise.
+     */
+    bool ble_valve_get_firmware_rev(char *buffer, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

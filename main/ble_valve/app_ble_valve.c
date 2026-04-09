@@ -78,6 +78,14 @@ static const ble_uuid128_t UUID_SVC_BATT =
 static const ble_uuid128_t UUID_CHR_BATT =
     BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x19, 0x2a, 0x00, 0x00);
 
+// Device Information Service (0x180A) — optional, for firmware version reporting
+static const ble_uuid128_t UUID_SVC_DIS =
+    BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x0a, 0x18, 0x00, 0x00);
+
+// Firmware Revision String characteristic (0x2A26)
+static const ble_uuid128_t UUID_CHR_FIRMWARE_REV =
+    BLE_UUID128_INIT(0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x26, 0x2a, 0x00, 0x00);
+
 // -----------------------------------------------------------------------------
 // ATT ERROR CODES
 // -----------------------------------------------------------------------------
@@ -113,6 +121,10 @@ static bool g_peer_addr_valid = false;
 
 static uint16_t h_valve_char = 0, h_flood_char = 0, h_rmleak_char = 0, h_batt_char = 0;
 static uint16_t h_valve_svc_end = 0, h_flood_svc_end = 0, h_batt_svc_end = 0;
+
+static uint16_t h_dis_char = 0;
+static uint16_t h_dis_svc_end = 0;
+static char g_firmware_rev[32] = {0};
 
 static uint8_t g_val_battery = 0;
 static bool g_val_leak = false;
@@ -596,6 +608,33 @@ static int on_read_cb(uint16_t conn_handle,
     return 0;
 }
 
+static int on_read_dis_cb(uint16_t conn_handle,
+                          const struct ble_gatt_error *error,
+                          struct ble_gatt_attr *attr,
+                          void *arg)
+{
+    (void)conn_handle;
+    (void)arg;
+
+    if (error->status == 0 && attr != NULL && attr->om != NULL)
+    {
+        uint16_t len = OS_MBUF_PKTLEN(attr->om);
+        if (len > sizeof(g_firmware_rev) - 1)
+            len = sizeof(g_firmware_rev) - 1;
+        os_mbuf_copydata(attr->om, 0, len, g_firmware_rev);
+        g_firmware_rev[len] = '\0';
+        ESP_LOGI(BLE_TAG, "[SETUP] Valve Firmware Rev: \"%s\"", g_firmware_rev);
+    }
+    else
+    {
+        ESP_LOGW(BLE_TAG, "[SETUP] DIS firmware rev read failed status=0x%04X", error->status);
+        g_firmware_rev[0] = '\0';
+    }
+
+    setup_next_step();
+    return 0;
+}
+
 static void apply_pending_valve_cmd_if_any(void)
 {
     if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0)
@@ -748,6 +787,17 @@ static void setup_next_step(void)
         setup_next_step();
         break;
 
+    case 9:
+        if (h_dis_char)
+        {
+            ESP_LOGI(BLE_TAG, "[SETUP] Read DIS Firmware Rev");
+            int rc = ble_gattc_read(valve_conn_handle, h_dis_char, on_read_dis_cb, NULL);
+            if (rc == 0) return;
+            ESP_LOGE(BLE_TAG, "[SETUP] read DIS fw_rev rc=%d", rc);
+        }
+        setup_next_step();
+        break;
+
     default:
         // Done with setup
         g_security_retry_count = 0;
@@ -762,8 +812,9 @@ static void setup_next_step(void)
         ESP_LOGI(BLE_TAG, "╔══════════════════════════════════════════════════════════════╗");
         ESP_LOGI(BLE_TAG, "║            SETUP COMPLETE - READY FOR GATT                   ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
-        ESP_LOGI(BLE_TAG, "[READY] Valve=%u, Flood=%u, RMLEAK=%u, Batt=%u",
-                 h_valve_char, h_flood_char, h_rmleak_char, h_batt_char);
+        ESP_LOGI(BLE_TAG, "[READY] Valve=%u, Flood=%u, RMLEAK=%u, Batt=%u, DIS=%u",
+                 h_valve_char, h_flood_char, h_rmleak_char, h_batt_char, h_dis_char);
+        ESP_LOGI(BLE_TAG, "[READY] FW Rev: \"%s\"", g_firmware_rev[0] ? g_firmware_rev : "(not available)");
         ESP_LOGI(BLE_TAG, "[READY] Battery=%u%%, Leak=%s, Valve=%s, RMLEAK=%s",
                  g_val_battery,
                  g_val_leak ? "LEAK" : "OK",
@@ -782,6 +833,56 @@ static void setup_next_step(void)
 // -----------------------------------------------------------------------------
 // DISCOVERY CHAIN
 // -----------------------------------------------------------------------------
+static int on_disc_dis_chr(uint16_t conn, const struct ble_gatt_error *err,
+                           const struct ble_gatt_chr *chr, void *arg)
+{
+    (void)arg;
+
+    if (err->status == 0)
+    {
+        h_dis_char = chr->val_handle;
+        ESP_LOGI(BLE_TAG, "[DISC] Found DIS Firmware Rev char: val_handle=%u", chr->val_handle);
+        setup_step = 0;
+        setup_next_step();
+        return BLE_HS_EDONE;
+    }
+
+    if (err->status == BLE_HS_EDONE)
+    {
+        ESP_LOGW(BLE_TAG, "[DISC] DIS Firmware Rev char not found");
+        h_dis_char = 0;
+        setup_step = 0;
+        setup_next_step();
+    }
+
+    return 0;
+}
+
+static int on_disc_dis_svc(uint16_t conn, const struct ble_gatt_error *err,
+                           const struct ble_gatt_svc *svc, void *arg)
+{
+    (void)arg;
+
+    if (err->status == 0)
+    {
+        h_dis_svc_end = svc->end_handle;
+        ESP_LOGI(BLE_TAG, "[DISC] Found DIS svc: start=%u, end=%u", svc->start_handle, svc->end_handle);
+        ble_gattc_disc_chrs_by_uuid(conn, svc->start_handle, svc->end_handle, &UUID_CHR_FIRMWARE_REV.u, on_disc_dis_chr, NULL);
+        return BLE_HS_EDONE;
+    }
+
+    if (err->status == BLE_HS_EDONE)
+    {
+        ESP_LOGW(BLE_TAG, "[DISC] DIS svc not found (optional, continuing)");
+        h_dis_char = 0;
+        h_dis_svc_end = 0;
+        setup_step = 0;
+        setup_next_step();
+    }
+
+    return 0;
+}
+
 static int on_disc_batt_chr(uint16_t conn, const struct ble_gatt_error *err,
                             const struct ble_gatt_chr *chr, void *arg)
 {
@@ -791,8 +892,8 @@ static int on_disc_batt_chr(uint16_t conn, const struct ble_gatt_error *err,
     {
         h_batt_char = chr->val_handle;
         ESP_LOGI(BLE_TAG, "[DISC] Found BATT char: val_handle=%u, props=0x%02X", chr->val_handle, chr->properties);
-        setup_step = 0;
-        setup_next_step();
+        // Chain to DIS discovery (optional service)
+        ble_gattc_disc_svc_by_uuid(conn, &UUID_SVC_DIS.u, on_disc_dis_svc, NULL);
         return BLE_HS_EDONE;
     }
 
@@ -800,8 +901,8 @@ static int on_disc_batt_chr(uint16_t conn, const struct ble_gatt_error *err,
     {
         ESP_LOGW(BLE_TAG, "[DISC] Battery char not found");
         h_batt_char = 0;
-        setup_step = 0;
-        setup_next_step();
+        // Chain to DIS discovery (optional service)
+        ble_gattc_disc_svc_by_uuid(conn, &UUID_SVC_DIS.u, on_disc_dis_svc, NULL);
     }
 
     return 0;
@@ -970,9 +1071,12 @@ static void start_discovery_chain(void)
     h_flood_char = 0;
     h_rmleak_char = 0;
     h_batt_char = 0;
+    h_dis_char = 0;
     h_valve_svc_end = 0;
     h_flood_svc_end = 0;
     h_batt_svc_end = 0;
+    h_dis_svc_end = 0;
+    g_firmware_rev[0] = '\0';
 
     if (discovery_timeout_timer)
         xTimerReset(discovery_timeout_timer, 0);
@@ -1082,12 +1186,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             h_flood_char = 0;
             h_rmleak_char = 0;
             h_batt_char = 0;
+            h_dis_char = 0;
             h_valve_svc_end = 0;
             h_flood_svc_end = 0;
             h_batt_svc_end = 0;
+            h_dis_svc_end = 0;
             g_val_battery = 0;
             g_val_leak = false;
             g_val_state = -1;
+            g_firmware_rev[0] = '\0';
 
             if (ble_gap_conn_find(valve_conn_handle, &desc) == 0)
             {
@@ -1133,12 +1240,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         h_flood_char = 0;
         h_rmleak_char = 0;
         h_batt_char = 0;
+        h_dis_char = 0;
         h_valve_svc_end = 0;
         h_flood_svc_end = 0;
         h_batt_svc_end = 0;
+        h_dis_svc_end = 0;
         g_val_battery = 0;
         g_val_leak = false;
         g_val_state = -1;
+        g_firmware_rev[0] = '\0';
 
         clear_all_state_bits();
         memset(g_valve_mac, 0, sizeof(g_valve_mac));
@@ -1812,4 +1922,18 @@ void ble_valve_cancel_pending_close(void)
         g_pending_rmleak_cmd = -1;
         ESP_LOGI(BLE_TAG, "[CMD] Pending RMLEAK SET cancelled (leak resolved)");
     }
+}
+
+bool ble_valve_get_firmware_rev(char *buffer, size_t len)
+{
+    if (buffer == NULL || len == 0)
+        return false;
+    if (g_firmware_rev[0] == '\0')
+    {
+        buffer[0] = '\0';
+        return false;
+    }
+    strncpy(buffer, g_firmware_rev, len - 1);
+    buffer[len - 1] = '\0';
+    return true;
 }
