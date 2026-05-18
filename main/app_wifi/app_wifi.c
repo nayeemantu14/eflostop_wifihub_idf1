@@ -9,6 +9,7 @@
 #include "app_iothub.h"
 #include "app_ble_valve.h"
 #include "provisioning_manager/provisioning_manager.h"
+#include "hub_identity/hub_identity.h"
 
 TaskHandle_t wifiTaskHandle = NULL;
 static bool has_notified_azure = false;
@@ -19,6 +20,12 @@ void wifi_task(void *pvParameter);
 
 void app_wifi_start()
 {
+    /* Override the default AP SSID with a unique name derived from MAC.
+     * hub_identity_init() must have been called first. */
+    const char *sid = hub_identity_get_short_id();
+    snprintf((char *)wifi_settings.ap_ssid, MAX_SSID_SIZE, "WiFi-Hub-%s", sid);
+    ESP_LOGI(WIFI_TAG, "AP SSID: %s", (char *)wifi_settings.ap_ssid);
+
     wifi_manager_start();
     wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
     wifi_manager_set_callback(WM_EVENT_STA_DISCONNECTED, &cb_connection_lost);

@@ -1676,9 +1676,8 @@ static void ble_starter_task(void *param)
     ESP_LOGI(BLE_TAG, "[INIT] Signal received. Starting BLE stack...");
 
     int rc = nimble_port_init();
-    if (rc != ESP_OK)
-    {
-        ESP_LOGE(BLE_TAG, "[INIT] nimble_port_init failed: %d", rc);
+    if (rc != ESP_OK) {
+        ESP_LOGE(BLE_TAG, "[INIT] nimble_port_init failed (rc=%d)", rc);
         vTaskDelete(NULL);
         return;
     }

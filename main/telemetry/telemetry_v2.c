@@ -15,6 +15,7 @@
 #include "health_engine.h"
 #include "rules_engine.h"
 #include "offline_buffer.h"
+#include "hub_identity.h"
 
 #define TELEM_TAG "TELEMETRY_V2"
 
@@ -58,6 +59,10 @@ static cJSON *build_envelope(const char *type)
 
     cJSON *gw = cJSON_CreateObject();
     cJSON_AddStringToObject(gw, "id", s_gateway_id);
+    cJSON_AddStringToObject(gw, "short_id", hub_identity_get_short_id());
+    const char *hub_name = hub_identity_get_name();
+    if (hub_name[0])
+        cJSON_AddStringToObject(gw, "name", hub_name);
     cJSON_AddStringToObject(gw, "fw", TELEMETRY_FW_VERSION);
     cJSON_AddNumberToObject(gw, "uptime_s",
                             (double)(esp_timer_get_time() / 1000000));
@@ -519,6 +524,10 @@ void telemetry_v2_publish_valve_event(const char *event_name)
     cJSON_AddNumberToObject(data, "battery", ble_valve_get_battery());
     cJSON_AddBoolToObject(data, "leak_state", ble_valve_get_leak());
     cJSON_AddBoolToObject(data, "rmleak", ble_valve_get_rmleak_state());
+
+    char valve_fw[32];
+    if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
+        cJSON_AddStringToObject(data, "fw_version", valve_fw);
 
     cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "event");

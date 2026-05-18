@@ -25,6 +25,7 @@
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "systemservices/monitoring.h"
 #include "wifi_reset/reset_button.h"
+#include "hub_identity/hub_identity.h"
 
 /* ---------------------------------------------------------
  * Tags
@@ -44,6 +45,9 @@ void app_main(void)
 		ret = nvs_flash_init();
 	}
 	ESP_ERROR_CHECK(ret);
+
+	/* derive Gateway ID + Short ID from MAC, load hub name from NVS */
+	hub_identity_init();
 
 	/* start subsystems */
     setupLEDTask();

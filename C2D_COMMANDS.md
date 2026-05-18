@@ -542,9 +542,49 @@ Right now, commands are authenticated through the Azure IoT Hub device identity 
 
 ---
 
-# 8 Quick Reference
+# 8 Device Twin Properties
+
+## 8.1 Reported properties (device → cloud)
+
+Published on connect and after any state change:
+
+```json
+{
+  "fw_version": "1.3.0",
+  "gateway_id": "GW-50787D0E28C0",
+  "short_id": "28C0",
+  "hub_name": "Beach House",
+  "provisioned": true,
+  "valve_mac": "00:80:E1:27:F7:BB",
+  "lora_sensor_count": 1,
+  "ble_leak_sensor_count": 3,
+  "auto_close_enabled": true,
+  "trigger_mask": 7,
+  "uptime_s": 12345,
+  "free_heap": 98000
+}
+```
+
+## 8.2 Desired properties (cloud → device)
+
+| Property | Type | Range | Description |
+|----------|------|-------|-------------|
+| `snapshot_interval_s` | int | 60–3600 | Telemetry snapshot interval |
+| `hub_name` | string | max 31 chars | User-assigned friendly name for this hub |
+
+Example — name a hub:
+```json
+{ "hub_name": "Beach House" }
+```
+
+The hub saves the name to NVS and reports it back via Twin reported. Setting to `""` clears the name. The name survives WiFi reset but is cleared on `decommission all`.
+
+---
+
+# 9 Quick Reference
 
 ```
+C2D Commands:
 Command              Payload
 -----------------    ----------------------------------------
 valve_open           (none)
@@ -556,4 +596,10 @@ provision            { valve_mac, lora_sensors, ble_leak_... }
 decommission         { "target": "valve|lora|ble|all", ... }
 rules_config         { auto_close_enabled, trigger_mask }
 sensor_meta          { sensor_type, sensor_id, location_... }
+
+Device Twin Desired:
+Property             Range
+-----------------    ----------------------------------------
+snapshot_interval_s  60–3600 (seconds)
+hub_name             max 31 chars (friendly name)
 ```

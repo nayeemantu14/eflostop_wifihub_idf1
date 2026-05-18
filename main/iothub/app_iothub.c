@@ -29,6 +29,7 @@
 #include "commands/c2d_commands.h"
 #include "offline_buffer/offline_buffer.h"
 #include "dps_client/dps_client.h"
+#include "hub_identity/hub_identity.h"
 
 // External Queue from LoRa app
 extern QueueHandle_t lora_rx_queue;
@@ -36,7 +37,6 @@ extern QueueHandle_t lora_rx_queue;
 TaskHandle_t iothub_task_handle = NULL;
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool g_iot_hub_connected = false;
-static char g_gateway_id[32] = {0};
 
 // DPS-assigned credentials (populated at boot)
 static char g_hub_hostname[128] = {0};
@@ -278,7 +278,7 @@ __attribute__((unused))
 static char *build_valve_delta_json(void)
 {
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "gatewayID", g_gateway_id);
+    cJSON_AddStringToObject(root, "gatewayID", hub_identity_get_gateway_id());
 
     cJSON *devicesArr = cJSON_CreateArray();
     cJSON_AddItemToObject(root, "devices", devicesArr);
@@ -323,7 +323,7 @@ static char *build_lora_delta_json(const lora_packet_t *pkt)
     if (!pkt) return NULL;
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "gatewayID", g_gateway_id);
+    cJSON_AddStringToObject(root, "gatewayID", hub_identity_get_gateway_id());
 
     cJSON *devicesArr = cJSON_CreateArray();
     cJSON_AddItemToObject(root, "devices", devicesArr);
@@ -365,7 +365,7 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
     if (!evt) return NULL;
 
     cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "gatewayID", g_gateway_id);
+    cJSON_AddStringToObject(root, "gatewayID", hub_identity_get_gateway_id());
 
     cJSON *devicesArr = cJSON_CreateArray();
     cJSON_AddItemToObject(root, "devices", devicesArr);
@@ -511,6 +511,8 @@ static void handle_c2d_command(const char *data, size_t data_len)
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_ALL !!!");
             if (provisioning_decommission()) {
                 sensor_meta_clear_all();
+                hub_identity_clear();
+                dps_clear_cache();
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
 
@@ -600,7 +602,9 @@ static void publish_twin_reported(void)
     if (!root) return;
 
     cJSON_AddStringToObject(root, "fw_version", TELEMETRY_FW_VERSION);
-    cJSON_AddStringToObject(root, "gateway_id", g_gateway_id);
+    cJSON_AddStringToObject(root, "gateway_id", hub_identity_get_gateway_id());
+    cJSON_AddStringToObject(root, "short_id", hub_identity_get_short_id());
+    cJSON_AddStringToObject(root, "hub_name", hub_identity_get_name());
     cJSON_AddBoolToObject(root, "provisioned", provisioning_is_provisioned());
 
     char valve_mac[18];
@@ -671,6 +675,18 @@ static void handle_twin_desired(const char *data, int data_len)
             telemetry_v2_set_snapshot_interval(val);
         } else {
             ESP_LOGW(IOTHUB_TAG, "Twin: snapshot_interval_s %d out of range [60..3600]", val);
+        }
+    }
+
+    // Handle hub_name
+    cJSON *name = cJSON_GetObjectItem(root, "hub_name");
+    if (name && cJSON_IsString(name)) {
+        if (strlen(name->valuestring) <= HUB_NAME_MAX_LEN) {
+            hub_identity_set_name(name->valuestring);
+            ESP_LOGI(IOTHUB_TAG, "Twin: hub_name = '%s'", hub_identity_get_name());
+        } else {
+            ESP_LOGW(IOTHUB_TAG, "Twin: hub_name too long (%d chars, max %d)",
+                     (int)strlen(name->valuestring), HUB_NAME_MAX_LEN);
         }
     }
 
@@ -819,15 +835,6 @@ static void initialize_sntp(void)
     }
 }
 
-static void init_gateway_id(void)
-{
-    uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
-    snprintf(g_gateway_id, sizeof(g_gateway_id), "GW-%02X%02X%02X%02X%02X%02X",
-             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    ESP_LOGI(IOTHUB_TAG, "Gateway ID: %s", g_gateway_id);
-}
-
 // ---------------------------------------------------------------------------
 // Main IoT Hub task
 // ---------------------------------------------------------------------------
@@ -862,14 +869,13 @@ void iothub_task(void *param)
         ESP_LOGI(IOTHUB_TAG, "Hub is UNPROVISIONED - waiting for provisioning JSON from Azure");
     }
 
-    init_gateway_id();
     initialize_sntp();
 
     // ---- DPS Registration (or load from NVS cache) ----
     dps_assignment_t dps = {0};
     int dps_retries = 0;
     while (dps_register(AZURE_DPS_ID_SCOPE, AZURE_DPS_GROUP_KEY,
-                        g_gateway_id, &dps) != ESP_OK) {
+                        hub_identity_get_gateway_id(), &dps) != ESP_OK) {
         dps_retries++;
         int backoff = (dps_retries < 5) ? dps_retries * 5 : 30;
         ESP_LOGW(IOTHUB_TAG, "DPS failed (attempt %d), retry in %ds",
@@ -910,7 +916,7 @@ void iothub_task(void *param)
     offline_buffer_init();
 
     // Initialize telemetry v2 (creates snapshot timer + queue)
-    telemetry_v2_init(mqtt_client, g_device_id, g_gateway_id,
+    telemetry_v2_init(mqtt_client, g_device_id, hub_identity_get_gateway_id(),
                       g_telem_lora_cache, g_telem_ble_cache);
 
     // Drain queues before adding to QueueSet
