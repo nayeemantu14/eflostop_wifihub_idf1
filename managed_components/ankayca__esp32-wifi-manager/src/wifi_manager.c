@@ -1022,7 +1022,14 @@ void wifi_manager( void * pvParameters ){
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 				if(! (uxBits & WIFI_MANAGER_SCAN_BIT) ){
 					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
-					ESP_ERROR_CHECK(esp_wifi_scan_start(&scan_config, false));
+					/* LOCAL PATCH: scan can fail transiently with ESP_ERR_WIFI_STATE when
+					 * a connect/disconnect is in flight (captive-portal race). Do NOT abort —
+					 * clear the bit so a later scan request can retry. */
+					esp_err_t scan_err = esp_wifi_scan_start(&scan_config, false);
+					if(scan_err != ESP_OK){
+						ESP_LOGW(TAG, "esp_wifi_scan_start failed (%s) — skipping scan", esp_err_to_name(scan_err));
+						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
+					}
 				}
 
 				/* callback */
@@ -1215,6 +1222,16 @@ void wifi_manager( void * pvParameters ){
 
 			case WM_ORDER_START_AP:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_START_AP");
+
+				/* LOCAL PATCH: stop the auto-reconnect retry timer while the captive
+				 * portal is up. Otherwise it keeps firing ORDER_CONNECT_STA and the
+				 * resulting esp_wifi_connect() races with captive-portal scan requests,
+				 * producing ESP_ERR_WIFI_STATE in WM_ORDER_START_WIFI_SCAN. The timer
+				 * is naturally re-armed by WM_EVENT_STA_DISCONNECTED if a later STA
+				 * attempt fails. */
+				if(xTimerIsTimerActive(wifi_manager_retry_timer) == pdTRUE){
+					xTimerStop(wifi_manager_retry_timer, (TickType_t)0);
+				}
 
 				ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
