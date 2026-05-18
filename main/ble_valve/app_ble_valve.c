@@ -423,11 +423,15 @@ static void notify_hub_update(ble_update_type_t update_type)
     {
         (void)xQueueSend(ble_update_queue, &update_type, 0);
     }
-    // Health engine: track valve connectivity
-    if (update_type == BLE_UPD_CONNECTED)
-        health_post_valve_event(true);
-    else if (update_type == BLE_UPD_DISCONNECTED)
+    /* Health engine: every notification proves the valve link is alive, so
+     * any data-bearing update (STATE/LEAK/RMLEAK/BATTERY) refreshes
+     * last_seen_ms — not just CONNECTED. Without this, last_seen_age_s in
+     * the snapshot would grow unboundedly even while battery NOTIFYs and
+     * state changes are arriving every few minutes. */
+    if (update_type == BLE_UPD_DISCONNECTED)
         health_post_valve_event(false);
+    else if (update_type != BLE_UPD_NONE)
+        health_post_valve_event(true);
 }
 
 static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf *om, void *arg)

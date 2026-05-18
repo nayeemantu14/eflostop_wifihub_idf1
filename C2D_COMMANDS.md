@@ -475,6 +475,54 @@ Legacy text: `SENSOR_META:{"sensor_type":"ble","sensor_id":"00:80:E1:27:99:E7","
 
 ---
 
+## 4.10 set_hub_name
+
+Sets or clears the user-friendly name for this hub. This is the same name that can also be set via Device Twin desired property `hub_name` — both paths write to NVS and sync the Twin reported properties.
+
+Typical use: the mobile app asks the user to name their hub during setup and sends this command for immediate confirmation via `cmd_ack`.
+
+| Field | Value |
+|-------|-------|
+| `cmd` | `"set_hub_name"` |
+| `payload.name` | string, max 31 chars (required). Empty string `""` clears the name. |
+
+Example — set a name:
+```json
+{
+  "schema": "eflostop.cmd",
+  "ver": 1,
+  "id": "name-001",
+  "cmd": "set_hub_name",
+  "payload": { "name": "Kitchen Hub" }
+}
+```
+
+Example — clear the name:
+```json
+{
+  "schema": "eflostop.cmd",
+  "ver": 1,
+  "id": "name-002",
+  "cmd": "set_hub_name",
+  "payload": { "name": "" }
+}
+```
+
+What happens:
+1. Name is saved to NVS (persists across reboots, survives WiFi reset, cleared on `decommission all`).
+2. Twin reported properties are updated immediately so the cloud stays in sync.
+3. The name appears in telemetry snapshots under `gateway.name`.
+
+Errors:
+| Detail | Why |
+|--------|-----|
+| `missing 'name' field` | Payload is missing or has no `name` key |
+| `name too long (max 31 chars)` | The name exceeds 31 characters |
+
+No legacy text equivalent. Envelope format only.
+
+---
+
 # 5 Legacy Text Commands
 
 These are the old plain-text commands. They still work but you won't get a `cmd_ack` back since there's no correlation ID.
@@ -596,6 +644,7 @@ provision            { valve_mac, lora_sensors, ble_leak_... }
 decommission         { "target": "valve|lora|ble|all", ... }
 rules_config         { auto_close_enabled, trigger_mask }
 sensor_meta          { sensor_type, sensor_id, location_... }
+set_hub_name         { "name": "max 31 chars" }
 
 Device Twin Desired:
 Property             Range

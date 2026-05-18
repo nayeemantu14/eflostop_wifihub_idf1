@@ -27,6 +27,10 @@
 #define NVS_OVERRIDE_NAMESPACE       "rules_eng"
 #define NVS_KEY_OVR_STATE            "ovr_state"
 #define NVS_KEY_OVR_EXPIRY           "ovr_expiry"
+/* Persist the incident latch so a hub reboot doesn't lose the fact that
+ * a leak incident was active. Combined with the valve's persisted RMLEAK,
+ * this lets us detect an off-line physical override on reconnect. */
+#define NVS_KEY_INCIDENT             "incident"
 
 // Minimum epoch value to consider time "synced" (2024-01-01 00:00:00 UTC)
 #define EPOCH_VALID_THRESHOLD        1704067200
@@ -92,6 +96,40 @@ static void override_save_to_nvs(void)
     nvs_close(h);
     ESP_LOGI(RULES_TAG, "NVS: override state=%d expiry=%ld saved",
              g_override_state, (long)g_override_window_expiry);
+}
+
+/* Persist the incident latch. Two callsites (`incident_save_to_nvs` / load)
+ * mirror the override pattern. Write rate is bounded: incidents transition
+ * at most a few times per leak event, so NVS wear is negligible. */
+static void incident_save_to_nvs(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGE(RULES_TAG, "NVS open failed for incident save: %s", esp_err_to_name(err));
+        return;
+    }
+    nvs_set_u8(h, NVS_KEY_INCIDENT, g_leak_incident_active ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGD(RULES_TAG, "NVS: incident=%d saved", g_leak_incident_active);
+}
+
+static void incident_load_from_nvs(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        g_leak_incident_active = false;
+        return;
+    }
+    uint8_t v = 0;
+    err = nvs_get_u8(h, NVS_KEY_INCIDENT, &v);
+    nvs_close(h);
+    g_leak_incident_active = (err == ESP_OK && v != 0);
+    if (g_leak_incident_active) {
+        ESP_LOGW(RULES_TAG, "NVS: restored incident latch — pending reconcile with valve");
+    }
 }
 
 static void override_load_from_nvs(void)
@@ -329,6 +367,11 @@ void rules_engine_init(void)
     // Restore override window from NVS (survives power cycle)
     override_load_from_nvs();
 
+    /* Restore the incident latch so a hub reboot mid-incident doesn't lose
+     * track of an in-flight leak. Final disambiguation happens at the next
+     * valve reconnect in rules_engine_on_valve_connected(). */
+    incident_load_from_nvs();
+
     g_initialized = true;
 }
 
@@ -387,6 +430,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
         ESP_LOGW(RULES_TAG, "LEAK INCIDENT latched by %s sensor %s",
                  source_to_str(source), source_id ? source_id : "unknown");
         g_leak_incident_active = true;
+        incident_save_to_nvs();
     }
 
     // 24h override window: block automatic valve closure but allow leak tracking.
@@ -458,9 +502,17 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // Issue valve commands only if connected — avoids stale pending commands
     // that would fire on reconnect even if the leak has since cleared.
     // If disconnected, the reconciliation (on_valve_connected) handles it.
+    //
+    // Order matters for telemetry correctness: ble_valve_set_rmleak() silently
+    // updates the cached RMLEAK state, then ble_valve_close() updates the
+    // cached valve state AND wakes the iothub task via BLE_UPD_STATE. By
+    // issuing RMLEAK first, the cached RMLEAK is already true when the
+    // valve_state_changed event is built, so it correctly reports rmleak=true
+    // alongside the close. (Reverse order races the telemetry build against
+    // the RMLEAK cache update and emits rmleak=false on the close event.)
     if (ble_valve_is_connected()) {
-        ble_valve_close();
         ble_valve_set_rmleak(true);
+        ble_valve_close();
     } else {
         ble_valve_connect();  // Trigger scan; reconciliation closes on connect
     }
@@ -575,6 +627,7 @@ void rules_engine_reset_leak_incident(void)
     // Always clear hub-side state, even if not latched (handles reboot scenario)
     bool was_active = g_leak_incident_active;
     g_leak_incident_active = false;
+    incident_save_to_nvs();
     g_auto_close_triggered = false;
     g_all_clear_since = 0;
     g_active_leak_count = 0;
@@ -658,20 +711,44 @@ bool rules_engine_cancel_override(void)
                      g_active_leak_count);
 
             g_leak_incident_active = true;  // Re-latch incident for auto-close path
+            incident_save_to_nvs();
             g_auto_close_triggered = true;
             g_rmleak_assert_tick = xTaskGetTickCount();
             g_all_clear_since = 0;
 
             xSemaphoreGive(g_mutex);
 
+            /* RMLEAK before close — see comment in rules_engine_evaluate_leak.
+             * Ensures the valve_state_changed event reports rmleak=true. */
             if (ble_valve_is_connected()) {
-                ble_valve_close();
                 ble_valve_set_rmleak(true);
+                ble_valve_close();
             } else {
                 ble_valve_connect();
             }
             return true;
         }
+    }
+
+    /* No active leaks at cancel time. The leak episode is over — wipe residual
+     * incident state so the next leak starts a fresh auto-close cycle.
+     *
+     * Without this, rules_engine_tick() would still see g_leak_incident_active
+     * latched from a since-cleared leak during the window, plus valve RMLEAK=0
+     * (left over from the user's physical override that *started* the window),
+     * and misread that as a brand-new physical override on the very next leak
+     * NOTIFY — silently re-arming the 24h window that the user just cancelled.
+     *
+     * g_rmleak_assert_tick is also reset so the next ble_valve_set_rmleak(true)
+     * gets a fresh grace period instead of inheriting a stale tick from a
+     * prior auto-close many seconds ago. */
+    bool needs_save = g_leak_incident_active;
+    g_leak_incident_active = false;
+    g_auto_close_triggered = false;
+    g_all_clear_since = 0;
+    g_rmleak_assert_tick = 0;
+    if (needs_save) {
+        incident_save_to_nvs();
     }
 
     xSemaphoreGive(g_mutex);
@@ -728,6 +805,7 @@ void rules_engine_on_valve_connected(void)
         if (!g_leak_incident_active && valve_rmleak) {
             ESP_LOGW(RULES_TAG, "Reconnected: valve RMLEAK active + override window — re-latching incident");
             g_leak_incident_active = true;
+            incident_save_to_nvs();
         }
         ESP_LOGI(RULES_TAG, "Reconnected: override window active — skipping auto-close");
         xSemaphoreGive(g_mutex);
@@ -744,6 +822,7 @@ void rules_engine_on_valve_connected(void)
                      g_active_leak_count);
 
             g_leak_incident_active = true;
+            incident_save_to_nvs();
             g_auto_close_triggered = true;
             g_rmleak_assert_tick = xTaskGetTickCount();
             g_all_clear_since = 0;
@@ -764,8 +843,9 @@ void rules_engine_on_valve_connected(void)
 
             xSemaphoreGive(g_mutex);
 
-            ble_valve_close();
+            /* RMLEAK before close — see comment in rules_engine_evaluate_leak. */
             ble_valve_set_rmleak(true);
+            ble_valve_close();
             return;
         }
     }
@@ -775,17 +855,40 @@ void rules_engine_on_valve_connected(void)
     bool hub_active = g_leak_incident_active;
 
     if (hub_active && !valve_rmleak) {
-        // Hub has incident but valve lost RMLEAK (valve rebooted) — re-assert
-        ESP_LOGW(RULES_TAG, "Reconnected: hub incident active, valve RMLEAK clear — re-asserting");
-        g_rmleak_assert_tick = xTaskGetTickCount();
-        xSemaphoreGive(g_mutex);
-        ble_valve_set_rmleak(true);
+        /* Hub had an incident, valve reports RMLEAK cleared. Two ways this
+         * can arise — disambiguate via valve_state:
+         *
+         *  (a) valve_state == OPEN: user physically overrode while the hub
+         *      was offline. With the new firmware, processLongPress atomically
+         *      opens the valve AND clears RMLEAK + notifies the hub. If the
+         *      hub was rebooting at the moment of NOTIFY, the override would
+         *      otherwise be lost. Start the 24h grace window retroactively
+         *      (from now — we don't know the exact override moment).
+         *
+         *  (b) valve_state == CLOSED: valve rebooted and lost RMLEAK (e.g.,
+         *      Debug build, pin reset cleared BKP0R). Re-assert RMLEAK so the
+         *      interlock comes back. */
+        if (valve_state == 1) {
+            ESP_LOGW(RULES_TAG, "Reconnected: hub incident + valve open + RMLEAK clear — inferring physical override, starting 24h window");
+            g_leak_incident_active = false;
+            incident_save_to_nvs();
+            g_auto_close_triggered = false;
+            g_all_clear_since = 0;
+            start_override_window();    /* writes its own NVS entries */
+            xSemaphoreGive(g_mutex);
+        } else {
+            ESP_LOGW(RULES_TAG, "Reconnected: hub incident active, valve closed + RMLEAK clear — re-asserting");
+            g_rmleak_assert_tick = xTaskGetTickCount();
+            xSemaphoreGive(g_mutex);
+            ble_valve_set_rmleak(true);
+        }
     } else if (!hub_active && valve_rmleak) {
         // Valve has RMLEAK but hub lost incident (hub rebooted).
         // Conservatively re-latch the incident. If the valve has RMLEAK but hub
         // doesn't know about it, the user will need to send LEAK_RESET to clear.
         ESP_LOGW(RULES_TAG, "Reconnected: valve RMLEAK active, hub incident clear — re-latching incident");
         g_leak_incident_active = true;
+        incident_save_to_nvs();
         xSemaphoreGive(g_mutex);
     } else if (hub_active && valve_rmleak) {
         ESP_LOGI(RULES_TAG, "Reconnected: hub + valve RMLEAK in sync");
@@ -836,15 +939,17 @@ void rules_engine_tick(void)
                              g_active_leak_count);
 
                     g_leak_incident_active = true;
+                    incident_save_to_nvs();
                     g_auto_close_triggered = true;
                     g_rmleak_assert_tick = xTaskGetTickCount();
                     g_all_clear_since = 0;
 
                     xSemaphoreGive(g_mutex);
 
+                    /* RMLEAK before close — see comment in rules_engine_evaluate_leak. */
                     if (ble_valve_is_connected()) {
-                        ble_valve_close();
                         ble_valve_set_rmleak(true);
+                        ble_valve_close();
                     } else {
                         ble_valve_connect();
                     }
@@ -867,6 +972,7 @@ void rules_engine_tick(void)
             ESP_LOGW(RULES_TAG, "AUTO-CLEAR: all sensors clear for %ds — clearing RMLEAK",
                      AUTO_CLEAR_TIMEOUT_MS / 1000);
             g_leak_incident_active = false;
+            incident_save_to_nvs();
             g_auto_close_triggered = false;
             g_all_clear_since = 0;
 
@@ -914,6 +1020,7 @@ void rules_engine_tick(void)
             // water access, but leaks continue to be reported to the cloud.
             ESP_LOGW(RULES_TAG, "RMLEAK cleared externally (valve override) — starting 24h override window");
             g_leak_incident_active = false;
+            incident_save_to_nvs();
             g_auto_close_triggered = false;
             g_all_clear_since = 0;
 
@@ -962,4 +1069,20 @@ int32_t rules_engine_get_override_remaining_s(void)
         xSemaphoreGive(g_mutex);
     }
     return remaining;
+}
+
+void rules_engine_clear_persistent_state(void)
+{
+    /* No mutex needed — used at decommission_all just before esp_restart.
+     * Wipes both incident latch and override window NVS entries so the next
+     * provisioning cycle starts from a known-clean slate. */
+    nvs_handle_t h;
+    if (nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+        nvs_erase_key(h, NVS_KEY_OVR_STATE);
+        nvs_erase_key(h, NVS_KEY_OVR_EXPIRY);
+        nvs_erase_key(h, NVS_KEY_INCIDENT);
+        nvs_commit(h);
+        nvs_close(h);
+        ESP_LOGI(RULES_TAG, "NVS: rules-engine persistent state cleared");
+    }
 }

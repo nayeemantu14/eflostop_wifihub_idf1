@@ -41,6 +41,7 @@ typedef struct {
 #define C2D_CMD_SENSOR_META         "sensor_meta"
 #define C2D_CMD_PROVISION           "provision"
 #define C2D_CMD_OVERRIDE_CANCEL     "override_cancel"
+#define C2D_CMD_SET_HUB_NAME       "set_hub_name"
 
 // ---------------------------------------------------------------------------
 // API

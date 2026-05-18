@@ -104,6 +104,13 @@ int32_t rules_engine_get_override_remaining_s(void);
  */
 bool rules_engine_cancel_override(void);
 
+/**
+ * @brief Wipe all persisted rules-engine state in NVS (incident latch + override
+ *        window). Call from decommission_all so a re-provisioned hub doesn't
+ *        inherit a stale incident from the previous deployment.
+ */
+void rules_engine_clear_persistent_state(void);
+
 #ifdef __cplusplus
 }
 #endif

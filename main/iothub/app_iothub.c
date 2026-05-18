@@ -402,6 +402,8 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 // C2D command dispatch (uses c2d_commands parser)
 // ---------------------------------------------------------------------------
 
+static void publish_twin_reported(void);  // forward declaration
+
 static void handle_c2d_command(const char *data, size_t data_len)
 {
     c2d_command_t cmd;
@@ -513,6 +515,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 sensor_meta_clear_all();
                 hub_identity_clear();
                 dps_clear_cache();
+                rules_engine_clear_persistent_state();
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
 
@@ -577,6 +580,25 @@ static void handle_c2d_command(const char *data, size_t data_len)
             success = false;
             error_msg = "provisioning failed";
         }
+    }
+    // ---- Hub Identity ----
+    else if (strcmp(cmd.cmd, C2D_CMD_SET_HUB_NAME) == 0) {
+        ESP_LOGI(IOTHUB_TAG, "Command: SET_HUB_NAME");
+        cJSON *pl = cmd.payload_json ? cJSON_Parse(cmd.payload_json) : NULL;
+        const char *new_name = pl ? cJSON_GetStringValue(cJSON_GetObjectItem(pl, "name")) : NULL;
+
+        if (!new_name) {
+            success = false;
+            error_msg = "missing 'name' field";
+        } else if (strlen(new_name) > HUB_NAME_MAX_LEN) {
+            success = false;
+            error_msg = "name too long (max 31 chars)";
+        } else {
+            hub_identity_set_name(new_name);
+            ESP_LOGI(IOTHUB_TAG, "Hub name set to: '%s'", hub_identity_get_name());
+            publish_twin_reported();
+        }
+        if (pl) cJSON_Delete(pl);
     }
     else {
         ESP_LOGW(IOTHUB_TAG, "Unknown command: %s", cmd.cmd);
