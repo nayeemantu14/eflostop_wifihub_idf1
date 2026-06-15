@@ -12,7 +12,7 @@ extern "C" {
 #endif
 
 #define TELEMETRY_SCHEMA        "eflostop.v2"
-#define TELEMETRY_FW_VERSION    "1.3.0"
+#define TELEMETRY_FW_VERSION    "1.4.0"
 #define SNAPSHOT_INTERVAL_MS    (5 * 60 * 1000)   // 5 minutes
 
 // ---------------------------------------------------------------------------

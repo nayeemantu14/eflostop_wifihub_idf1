@@ -452,8 +452,15 @@ static void handle_c2d_command(const char *data, size_t data_len)
     // ---- Leak reset ----
     else if (strcmp(cmd.cmd, C2D_CMD_LEAK_RESET) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: LEAK_RESET");
-        rules_engine_reset_leak_incident();
-        ESP_LOGI(IOTHUB_TAG, "Leak incident cleared, RMLEAK reset");
+        // Refused while a leak is still active — clearing the interlock then
+        // would let valve_open restore water during a live leak with no
+        // override window. During-leak water must go through override_enable.
+        if (!rules_engine_reset_leak_incident()) {
+            success = false;
+            error_msg = "A leak is still active. Fix the leak first, or use override to open the valve during a leak.";
+        } else {
+            ESP_LOGI(IOTHUB_TAG, "Leak incident cleared, RMLEAK reset");
+        }
     }
     // ---- Decommission ----
     else if (strcmp(cmd.cmd, C2D_CMD_DECOMMISSION) == 0) {
@@ -548,6 +555,33 @@ static void handle_c2d_command(const char *data, size_t data_len)
         if (!rules_engine_cancel_override()) {
             success = false;
             error_msg = "override cancel failed";
+        }
+    }
+    // ---- Override enable (remote equivalent of the physical valve button) ----
+    // Opens the valve during an active leak and starts the 24h water-access
+    // override window. Same end-state as a physical button press; see §4.4.3.
+    else if (strcmp(cmd.cmd, C2D_CMD_OVERRIDE_ENABLE) == 0) {
+        ESP_LOGI(IOTHUB_TAG, "Command: OVERRIDE_ENABLE");
+        override_enable_result_t r = rules_engine_enable_override_remote();
+        if (r != OVERRIDE_ENABLE_OK) {
+            success = false;
+            switch (r) {
+            case OVERRIDE_ENABLE_ERR_NO_INCIDENT:
+                error_msg = "No active leak to override. Use the normal Open Valve control.";
+                break;
+            case OVERRIDE_ENABLE_ERR_VALVE_FLOOD:
+                error_msg = "Water detected at the valve. It can't be opened remotely until the valve area is dry.";
+                break;
+            case OVERRIDE_ENABLE_ERR_VALVE_DISCONNECTED:
+                error_msg = "The valve isn't responding. Check its power and connection, then try again.";
+                break;
+            case OVERRIDE_ENABLE_ERR_NOT_PROVISIONED:
+                error_msg = "No valve is set up for this hub.";
+                break;
+            default:
+                error_msg = "Something went wrong applying the override. Your water state is unchanged. Try again.";
+                break;
+            }
         }
     }
     // ---- Rules config ----

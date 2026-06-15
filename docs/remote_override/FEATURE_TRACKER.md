@@ -25,16 +25,44 @@ start. Full telemetry so the app's existing override banner / countdown / cancel
 | `docs/remote_override/FEATURE_TRACKER.md` | this file | ✅ live |
 | `docs/remote_override/DECISIONS.md` | Gate 2 Q&A + decision record | ⏳ after answers |
 | `docs/remote_override/PLAN.md` | Gate 3 phased plan | ⏳ |
-| `docs/remote_override/WATTS_DIGITAL_SPEC.md` | external handover (NO LoRa) | ⏳ Phase 1 |
-| `docs/remote_override/TEST_PLAN.md` | bench procedures | ⏳ |
+| `docs/remote_override/WATTS_DIGITAL_SPEC.md` | external handover (NO LoRa) | ✅ DONE (lean) |
+| `docs/remote_override/TEST_PLAN.md` | bench procedures | ✅ DONE |
 
 ## Gate status
 - **GATE 1 — Discovery:** ✅ COMPLETE. `FINDINGS.md`.
 - **GATE 2 — Clarification questions:** ✅ ANSWERED & RECORDED in `DECISIONS.md` (command renamed `override_enable`; +9 modifications; +Gate 3 review amendments).
 - **GATE 3 — Phased plan:** 🔵 PRESENTED for approval. `PLAN.md` written, both sub-agent reviews attached verbatim. **Awaiting per-phase approval. Phase 3 (valve FW) dropped.** No firmware touched.
-- **PHASE 1 — Contract freeze + Watts spec + OPEN-VERIFY-1:** ⏳ awaiting approval to start.
-- **PHASE 2 — Hub firmware:** ⏳ blocked on Phase 1.
-- **PHASE 3 — Docs/handover:** ⏳ blocked on Phase 2.
+- **PHASE 1 — Contract freeze + Watts spec:** ✅ `WATTS_DIGITAL_SPEC.md` written (lean, LoRa-clean, redundancy-with-button framing). OPEN-VERIFY-1 still pending (user-run; capability story uses `gateway.fw≥1.4.0` as primary gate so it doesn't block).
+- **PHASE 2 — Hub firmware:** ✅ IMPLEMENTED (5 files, +152/−6). **Not yet built/flashed/bench-tested** — user does that (assistant cannot run idf.py). Not committed (awaiting user review).
+- **PHASE 3 — Docs/handover (SRS inserts, TEST_PLAN, evidence):** ⏳ pending after bench validation.
+
+## Phase 2 firmware change set (implemented, uncommitted)
+- `main/telemetry/telemetry_v2.h`: `TELEMETRY_FW_VERSION` `1.3.0`→`1.4.0` (capability signal).
+- `main/commands/c2d_commands.h`: `#define C2D_CMD_OVERRIDE_ENABLE "override_enable"`.
+- `main/rules_engine/rules_engine.h`: `override_enable_result_t` enum + `rules_engine_enable_override_remote()` decl.
+- `main/rules_engine/rules_engine.c`: `start_override_window(const char *trigger)` (+2 callers pass `"button"`);
+  event fields now `{trigger, expires_ts, remaining_s}` (dropped `expiry_epoch`/`duration_h`); `#ifndef`
+  duration guard (`-D OVERRIDE_WINDOW_DURATION_S=<s>` for bench); new `rules_engine_enable_override_remote()`
+  (preconditions→ window→clear RMLEAK→open; bounded ≤10s reconnect).
+- `main/iothub/app_iothub.c`: `override_enable` dispatch branch → maps result enum to the 5 frozen `error.detail` strings.
+- Known minor transient (noted for TEST_PLAN): if valve was disconnected WITH active leaks and reconnects during
+  the ≤10s wait, `on_valve_connected` Pri-1 may briefly close+RMLEAK before the handler opens; end-state is
+  correct (open, window active). Acceptable for MVP.
+
+## Bench-test hardening (2026-06-12) — leak_reset interlock guard (implemented, uncommitted)
+Found during bench testing: `leak_reset` + `valve_open` with a remote sensor still wet opened the valve,
+bypassing the override window. **Fix:** `leak_reset` now refuses while any leak source is wet
+(`g_active_leak_count > 0`). `rules_engine_reset_leak_incident()` returns `bool`; dispatcher emits cmd_ack
+error `"A leak is still active. Fix the leak first, or use override to open the valve during a leak."`. Guarding
+leak_reset alone closes the hole (RMLEAK stays set → valve blocks the open). Files: rules_engine.c/.h,
+app_iothub.c. See DECISIONS.md §"Bench-test hardening". **Needs reflash + TC-N10 bench re-test.** Spec note for
+Phase 3: add the error row to SRS §4.4.1/§5.3.
+
+## Bench test progress (T0–T14, against the as-built firmware)
+PASSED: T0 (fw 1.4.0), T1 (happy path), T2 (no_incident), T3 (valve_flood_active + valve_flood_detected),
+T4 (valve_disconnected), T6 (idempotent refresh), T9 (override_cancel wet→close / dry→stay-open), snapshot
+override_active/remaining, T10 (reboot persistence, informal). REMAINING: T7 (button↔app parity), TC-N10
+(leak_reset guard — needs the reflash above), optional T11 (no-network reboot), T12 (shortened-expiry).
 
 ## SCOPE — LEAN (user directive 2026-06-12)
 Ship **only** the override feature through the app. SRS edit trimmed to ~1 page: §5.3 command row, compact

@@ -14,6 +14,17 @@ typedef enum {
     LEAK_SOURCE_VALVE_FLOOD
 } leak_source_t;
 
+// Result of a remote (C2D) override_enable request. Maps 1:1 to the cmd_ack
+// error.detail strings produced by the IoT Hub command dispatcher.
+typedef enum {
+    OVERRIDE_ENABLE_OK = 0,
+    OVERRIDE_ENABLE_ERR_NO_INCIDENT,        // No active leak incident / RMLEAK to override
+    OVERRIDE_ENABLE_ERR_VALVE_FLOOD,        // Valve's own flood probe is wet (absolute floor)
+    OVERRIDE_ENABLE_ERR_VALVE_DISCONNECTED, // Valve unreachable after bounded reconnect
+    OVERRIDE_ENABLE_ERR_NOT_PROVISIONED,    // Hub unprovisioned / no valve configured
+    OVERRIDE_ENABLE_ERR_INTERNAL            // Mutex timeout / not initialized
+} override_enable_result_t;
+
 /**
  * @brief Initialize the rules engine. Call after provisioning_init().
  *        Loads override window state from NVS if previously persisted.
@@ -57,8 +68,18 @@ bool rules_engine_is_leak_incident_active(void);
  * @brief Reset the leak incident latch and clear RMLEAK on the valve.
  *        Also cancels any active 24h override window.
  *        Does NOT open the valve — opening requires a separate command.
+ *
+ * GUARDED: refuses (returns false, clears nothing) while any leak source is
+ * still actively wet. Clearing the interlock then would let a follow-up
+ * valve_open restore water during a live leak with NO override window and no
+ * protection. The sanctioned during-leak water path is
+ * rules_engine_enable_override_remote() (which starts the guarded 24h window).
+ * Mirrors the 30s auto-clear, which likewise requires all sensors clear.
+ *
+ * @return true if the incident was cleared (or there was nothing to clear);
+ *         false if refused because a leak is still active (or on error).
  */
-void rules_engine_reset_leak_incident(void);
+bool rules_engine_reset_leak_incident(void);
 
 /**
  * @brief Re-assert RMLEAK on valve if a leak incident is active.
@@ -103,6 +124,26 @@ int32_t rules_engine_get_override_remaining_s(void);
  * @return true on success (always succeeds, even if no window was active)
  */
 bool rules_engine_cancel_override(void);
+
+/**
+ * @brief Remotely start the 24h water-access override — the app-initiated
+ *        equivalent of a physical valve-button override (SRS §4.4.3).
+ *
+ * Identical end-state to the button: clears the leak incident latch, starts the
+ * 24h window (auto-close blocked, leaks still reported), clears the valve RMLEAK
+ * interlock and opens the valve. Order is window → clear RMLEAK → open so the
+ * hub does not race-close or misread the resulting RMLEAK 1->0 as a physical
+ * override. Idempotent: refreshes an already-active window and re-emits the
+ * "water_access_override_enabled" event (trigger="c2d_command").
+ *
+ * Preconditions are checked before any state changes; the window starts only on
+ * successful execution, never on mere receipt. Blocks up to ~10s attempting a
+ * BLE reconnect if the valve is not ready.
+ *
+ * @return OVERRIDE_ENABLE_OK on success, or an error code the dispatcher maps to
+ *         a frozen cmd_ack error.detail string.
+ */
+override_enable_result_t rules_engine_enable_override_remote(void);
 
 /**
  * @brief Wipe all persisted rules-engine state in NVS (incident latch + override

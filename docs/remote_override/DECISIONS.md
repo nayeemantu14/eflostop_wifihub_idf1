@@ -196,6 +196,45 @@ in the interim.
 
 ---
 
+## Bench-test hardening (2026-06-12) — `leak_reset` interlock guard
+
+**Finding (bench).** With a *remote* sensor still actively leaking, the sequence `leak_reset` → `valve_open`
+opened the valve — restoring water during a live leak with **no override window and no protection**, bypassing
+the sanctioned `override_enable` path and all its guardrails.
+
+**Root cause.** `rules_engine_reset_leak_incident()` cleared RMLEAK **unconditionally**. Because the leak was a
+*remote sensor* (the valve's own flood probe was dry), the valve had no local reason to refuse, so the
+follow-up `valve_open` succeeded. This was **inconsistent** with the 30 s auto-clear, which *does* require all
+sensors clear before releasing RMLEAK. (Pre-existing gap — predates `override_enable`.)
+
+**Decision.** Guard `leak_reset`: **refuse while any leak source is still wet** (`g_active_leak_count > 0`).
+- `rules_engine_reset_leak_incident()` now returns `bool` and clears nothing when refused.
+- The dispatcher maps `false` → `cmd_ack status:error`, frozen `error.detail`:
+  `A leak is still active. Fix the leak first, or use override to open the valve during a leak.`
+- **Guarding `leak_reset` alone fully closes the hole**: when refused, RMLEAK stays asserted, and the valve's
+  own interlock then blocks the follow-up `valve_open` (force-closes an open while `remote_leak_active` is set).
+  No change to `valve_open` needed.
+
+**Resulting model — the three RMLEAK-clear paths are now consistent:**
+| Path | Guard |
+|---|---|
+| Auto-clear (30 s) | all sensors clear ✓ |
+| `override_enable` | starts the guarded 24 h window ✓ (the **only** during-leak water path) |
+| `leak_reset` | **now: refused while a sensor is wet** (after-leak recovery only) |
+
+**Behaviour change to note for backend/app.** `leak_reset` gains a new (additive) `cmd_ack` error. The app
+should route the user to **Override** when it sees it. Also: `leak_reset` sent during an active override window
+*with a wet sensor* now refuses — to exit a window, use `override_cancel` (unchanged), not `leak_reset`.
+
+**Files.** `main/rules_engine/rules_engine.c` (guard + `bool` return), `rules_engine.h` (decl + doc),
+`main/iothub/app_iothub.c` (cmd_ack mapping). **Spec (Phase 3):** add the one error row to SRS §4.4.1 / §5.3
+`leak_reset` error scenarios; reinforce "Override = during-leak water; Leak Reset = after the leak is fixed".
+
+**Verified:** bench-confirm the reported sequence now ends with `leak_reset` → `cmd_ack error` (above) and the
+subsequent `valve_open` leaving the valve **closed** (interlock holds). Add as **TC-N10**.
+
+---
+
 ## Gate 3 review-driven amendments (adopted from the two sub-agent reviews)
 
 The App/backend and Product/safety reviewers (verbatim in `PLAN.md` Appendix) raised launch-blockers. Adopted:
