@@ -58,11 +58,27 @@ leak_reset alone closes the hole (RMLEAK stays set → valve blocks the open). F
 app_iothub.c. See DECISIONS.md §"Bench-test hardening". **Needs reflash + TC-N10 bench re-test.** Spec note for
 Phase 3: add the error row to SRS §4.4.1/§5.3.
 
+## Bench-test hardening (2026-06-24) — hub-side valve_open RMLEAK guard (implemented, uncommitted)
+TC-N10 (2026-06-24 capture) confirmed the leak_reset guard works (exact `cmd_ack` error). It also exposed a
+residual: step 3's `valve_open` while RMLEAK-locked was **forwarded to the valve**, which briefly reported
+`open` then re-closed via its own interlock (same-`ts` transient at 10:22:47–48) — a sub-second water-on blip
+during a live leak. **Fix:** the hub now rejects an open up front when `ble_valve_get_rmleak_state()` is true,
+before sending anything over BLE. New static helper `valve_open_reject_reason()` guards both `valve_open` and
+`valve_set_state:"open"`; error detail `"Valve is locked after a leak (RMLEAK). Clear it with leak_reset first,
+or use override to open the valve during a leak."`. `override_enable` is unaffected (it clears RMLEAK before
+opening and never goes through this handler). File: `main/iothub/app_iothub.c`. Docs synced: C2D §4.1/§4.3,
+TEST_PLAN TC-N10 step 3. **Needs reflash + TC-N10 step-3 re-test** (now expect `cmd_ack error`, no transient).
+Spec note: hub now also enforces APP-FR-057 server-side (defense in depth) — optional SRS note §4.5/§5.3.
+**Release candidate FW 1.4.1** (`PROJECT_VER` 1.4.0→1.4.1). Flash 1.4.1, re-run TC-N10, confirm `gateway.fw:"1.4.1"`
++ clean step-3 reject, then merge `feature/remote-water-access-override` → `master`.
+
 ## Bench test progress (T0–T14, against the as-built firmware)
 PASSED: T0 (fw 1.4.0), T1 (happy path), T2 (no_incident), T3 (valve_flood_active + valve_flood_detected),
 T4 (valve_disconnected), T6 (idempotent refresh), T9 (override_cancel wet→close / dry→stay-open), snapshot
-override_active/remaining, T10 (reboot persistence, informal). REMAINING: T7 (button↔app parity), TC-N10
-(leak_reset guard — needs the reflash above), optional T11 (no-network reboot), T12 (shortened-expiry).
+override_active/remaining, T10 (reboot persistence, informal), **TC-N10 leak_reset guard (2026-06-24 — exact
+cmd_ack error, interlock held)**. REMAINING: T7 (button↔app parity), **TC-N10 step 3 re-test** (after the
+hub-side valve_open RMLEAK guard reflash — now expect `cmd_ack error`, no valve_state_changed transient),
+optional T11 (no-network reboot), T12 (shortened-expiry).
 
 ## SCOPE — LEAN (user directive 2026-06-12)
 Ship **only** the override feature through the app. SRS edit trimmed to ~1 page: §5.3 command row, compact

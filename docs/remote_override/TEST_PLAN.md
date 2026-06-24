@@ -185,7 +185,7 @@ $b='{"schema":"eflostop.cmd","ver":1,"id":"rst-guard","cmd":"leak_reset"}'; az i
 ```powershell
 $b='{"schema":"eflostop.cmd","ver":1,"id":"open-guard","cmd":"valve_open"}'; az iot device c2d-message send -n wd-core-iothub-poc -d GW-50787D0E28CC --data $b
 ```
-- **P:** valve **stays closed** (`valve.state:"closed"`, `rmleak:true` in the next snapshot) — the interlock held.
+- **P:** the **hub rejects it up front**: `cmd_ack status:"error"`, `error.detail:"Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak."` Nothing is sent to the valve, so there is **no `valve_state_changed` transient** — the valve stays `closed`/`rmleak:true`. Serial: `VALVE_OPEN refused — valve RMLEAK is asserted`. *(Before the hub-side guard this path forwarded the open and the valve briefly opened then re-closed via its own RMLEAK interlock — see the TC-N10 capture 2026-06-24, 10:22:47–48.)*
 4. Now **dry** the sensor, wait for `leak_cleared`, then `leak_reset` again → **P:** `cmd_ack ok` + `rmleak_cleared`; a follow-up `valve_open` now opens. *(Confirms the legit after-the-leak recovery still works.)*
 
 ### T14 — OPEN-VERIFY-1: unknown command on shipped fw 1.3.0  *(rollout safety — run on an OLD hub)*

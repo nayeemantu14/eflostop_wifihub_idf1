@@ -9,5 +9,5 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # Drives the boot banner, OTA image header, telemetry gateway.fw, and twin
 # fw_version (the latter two read it at runtime via the app descriptor).
 # Bump this one line to change the hub version.
-set(PROJECT_VER "1.4.0")
+set(PROJECT_VER "1.4.1")
 project(eFloStop_WiFiHub_idf1)

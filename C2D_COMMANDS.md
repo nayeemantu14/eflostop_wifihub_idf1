@@ -85,7 +85,7 @@ When a command is eligible (see §3.4), the hub sends back a telemetry event to 
 {
   "schema": "eflostop.v2",
   "ts": 1770589401,
-  "gateway": { "id": "GW-50787D0E28CC", "short_id": "28CC", "fw": "1.4.0", "uptime_s": 971 },
+  "gateway": { "id": "GW-50787D0E28CC", "short_id": "28CC", "fw": "1.4.1", "uptime_s": 971 },
   "type": "event",
   "data": {
     "event": "cmd_ack",
@@ -102,7 +102,7 @@ When a command is eligible (see §3.4), the hub sends back a telemetry event to 
 {
   "schema": "eflostop.v2",
   "ts": 1770589401,
-  "gateway": { "id": "GW-50787D0E28CC", "short_id": "28CC", "fw": "1.4.0", "uptime_s": 971 },
+  "gateway": { "id": "GW-50787D0E28CC", "short_id": "28CC", "fw": "1.4.1", "uptime_s": 971 },
   "type": "event",
   "data": {
     "event": "cmd_ack",
@@ -117,7 +117,7 @@ When a command is eligible (see §3.4), the hub sends back a telemetry event to 
 }
 ```
 
-The `gateway` object also carries `name` when a hub name is set. `fw` is the running firmware version (`1.4.0`), read at runtime from the build's `PROJECT_VER` — it always matches the boot banner and OTA image.
+The `gateway` object also carries `name` when a hub name is set. `fw` is the running firmware version (`1.4.1`), read at runtime from the build's `PROJECT_VER` — it always matches the boot banner and OTA image.
 
 ## 3.3 Ack fields
 
@@ -156,7 +156,12 @@ Opens the water valve.
 { "schema": "eflostop.cmd", "ver": 1, "id": "open-001", "cmd": "valve_open" }
 ```
 
-What happens: the hub calls `ble_valve_connect()` then `ble_valve_open()`. There is **no transport/BLE success check**, so the `cmd_ack` is **always `ok`** regardless of whether the valve is reachable or whether the valve-side RMLEAK interlock refuses the open. The actual open is confirmed asynchronously by a `valve_state_changed` event (emitted by the BLE-notify path when the valve reports its new state) and by the next snapshot — **not** by this command. If RMLEAK is set on the valve, the valve refuses to open (interlock is enforced valve-side); clear it first with `leak_reset` or `override_enable`.
+What happens: if the valve's RMLEAK latch is asserted (valve locked after an auto-close), the hub **rejects the command up front** with a `cmd_ack` error and sends nothing to the valve — this prevents the sub-second water-on transient you'd otherwise get from letting the valve briefly honor the open before its own RMLEAK interlock re-closes it. Otherwise the hub calls `ble_valve_connect()` then `ble_valve_open()`; on that (allowed) path there is **no transport/BLE success check**, so a forwarded open `cmd_ack`s **`ok`** regardless of whether the valve is reachable. The actual open is confirmed asynchronously by a `valve_state_changed` event (emitted by the BLE-notify path when the valve reports its new state) and by the next snapshot — **not** by this command. To open during an active leak, use `override_enable` (it clears RMLEAK as part of the guarded 24h window, so it bypasses this check by design).
+
+Errors:
+| Detail | Why |
+|--------|-----|
+| `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch is asserted — clear it via `leak_reset`, or open during a leak via `override_enable` |
 
 Legacy text: `VALVE_OPEN`
 
@@ -199,6 +204,7 @@ Errors:
 |--------|-----|
 | `missing 'state' field (expected "open" or "closed")` | Payload missing or no `state` key |
 | `invalid state value (expected "open" or "closed")` | `state` is something other than `"open"`/`"closed"` |
+| `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | `state:"open"` while the valve RMLEAK latch is asserted (same guard as `valve_open`) |
 
 Envelope-only. No legacy text form.
 
@@ -400,6 +406,15 @@ At least one field is required. Each present array does a **full replace** of th
     "lora_sensors": ["0x754A6237"]
   }
 }
+{
+  "schema": "eflostop.cmd", 
+  "ver": 1, 
+  "id": "prov-002", 
+  "cmd": "provision",
+  "payload": {
+    "ble_leak_sensors": ["00:80:e1:2a:3b:00", "00:80:e1:2a:3f:59"]
+  }
+}
 ```
 
 Limits: 1 valve · up to 16 LoRa sensors · up to 16 BLE leak sensors.
@@ -591,7 +606,7 @@ Published on connect and after relevant changes (e.g. `set_hub_name`). This PATC
 
 ```json
 {
-  "fw_version": "1.4.0",
+  "fw_version": "1.4.1",
   "gateway_id": "GW-50787D0E28CC",
   "short_id": "28CC",
   "hub_name": "Beach House",
