@@ -17,6 +17,7 @@
 #include "nvs_flash.h"
 #include "wifi_manager.h"
 #include "rgb.h"
+#include "net_status/net_status.h"
 #include "app_wifi/app_wifi.h"
 #include "app_uart/app_uart.h"
 #include "app_lora/app_lora.h"
@@ -51,6 +52,7 @@ void app_main(void)
 
 	/* start subsystems */
     setupLEDTask();
+    net_status_init();   /* network status LED coordinator (after ledQueue exists) */
 	configureUART();
     app_wifi_start();
 	configurelora();
