@@ -34,7 +34,7 @@ start. Full telemetry so the app's existing override banner / countdown / cancel
 - **GATE 3 — Phased plan:** 🔵 PRESENTED for approval. `PLAN.md` written, both sub-agent reviews attached verbatim. **Awaiting per-phase approval. Phase 3 (valve FW) dropped.** No firmware touched.
 - **PHASE 1 — Contract freeze + Watts spec:** ✅ `WATTS_DIGITAL_SPEC.md` written (lean, LoRa-clean, redundancy-with-button framing). OPEN-VERIFY-1 still pending (user-run; capability story uses `gateway.fw≥1.4.0` as primary gate so it doesn't block).
 - **PHASE 2 — Hub firmware:** ✅ IMPLEMENTED + COMMITTED (`31173b9`). **Not yet built/flashed/bench-tested** — user does that (assistant cannot run idf.py). Follow-up committed 2026-06-24: fw-version single-sourced from `PROJECT_VER`=1.4.0 (macro removed) so banner/OTA/telemetry can't drift; C2D_COMMANDS.md synced for `override_enable` + `leak_reset` guard; app-team flow Q&A docs added.
-- **PHASE 3 — Docs/handover (SRS inserts, TEST_PLAN, evidence):** ⏳ pending after bench validation.
+- **PHASE 3 — Docs/handover (SRS inserts, TEST_PLAN, evidence):** ✅ DONE 2026-06-24. SRS V3 synced via multi-agent workflow (byte-exact + integrity verified): §5.3 `leak_reset` wet-guard + `valve_open`/`valve_set_state` RMLEAK reject, §4.4.1 wet-refusal sentence, APP-FR-057 server-side enforcement note, new negative test **TC-N08**, revision-history addendum. TEST_PLAN TC-N10 logged PASS (fw 1.4.1). SRS docx = `…Watts_Digital_Update-V3.docx` (deliverable, not in git).
 
 ## Phase 2 firmware change set (implemented, uncommitted)
 - `main/telemetry/telemetry_v2.h`: `TELEMETRY_FW_VERSION` `1.3.0`→`1.4.0` (capability signal). **[2026-06-24] superseded:** macro removed; version single-sourced from `PROJECT_VER`=1.4.0 via `telemetry_v2_fw_version()` (ESP-IDF app descriptor). `CMakeLists.txt` `PROJECT_VER` 1.3.0→1.4.0 — it was still 1.3.0 in `31173b9`, so the boot banner / OTA header reported 1.3.0 while `gateway.fw`/twin reported 1.4.0; now unified.
@@ -55,8 +55,8 @@ bypassing the override window. **Fix:** `leak_reset` now refuses while any leak 
 (`g_active_leak_count > 0`). `rules_engine_reset_leak_incident()` returns `bool`; dispatcher emits cmd_ack
 error `"A leak is still active. Fix the leak first, or use override to open the valve during a leak."`. Guarding
 leak_reset alone closes the hole (RMLEAK stays set → valve blocks the open). Files: rules_engine.c/.h,
-app_iothub.c. See DECISIONS.md §"Bench-test hardening". **Needs reflash + TC-N10 bench re-test.** Spec note for
-Phase 3: add the error row to SRS §4.4.1/§5.3.
+app_iothub.c. See DECISIONS.md §"Bench-test hardening". **Reflashed + TC-N10 re-tested → PASS (fw 1.4.1).** Spec note for
+Phase 3 **DONE 2026-06-24: SRS V3 §5.3 `leak_reset` error row + §4.4.1 wet-refusal + new TC-N08.**
 
 ## Bench-test hardening (2026-06-24) — hub-side valve_open RMLEAK guard (implemented, uncommitted)
 TC-N10 (2026-06-24 capture) confirmed the leak_reset guard works (exact `cmd_ack` error). It also exposed a
@@ -68,7 +68,7 @@ before sending anything over BLE. New static helper `valve_open_reject_reason()`
 or use override to open the valve during a leak."`. `override_enable` is unaffected (it clears RMLEAK before
 opening and never goes through this handler). File: `main/iothub/app_iothub.c`. Docs synced: C2D §4.1/§4.3,
 TEST_PLAN TC-N10 step 3. **DONE 2026-06-24 on fw 1.4.1:** TC-N10 step 3 reproduced clean — `valve_set_state:"open"` rejected at the hub, no `valve_state_changed` transient (capture 10:54:30).
-Spec note: hub now also enforces APP-FR-057 server-side (defense in depth) — optional SRS note §4.5/§5.3.
+Spec note: hub now also enforces APP-FR-057 server-side (defense in depth) — **SRS V3 synced 2026-06-24: APP-FR-057 server-side note + §5.3 `valve_open`/`valve_set_state` reject + new TC-N08.**
 **FW 1.4.1 released** (`PROJECT_VER` 1.4.0→1.4.1). Confirmed `gateway.fw:"1.4.1"` on a clean rebuild (lifecycle +
 snapshot 2026-06-24) plus clean TC-N10 step-3 reject; merged `feature/remote-water-access-override` → `master`.
 
