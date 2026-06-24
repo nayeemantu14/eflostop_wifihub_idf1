@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "nvs_store/nvs_store.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -46,20 +47,9 @@ bool provisioning_init(void)
         return false;
     }
 
-    // Initialize NVS if not already done
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_LOGW(PROV_TAG, "NVS partition was truncated or version changed, erasing...");
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-
-    if (ret != ESP_OK) {
-        ESP_LOGE(PROV_TAG, "Failed to initialize NVS: %s", esp_err_to_name(ret));
-        vSemaphoreDelete(g_prov_mutex);
-        g_prov_mutex = NULL;
-        return false;
-    }
+    // NVS (default + nvs_prov) is initialized in app_main via nvs_flash_init() +
+    // nvs_store_init(); do not re-init or erase here. Commissioning lives in the
+    // dedicated NVS_PROV_PARTITION so a WiFi reset / default-partition wipe can't touch it.
 
     // Try to load existing config
     memset(&g_config, 0, sizeof(g_config));
@@ -129,7 +119,7 @@ bool provisioning_load_from_nvs(provisioning_config_t *config)
     }
 
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGD(PROV_TAG, "NVS namespace not found (first boot?)");
         return false;
@@ -226,7 +216,7 @@ bool provisioning_save_to_nvs(const provisioning_config_t *config)
     }
 
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(PROV_TAG, "Failed to open NVS for write: %s", esp_err_to_name(err));
         return false;
@@ -560,7 +550,7 @@ bool provisioning_decommission(void)
 
     // Erase from NVS
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(PROV_TAG, "Failed to open NVS for erase: %s", esp_err_to_name(err));
         return false;
@@ -1019,7 +1009,7 @@ bool provisioning_set_rules_config(const rules_config_t *rules)
 
     // Persist just the rules keys to NVS
     nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(PROV_TAG, "Failed to open NVS: %s", esp_err_to_name(err));
         xSemaphoreGive(g_prov_mutex);

@@ -2,7 +2,6 @@
 #include <string.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>
-#include "esp_system.h"
 #include "wifi_manager.h"
 
 #define TAG "RESET_BTN"
@@ -12,7 +11,7 @@
 // ---------------------------------------------------------------------------
 typedef enum {
     BTN_EVT_EDGE,           // GPIO interrupt fired (press or release)
-    BTN_EVT_TIMER_EXPIRED   // 5-second one-shot timer fired
+    BTN_EVT_TIMER_EXPIRED   // 10-second one-shot timer fired
 } btn_event_t;
 
 // ---------------------------------------------------------------------------
@@ -20,7 +19,7 @@ typedef enum {
 // ---------------------------------------------------------------------------
 typedef enum {
     STATE_IDLE,
-    STATE_PRESSED_PENDING,       // Button down, waiting for 5 s timer
+    STATE_PRESSED_PENDING,       // Button down, waiting for 10 s timer
     STATE_TRIGGERED_WAIT_RELEASE // Reset fired, waiting for release
 } btn_state_t;
 
@@ -31,7 +30,7 @@ static QueueHandle_t  s_evt_queue    = NULL;
 static TimerHandle_t  s_hold_timer   = NULL;
 static TaskHandle_t   s_task_handle  = NULL;
 
-#define HOLD_TIME_MS     5000
+#define HOLD_TIME_MS     10000   // 10 s hold to avoid accidental activation
 #define DEBOUNCE_MS      50
 #define EVT_QUEUE_LEN    8
 #define TASK_STACK_SIZE  3072
@@ -70,26 +69,26 @@ static void hold_timer_cb(TimerHandle_t xTimer)
 // ---------------------------------------------------------------------------
 static void execute_wifi_reset(void)
 {
-    ESP_LOGW(TAG, "=== LONG PRESS CONFIRMED — RESETTING WIFI ===");
+    ESP_LOGW(TAG, "=== LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===");
 
     /*
-     * wifi_manager_disconnect_async() sends WM_ORDER_DISCONNECT_STA.
-     * The wifi_manager handles the full sequence:
+     * Clear ONLY the WiFi credentials and drop into AP mode for reconfiguration.
+     *
+     * wifi_manager_disconnect_async() sends WM_ORDER_DISCONNECT_STA; the
+     * wifi_manager then:
      *   1. esp_wifi_disconnect()           — clean disconnect
      *   2. memset config to 0 + save NVS   — erase stored credentials
-     *   3. WM_ORDER_START_AP               — start captive portal
+     *                                        (default "nvs" partition only)
+     *   3. WM_ORDER_START_AP               — start the captive portal
      *
-     * See wifi_manager.c WIFI_EVENT_STA_DISCONNECTED handler with
-     * WIFI_MANAGER_REQUEST_DISCONNECT_BIT set.
+     * No esp_restart(): we drop straight into AP mode, so we never hit the
+     * reboot-time default-partition NVS recovery path. Commissioning (valve /
+     * sensors / identity) lives in the dedicated NVS_PROV_PARTITION and is
+     * intentionally NOT touched here — full decommission is app-only (C2D).
      */
-    ESP_LOGI(TAG, "Disconnecting WiFi + erasing credentials...");
+    ESP_LOGI(TAG, "Erasing WiFi credentials + starting AP for reconfiguration "
+                  "(commissioning preserved)...");
     wifi_manager_disconnect_async();
-
-    // Give wifi_manager time to erase NVS credentials before reboot
-    vTaskDelay(pdMS_TO_TICKS(2000));
-
-    ESP_LOGW(TAG, "Restarting ESP...");
-    esp_restart();
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +132,7 @@ static void reset_button_task(void *pvParameters)
 
             case STATE_PRESSED_PENDING:
                 if (!pressed) {
-                    // Released before 5 seconds — cancel
+                    // Released before 10 seconds — cancel
                     ESP_LOGI(TAG, "Button released early — timer cancelled");
                     xTimerStop(s_hold_timer, 0);
                     state = STATE_IDLE;
@@ -158,7 +157,7 @@ static void reset_button_task(void *pvParameters)
 
             // Verify button is still physically held down
             if (button_is_pressed()) {
-                ESP_LOGW(TAG, "5-second hold confirmed — executing WiFi reset");
+                ESP_LOGW(TAG, "%d-second hold confirmed — executing WiFi reset", HOLD_TIME_MS / 1000);
                 execute_wifi_reset();
                 state = STATE_TRIGGERED_WAIT_RELEASE;
             } else {
@@ -187,7 +186,7 @@ void reset_button_init(void)
         return;
     }
 
-    // Create one-shot 5-second hold timer
+    // Create one-shot 10-second hold timer
     s_hold_timer = xTimerCreate("btn_hold",
                                 pdMS_TO_TICKS(HOLD_TIME_MS),
                                 pdFALSE,    // one-shot

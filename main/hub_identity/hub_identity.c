@@ -12,6 +12,7 @@
 #include "esp_mac.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "nvs_store/nvs_store.h"
 
 #define TAG          "HUB_IDENT"
 #define NVS_NS       "hub_ident"
@@ -41,7 +42,7 @@ bool hub_identity_init(void)
     s_hub_name[0] = '\0';
 
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+    if (nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NS, NVS_READONLY, &h) == ESP_OK) {
         size_t len = sizeof(s_hub_name);
         if (nvs_get_str(h, NVS_KEY_NAME, s_hub_name, &len) != ESP_OK)
             s_hub_name[0] = '\0';
@@ -88,7 +89,7 @@ bool hub_identity_set_name(const char *name)
     }
 
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK)
+    if (nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NS, NVS_READWRITE, &h) != ESP_OK)
         return false;
 
     esp_err_t err = nvs_set_str(h, NVS_KEY_NAME, name);
@@ -112,7 +113,7 @@ void hub_identity_clear(void)
     s_hub_name[0] = '\0';
 
     nvs_handle_t h;
-    if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+    if (nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
         nvs_erase_key(h, NVS_KEY_NAME);
         nvs_commit(h);
         nvs_close(h);
