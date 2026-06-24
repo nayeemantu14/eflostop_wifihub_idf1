@@ -33,11 +33,11 @@ start. Full telemetry so the app's existing override banner / countdown / cancel
 - **GATE 2 — Clarification questions:** ✅ ANSWERED & RECORDED in `DECISIONS.md` (command renamed `override_enable`; +9 modifications; +Gate 3 review amendments).
 - **GATE 3 — Phased plan:** 🔵 PRESENTED for approval. `PLAN.md` written, both sub-agent reviews attached verbatim. **Awaiting per-phase approval. Phase 3 (valve FW) dropped.** No firmware touched.
 - **PHASE 1 — Contract freeze + Watts spec:** ✅ `WATTS_DIGITAL_SPEC.md` written (lean, LoRa-clean, redundancy-with-button framing). OPEN-VERIFY-1 still pending (user-run; capability story uses `gateway.fw≥1.4.0` as primary gate so it doesn't block).
-- **PHASE 2 — Hub firmware:** ✅ IMPLEMENTED (5 files, +152/−6). **Not yet built/flashed/bench-tested** — user does that (assistant cannot run idf.py). Not committed (awaiting user review).
+- **PHASE 2 — Hub firmware:** ✅ IMPLEMENTED + COMMITTED (`31173b9`). **Not yet built/flashed/bench-tested** — user does that (assistant cannot run idf.py). Follow-up committed 2026-06-24: fw-version single-sourced from `PROJECT_VER`=1.4.0 (macro removed) so banner/OTA/telemetry can't drift; C2D_COMMANDS.md synced for `override_enable` + `leak_reset` guard; app-team flow Q&A docs added.
 - **PHASE 3 — Docs/handover (SRS inserts, TEST_PLAN, evidence):** ⏳ pending after bench validation.
 
 ## Phase 2 firmware change set (implemented, uncommitted)
-- `main/telemetry/telemetry_v2.h`: `TELEMETRY_FW_VERSION` `1.3.0`→`1.4.0` (capability signal).
+- `main/telemetry/telemetry_v2.h`: `TELEMETRY_FW_VERSION` `1.3.0`→`1.4.0` (capability signal). **[2026-06-24] superseded:** macro removed; version single-sourced from `PROJECT_VER`=1.4.0 via `telemetry_v2_fw_version()` (ESP-IDF app descriptor). `CMakeLists.txt` `PROJECT_VER` 1.3.0→1.4.0 — it was still 1.3.0 in `31173b9`, so the boot banner / OTA header reported 1.3.0 while `gateway.fw`/twin reported 1.4.0; now unified.
 - `main/commands/c2d_commands.h`: `#define C2D_CMD_OVERRIDE_ENABLE "override_enable"`.
 - `main/rules_engine/rules_engine.h`: `override_enable_result_t` enum + `rules_engine_enable_override_remote()` decl.
 - `main/rules_engine/rules_engine.c`: `start_override_window(const char *trigger)` (+2 callers pass `"button"`);
