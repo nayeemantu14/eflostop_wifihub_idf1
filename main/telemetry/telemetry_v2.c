@@ -7,6 +7,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
 #include "cJSON.h"
 
 #include "app_ble_valve.h"
@@ -34,6 +35,16 @@ static TimerHandle_t  s_snapshot_timer = NULL;
 static QueueHandle_t  s_snapshot_queue = NULL;
 
 // ---- Helpers --------------------------------------------------------------
+
+// Single source of truth for the hub firmware version: the ESP-IDF application
+// descriptor, populated from PROJECT_VER in the top-level CMakeLists.txt. This
+// is the SAME string shown in the boot banner ("App version") and the OTA image
+// header, so gateway.fw / twin fw_version can never drift from the build version.
+const char *telemetry_v2_fw_version(void)
+{
+    const esp_app_desc_t *desc = esp_app_get_description();
+    return (desc && desc->version[0]) ? desc->version : "0.0.0";
+}
 
 // Minimum epoch to consider time synced (2024-01-01 00:00:00 UTC)
 #define EPOCH_VALID_THRESHOLD_TELEM  1704067200
@@ -63,7 +74,7 @@ static cJSON *build_envelope(const char *type)
     const char *hub_name = hub_identity_get_name();
     if (hub_name[0])
         cJSON_AddStringToObject(gw, "name", hub_name);
-    cJSON_AddStringToObject(gw, "fw", TELEMETRY_FW_VERSION);
+    cJSON_AddStringToObject(gw, "fw", telemetry_v2_fw_version());
     cJSON_AddNumberToObject(gw, "uptime_s",
                             (double)(esp_timer_get_time() / 1000000));
     cJSON_AddItemToObject(root, "gateway", gw);

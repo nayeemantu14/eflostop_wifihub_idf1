@@ -5,5 +5,9 @@ cmake_minimum_required(VERSION 3.16)
 set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/examples/common_components/protocol_examples_common)
 set(EXTRA_COMPONENT_DIRS $ENV{IDF_PATH}/components)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set(PROJECT_VER "1.3.0")
+# Hub firmware version — SINGLE SOURCE OF TRUTH.
+# Drives the boot banner, OTA image header, telemetry gateway.fw, and twin
+# fw_version (the latter two read it at runtime via the app descriptor).
+# Bump this one line to change the hub version.
+set(PROJECT_VER "1.4.0")
 project(eFloStop_WiFiHub_idf1)

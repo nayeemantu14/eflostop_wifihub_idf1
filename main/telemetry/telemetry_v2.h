@@ -12,8 +12,12 @@ extern "C" {
 #endif
 
 #define TELEMETRY_SCHEMA        "eflostop.v2"
-#define TELEMETRY_FW_VERSION    "1.4.0"
 #define SNAPSHOT_INTERVAL_MS    (5 * 60 * 1000)   // 5 minutes
+
+// Hub firmware version (gateway.fw / twin fw_version). Single source of truth =
+// PROJECT_VER in the top-level CMakeLists.txt, read at runtime from the ESP-IDF
+// app descriptor. To bump the hub version, edit PROJECT_VER only.
+const char *telemetry_v2_fw_version(void);
 
 // ---------------------------------------------------------------------------
 // Cache types — shared between telemetry module and app_iothub for state

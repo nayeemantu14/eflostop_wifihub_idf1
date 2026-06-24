@@ -657,7 +657,7 @@ static void publish_twin_reported(void)
     cJSON *root = cJSON_CreateObject();
     if (!root) return;
 
-    cJSON_AddStringToObject(root, "fw_version", TELEMETRY_FW_VERSION);
+    cJSON_AddStringToObject(root, "fw_version", telemetry_v2_fw_version());
     cJSON_AddStringToObject(root, "gateway_id", hub_identity_get_gateway_id());
     cJSON_AddStringToObject(root, "short_id", hub_identity_get_short_id());
     cJSON_AddStringToObject(root, "hub_name", hub_identity_get_name());
