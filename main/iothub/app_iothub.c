@@ -30,6 +30,7 @@
 #include "offline_buffer/offline_buffer.h"
 #include "dps_client/dps_client.h"
 #include "hub_identity/hub_identity.h"
+#include "net_status/net_status.h"
 
 // External Queue from LoRa app
 extern QueueHandle_t lora_rx_queue;
@@ -793,6 +794,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGI(IOTHUB_TAG, "Connected to Azure IoT Hub!");
         g_iot_hub_connected = true;
         telemetry_v2_set_connected(true);
+        net_status_set_mqtt(true);   // status LED -> fully connected (ramp blue)
         g_needs_lifecycle = true;  // Event loop will publish lifecycle + snapshot
         {
             char sub_topic[128];
@@ -812,6 +814,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         ESP_LOGW(IOTHUB_TAG, "Disconnected.");
         g_iot_hub_connected = false;
         telemetry_v2_set_connected(false);
+        net_status_set_mqtt(false);  // status LED -> connecting (beat blue) if WiFi still up
         break;
 
     case MQTT_EVENT_DATA:

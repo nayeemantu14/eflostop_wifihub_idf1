@@ -31,7 +31,20 @@ led_strip_handle_t configLED(void)
     return strip;
 }
 
-void rampRED(led_strip_handle_t strip)
+// Returns true if a command is already waiting in the queue. The looping
+// animations poll this between steps so a state change (e.g. WiFi/MQTT up or
+// down) is reflected within ~one step instead of after the full ~4.5 s cycle.
+// Non-blocking peek — it does NOT consume the command; led_task's
+// xQueueReceive picks it up on the next loop.
+static bool led_cmd_pending(void)
+{
+    uint8_t peek;
+    return (ledQueue != NULL && xQueuePeek(ledQueue, &peek, 0) == pdTRUE);
+}
+
+// 40-step smooth fade (up, hold, down) shared by rampRED/rampBLUE.
+// 'blue' selects the channel; everything else is identical.
+static void rampColor(led_strip_handle_t strip, bool blue)
 {
     const uint8_t R[] = {0, 0, 1, 1, 1, 2, 2, 3, 4, 5, 5, 8, 9, 10, 11, 13, 15, 15, 17, 19,
                          25, 25, 27, 29, 31, 33, 35, 37, 39, 41, 43, 43, 45, 47, 47, 49,
@@ -41,22 +54,35 @@ void rampRED(led_strip_handle_t strip)
     // ramp up
     for (size_t i = 0; i < R_LEN; i++)
     {
-        ESP_ERROR_CHECK(led_strip_set_pixel(strip, 0, R[i], 0, 0));
+        ESP_ERROR_CHECK(led_strip_set_pixel(strip, 0, blue ? 0 : R[i], 0, blue ? R[i] : 0));
         ESP_ERROR_CHECK(led_strip_refresh(strip));
         vTaskDelay(pdMS_TO_TICKS(50));
+        if (led_cmd_pending()) return;
     }
 
     vTaskDelay(pdMS_TO_TICKS(500));
+    if (led_cmd_pending()) return;
 
     // ramp down
     for (size_t i = R_LEN; i-- > 0;)
     {
-        ESP_ERROR_CHECK(led_strip_set_pixel(strip, 0, R[i], 0, 0));
+        ESP_ERROR_CHECK(led_strip_set_pixel(strip, 0, blue ? 0 : R[i], 0, blue ? R[i] : 0));
         ESP_ERROR_CHECK(led_strip_refresh(strip));
         vTaskDelay(pdMS_TO_TICKS(50));
+        if (led_cmd_pending()) return;
     }
 
     ESP_ERROR_CHECK(led_strip_clear(strip));
+}
+
+void rampRED(led_strip_handle_t strip)
+{
+    rampColor(strip, false);
+}
+
+void rampBLUE(led_strip_handle_t strip)
+{
+    rampColor(strip, true);
 }
 
 void beatBLUE(led_strip_handle_t strip)
@@ -66,9 +92,11 @@ void beatBLUE(led_strip_handle_t strip)
         ESP_ERROR_CHECK(led_strip_set_pixel(strip, 0, 0, 0, 45));
         ESP_ERROR_CHECK(led_strip_refresh(strip));
         vTaskDelay(pdMS_TO_TICKS(100));
+        if (led_cmd_pending()) { ESP_ERROR_CHECK(led_strip_clear(strip)); return; }
 
         ESP_ERROR_CHECK(led_strip_clear(strip));
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(500));
+        if (led_cmd_pending()) return;
     }
 }
 
@@ -112,8 +140,9 @@ void led_task(void *param)
     led_strip_handle_t strip = (led_strip_handle_t)param;
     uint8_t color;
 
-    // Default state
-    uint8_t stateColor = 'R'; 
+    // Default state: no internet (ramp red) until the net_status coordinator
+    // reports otherwise.
+    uint8_t stateColor = LED_CMD_NO_INTERNET;
 
     while (1)
     {
@@ -122,20 +151,23 @@ void led_task(void *param)
         {
             switch (color)
             {
-            case 'R':
-                stateColor = 'R'; // Update state to Red
+            case LED_CMD_NO_INTERNET:
+                stateColor = LED_CMD_NO_INTERNET; // ramp red
                 break;
-            case 'B':
-                stateColor = 'B'; // Update state to Blue
+            case LED_CMD_CONNECTING:
+                stateColor = LED_CMD_CONNECTING;  // beat blue
                 break;
-            case 'G':
+            case LED_CMD_CONNECTED:
+                stateColor = LED_CMD_CONNECTED;   // ramp blue
+                break;
+            case LED_CMD_LORA_PULSE:
                 clearLED(strip);
                 vTaskDelay(pdMS_TO_TICKS(100));
                 pulseGREEN(strip);
-                // Note: We do NOT update stateColor, so it returns 
-                // to Red or Blue automatically after this.
+                // Note: We do NOT update stateColor, so it returns
+                // to its base animation automatically after this.
                 break;
-            case 'C':
+            case LED_CMD_CLEAR:
                 clearLED(strip);
                 break;
             default:
@@ -146,11 +178,14 @@ void led_task(void *param)
         // 2. Play the Continuous Animation based on current state
         switch (stateColor)
         {
-        case 'R':
+        case LED_CMD_NO_INTERNET:
             rampRED(strip);
             break;
-        case 'B':
+        case LED_CMD_CONNECTING:
             beatBLUE(strip);
+            break;
+        case LED_CMD_CONNECTED:
+            rampBLUE(strip);
             break;
         default:
             vTaskDelay(pdMS_TO_TICKS(100)); // Safety delay

@@ -2,8 +2,7 @@
 #include "wifi_manager.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "rgb.h"
-#include "freertos/queue.h"
+#include "net_status/net_status.h"
 #include "esp_wifi.h"
 
 #include "app_iothub.h"
@@ -51,12 +50,9 @@ void cb_connection_ok(void *pvParameter)
     // 2. BLE will be started by IoT Hub task after provisioning is checked
     // No BLE start here - provisioning manager initializes after this callback
 
-    // 3. LED Blue
-    if (ledQueue != NULL)
-    {
-        uint8_t msg = 'B';
-        xQueueSend(ledQueue, &msg, 0);
-    }
+    // 3. Network LED -> "connecting" (beat blue). The MQTT handler promotes it
+    //    to "connected" (ramp blue) once the IoT Hub session is up.
+    net_status_set_wifi(true);
 }
 
 void cb_connection_lost(void *pvParameter)
@@ -67,21 +63,15 @@ void cb_connection_lost(void *pvParameter)
         ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", wifi_event->reason);
     }
 
-    if (ledQueue != NULL)
-    {
-        uint8_t msg = 'R';
-        xQueueSend(ledQueue, &msg, 0);
-    }
+    // Network LED -> "no internet" (ramp red). This also clears the MQTT flag
+    // inside net_status so a later reconnect shows "connecting" first.
+    net_status_set_wifi(false);
 }
 
 void wifi_task(void *pvParameter)
 {
     (void)pvParameter;
-    if (ledQueue != NULL)
-    {
-        uint8_t msg = 'R';
-        xQueueSend(ledQueue, &msg, 0);
-    }
+    // Initial "no internet" state is latched by net_status_init() at boot.
     while (1)
     {
         vTaskDelay(pdMS_TO_TICKS(5000));
