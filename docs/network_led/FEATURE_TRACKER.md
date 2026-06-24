@@ -57,9 +57,9 @@ interruptible animations, `'F'` in **both** led_task switches, explicit `semphr.
 - **DESIGN + REVIEW:** ✅ done (coordinator chosen; adversarial review folded in). No code written before review.
 - **IMPLEMENT:** ✅ done on `feature/network-led-states` (commit `33f6ae1`). **Not yet built/flashed** — user does that.
 - **CODE VERIFY:** ✅ adversarial bug-hunt on the *actual* committed code (3 lenses: compile / runtime-concurrency / spec) returned **zero** findings; gate verdict **safe to flash as-is**. Confirmed: net_status.c includes complete (`semphr.h` explicit); `bool` reachable via FreeRTOS→portmacro→`<stdbool.h>`; `'F'` in both led_task switches; mutex NULL-guard + no give-without-take; CMake registration resolves; PROJECT_VER 1.4.2 single-source. Only note: pre-existing cosmetic unreachable `vTaskDelete(NULL)` after `while(1)` (no `-Werror` trap).
-- **BUILD (user):** ⏳ pending — confirm clean build + boot banner shows `1.4.2`.
-- **BENCH TEST (user):** ⏳ pending — run `TEST_PLAN.md` (boot=red ramp, WiFi up=blue beat 500 ms, MQTT up=blue ramp, MQTT drop=blue beat, WiFi drop=red ramp; LoRa green still pulses). Verify against serial `NET_STATUS wifi=.. mqtt=..` lines.
-- **MERGE:** ⏳ after test passes — `git merge --no-ff feature/network-led-states` into `master`. No push.
+- **BUILD (user):** ✅ clean build on FW 1.4.2.
+- **BENCH TEST (user):** ✅ **PASS 2026-06-24** — user confirmed all three states + transitions behave as intended ("working perfectly like I wanted it"). Boot=red ramp, WiFi up=blue beat 500 ms, MQTT up=blue ramp, MQTT drop=blue beat, WiFi drop=red ramp; LoRa green overlay intact.
+- **MERGE:** ✅ `git merge --no-ff feature/network-led-states` → `master` (2026-06-24). **Not pushed** (per directive — push only when asked).
 
 ## Change set (implemented, on feature branch)
 - **`rgb.h`**: added `LED_CMD_NO_INTERNET 'R'`, `LED_CMD_CONNECTING 'B'`, `LED_CMD_CONNECTED 'F'`,
