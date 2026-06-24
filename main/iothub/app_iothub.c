@@ -404,6 +404,22 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 
 static void publish_twin_reported(void);  // forward declaration
 
+// Reject an "open the valve" request while the valve's RMLEAK latch is asserted
+// (valve locked after an auto-close). Forwarding the open anyway lets the valve
+// briefly honor it before its own RMLEAK interlock re-closes it — a sub-second
+// water-on transient during a live leak. Clear the latch first with leak_reset,
+// or open during a leak via override_enable (which clears RMLEAK as part of the
+// guarded 24h window and so does not go through this handler). Returns the
+// cmd_ack error detail when the open must be refused, or NULL when it may proceed.
+static const char *valve_open_reject_reason(void)
+{
+    if (ble_valve_get_rmleak_state()) {
+        return "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, "
+               "or use override to open the valve during a leak.";
+    }
+    return NULL;
+}
+
 static void handle_c2d_command(const char *data, size_t data_len)
 {
     c2d_command_t cmd;
@@ -420,8 +436,14 @@ static void handle_c2d_command(const char *data, size_t data_len)
     // ---- Valve control ----
     if (strcmp(cmd.cmd, C2D_CMD_VALVE_OPEN) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: VALVE_OPEN");
-        ble_valve_connect();
-        ble_valve_open();
+        error_msg = valve_open_reject_reason();
+        if (error_msg) {
+            success = false;
+            ESP_LOGW(IOTHUB_TAG, "VALVE_OPEN refused — valve RMLEAK is asserted");
+        } else {
+            ble_valve_connect();
+            ble_valve_open();
+        }
     }
     else if (strcmp(cmd.cmd, C2D_CMD_VALVE_CLOSE) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: VALVE_CLOSE");
@@ -437,8 +459,14 @@ static void handle_c2d_command(const char *data, size_t data_len)
             error_msg = "missing 'state' field (expected \"open\" or \"closed\")";
         } else if (strcmp(desired, "open") == 0) {
             ESP_LOGI(IOTHUB_TAG, "Command: VALVE_SET_STATE -> open");
-            ble_valve_connect();
-            ble_valve_open();
+            error_msg = valve_open_reject_reason();
+            if (error_msg) {
+                success = false;
+                ESP_LOGW(IOTHUB_TAG, "VALVE_SET_STATE open refused — valve RMLEAK is asserted");
+            } else {
+                ble_valve_connect();
+                ble_valve_open();
+            }
         } else if (strcmp(desired, "closed") == 0) {
             ESP_LOGI(IOTHUB_TAG, "Command: VALVE_SET_STATE -> closed");
             ble_valve_connect();
@@ -452,8 +480,15 @@ static void handle_c2d_command(const char *data, size_t data_len)
     // ---- Leak reset ----
     else if (strcmp(cmd.cmd, C2D_CMD_LEAK_RESET) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: LEAK_RESET");
-        rules_engine_reset_leak_incident();
-        ESP_LOGI(IOTHUB_TAG, "Leak incident cleared, RMLEAK reset");
+        // Refused while a leak is still active — clearing the interlock then
+        // would let valve_open restore water during a live leak with no
+        // override window. During-leak water must go through override_enable.
+        if (!rules_engine_reset_leak_incident()) {
+            success = false;
+            error_msg = "A leak is still active. Fix the leak first, or use override to open the valve during a leak.";
+        } else {
+            ESP_LOGI(IOTHUB_TAG, "Leak incident cleared, RMLEAK reset");
+        }
     }
     // ---- Decommission ----
     else if (strcmp(cmd.cmd, C2D_CMD_DECOMMISSION) == 0) {
@@ -550,6 +585,33 @@ static void handle_c2d_command(const char *data, size_t data_len)
             error_msg = "override cancel failed";
         }
     }
+    // ---- Override enable (remote equivalent of the physical valve button) ----
+    // Opens the valve during an active leak and starts the 24h water-access
+    // override window. Same end-state as a physical button press; see §4.4.3.
+    else if (strcmp(cmd.cmd, C2D_CMD_OVERRIDE_ENABLE) == 0) {
+        ESP_LOGI(IOTHUB_TAG, "Command: OVERRIDE_ENABLE");
+        override_enable_result_t r = rules_engine_enable_override_remote();
+        if (r != OVERRIDE_ENABLE_OK) {
+            success = false;
+            switch (r) {
+            case OVERRIDE_ENABLE_ERR_NO_INCIDENT:
+                error_msg = "No active leak to override. Use the normal Open Valve control.";
+                break;
+            case OVERRIDE_ENABLE_ERR_VALVE_FLOOD:
+                error_msg = "Water detected at the valve. It can't be opened remotely until the valve area is dry.";
+                break;
+            case OVERRIDE_ENABLE_ERR_VALVE_DISCONNECTED:
+                error_msg = "The valve isn't responding. Check its power and connection, then try again.";
+                break;
+            case OVERRIDE_ENABLE_ERR_NOT_PROVISIONED:
+                error_msg = "No valve is set up for this hub.";
+                break;
+            default:
+                error_msg = "Something went wrong applying the override. Your water state is unchanged. Try again.";
+                break;
+            }
+        }
+    }
     // ---- Rules config ----
     else if (strcmp(cmd.cmd, C2D_CMD_RULES_CONFIG) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: RULES_CONFIG");
@@ -623,7 +685,7 @@ static void publish_twin_reported(void)
     cJSON *root = cJSON_CreateObject();
     if (!root) return;
 
-    cJSON_AddStringToObject(root, "fw_version", TELEMETRY_FW_VERSION);
+    cJSON_AddStringToObject(root, "fw_version", telemetry_v2_fw_version());
     cJSON_AddStringToObject(root, "gateway_id", hub_identity_get_gateway_id());
     cJSON_AddStringToObject(root, "short_id", hub_identity_get_short_id());
     cJSON_AddStringToObject(root, "hub_name", hub_identity_get_name());

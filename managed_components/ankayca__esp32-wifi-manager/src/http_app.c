@@ -66,7 +66,6 @@ static char* http_connect_url = NULL;
 static char* http_ap_url = NULL;
 static char* http_status_url = NULL;
 static char* http_watts_logo_url = NULL;
-static char* http_avg_logo_url = NULL;
 
 /**
  * @brief embedded binary data.
@@ -81,8 +80,6 @@ extern const uint8_t index_html_start[] asm("_binary_index_html_start");
 extern const uint8_t index_html_end[] asm("_binary_index_html_end");
 extern const uint8_t watts_logo_png_start[] asm("_binary_Watts_Logo_png_start");
 extern const uint8_t watts_logo_png_end[] asm("_binary_Watts_Logo_png_end");
-extern const uint8_t avg_logo_png_start[] asm("_binary_AVG_Logo_png_start");
-extern const uint8_t avg_logo_png_end[] asm("_binary_AVG_Logo_png_end");
 
 
 /* const httpd related values stored in ROM */
@@ -278,13 +275,6 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
 			httpd_resp_send(req, (char*)watts_logo_png_start, watts_logo_png_end - watts_logo_png_start);
 		}
-		/* GET /AVG_Logo.png */
-		else if(strcmp(req->uri, http_avg_logo_url) == 0){
-			httpd_resp_set_status(req, http_200_hdr);
-			httpd_resp_set_type(req, http_content_type_png);
-			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
-			httpd_resp_send(req, (char*)avg_logo_png_start, avg_logo_png_end - avg_logo_png_start);
-		}
 		/* GET /ap.json */
 		else if(strcmp(req->uri, http_ap_url) == 0){
 
@@ -424,10 +414,6 @@ void http_app_stop(){
 			free(http_watts_logo_url);
 			http_watts_logo_url = NULL;
 		}
-		if(http_avg_logo_url){
-			free(http_avg_logo_url);
-			http_avg_logo_url = NULL;
-		}
 
 		/* stop server */
 		httpd_stop(httpd_handle);
@@ -485,7 +471,6 @@ void http_app_start(bool lru_purge_enable){
 			const char page_ap[] = "ap.json";
 			const char page_status[] = "status.json";
 			const char page_watts_logo[] = "Watts_Logo.png";
-			const char page_avg_logo[] = "AVG_Logo.png";
 
 			/* root url, eg "/"   */
 			const size_t http_root_url_sz = sizeof(char) * (root_len+1);
@@ -512,7 +497,6 @@ void http_app_start(bool lru_purge_enable){
 			http_ap_url = http_app_generate_url(page_ap);
 			http_status_url = http_app_generate_url(page_status);
 			http_watts_logo_url = http_app_generate_url(page_watts_logo);
-			http_avg_logo_url = http_app_generate_url(page_avg_logo);
 
 		}
 

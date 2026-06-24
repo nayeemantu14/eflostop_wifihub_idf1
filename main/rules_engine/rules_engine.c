@@ -22,8 +22,16 @@
 // all automatic valve closures are blocked for 24 hours. This gives the user
 // guaranteed water access while still reporting leaks to the cloud. The window
 // can be cancelled early by a C2D "override_cancel" command or LEAK_RESET.
+/* Production = 24h. A bench/debug build may shorten this to test window expiry
+ * by compiling with -D OVERRIDE_WINDOW_DURATION_S=<seconds>. */
+#ifndef OVERRIDE_WINDOW_DURATION_S
 #define OVERRIDE_WINDOW_DURATION_S   (24 * 60 * 60)  // 24 hours
+#endif
 #define OVERRIDE_BLOCKED_COOLDOWN_MS 60000            // Rate-limit "blocked" telemetry to 1/min
+/* Bounded BLE reconnect attempt for a remote override_enable: the valve must be
+ * reachable before the window is committed (window starts at execution, not
+ * receipt). Sized to stay within the app's 20s cmd_ack timeout. */
+#define OVERRIDE_CONNECT_TIMEOUT_MS  10000
 #define NVS_OVERRIDE_NAMESPACE       "rules_eng"
 #define NVS_KEY_OVR_STATE            "ovr_state"
 #define NVS_KEY_OVR_EXPIRY           "ovr_expiry"
@@ -178,7 +186,10 @@ static void override_load_from_nvs(void)
 }
 
 // Start or refresh the 24h override window.  Must be called with g_mutex held.
-static void start_override_window(void)
+// `trigger` records the activation source in telemetry:
+//   "button"      — physical valve button (tick / reconnect detection paths)
+//   "c2d_command" — remote app-initiated override_enable command
+static void start_override_window(const char *trigger)
 {
     time_t now;
     time(&now);
@@ -201,8 +212,9 @@ static void start_override_window(void)
     cJSON *root = cJSON_CreateObject();
     if (root) {
         cJSON_AddStringToObject(root, "event", "water_access_override_enabled");
-        cJSON_AddNumberToObject(root, "expiry_epoch", (double)g_override_window_expiry);
-        cJSON_AddNumberToObject(root, "duration_h", 24);
+        cJSON_AddStringToObject(root, "trigger", trigger ? trigger : "button");
+        cJSON_AddNumberToObject(root, "expires_ts", (double)g_override_window_expiry);
+        cJSON_AddNumberToObject(root, "remaining_s", (double)OVERRIDE_WINDOW_DURATION_S);
         if (g_pending_telemetry) free(g_pending_telemetry);
         g_pending_telemetry = cJSON_PrintUnformatted(root);
         cJSON_Delete(root);
@@ -615,13 +627,25 @@ bool rules_engine_is_leak_incident_active(void)
     return active;
 }
 
-void rules_engine_reset_leak_incident(void)
+bool rules_engine_reset_leak_incident(void)
 {
-    if (!g_initialized) return;
+    if (!g_initialized) return false;
 
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGW(RULES_TAG, "Failed to take mutex for LEAK_RESET");
-        return;
+        return false;
+    }
+
+    /* Guard: refuse to clear the interlock while any leak source is still wet.
+     * Otherwise a follow-up valve_open would restore water during an active leak
+     * with NO override window and no protection. During-leak water must go
+     * through override_enable (the guarded 24h window). Mirrors the 30s
+     * auto-clear, which likewise requires all sensors clear. */
+    if (g_active_leak_count > 0) {
+        ESP_LOGW(RULES_TAG, "LEAK_RESET refused — %u leak source(s) still active (use override to open during a leak)",
+                 (unsigned)g_active_leak_count);
+        xSemaphoreGive(g_mutex);
+        return false;
     }
 
     // Always clear hub-side state, even if not latched (handles reboot scenario)
@@ -669,6 +693,7 @@ void rules_engine_reset_leak_incident(void)
     if (was_active || valve_rmleak) {
         ble_valve_set_rmleak(false);
     }
+    return true;
 }
 
 bool rules_engine_cancel_override(void)
@@ -753,6 +778,81 @@ bool rules_engine_cancel_override(void)
 
     xSemaphoreGive(g_mutex);
     return true;
+}
+
+override_enable_result_t rules_engine_enable_override_remote(void)
+{
+    if (!g_initialized) return OVERRIDE_ENABLE_ERR_INTERNAL;
+
+    // ── Precondition 1: a valve must be provisioned to override ───────────
+    if (!provisioning_is_provisioned() || !ble_valve_has_target_mac()) {
+        ESP_LOGW(RULES_TAG, "override_enable: no valve provisioned");
+        return OVERRIDE_ENABLE_ERR_NOT_PROVISIONED;
+    }
+
+    // ── Precondition 2: valve must be reachable. Bounded reconnect so the
+    // window starts at EXECUTION, never at receipt. Polls (not a busy-wait) and
+    // stays within the app's 20s cmd_ack timeout. ──────────────────────────
+    if (!ble_valve_is_ready()) {
+        ESP_LOGI(RULES_TAG, "override_enable: valve not ready — reconnecting (<=%dms)",
+                 OVERRIDE_CONNECT_TIMEOUT_MS);
+        ble_valve_connect();
+        TickType_t start = xTaskGetTickCount();
+        while (!ble_valve_is_ready()) {
+            if ((xTaskGetTickCount() - start) >= pdMS_TO_TICKS(OVERRIDE_CONNECT_TIMEOUT_MS)) {
+                ESP_LOGW(RULES_TAG, "override_enable: valve unreachable after reconnect window");
+                return OVERRIDE_ENABLE_ERR_VALVE_DISCONNECTED;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+
+    // ── Precondition 3: there must be something to override — an active
+    // incident, an asserted valve RMLEAK, or an already-active window
+    // (idempotent refresh). Reject pre-emptive use. (Query fns take the mutex,
+    // so call them BEFORE acquiring it below.) ─────────────────────────────
+    bool window_active = rules_engine_is_override_window_active();
+    bool incident      = rules_engine_is_leak_incident_active();
+    bool valve_rmleak  = ble_valve_get_rmleak_state();
+    if (!window_active && !incident && !valve_rmleak) {
+        ESP_LOGW(RULES_TAG, "override_enable: no active incident to override");
+        return OVERRIDE_ENABLE_ERR_NO_INCIDENT;
+    }
+
+    // ── Precondition 4: the valve's OWN flood probe is an absolute floor —
+    // no override (physical or remote) opens the valve while it stands in
+    // water; the valve would refuse/re-close anyway. ───────────────────────
+    if (ble_valve_get_leak()) {
+        ESP_LOGW(RULES_TAG, "override_enable: valve flood probe wet — refusing");
+        return OVERRIDE_ENABLE_ERR_VALVE_FLOOD;
+    }
+
+    // ── Execute: window → clear RMLEAK → open ─────────────────────────────
+    // Window FIRST so rules_engine_evaluate_leak() blocks auto-close and
+    // rules_engine_tick() Check 2 is skipped (it only fires when override is
+    // INACTIVE) — otherwise the hub could misread the RMLEAK 1->0 we are about
+    // to cause as a *physical* override, or race a concurrent leak into an
+    // auto-close between the RMLEAK clear and the open.
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(RULES_TAG, "override_enable: mutex timeout");
+        return OVERRIDE_ENABLE_ERR_INTERNAL;
+    }
+    g_leak_incident_active = false;
+    incident_save_to_nvs();
+    g_auto_close_triggered = false;
+    g_all_clear_since = 0;
+    g_rmleak_assert_tick = 0;
+    start_override_window("c2d_command");   /* persists NVS + queues telemetry */
+    xSemaphoreGive(g_mutex);
+
+    // RMLEAK must be cleared BEFORE the open — the valve refuses an open while
+    // its remote_leak_active interlock is set (mirrors the physical button,
+    // which clears its local latch before driving the motor open).
+    ble_valve_set_rmleak(false);
+    ble_valve_open();
+
+    ESP_LOGW(RULES_TAG, "override_enable: 24h override started remotely — RMLEAK cleared, valve opening");
+    return OVERRIDE_ENABLE_OK;
 }
 
 void rules_engine_reassert_rmleak_if_needed(void)
@@ -874,7 +974,7 @@ void rules_engine_on_valve_connected(void)
             incident_save_to_nvs();
             g_auto_close_triggered = false;
             g_all_clear_since = 0;
-            start_override_window();    /* writes its own NVS entries */
+            start_override_window("button");    /* writes its own NVS entries */
             xSemaphoreGive(g_mutex);
         } else {
             ESP_LOGW(RULES_TAG, "Reconnected: hub incident active, valve closed + RMLEAK clear — re-asserting");
@@ -1024,7 +1124,7 @@ void rules_engine_tick(void)
             g_auto_close_triggered = false;
             g_all_clear_since = 0;
 
-            start_override_window();
+            start_override_window("button");
         }
     }
     // Track valve ready state for transition detection
