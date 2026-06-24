@@ -201,7 +201,7 @@ $b='{"schema":"eflostop.cmd","ver":1,"id":"open-guard","cmd":"valve_open"}'; az 
 
 | Test | Result (pass/fail) | Notes / captured JSON |
 |---|---|---|
-| T0 version 1.4.0 | | |
+| T0 fw version | PASS — `gateway.fw:"1.4.1"` (lifecycle + snapshot, 2026-06-24) | ≥1.4.0 capability gate satisfied |
 | T1 happy path | | |
 | T2 no_incident | | |
 | T3 valve flood (+ button parity) | | |
@@ -216,6 +216,7 @@ $b='{"schema":"eflostop.cmd","ver":1,"id":"open-guard","cmd":"valve_open"}'; az 
 | T12 expiry re-arm (short build) | | |
 | T13 offline buffering | | |
 | T14 unknown cmd on 1.3.0 | | |
+| TC-N10 leak_reset + open guard | PASS (2026-06-24, fw 1.4.1) | Step 2: `leak_reset` refused while wet (exact error). Step 3: `valve_set_state:"open"` rejected at the hub with the RMLEAK error — **no `valve_state_changed` transient**. Step 4: dry recovery opens. Captures: 1.4.0 run showed the transient (10:22:47–48); 1.4.1 run clean (10:54:30). |
 
 ---
 
