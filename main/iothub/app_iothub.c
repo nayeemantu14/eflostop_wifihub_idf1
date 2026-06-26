@@ -47,7 +47,10 @@ static char g_device_key[64] = {0};
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
 
-// Boot snapshot: sent once after health engine boot sync completes
+// Sync snapshot: published once after the health-engine sync window completes
+// (all known devices heard, else the 2-min / 120 s timeout). Re-armed (set false)
+// on MQTT (re)connect AND on a `provision` (commission) command, so the first
+// post-commission snapshot lands within 120 s instead of waiting for the 5-min timer.
 static bool g_boot_snapshot_sent = false;
 
 // Device Twin: request ID counter for twin GET/PATCH operations
@@ -639,6 +642,16 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 cmd.payload_json, strlen(cmd.payload_json))) {
             health_engine_reload_devices();
             iothub_apply_provisioned_mac();
+            // Fast-track the first post-commission snapshot. health_engine_reload_devices()
+            // already re-armed the sync window (all-devices-seen, else 120 s timeout, with the
+            // window clock reset); re-arm the snapshot trigger too so the event loop publishes
+            // as soon as every commissioned device has been heard — or at the 120 s deadline —
+            // instead of waiting for the 5-min periodic snapshot. Best-effort: a device not
+            // heard within 120 s is reported offline/null (no hang, no schema change). The
+            // trigger stays gated to fire once, so this does not introduce a double-send.
+            g_boot_snapshot_sent = false;
+            ESP_LOGI(IOTHUB_TAG,
+                     "Commission: fast snapshot armed (publishes on all-devices-seen, else <=120s)");
         } else {
             success = false;
             error_msg = "provisioning failed";
@@ -1115,9 +1128,11 @@ void iothub_task(void *param)
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
         }
 
-        // ---- Boot snapshot: fires once after all sensors checked in (or 2-min timeout) ----
+        // ---- Sync snapshot: fires once after all sensors check in (or the 120 s / 2-min
+        //      timeout) — on boot, on reconnect, and after a `provision` (commission) command ----
         if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
             g_boot_snapshot_sent = true;
+            ESP_LOGI(IOTHUB_TAG, "Publishing sync snapshot (boot/commission window complete)");
             telemetry_v2_publish_snapshot();
         }
 
