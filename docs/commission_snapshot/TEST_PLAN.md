@@ -1,85 +1,172 @@
 # TEST PLAN — Fast First Snapshot After Commissioning (FW 1.4.4)
 
 Validate that a `provision` (commission) C2D command makes the hub publish a snapshot **within 120 s** —
-ideally within seconds when the devices are live — instead of waiting for the 5-min periodic timer.
+ideally within seconds when the devices are live — instead of waiting for the 5-min periodic timer, and
+that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw_version`).
 
-> Hub under test: `feature/fast-commission-snapshot` (combined firmware, `gateway.fw = 1.4.4`). The board can
-> stay on the existing `nvs_prov` layout from the 1.4.3 test, so a **plain flash (no erase) preserves
-> commissioning** — but the test re-sends `provision` anyway (that's the trigger).
+> Hub under test: `feature/fast-commission-snapshot`, `gateway.fw = 1.4.4`. Includes the window-anchoring
+> fix (`777fc65`) and the snapshot-ordering fix (`0aab312`).
 
-## Tooling
-- Serial: `idf.py -p <PORT> monitor` — watch `IOTHUB`, `HEALTH_ENGINE`, `TELEMETRY_V2`.
-- Cloud: `az iot hub monitor-events -n <hub> -d <gw> --timeout 0` (leave running) + a stopwatch.
-- Send the `provision` command (app, or `az iot device c2d-message send`) with the envelope:
+---
+
+## 0. Prerequisites & tooling
+
+| Item | Value |
+|---|---|
+| Hub branch / version | `feature/fast-commission-snapshot`, **1.4.4** |
+| Valve MAC | `00:80:E1:27:F7:BB` |
+| Leak sensor A (keep LIVE) | `00:80:e1:2a:3f:59` |
+| Leak sensor B (use for OFFLINE case) | `00:80:e1:2a:3b:00` |
+| Serial port | `COM4` (adjust if different) |
+
+**Tools to have running before each test:**
+1. **Serial monitor** — watch `IOTHUB`, `HEALTH_ENGINE`, `TELEMETRY_V2`, `BLE_LEAK`:
+   ```
+   idf.py -p COM4 monitor
+   ```
+2. **Cloud monitor** — VS Code *Azure IoT Hub → Start Monitoring Built-in Event Endpoint* on
+   `GW-34B7DA6AAD54`, or:
+   ```
+   az iot hub monitor-events -n wd-core-iothub-poc -d GW-34B7DA6AAD54 --timeout 0
+   ```
+3. **A stopwatch** (phone) for the latency tests.
+
+**C2D command envelopes** (send via the app, the Azure IoT Toolkit "Send C2D Message", or
+`az iot device c2d-message send -n wd-core-iothub-poc -d GW-34B7DA6AAD54 --data '<json>'`):
+
+- **Decommission-all** (reset to a clean state between tests):
   ```json
-  {"schema":"eflostop.cmd","ver":1,"id":"prov-002","cmd":"provision",
-   "payload":{"valve_mac":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:3b:00","00:80:e1:2a:3f:59"]}}
+  {"schema":"eflostop.cmd","ver":1,"id":"decom-all","cmd":"decommission","payload":{"target":"all"}}
+  ```
+- **Provision — 1 live sensor** (C1, C2, C3, C5, C6):
+  ```json
+  {"schema":"eflostop.cmd","ver":1,"id":"prov-1","cmd":"provision","payload":{"valve_mac":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:3f:59"]}}
+  ```
+- **Provision — 1 live + 1 offline sensor** (C4):
+  ```json
+  {"schema":"eflostop.cmd","ver":1,"id":"prov-c4","cmd":"provision","payload":{"valve_mac":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:3b:00","00:80:e1:2a:3f:59"]}}
   ```
 
-## Build & flash
-```
-idf.py build                      # confirm version 1.4.4
-idf.py -p <PORT> flash monitor    # no erase needed if board already has nvs_prov (1.4.3)
-```
-Confirm boot banner `App version: 1.4.4` and `NVS_STORE: … 'nvs_prov' ready`. Get the hub online (MQTT up).
+> **Serial markers to recognise** (the commission flow):
+> `C2D cmd='provision'` → `PROVISIONING: Provisioning completed` → `HEALTH_ENGINE: Device table loaded`
+> → `IOTHUB: Commission: fast snapshot armed …` → (advert) `BLE_LEAK: eleak …` →
+> `IOTHUB: Event: BLE Leak …` → `HEALTH_ENGINE: Boot sync: all devices seen` **or**
+> `Boot sync: timeout (2 min)` → `IOTHUB: Publishing sync snapshot …` → `TELEMETRY_V2: Pub snapshot …`.
 
-## Tests
-Legend **P** = pass criteria.
+**"Clean-state" reset procedure (do this before each test below):**
+1. Send the **decommission-all** command.
+2. Wait for `cmd_ack decommission status:ok` (cloud) and the hub to auto-restart (serial shows a fresh
+   boot banner → `Hub is UNPROVISIONED`). DPS will re-register (`DPS: Assigned hub=…`).
+3. Confirm serial: `IOTHUB: Connected to Azure IoT Hub!` and `Hub is UNPROVISIONED - waiting for
+   provisioning JSON`.
 
-### C1 — Latency (headline)
-1. With T-MON running, **start a stopwatch** and send the `provision` command.
-2. Serial: `C2D cmd='provision'` → `Commission: fast snapshot armed (publishes on all-devices-seen, else <=120s)`
-   → `HEALTH_ENGINE: Boot sync: all devices seen` (early) **or** `Boot sync: timeout (2 min)` (deadline) →
-   `Publishing sync snapshot (boot/commission window complete)` → `TELEMETRY_V2: Pub snapshot…`.
-3. **P:** a `type:"snapshot"` message arrives on T-MON **≤120 s** after the command. Record the measured time.
+---
 
-### C2 — Early-send when devices are live
-1. Ensure the valve is connected and the leak sensors have advertised recently (or power-cycle a sensor right
-   before to trigger its boot burst).
-2. **P:** the snapshot arrives **well under 120 s** (serial shows `all devices seen`, not `timeout`) — i.e. it
-   does not wait the full window when everything is already heard.
+## C0 — Build & version sanity
+1. `idf.py build` — confirm it reports version **1.4.4**.
+2. `idf.py -p COM4 flash monitor`.
+3. **P:** boot banner shows `App version: 1.4.4`; first lifecycle/snapshot shows `"fw":"1.4.4"`;
+   `NVS_STORE: commissioning NVS partition 'nvs_prov' ready`.
 
-### C3 — Completeness
-1. Provision **N** sensors (vary N).
-2. **P:** all N devices appear in the snapshot `data.ble_leak_sensors` / `lora_sensors` (+ the valve).
+---
 
-### C4 — Degraded (missing sensor)
-1. Keep one BLE-leak sensor dry **and** not advertising (out of range / battery out).
-2. **P:** the snapshot still sends at the **120 s deadline** (serial `Boot sync: timeout`), with that sensor
-   `connected:false` / null fields — no hang, no silent drop.
+## C1 — Latency (headline): snapshot ≤120 s of `provision`
+1. Do the **clean-state reset**.
+2. Ensure leak sensor A (`3F:59`) is powered and within range.
+3. **Start the stopwatch** and send **Provision — 1 live sensor**.
+4. Watch serial for the commission flow markers (above), ending in `Publishing sync snapshot` →
+   `Pub snapshot`.
+5. **P:** a `type:"snapshot"` arrives on the cloud monitor **≤120 s** after the command. Record the
+   measured time. *(Reference run: ~63 s.)*
 
-### C5 — Re-entrancy
-1. Send `provision` **twice** in quick succession (and/or rely on Azure QoS-1 redelivery).
-2. **P:** at most one extra snapshot; no crash, no snapshot storm.
+---
 
-### C6 — Regression (no double-send, periodic intact)
-1. After the commission snapshot, leave the hub idle.
-2. **P:** the normal **5-min periodic** snapshot cadence continues; the commission snapshot did **not** cause a
-   duplicate (two near-identical-`ts` snapshots) beyond the existing boot/periodic behavior.
+## C2 — Early-send when the device is live (don't wait the full window)
+1. Do the **clean-state reset**.
+2. **Power-cycle sensor A right before provisioning** (pull the battery, reinsert) so it fires its
+   power-on boot burst — it will be heard within seconds.
+3. Send **Provision — 1 live sensor**.
+4. **P:** serial shows `HEALTH_ENGINE: Boot sync: all devices seen` (**not** `timeout`), and the
+   snapshot arrives **well under 120 s** — i.e. it does not wait the full window when everything is
+   already heard.
 
-## Change 2 — twin tags (Azure-side, after enrollment config is applied)
-1. Set `initialTwin.tags = {"DeviceBrand":"<TBD>","DeviceModel":"eFloStop","DeviceType":"<TBD>"}` on the DPS
-   **enrollment group** (Azure portal / service SDK). For already-provisioned hubs, back-fill:
-   `az iot hub device-twin update -n <hub> -d <gw> --tags '{"DeviceBrand":"<TBD>","DeviceModel":"eFloStop","DeviceType":"<TBD>"}'`.
-2. **P:** `az iot hub device-twin show -n <hub> -d <gw> --query tags` shows the three tags. Confirm the device's
-   **reported properties are unchanged** and it operates identically (tags are not device-visible — verify on
-   the service side only).
+---
+
+## C3 — Completeness + full fields (the fixed bug)
+1. Do the **clean-state reset**.
+2. Send **Provision — 1 live sensor** (sensor A live).
+3. Inspect the commission snapshot in the cloud monitor.
+4. **P (completeness):** `data.valve` present + `data.ble_leak_sensors` contains `3F:59`.
+5. **P (no null race):** the `3F:59` entry has **non-null** `battery`, `rssi`, and `fw_version`
+   (e.g. `battery:60, rssi:-33, fw_version:"1.1.0"`), with `connected:true`, `last_seen_age_s:0`.
+6. **P (serial ordering):** UART shows `IOTHUB: Event: BLE Leak …` (cache update) **before**
+   `IOTHUB: Publishing sync snapshot …` in the same burst.
+
+---
+
+## C4 — Degraded (a provisioned sensor never advertises)
+1. Do the **clean-state reset**.
+2. **Make sensor B (`3B:00`) silent** — remove its battery (or take it out of range). Keep sensor A
+   (`3F:59`) live.
+3. Send **Provision — 1 live + 1 offline sensor**.
+4. Let the window run to the deadline.
+5. **P (deadline send):** serial shows `HEALTH_ENGINE: Boot sync: timeout (2 min)` ~120 s after the
+   provision, then `Publishing sync snapshot`. No hang, no crash, no reboot.
+6. **P (mixed payload):** in the snapshot —
+   - `3F:59` → `connected:true` with full `battery`/`rssi`/`fw_version`.
+   - `3B:00` → `connected:false`, `last_seen_age_s:null`, `battery/rssi/fw_version:null`.
+   - `system_health.rating` = `critical` (or degraded) citing the offline sensor.
+
+---
+
+## C5 — Re-entrancy (double `provision`, QoS-1 redelivery)
+1. Do the **clean-state reset**.
+2. Send **Provision — 1 live sensor** with `id:"prov-c5a"`, then **again within ~3 s** with
+   `id:"prov-c5b"` (same payload).
+3. **P:** no crash / no reboot; serial may show `Commission: fast snapshot armed` for each, but the
+   snapshots do **not** pile up — **at most one extra** snapshot total (a re-arm before the first
+   snapshot fires → a single snapshot; a re-arm after → at most one additional). No snapshot storm
+   (not 3+ in seconds).
+
+---
+
+## C6 — Regression (5-min periodic intact, no double-send)
+1. Do the **clean-state reset**, then send **Provision — 1 live sensor** and let the commission
+   snapshot publish (per C1).
+2. Leave the hub **idle ~6 minutes**, untouched.
+3. **P (periodic intact):** the normal **5-min periodic** snapshot fires (`TELEMETRY_V2: Pub snapshot`
+   ~300 s after `Snapshot timer started`), proving the commission path didn't disturb the periodic
+   timer.
+4. **P (no double-send):** there is **no** duplicate commission snapshot between the commission
+   snapshot and the first periodic one (no two near-identical-`ts` snapshots back-to-back).
+
+---
+
+## Change 2 — Twin tags (Azure-side, NO firmware) — *blocked, do when values arrive*
+> Needs `DeviceBrand` / `DeviceType` strings from the app team (`DeviceModel = "eFloStop"`).
+1. Set `initialTwin.tags = {"DeviceBrand":"<TBD>","DeviceModel":"eFloStop","DeviceType":"<TBD>"}` on the
+   DPS **enrollment group** (Azure portal / service SDK). For already-provisioned hubs, back-fill:
+   ```
+   az iot hub device-twin update -n wd-core-iothub-poc -d GW-34B7DA6AAD54 \
+     --tags '{"DeviceBrand":"<TBD>","DeviceModel":"eFloStop","DeviceType":"<TBD>"}'
+   ```
+2. **P:** `az iot hub device-twin show -n wd-core-iothub-poc -d GW-34B7DA6AAD54 --query tags` shows the
+   three tags; the device's **reported properties are unchanged** and it operates identically (tags are
+   service-side only, not device-visible).
+
+---
 
 ## Result log
 | Test | Expected | Observed | Pass? |
 |---|---|---|---|
 | C0 version 1.4.4 | banner 1.4.4 | `App version: 1.4.4`, `gateway.fw:1.4.4` | ✅ |
 | C1 latency ≤120 s | snapshot within 120 s of `provision` | provision uptime 31 s → snapshot uptime 94 s (~63 s) | ✅ |
-| C2 early-send | well under 120 s when live | serial `Boot sync: all devices seen` (not timeout); fired when sensor heard | ✅ |
-| C3 completeness | all N + valve present | valve + leak `3F:59` present, **all fields populated** (batt 60, rssi -33, fw 1.1.0) | ✅ |
-| C4 degraded | sends at 120 s, missing sensor null | not exercised (sensor online) | ⏳ |
-| C5 re-entrancy | ≤1 extra snapshot, no storm | not exercised | ⏳ |
-| C6 regression | 5-min cadence intact, no double-send | one sync snapshot per boot/commission, no storm; 5-min periodic not observed (short sessions) | 🟡 |
-| Change 2 tags | tags present service-side | blocked on Brand/Type + DPS enrollment edit | ⏳ |
+| C2 early-send | well under 120 s when live | serial `Boot sync: all devices seen` (not timeout) | ✅ |
+| C3 completeness + full fields | all N + valve, non-null sensor fields | valve + `3F:59` (batt 60, rssi -33, fw 1.1.0) | ✅ |
+| C4 degraded | sends at 120 s timeout; live sensor full, missing sensor null | | |
+| C5 re-entrancy | ≤1 extra snapshot, no storm, no crash | | |
+| C6 regression | 5-min cadence intact, no double-send | | |
+| Change 2 tags | tags present service-side | blocked on Brand/Type + DPS edit | ⏳ |
 
-**Ordering-race fix confirmed (commit `0aab312`):** UART shows `Event: BLE Leak … batt=60` (cache
-update) now precedes `Publishing sync snapshot` in both boot (L417-420) and commission (L891-894)
-paths. Snapshot reads the fresh cache → no more null `battery/rssi/fw_version`. Prior run had the
-snapshot emitted *before* the cache update → null fields.
-
-> After C1–C6 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); do not push unless asked.
+> After C4-C6 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4);
+> tag `v1.4.4` if requested. **Do not push unless asked.**
