@@ -66,6 +66,42 @@ static bool g_boot_snapshot_sent = false;
 static int64_t g_commission_until_ms = 0;
 static uint8_t g_commission_pub_seen = 0;
 
+// ---------------------------------------------------------------------------
+// Unified snapshot scheduler (event-coupled snapshots + heartbeat suppression)
+//
+// All state below is owned by iothub_task ONLY (read/written inside the event
+// loop) and is therefore lock-free. The deadline is a MONOTONIC esp_timer value
+// (immune to SNTP wall-clock steps). EVERY snapshot — heartbeat, event-coupled,
+// or commission/boot — flows through the single flush block at the end of the
+// loop, which re-arms the heartbeat ONLY on a snapshot that actually reached
+// esp-mqtt (so an offline/pre-SNTP/outbox drop never suppresses the heartbeat).
+// ---------------------------------------------------------------------------
+typedef enum {
+    SNAP_HEARTBEAT = 0,   // periodic ~5-min heartbeat
+    SNAP_EVENT,           // coupled to a state-changing event (tiered window)
+    SNAP_COMMISSION,      // incremental commission refresh (urgent, no clamp)
+    SNAP_BOOT,            // first snapshot after boot/reconnect/commission sync
+} snap_reason_t;
+
+typedef enum { SNAP_TIER_LOW = 0, SNAP_TIER_HIGH = 1 } snap_tier_t;
+
+#define SNAP_HIGH_WINDOW_MS    300     // safety-critical burst coalescing window
+#define SNAP_LOW_WINDOW_MS     2000    // low-priority coalescing window
+#define SNAP_MIN_INTERVAL_MS   5000    // min spacing between EVENT/HEARTBEAT snapshots (<=12/min)
+#define SNAP_OFFLINE_FLOOR_MS  30000   // loop idle cap while offline/unprovisioned with a due deadline
+#define SNAP_RETRY_FLOOR_MS    5000    // retry spacing when connected but a publish failed (no tight-spin)
+
+static int64_t       s_snap_due_ms      = 0;                    // monotonic ms; next snapshot deadline
+static int64_t       s_snap_last_pub_ms = 0;                    // monotonic ms of last CONFIRMED publish
+static snap_reason_t s_snap_reason      = SNAP_HEARTBEAT;
+static snap_tier_t   s_snap_tier        = SNAP_TIER_LOW;
+static char          s_snap_evt[32]     = {0};                  // event name (log + observability)
+static int64_t       s_hb_interval_ms   = SNAPSHOT_INTERVAL_MS; // latched from Twin each iteration
+
+// Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
+// -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
+static int s_valve_pub_state = -2;
+
 // Device Twin: request ID counter for twin GET/PATCH operations
 static int g_twin_rid = 0;
 
@@ -457,9 +493,74 @@ static void reseed_valve_health_if_connected(void)
 // still gets reported promptly (not only at the next 5-min periodic).
 static void arm_commission_snapshot(void)
 {
+    // NOTE: runs in the esp-mqtt event-task context (C2D path), NOT iothub_task.
+    // It therefore writes ONLY these tolerant scalar flags (the same self-healing
+    // cross-task pattern already in use) and MUST NOT call snap_request() — the
+    // scheduler deadline is derived inside iothub_task from these flags.
     g_boot_snapshot_sent  = false;
     g_commission_pub_seen = 0;
     g_commission_until_ms = (esp_timer_get_time() / 1000) + COMMISSION_REFRESH_GRACE_MS;
+}
+
+// ---- Snapshot scheduler helpers (iothub_task context ONLY) ----------------
+
+static inline int64_t snap_now_ms(void) { return esp_timer_get_time() / 1000; }
+
+static const char *snap_reason_str(snap_reason_t r)
+{
+    switch (r) {
+        case SNAP_EVENT:      return "event";
+        case SNAP_COMMISSION: return "commission";
+        case SNAP_BOOT:       return "boot";
+        case SNAP_HEARTBEAT:
+        default:              return "heartbeat";
+    }
+}
+
+// Re-arm the heartbeat deadline relative to the last CONFIRMED publish. Called at
+// task start, after every successful snapshot publish, and on the unprovisioned
+// branch (to clear a stranded EVENT deadline + stale device label).
+static void snap_rearm_heartbeat(void)
+{
+    s_snap_due_ms = s_snap_last_pub_ms + s_hb_interval_ms;
+    s_snap_reason = SNAP_HEARTBEAT;
+    s_snap_tier   = SNAP_TIER_LOW;
+    s_snap_evt[0] = '\0';
+}
+
+// Request a snapshot. PULL-IN-ONLY: the deadline only moves EARLIER (or upgrades
+// LOW->HIGH tier within an EVENT burst), so a cascade collapses to ONE snapshot.
+// COMMISSION/BOOT are urgent (due=now, no min-interval clamp) to keep incremental
+// refresh prompt; EVENT/HEARTBEAT are clamped to last_pub+MIN_INTERVAL to bound
+// message volume. Runs in iothub_task only -> lock-free.
+static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt)
+{
+    int64_t now = snap_now_ms();
+
+    if (reason == SNAP_COMMISSION || reason == SNAP_BOOT) {
+        s_snap_due_ms = now;
+        s_snap_reason = reason;
+        s_snap_tier   = SNAP_TIER_HIGH;
+        snprintf(s_snap_evt, sizeof(s_snap_evt), "%s", evt ? evt : "");
+        return;
+    }
+
+    int64_t window = (reason == SNAP_EVENT)
+        ? ((tier == SNAP_TIER_HIGH) ? SNAP_HIGH_WINDOW_MS : SNAP_LOW_WINDOW_MS)
+        : 0;
+    int64_t want  = now + window;
+    int64_t floor = s_snap_last_pub_ms + SNAP_MIN_INTERVAL_MS;   // min-interval clamp
+    if (want < floor) want = floor;
+
+    bool upgrade = (reason == SNAP_EVENT && s_snap_reason == SNAP_EVENT &&
+                    tier == SNAP_TIER_HIGH && s_snap_tier == SNAP_TIER_LOW);
+
+    if (want < s_snap_due_ms || upgrade) {
+        s_snap_due_ms = want;
+        s_snap_reason = reason;
+        s_snap_tier   = tier;
+        snprintf(s_snap_evt, sizeof(s_snap_evt), "%s", evt ? evt : "");
+    }
 }
 
 static void handle_c2d_command(const char *data, size_t data_len)
@@ -886,6 +987,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         telemetry_v2_set_connected(true);
         net_status_set_mqtt(true);   // status LED -> fully connected (ramp blue)
         g_needs_lifecycle = true;  // Event loop will publish lifecycle + snapshot
+        telemetry_v2_wake_snapshot();  // wake iothub_task now so the first post-reconnect snapshot is prompt
         {
             char sub_topic[128];
             // C2D messages
@@ -1126,8 +1228,14 @@ void iothub_task(void *param)
         xQueueAddToSet(snap_q, evt_queue_set);
     }
 
-    // Start the periodic snapshot timer (fires every SNAPSHOT_INTERVAL_MS)
+    // Start the periodic snapshot timer (fixed liveness backstop that only wakes
+    // the loop; the actual heartbeat cadence is driven by the deadline scheduler).
     telemetry_v2_start_snapshot_timer();
+
+    // Arm the snapshot scheduler's first heartbeat deadline (now + interval).
+    s_hb_interval_ms   = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
+    s_snap_last_pub_ms = snap_now_ms();
+    snap_rearm_heartbeat();
 
     lora_packet_t pkt;
     ble_update_type_t ble_upd_type;
@@ -1138,17 +1246,31 @@ void iothub_task(void *param)
 
     while (1)
     {
+        // Latch the (Twin-tunable) heartbeat interval for this iteration.
+        s_hb_interval_ms = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
+
+        bool provisioned = provisioning_is_provisioned();
+
         // While a boot/commission snapshot is pending OR the post-commission
         // refresh grace is open, poll briefly so the snapshot publishes within ~2 s
-        // of the window completing (all-seen or the timeout) and the incremental
-        // refresh fires promptly when a late device is heard; otherwise idle at 30 s.
-        // health_is_boot_sync_complete() evaluates the deadline on read, so this poll
-        // cadence bounds the latency.
-        bool commission_pending = provisioning_is_provisioned() &&
+        // of the window completing and the incremental refresh fires promptly.
+        bool commission_pending = provisioned &&
             (!g_boot_snapshot_sent ||
-             (esp_timer_get_time() / 1000) < g_commission_until_ms);
-        TickType_t evt_wait = commission_pending ? pdMS_TO_TICKS(2000)
-                                                 : pdMS_TO_TICKS(30000);
+             (snap_now_ms() < g_commission_until_ms));
+
+        // Flush trigger = derive the select timeout from the snapshot deadline so
+        // the loop wakes in time to flush a pending snapshot (defeats the 30 s idle
+        // block). If a snapshot is due but we can't publish (offline/unprovisioned),
+        // idle at the offline floor instead of tight-spinning; reconnect wakes us
+        // immediately via telemetry_v2_wake_snapshot().
+        int64_t now_ms = snap_now_ms();
+        int64_t delta  = s_snap_due_ms - now_ms;
+        if (delta < 0) delta = 0;
+        bool can_pub = provisioned && telemetry_v2_is_connected();
+        if (delta <= 0 && !can_pub) delta = SNAP_OFFLINE_FLOOR_MS;
+        int64_t base = commission_pending ? 2000 : 30000;
+        int64_t wake = (delta < base) ? delta : base;
+        TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
 
         // Periodic rules engine tick (auto-clear timeout, valve override detection)
@@ -1158,7 +1280,6 @@ void iothub_task(void *param)
         // Phase 1: RECEIVE (always -- regardless of connection state)
         // =================================================================
         bool has_lora = false, has_valve = false, has_ble_leak = false;
-        bool has_snapshot = false;
 
         if (active_queue == lora_rx_queue) {
             has_lora = xQueueReceive(lora_rx_queue, &pkt, 0);
@@ -1167,9 +1288,10 @@ void iothub_task(void *param)
         } else if (active_queue == ble_leak_rx_queue) {
             has_ble_leak = xQueueReceive(ble_leak_rx_queue, &ble_leak_evt, 0);
         } else if (snap_q && active_queue == snap_q) {
+            // Liveness/reconnect wake only — the heartbeat is driven by the
+            // deadline scheduler + single flush block, not by this trigger.
             uint8_t trig;
             xQueueReceive(snap_q, &trig, 0);
-            has_snapshot = true;
         }
 
         // =================================================================
@@ -1203,8 +1325,12 @@ void iothub_task(void *param)
         // =================================================================
         // Phase 3: PUBLISH (only when connected + provisioned)
         // =================================================================
-        if (!provisioning_is_provisioned()) {
+        if (!provisioned) {
             if (auto_close_json) free(auto_close_json);
+            // Reset the scheduler to a neutral heartbeat so a stranded past-due
+            // EVENT deadline (with a now-stale device label) can't fire on the
+            // next provision; offline-floor in evt_wait prevents any spin.
+            snap_rearm_heartbeat();
             continue;
         }
 
@@ -1220,6 +1346,12 @@ void iothub_task(void *param)
         // ---- Rules engine events (auto-close, rmleak changes) ----
         if (auto_close_json) {
             telemetry_v2_publish_rules_event(auto_close_json);
+            // Couple a snapshot: auto_close_blocked_override is low-priority (it is
+            // rate-limited and the override state is unchanged); all other rules
+            // events (auto_close, rmleak_cleared, override enable/re-enable) are
+            // safety-critical and flush at the HIGH cadence.
+            bool low = (strstr(auto_close_json, "auto_close_blocked_override") != NULL);
+            snap_request(SNAP_EVENT, low ? SNAP_TIER_LOW : SNAP_TIER_HIGH, "rules");
             free(auto_close_json);
         }
 
@@ -1232,18 +1364,6 @@ void iothub_task(void *param)
                     telemetry_v2_publish_health_event(json);
                     free(json);
                 }
-            }
-        }
-
-        // ---- Periodic snapshot ----
-        if (has_snapshot) {
-            telemetry_v2_publish_snapshot();
-            // Coalesce with a still-pending boot/commission sync snapshot: this
-            // periodic snapshot already carries identical state, so mark the boot
-            // snapshot sent to stop the sync block below from publishing a
-            // back-to-back duplicate in this same iteration.
-            if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
-                g_boot_snapshot_sent = true;
             }
         }
 
@@ -1265,6 +1385,8 @@ void iothub_task(void *param)
                         pkt.leakStatus ? "leak_detected" : "leak_cleared",
                         "lora", lora_id,
                         (pkt.leakStatus != 0), pkt.batteryPercentage, pkt.rssi);
+                    snap_request(SNAP_EVENT, SNAP_TIER_HIGH,
+                        pkt.leakStatus ? "leak_detected" : "leak_cleared");
                 }
             }
         }
@@ -1290,11 +1412,20 @@ void iothub_task(void *param)
 
             if (mac_ok) {
                 if (ble_upd_type == BLE_UPD_LEAK) {
-                    telemetry_v2_publish_valve_event(
-                        ble_valve_get_leak() ? "valve_flood_detected"
-                                             : "valve_flood_cleared");
+                    const char *ev = ble_valve_get_leak() ? "valve_flood_detected"
+                                                          : "valve_flood_cleared";
+                    telemetry_v2_publish_valve_event(ev);
+                    snap_request(SNAP_EVENT, SNAP_TIER_HIGH, ev);
                 } else if (ble_upd_type == BLE_UPD_STATE) {
-                    telemetry_v2_publish_valve_event("valve_state_changed");
+                    // Delta-gate: only emit on a REAL state change (was emitted on
+                    // every BLE_UPD_STATE notify). Caps the event stream and the
+                    // coupled snapshot rate.
+                    int vstate = ble_valve_get_state();
+                    if (vstate != s_valve_pub_state) {
+                        s_valve_pub_state = vstate;
+                        telemetry_v2_publish_valve_event("valve_state_changed");
+                        snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "valve_state_changed");
+                    }
                 }
                 // BLE_UPD_BATTERY: no event — included in snapshot
                 // BLE_UPD_RMLEAK: handled by rules engine events
@@ -1315,44 +1446,70 @@ void iothub_task(void *param)
                     "ble_leak_sensor", ble_leak_evt.sensor_mac_str,
                     ble_leak_evt.leak_detected,
                     ble_leak_evt.battery, ble_leak_evt.rssi);
+                snap_request(SNAP_EVENT, SNAP_TIER_HIGH,
+                    ble_leak_evt.leak_detected ? "leak_detected" : "leak_cleared");
             }
         }
 
-        // ---- Sync snapshot: fires once after all sensors check in (or the 120 s / 2-min
-        //      timeout) — on boot, on reconnect, and after a `provision` (commission) command.
-        //      MUST run after the LoRa/valve/BLE-leak event blocks above: the check-in that
-        //      flips boot-sync to "complete" is done in the scanner task the instant an
-        //      advertisement arrives, which is ahead of the telemetry-cache update here. If
-        //      this published earlier in the loop it would race the cache and emit null
-        //      battery/rssi/fw for the very sensor whose advertisement just completed the
-        //      window. Publishing last guarantees the snapshot reflects that advertisement. ----
+        // ---- Boot/commission snapshot ARMING (no publish here) ----
+        // Arm the deadline when the boot-sync window completes (boot, reconnect,
+        // or a `provision` command) or when a late device is heard within the
+        // refresh grace. The actual publish + bookkeeping happen in the single
+        // flush block below, AFTER all cache updates and only on a confirmed send
+        // — so the snapshot reflects the advertisement that just completed the
+        // window and a failed publish never marks the snapshot "sent" (the
+        // guaranteed boot snapshot can't be lost).
         if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
-            g_boot_snapshot_sent = true;
-            uint8_t seen = 0, total = 0;
-            if (health_get_sync_counts(&seen, &total)) {
-                g_commission_pub_seen = seen;
-                if (seen >= total) g_commission_until_ms = 0;  // all heard — no refresh needed
-            }
-            ESP_LOGI(IOTHUB_TAG, "Publishing sync snapshot (boot/commission window complete)");
-            telemetry_v2_publish_snapshot();
-        }
-        // ---- Incremental commission refresh ----
-        // After the initial snapshot, a commissioned device may be heard for the
-        // first time only after the window closed (a far/slow leak sensor on a
-        // ~100 s cadence). Within the grace window, publish a refreshed snapshot
-        // each time the heard-device count increases, so its data reaches the cloud
-        // immediately instead of waiting for the 5-min periodic. Self-limits once
-        // every device has been heard.
-        else if (g_boot_snapshot_sent &&
-                 (esp_timer_get_time() / 1000) < g_commission_until_ms) {
+            snap_request(SNAP_BOOT, SNAP_TIER_HIGH, "boot");
+        } else if (g_boot_snapshot_sent &&
+                   (snap_now_ms() < g_commission_until_ms)) {
             uint8_t seen = 0, total = 0;
             if (health_get_sync_counts(&seen, &total) && seen > g_commission_pub_seen) {
-                g_commission_pub_seen = seen;
-                ESP_LOGI(IOTHUB_TAG,
-                         "Publishing commission refresh snapshot (device heard, %u/%u seen)",
-                         (unsigned)seen, (unsigned)total);
-                telemetry_v2_publish_snapshot();
-                if (seen >= total) g_commission_until_ms = 0;  // all heard — stop refreshing
+                snap_request(SNAP_COMMISSION, SNAP_TIER_HIGH, "commission-refresh");
+            }
+        }
+
+        // =================================================================
+        // SINGLE FLUSH BLOCK — the ONLY telemetry_v2_publish_snapshot() site.
+        // Runs after all event/cache updates and the boot/commission arming, so
+        // the snapshot always reflects post-burst state (ordering invariant).
+        // Re-arms the heartbeat ONLY on a snapshot that actually reached esp-mqtt.
+        // =================================================================
+        {
+            int64_t flush_now = snap_now_ms();
+            bool due = (flush_now >= s_snap_due_ms);
+            // BOOT/COMMISSION additionally require the sync window complete (mirror
+            // of the original gate) so we never emit a premature pre-sync snapshot.
+            bool gate_ok = !(s_snap_reason == SNAP_BOOT || s_snap_reason == SNAP_COMMISSION)
+                           || health_is_boot_sync_complete();
+            if (due && gate_ok && telemetry_v2_is_connected()) {
+                snap_reason_t reason = s_snap_reason;
+                const char *rstr = snap_reason_str(reason);
+                if (reason == SNAP_EVENT)
+                    ESP_LOGI(IOTHUB_TAG, "SNAP trigger=event:%s", s_snap_evt);
+                else
+                    ESP_LOGI(IOTHUB_TAG, "SNAP trigger=%s", rstr);
+
+                bool ok = telemetry_v2_publish_snapshot(rstr);
+                if (ok) {
+                    s_snap_last_pub_ms = flush_now;
+                    if (reason == SNAP_BOOT || reason == SNAP_COMMISSION) {
+                        g_boot_snapshot_sent = true;
+                        uint8_t seen = 0, total = 0;
+                        if (health_get_sync_counts(&seen, &total)) {
+                            g_commission_pub_seen = seen;
+                            if (seen >= total) g_commission_until_ms = 0;
+                        }
+                    }
+                    snap_rearm_heartbeat();
+                    ESP_LOGI(IOTHUB_TAG, "SNAP heartbeat=reset interval_ms=%lld",
+                             (long long)s_hb_interval_ms);
+                } else {
+                    // Connected but publish failed (e.g. QoS-1 outbox full): back
+                    // off RETRY_FLOOR, do NOT advance last_pub or re-arm heartbeat.
+                    s_snap_due_ms = flush_now + SNAP_RETRY_FLOOR_MS;
+                    ESP_LOGW(IOTHUB_TAG, "SNAP heartbeat=suppressed (publish-failed)");
+                }
             }
         }
     }
