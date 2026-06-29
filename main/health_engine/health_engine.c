@@ -463,6 +463,12 @@ void health_engine_reload_devices(void)
     }
 
     s_boot_sync_done = false;  // Reset boot sync on reload
+    s_boot_start_ms  = now_ms();  // Restart the sync window from THIS reload (boot OR a
+                                  // `provision` command) so the 120 s "wait for all
+                                  // commissioned devices to be heard" budget is anchored
+                                  // to the commission event, not to power-on. Without this
+                                  // a provision >120 s after boot would fire the snapshot
+                                  // immediately with devices not yet re-heard.
 
     ESP_LOGI(HEALTH_TAG, "Device table loaded: %d device(s)", idx);
 
@@ -501,8 +507,7 @@ void health_engine_init(void)
         return;
     }
 
-    health_engine_reload_devices();
-    s_boot_start_ms = now_ms();
+    health_engine_reload_devices();   // also stamps s_boot_start_ms (sync-window start)
 
     xTaskCreate(health_engine_task, "health_engine", 3072, NULL, 2, NULL);
     xTimerStart(s_tick_timer, 0);
