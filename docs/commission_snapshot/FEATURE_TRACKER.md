@@ -37,12 +37,27 @@ Reuses the existing health-engine "sync snapshot" machinery rather than a new bl
 - `main/iothub/app_iothub.c`: `provision` branch re-arms `g_boot_snapshot_sent=false` + log
   `Commission: fast snapshot armed…`; sync-snapshot site logs `Publishing sync snapshot…`. Comment on
   `g_boot_snapshot_sent` updated (boot **or** commission).
+- `main/health_engine/health_engine.c`: `health_engine_reload_devices()` now also stamps
+  `s_boot_start_ms = now_ms()` so the 120 s window is **anchored to the `provision`**, not to power-on
+  (commit `777fc65`). Without this, provisioning >120 s into uptime fired the snapshot near-instantly.
+- `main/iothub/app_iothub.c`: **sync-snapshot publish moved to the END of the event loop**, after the
+  LoRa/valve/BLE-leak event blocks. The boot-sync "all devices seen" flag is flipped by the scanner task
+  the instant an advert arrives (ahead of the iothub loop's telemetry-cache update), so the polled
+  snapshot condition could fire in the same iteration as the leak event but **before** the cache was
+  refreshed → snapshot emitted `battery/rssi/fw_version = null` for the very sensor that just completed
+  the window. Publishing last guarantees fresh data. (The periodic snapshot was unaffected — it is
+  queue-triggered and mutually exclusive with leak events in the dequeue.)
 - `CMakeLists.txt`: `PROJECT_VER` → **1.4.4**.
 - (Change 2: no firmware — DPS enrollment config + optional `az` back-fill, external to repo.)
 
 ## Status
-- **IMPLEMENT (Change 1):** ✅ committed `aae5c8b`; merged up to current master (`1380d5f`).
-- **BUILD/BENCH:** ⏳ pending — user flashes + runs `TEST_PLAN.md`.
+- **IMPLEMENT (Change 1):** ✅ `aae5c8b` (fast snapshot) + `777fc65` (anchor window to provision)
+  + sync-snapshot ordering fix (this change). Merged up to current master (`1380d5f`).
+- **BENCH (anchoring fix `777fc65`):** ✅ provision at uptime 48 s → snapshot at uptime 124 s (~76 s),
+  sensor `connected:true` — window correctly restarted from the provision, dry sensor heard within it.
+- **BENCH (ordering fix):** ⏳ pending re-flash — last test showed `battery/rssi/fw=null` in the
+  commission snapshot due to the cache race (now fixed); needs one more flash + re-test.
+- **BUILD/BENCH (full TEST_PLAN):** ⏳ pending — user flashes + runs `TEST_PLAN.md`.
 - **Change 2:** ⏳ blocked on `DeviceBrand`/`DeviceType` strings + Azure DPS enrollment edit (no firmware).
 - **MERGE:** ⏳ after bench pass → `git merge --no-ff feature/fast-commission-snapshot` into master (1.4.4).
 

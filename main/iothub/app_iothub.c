@@ -1162,14 +1162,6 @@ void iothub_task(void *param)
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
         }
 
-        // ---- Sync snapshot: fires once after all sensors check in (or the 120 s / 2-min
-        //      timeout) — on boot, on reconnect, and after a `provision` (commission) command ----
-        if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
-            g_boot_snapshot_sent = true;
-            ESP_LOGI(IOTHUB_TAG, "Publishing sync snapshot (boot/commission window complete)");
-            telemetry_v2_publish_snapshot();
-        }
-
         // ---- Rules engine events (auto-close, rmleak changes) ----
         if (auto_close_json) {
             telemetry_v2_publish_rules_event(auto_close_json);
@@ -1262,6 +1254,20 @@ void iothub_task(void *param)
                     ble_leak_evt.leak_detected,
                     ble_leak_evt.battery, ble_leak_evt.rssi);
             }
+        }
+
+        // ---- Sync snapshot: fires once after all sensors check in (or the 120 s / 2-min
+        //      timeout) — on boot, on reconnect, and after a `provision` (commission) command.
+        //      MUST run after the LoRa/valve/BLE-leak event blocks above: the check-in that
+        //      flips boot-sync to "complete" is done in the scanner task the instant an
+        //      advertisement arrives, which is ahead of the telemetry-cache update here. If
+        //      this published earlier in the loop it would race the cache and emit null
+        //      battery/rssi/fw for the very sensor whose advertisement just completed the
+        //      window. Publishing last guarantees the snapshot reflects that advertisement. ----
+        if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
+            g_boot_snapshot_sent = true;
+            ESP_LOGI(IOTHUB_TAG, "Publishing sync snapshot (boot/commission window complete)");
+            telemetry_v2_publish_snapshot();
         }
     }
 }
