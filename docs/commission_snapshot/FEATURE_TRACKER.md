@@ -83,9 +83,11 @@ Fixes (user chose A+B+D+E):
   heard-device count increases (`health_get_sync_counts()`), so a late sensor's data reaches the cloud
   immediately. Self-limits once all devices are heard. New helper `arm_commission_snapshot()` sets it up on
   provision + every decommission. Loop polls at 2 s during the grace so the refresh lands within ~2 s.
-- **B — Separate, longer commission window.** `HEALTH_COMMISSION_SYNC_TIMEOUT_MS`=240 s (vs 120 s boot);
+- **B — Separate commission window.** `HEALTH_COMMISSION_SYNC_TIMEOUT_MS`=**150 s** (vs 120 s boot);
   `health_engine_reload_devices(uint32_t sync_window_ms)` now takes the window length (boot passes 120 s,
-  provision/decommission pass 240 s). 240 s ≈ 2 sensor cadences.
+  provision/decommission pass 150 s). Tuned to ~1.5× the ~100 s burst cadence: catches an in-range sensor in
+  a single clean snapshot, reports an absent device promptly; A's refresh covers the far/slow tail so the
+  window need not cover the worst case (was 240 s — shortened after review).
 - **D — Cache/health consistency.** `telemetry_v2.c`: only merge cached battery/rssi/fw when
   `health[i].connected` (LoRa + BLE), so a reloaded-but-not-yet-reheard sensor can't show `connected:false`
   with stale `battery/rssi/fw` (the 309 s mismatch).
@@ -106,7 +108,7 @@ Fixes (user chose A+B+D+E):
   re-test: valve `connected:true/rating:excellent`, single snapshot, timeout ~120 s.
 - **BENCH (combined valve+sensor commission):** 🟡 reproduced "sensor data never arrives" (far sensor heard
   at 222 s, past the 120 s window; one-shot snapshot). Fixes A+B+D+E implemented — **re-flash + re-test
-  pending**. Expect: initial snapshot at all-seen or 240 s; a late sensor triggers a **refresh snapshot**
+  pending**. Expect: initial snapshot at all-seen or 150 s; a late sensor triggers a **refresh snapshot**
   within ~2 s of being heard; no `connected:false` + stale `battery/rssi/fw`; `Whitelist reloaded` only on change.
 - **BUILD/BENCH (full TEST_PLAN):** 🟡 **C0/C1/C2/C3 PASS**. C4 + combined-commission fixes pending re-test;
   C5 (re-entrancy), C6 (5-min periodic intact) not yet exercised.

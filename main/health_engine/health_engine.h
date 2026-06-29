@@ -23,9 +23,14 @@ extern "C" {
 #define HEALTH_RSSI_GOOD_DBM         (-80)
 #define HEALTH_VALVE_DISC_TIMEOUT_MS (3 * 60 * 1000)      // 3-min grace before CRITICAL
 #define HEALTH_BOOT_SYNC_TIMEOUT_MS  (2 * 60 * 1000)     // 2-min boot window for sensor check-ins
-#define HEALTH_COMMISSION_SYNC_TIMEOUT_MS (4 * 60 * 1000) // 4-min window after a provision/commission
-                                                          // (a dry sensor advertises on a ~100 s
-                                                          // cadence; 2 cadences gives it time to be heard)
+#define HEALTH_COMMISSION_SYNC_TIMEOUT_MS (150 * 1000)    // 2.5-min window after a provision/commission.
+                                                          // ~1.5x the dry sensor's ~100 s burst cadence:
+                                                          // long enough to catch an in-range sensor in a
+                                                          // single clean snapshot, short enough to report a
+                                                          // genuinely-absent device promptly. Late/far
+                                                          // sensors are still picked up by the incremental
+                                                          // refresh snapshot (app_iothub.c), so the window
+                                                          // need not cover the worst case.
 #define HEALTH_MAX_DEVICES           33                   // 1 valve + 16 LoRa + 16 BLE leak
 
 // ---------------------------------------------------------------------------
