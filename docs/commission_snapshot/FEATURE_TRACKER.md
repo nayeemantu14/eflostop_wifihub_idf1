@@ -55,9 +55,11 @@ Reuses the existing health-engine "sync snapshot" machinery rather than a new bl
   + sync-snapshot ordering fix (this change). Merged up to current master (`1380d5f`).
 - **BENCH (anchoring fix `777fc65`):** ✅ provision at uptime 48 s → snapshot at uptime 124 s (~76 s),
   sensor `connected:true` — window correctly restarted from the provision, dry sensor heard within it.
-- **BENCH (ordering fix):** ⏳ pending re-flash — last test showed `battery/rssi/fw=null` in the
-  commission snapshot due to the cache race (now fixed); needs one more flash + re-test.
-- **BUILD/BENCH (full TEST_PLAN):** ⏳ pending — user flashes + runs `TEST_PLAN.md`.
+- **BENCH (ordering fix `0aab312`):** ✅ re-flashed + tested. Commission snapshot at uptime 94 s
+  (~63 s after provision, early-send path) with **all fields populated** (batt 60, rssi -33, fw 1.1.0).
+  UART confirms `Event: BLE Leak` (cache update) now precedes `Publishing sync snapshot`.
+- **BUILD/BENCH (full TEST_PLAN):** 🟡 headline tests **C0/C1/C2/C3 PASS**. C4 (degraded/missing
+  sensor), C5 (re-entrancy), C6 (5-min periodic intact) not yet exercised.
 - **Change 2:** ⏳ blocked on `DeviceBrand`/`DeviceType` strings + Azure DPS enrollment edit (no firmware).
 - **MERGE:** ⏳ after bench pass → `git merge --no-ff feature/fast-commission-snapshot` into master (1.4.4).
 

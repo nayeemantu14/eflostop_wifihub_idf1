@@ -68,13 +68,18 @@ Legend **P** = pass criteria.
 ## Result log
 | Test | Expected | Observed | Pass? |
 |---|---|---|---|
-| C0 version 1.4.4 | banner 1.4.4 | | |
-| C1 latency ≤120 s | snapshot within 120 s of `provision` | | |
-| C2 early-send | well under 120 s when live | | |
-| C3 completeness | all N + valve present | | |
-| C4 degraded | sends at 120 s, missing sensor null | | |
-| C5 re-entrancy | ≤1 extra snapshot, no storm | | |
-| C6 regression | 5-min cadence intact, no double-send | | |
-| Change 2 tags | tags present service-side | | |
+| C0 version 1.4.4 | banner 1.4.4 | `App version: 1.4.4`, `gateway.fw:1.4.4` | ✅ |
+| C1 latency ≤120 s | snapshot within 120 s of `provision` | provision uptime 31 s → snapshot uptime 94 s (~63 s) | ✅ |
+| C2 early-send | well under 120 s when live | serial `Boot sync: all devices seen` (not timeout); fired when sensor heard | ✅ |
+| C3 completeness | all N + valve present | valve + leak `3F:59` present, **all fields populated** (batt 60, rssi -33, fw 1.1.0) | ✅ |
+| C4 degraded | sends at 120 s, missing sensor null | not exercised (sensor online) | ⏳ |
+| C5 re-entrancy | ≤1 extra snapshot, no storm | not exercised | ⏳ |
+| C6 regression | 5-min cadence intact, no double-send | one sync snapshot per boot/commission, no storm; 5-min periodic not observed (short sessions) | 🟡 |
+| Change 2 tags | tags present service-side | blocked on Brand/Type + DPS enrollment edit | ⏳ |
+
+**Ordering-race fix confirmed (commit `0aab312`):** UART shows `Event: BLE Leak … batt=60` (cache
+update) now precedes `Publishing sync snapshot` in both boot (L417-420) and commission (L891-894)
+paths. Snapshot reads the fresh cache → no more null `battery/rssi/fw_version`. Prior run had the
+snapshot emitted *before* the cache update → null fields.
 
 > After C1–C6 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); do not push unless asked.
