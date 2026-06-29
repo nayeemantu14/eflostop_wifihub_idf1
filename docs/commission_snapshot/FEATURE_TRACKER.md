@@ -110,10 +110,14 @@ Fixes (user chose A+B+D+E):
   at 222 s, past the 120 s window; one-shot snapshot). Fixes A+B+D+E implemented — **re-flash + re-test
   pending**. Expect: initial snapshot at all-seen or 150 s; a late sensor triggers a **refresh snapshot**
   within ~2 s of being heard; no `connected:false` + stale `battery/rssi/fw`; `Whitelist reloaded` only on change.
-- **BUILD/BENCH (full TEST_PLAN):** 🟡 **C0/C1/C2/C3 PASS**. C4 + combined-commission fixes pending re-test;
-  C5 (re-entrancy), C6 (5-min periodic intact) not yet exercised.
+- **BUILD/BENCH (full TEST_PLAN, 150 s build):** ✅ **ALL firmware cases pass** (C0-C9 + C2D-malformed +
+  separate-window + stability). C7 incremental refresh **confirmed on HW**: sensor off → 150 s timeout
+  snapshot offline → sensor on → `Publishing commission refresh snapshot (device heard, 2/2 seen)` → sensor
+  online (UART `UART logs.txt` @732 s). Monitor duplicate @473 s was Azure QoS-1 redelivery, not a firmware
+  double-send (UART = single publish).
 - **Change 2:** ⏳ blocked on `DeviceBrand`/`DeviceType` strings + Azure DPS enrollment edit (no firmware).
-- **MERGE:** ⏳ after bench pass → `git merge --no-ff feature/fast-commission-snapshot` into master (1.4.4).
+- **MERGE:** ✅ merged `feature/fast-commission-snapshot` → master (1.4.4) via `--no-ff`, tagged `v1.4.4`.
+  **Not pushed** (awaiting explicit request).
 
 ## Open items
 - Get `DeviceBrand` / `DeviceType` values from the app team for Change 2.

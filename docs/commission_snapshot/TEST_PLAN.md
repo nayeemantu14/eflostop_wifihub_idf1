@@ -220,7 +220,7 @@ Deterministically forces a sensor to be heard **after** the window closes, then 
 | C4 degraded | `#1`+`#2`+`#3` | boot timeout **120 s** @122.8 s; **valve online/excellent**; single snapshot; `3b:00` null | ✅ |
 | C5 re-entrancy | re-entrancy | ✅ **double provision @257 s & @267 s (10 s apart) → no storm/crash**; just periodic @309 + one commission-timeout @419 | ✅ |
 | C6 regression | `#2` / periodic | 5-min periodic fired @309 s & @609 s; UART has 6 `Pub snapshot`, all distinct triggers — no firmware double-send | ✅ |
-| **C7 incremental refresh** | **A** | **still not exercised** — last provision @535 s timed out @685 s with the sensor off and the capture ended before it was powered on. **Code-reviewed `wouldFire=true` (high conf)** — needs the power-off→timeout→**power-on** step captured | 🟡 |
+| **C7 incremental refresh** | **A** | ✅ **CONFIRMED on HW**: sensor off → `Boot sync: timeout (150 s)` @685 s snapshot `3f:59` offline/null → sensor ON @732 s → `Publishing commission refresh snapshot (device heard, 2/2 seen)` → snapshot `3f:59` connected:true, batt 62, rssi -50, fw 1.1.0; ordering correct (Event before refresh); self-limited (only periodic after) | ✅ |
 | C8 cache consistency | D | re-prov snapshot @309 s: both sensors `connected:false` with **null** battery/rssi/fw (no stale 62) | ✅ |
 | C9 decommission (ble+valve) | `#4`+`#1`+E | ble removals reflected (@473 s → 0 sensors); **valve decommission @505 s → UNPROVISIONED, no spurious snapshot, then re-provision reconnects**; `Whitelist reloaded` only on real changes | ✅ |
 | C2D malformed (new) | `929c6c1` | ✅ truncated envelope @452 s → `Malformed C2D JSON — ignoring` + `Unrecognized C2D payload`, **no state change** (whitelist stayed 1) | ✅ |
@@ -229,14 +229,10 @@ Deterministically forces a sensor to be heard **after** the window closes, then 
 | Stability / scan self-heal | — | no panic/abort; heap stable ~41 KB; leak-scan self-heal works (`Scan not active … restarting` on valve reconnect) | ✅ |
 | Change 2 tags | Azure-side | blocked on Brand/Type + DPS edit | ⏳ |
 
-> **10/11 validated; only C7 still needs the deliberate power-on-after-timeout capture.** C2D-malformed fix
-> CONFIRMED on hardware (`Malformed C2D JSON — ignoring` @452 s, no re-provision). C5 re-entrancy CONFIRMED.
-> Valve decommission CONFIRMED. The monitor's duplicate snapshot @473 s is **Azure QoS-1 redelivery**, not a
-> firmware bug (UART shows a single publish).
+> **ALL firmware cases validated on hardware (C7 confirmed — refresh fires @732 s with sensor online).**
+> C2D-malformed fix confirmed (`Malformed C2D JSON — ignoring`, no re-provision); C5 re-entrancy confirmed;
+> valve decommission confirmed; the monitor's duplicate snapshot @473 s is **Azure QoS-1 redelivery**, not a
+> firmware bug (UART = single publish). Only **Change 2 (twin tags)** remains — Azure-side, blocked on
+> Brand/Type values.
 >
-> C7 (incremental refresh A) is **code-confirmed** but un-exercised: run **power sensor OFF → wait for
-> `Boot sync: timeout (150 s)` snapshot (sensor offline) → power sensor ON** → expect
-> `Publishing commission refresh snapshot (device heard, N/N seen)` + a snapshot with the sensor online.
->
-> After C7: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); tag `v1.4.4` if requested.
-> **Do not push unless asked.**
+> ✅ **MERGED** to master (1.4.4) via `git merge --no-ff`, tagged `v1.4.4`. **Not pushed.**
