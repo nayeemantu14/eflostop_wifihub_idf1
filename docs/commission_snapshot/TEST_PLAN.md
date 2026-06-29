@@ -210,20 +210,33 @@ Deterministically forces a sensor to be heard **after** the window closes, then 
 
 ---
 
-## Result log (re-run all on the 150 s build, commits through `8112f0c`)
-| Test | Validates | Expected | Observed | Pass? |
-|---|---|---|---|---|
-| C0 version/build | build compiles, 1.4.4 | banner 1.4.4 | | |
-| C1 latency ≤150 s | fast snapshot | snapshot ≤150 s of `provision` (usually sooner) | | |
-| C2 early-send | early-send | well under 150 s when live (`all devices seen`) | | |
-| C3 completeness + full fields | `0aab312` ordering | valve + sensor, non-null battery/rssi/fw | | |
-| C4 degraded | `#1`+`#2`+`#3` | timeout ~150 s, **valve online**, single snapshot, missing sensor null | | |
-| C5 re-entrancy | re-entrancy | ≤1 extra snapshot, no storm, no crash | | |
-| C6 regression | `#2` / periodic | 5-min cadence intact, no double-send | | |
-| **C7 incremental refresh** | **A (the headline fix)** | late sensor (powered on after window) → `commission refresh snapshot`, goes online | | |
-| C8 cache consistency | D | re-provisioned sensor: `connected:false` has **null** battery/rssi/fw (not stale) | | |
-| C9 decommission | `#4`+`#1`+E | snapshot reflects removal; valve stays online; whitelist log only on change | | |
-| Change 2 tags | Azure-side | tags present service-side | blocked on Brand/Type + DPS edit | ⏳ |
+## Result log (bench run on 150 s build; verified vs UART+monitor by workflow `wf_f5fa217f`)
+| Test | Validates | Observed | Pass? |
+|---|---|---|---|
+| C0 version/build | build compiles, 1.4.4 | runs; `App version: 1.4.4`, `fw:1.4.4` everywhere; uptime 0→670 s | ✅ |
+| C1 latency ≤150 s | fast snapshot | commission snapshots within window (re-prov heard at 138 s, published 150 s) | ✅ |
+| C2 early-send | early-send | all-seen early-send proven (decom→0 sensors → snapshot @uptime418, valve-only) | ✅ |
+| C3 completeness + full fields | `0aab312` | heard sensors carry full battery/rssi/fw (boot @123 s, final @642 s), no nulls | ✅ |
+| C4 degraded | `#1`+`#2`+`#3` | boot timeout **120 s** @122.8 s; **valve online/excellent**; single snapshot; `3b:00` null | ✅ |
+| C5 re-entrancy | re-entrancy | not stress-tested (decom×2 same id ~180 s apart handled fine; rapid double-provision not run) | 🟡 |
+| C6 regression | `#2` / periodic | 5-min periodic fired @306 s & @606 s; no back-to-back duplicate snapshots | ✅ |
+| **C7 incremental refresh** | **A** | **not exercised** (sensor heard at 138 s, inside window). **Code-reviewed `wouldFire=true` (high conf)** — needs the deliberate power-off→timeout→power-on test | 🟡 |
+| C8 cache consistency | D | re-prov snapshot @606 s: `3f:59` `connected:false` with **null** battery/rssi/fw (no stale 59) | ✅ |
+| C9 decommission | `#4`+`#1`+E | removals reflected (@386 s, @418 s); valve stayed online; `Whitelist reloaded` only on the 3 real changes | ✅ |
+| B (separate window) | 150 s commission | commission timeouts **150 s** @386.9 s & @643.1 s; boot stays 120 s — distinct values | ✅ |
+| Stability | no crash/leak | single POWERON boot, no panic/abort; heap stable ~41 KB, min_ever ~30.6 KB (no leak) | ✅ |
+| Change 2 tags | Azure-side | blocked on Brand/Type + DPS edit | ⏳ |
 
-> After C0–C9 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4);
-> tag `v1.4.4` if requested. **Do not push unless asked.**
+> **9/11 validated; C5 + C7 partial.** C7 (incremental refresh A) is **code-confirmed** correct but not yet
+> hardware-exercised — run the deliberate test (power sensor OFF → let the 150 s window time out → power it
+> ON → expect `Publishing commission refresh snapshot`). C5: run a rapid double-`provision`.
+>
+> **New finding (separate from this feature, MAJOR latent risk):** a malformed/truncated C2D *envelope* is
+> force-classified as `provision` (ver=0) by the brace-leading catch-all in `c2d_commands.c`, and sends **no
+> cmd_ack** → cloud sees a silent failure (here the truncated decommission at UART L443 was safely rejected
+> by the JSON re-parse, but a brace-blob with provisioning-like keys could trigger an unintended re-provision).
+> Fix: only fall back to `provision` when the body parses as JSON *without* a `cmd` field, and nack unparseable
+> envelopes. Decide whether to fix in this branch or a separate ticket.
+>
+> After C5/C7 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); tag `v1.4.4` if
+> requested. **Do not push unless asked.**
