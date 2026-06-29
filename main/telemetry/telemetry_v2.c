@@ -356,7 +356,7 @@ void telemetry_v2_publish_lifecycle(void)
 
 // ---- Snapshot -------------------------------------------------------------
 
-bool telemetry_v2_publish_snapshot(const char *reason)
+bool telemetry_v2_publish_snapshot(const char *trigger)
 {
     cJSON *root = build_envelope("snapshot");
     if (!root) return false;   // pre-SNTP / alloc fail — treated as "not published"
@@ -364,9 +364,10 @@ bool telemetry_v2_publish_snapshot(const char *reason)
     cJSON *data = cJSON_CreateObject();
 
     // Trigger reason (heartbeat | event | commission | boot) — lets the app
-    // attribute each snapshot in its event-log-vs-UI-refresh model.
-    if (reason && reason[0])
-        cJSON_AddStringToObject(data, "reason", reason);
+    // attribute each snapshot in its event-log-vs-UI-refresh model. (Named
+    // `trigger` to avoid colliding with the system_health `char reason[128]` below.)
+    if (trigger && trigger[0])
+        cJSON_AddStringToObject(data, "reason", trigger);
 
     // ---- Fetch health device status for all provisioned devices ----
     health_device_status_t health[HEALTH_MAX_DEVICES];

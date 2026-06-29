@@ -41,8 +41,23 @@ Plan: `~/.claude/plans/hidden-toasting-storm.md`.
 | C3 | event coupling at LoRa/valve/BLE/rules sites + `valve_state_changed` delta-gate | ✅ code |
 | C4 | immediate reconnect wake | ✅ code |
 | C5 | `PROJECT_VER` → 1.5.0 + docs | ✅ code |
-| — | **Adversarial review of the actual diff** | ⏳ pending |
+| RV | **Adversarial review of the actual diff** — GO after fixes | ✅ done |
 | — | **Bench test (E0–E12 in TEST_PLAN.md)** | ⏳ pending hardware |
+
+### Diff-review fixes folded in (post-implementation adversarial pass)
+- **FIX 1 (BLOCKER, compile error):** `publish_snapshot` param `reason` collided with the
+  `char reason[128]` system-health local → renamed the param to `trigger`.
+- **FIX 2:** publish-fail RETRY_FLOOR now honored for **all** reasons via `s_snap_retry_until_ms`
+  (BOOT/COMMISSION re-arms could previously hammer a saturated outbox every ~2 s); plus a gated-skip
+  defer (no 1-tick spin if boot-sync reverts mid-iteration).
+- **FIX 3:** health Critical/recovery transitions now couple a snapshot (`snap_request(EVENT,"health")`)
+  — deviates from the plan's original exclusion, per AC1 completeness; health alerts are debounced so volume stays low.
+- **FIX 4:** heartbeat/boot/commission snapshots suppressed while a (re)sync window is open
+  (`g_boot_snapshot_sent==false`) so no value-incomplete snapshot; EVENT still passes (urgent).
+- **FIX 5:** unprovisioned branch also clears `g_boot_snapshot_sent`/`g_commission_pub_seen`/`g_commission_until_ms`.
+- **FIX 6:** `s_valve_pub_state` delta-gate reset on `BLE_UPD_CONNECTED` (first state notify after reconnect re-emits).
+- **FIX 7 (cosmetic, NOT taken):** EVENT-vs-BOOT same-iteration label coincidence — state is always correct,
+  only the rare log/`data.reason` label differs; not worth complicating the bookkeeping. Accepted residual.
 
 ## Files touched
 - `main/telemetry/telemetry_v2.c` / `.h`

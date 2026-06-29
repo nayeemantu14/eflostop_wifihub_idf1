@@ -99,13 +99,13 @@ void telemetry_v2_publish_lifecycle(void);
 
 /**
  * @brief Publish type="snapshot" with all current device + sensor state.
- * @param reason  Trigger reason string emitted as data.reason
+ * @param trigger Trigger reason string emitted as data.reason
  *                ("heartbeat" | "event" | "commission" | "boot"); may be NULL.
  * @return true ONLY if the snapshot actually reached esp-mqtt (online, msg_id>=0);
  *         false if dropped offline or suppressed pre-SNTP. The caller re-arms the
  *         heartbeat only on true.
  */
-bool telemetry_v2_publish_snapshot(const char *reason);
+bool telemetry_v2_publish_snapshot(const char *trigger);
 
 /** Publish type="event" for valve transitions (state, flood). */
 void telemetry_v2_publish_valve_event(const char *event_name);

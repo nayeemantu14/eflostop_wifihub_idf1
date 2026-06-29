@@ -91,12 +91,13 @@ typedef enum { SNAP_TIER_LOW = 0, SNAP_TIER_HIGH = 1 } snap_tier_t;
 #define SNAP_OFFLINE_FLOOR_MS  30000   // loop idle cap while offline/unprovisioned with a due deadline
 #define SNAP_RETRY_FLOOR_MS    5000    // retry spacing when connected but a publish failed (no tight-spin)
 
-static int64_t       s_snap_due_ms      = 0;                    // monotonic ms; next snapshot deadline
-static int64_t       s_snap_last_pub_ms = 0;                    // monotonic ms of last CONFIRMED publish
-static snap_reason_t s_snap_reason      = SNAP_HEARTBEAT;
-static snap_tier_t   s_snap_tier        = SNAP_TIER_LOW;
-static char          s_snap_evt[32]     = {0};                  // event name (log + observability)
-static int64_t       s_hb_interval_ms   = SNAPSHOT_INTERVAL_MS; // latched from Twin each iteration
+static int64_t       s_snap_due_ms       = 0;                   // monotonic ms; next snapshot deadline
+static int64_t       s_snap_last_pub_ms  = 0;                   // monotonic ms of last CONFIRMED publish
+static int64_t       s_snap_retry_until_ms = 0;                 // monotonic ms; publish-fail backoff floor (0 = none)
+static snap_reason_t s_snap_reason       = SNAP_HEARTBEAT;
+static snap_tier_t   s_snap_tier         = SNAP_TIER_LOW;
+static char          s_snap_evt[32]      = {0};                 // event name (log + observability)
+static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from Twin each iteration
 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
@@ -526,6 +527,7 @@ static void snap_rearm_heartbeat(void)
     s_snap_reason = SNAP_HEARTBEAT;
     s_snap_tier   = SNAP_TIER_LOW;
     s_snap_evt[0] = '\0';
+    s_snap_retry_until_ms = 0;   // a confirmed publish clears any publish-fail backoff
 }
 
 // Request a snapshot. PULL-IN-ONLY: the deadline only moves EARLIER (or upgrades
@@ -538,7 +540,9 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
     int64_t now = snap_now_ms();
 
     if (reason == SNAP_COMMISSION || reason == SNAP_BOOT) {
-        s_snap_due_ms = now;
+        int64_t want = now;
+        if (want < s_snap_retry_until_ms) want = s_snap_retry_until_ms;  // honor publish-fail backoff
+        s_snap_due_ms = want;
         s_snap_reason = reason;
         s_snap_tier   = SNAP_TIER_HIGH;
         snprintf(s_snap_evt, sizeof(s_snap_evt), "%s", evt ? evt : "");
@@ -551,6 +555,7 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
     int64_t want  = now + window;
     int64_t floor = s_snap_last_pub_ms + SNAP_MIN_INTERVAL_MS;   // min-interval clamp
     if (want < floor) want = floor;
+    if (want < s_snap_retry_until_ms) want = s_snap_retry_until_ms;  // honor publish-fail backoff
 
     bool upgrade = (reason == SNAP_EVENT && s_snap_reason == SNAP_EVENT &&
                     tier == SNAP_TIER_HIGH && s_snap_tier == SNAP_TIER_LOW);
@@ -1317,6 +1322,9 @@ void iothub_task(void *param)
         // Valve reconnect reconciliation: re-evaluate active leaks and hub/valve sync
         if (has_valve && ble_upd_type == BLE_UPD_CONNECTED) {
             rules_engine_on_valve_connected();
+            // Reset the valve_state_changed delta-gate so the first state notify
+            // after a (re)connect / re-provision always emits the event + snapshot.
+            s_valve_pub_state = -2;
         }
 
         // Check for pending rules engine telemetry (auto-close, rmleak events)
@@ -1329,8 +1337,13 @@ void iothub_task(void *param)
             if (auto_close_json) free(auto_close_json);
             // Reset the scheduler to a neutral heartbeat so a stranded past-due
             // EVENT deadline (with a now-stale device label) can't fire on the
-            // next provision; offline-floor in evt_wait prevents any spin.
+            // next provision; offline-floor in evt_wait prevents any spin. Also
+            // clear the commission bookkeeping so a re-provision can't run against
+            // stale state if it arrives via a path that skips arm_commission_snapshot.
             snap_rearm_heartbeat();
+            g_boot_snapshot_sent  = false;
+            g_commission_pub_seen = 0;
+            g_commission_until_ms = 0;
             continue;
         }
 
@@ -1358,13 +1371,21 @@ void iothub_task(void *param)
         // ---- Health alerts (Critical transitions) ----
         {
             health_alert_t alert;
+            bool any_alert = false;
             while (health_pop_alert(&alert)) {
                 char *json = health_alert_to_json(&alert);
                 if (json) {
                     telemetry_v2_publish_health_event(json);
                     free(json);
+                    any_alert = true;
                 }
             }
+            // A device crossing offline/Critical (or recovering) is a real state
+            // change carried in the snapshot (rating/connected) — couple a snapshot
+            // like every other event producer so the app doesn't wait for the next
+            // heartbeat. Health alerts are already debounced, so this stays low-volume.
+            if (any_alert)
+                snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "health");
         }
 
         // ---- LoRa sensor events ----
@@ -1475,15 +1496,22 @@ void iothub_task(void *param)
         // the snapshot always reflects post-burst state (ordering invariant).
         // Re-arms the heartbeat ONLY on a snapshot that actually reached esp-mqtt.
         // =================================================================
-        {
+        if (telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
             int64_t flush_now = snap_now_ms();
-            bool due = (flush_now >= s_snap_due_ms);
-            // BOOT/COMMISSION additionally require the sync window complete (mirror
-            // of the original gate) so we never emit a premature pre-sync snapshot.
-            bool gate_ok = !(s_snap_reason == SNAP_BOOT || s_snap_reason == SNAP_COMMISSION)
+            snap_reason_t reason = s_snap_reason;
+            // Gate: while a boot/commission (re)sync window is OPEN (g_boot_snapshot_sent
+            // false), suppress HEARTBEAT/BOOT/COMMISSION until the window closes so we
+            // never emit a value-incomplete snapshot. EVENT always passes (urgent; its
+            // post-event state is already in the cache).
+            bool window_open = !g_boot_snapshot_sent;
+            bool gate_ok = (reason == SNAP_EVENT) || !window_open
                            || health_is_boot_sync_complete();
-            if (due && gate_ok && telemetry_v2_is_connected()) {
-                snap_reason_t reason = s_snap_reason;
+            if (!gate_ok) {
+                // Due but the (re)sync window is still open — defer ~one commission
+                // poll instead of busy-spinning at 1 tick (the boot arming above will
+                // pull the deadline in the instant the window closes).
+                s_snap_due_ms = flush_now + 2000;
+            } else {
                 const char *rstr = snap_reason_str(reason);
                 if (reason == SNAP_EVENT)
                     ESP_LOGI(IOTHUB_TAG, "SNAP trigger=event:%s", s_snap_evt);
@@ -1501,13 +1529,15 @@ void iothub_task(void *param)
                             if (seen >= total) g_commission_until_ms = 0;
                         }
                     }
-                    snap_rearm_heartbeat();
+                    snap_rearm_heartbeat();   // also clears the retry backoff
                     ESP_LOGI(IOTHUB_TAG, "SNAP heartbeat=reset interval_ms=%lld",
                              (long long)s_hb_interval_ms);
                 } else {
-                    // Connected but publish failed (e.g. QoS-1 outbox full): back
-                    // off RETRY_FLOOR, do NOT advance last_pub or re-arm heartbeat.
-                    s_snap_due_ms = flush_now + SNAP_RETRY_FLOOR_MS;
+                    // Connected but publish failed (e.g. QoS-1 outbox full): back off
+                    // RETRY_FLOOR for ALL reasons (the retry floor is honored by
+                    // snap_request so BOOT/COMMISSION re-arms can't hammer the outbox).
+                    s_snap_retry_until_ms = flush_now + SNAP_RETRY_FLOOR_MS;
+                    s_snap_due_ms = s_snap_retry_until_ms;
                     ESP_LOGW(IOTHUB_TAG, "SNAP heartbeat=suppressed (publish-failed)");
                 }
             }
