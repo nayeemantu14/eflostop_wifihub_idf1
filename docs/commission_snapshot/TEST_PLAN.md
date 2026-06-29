@@ -218,26 +218,25 @@ Deterministically forces a sensor to be heard **after** the window closes, then 
 | C2 early-send | early-send | all-seen early-send proven (decom→0 sensors → snapshot @uptime418, valve-only) | ✅ |
 | C3 completeness + full fields | `0aab312` | heard sensors carry full battery/rssi/fw (boot @123 s, final @642 s), no nulls | ✅ |
 | C4 degraded | `#1`+`#2`+`#3` | boot timeout **120 s** @122.8 s; **valve online/excellent**; single snapshot; `3b:00` null | ✅ |
-| C5 re-entrancy | re-entrancy | not stress-tested (decom×2 same id ~180 s apart handled fine; rapid double-provision not run) | 🟡 |
-| C6 regression | `#2` / periodic | 5-min periodic fired @306 s & @606 s; no back-to-back duplicate snapshots | ✅ |
-| **C7 incremental refresh** | **A** | **not exercised** (sensor heard at 138 s, inside window). **Code-reviewed `wouldFire=true` (high conf)** — needs the deliberate power-off→timeout→power-on test | 🟡 |
-| C8 cache consistency | D | re-prov snapshot @606 s: `3f:59` `connected:false` with **null** battery/rssi/fw (no stale 59) | ✅ |
-| C9 decommission | `#4`+`#1`+E | removals reflected (@386 s, @418 s); valve stayed online; `Whitelist reloaded` only on the 3 real changes | ✅ |
-| B (separate window) | 150 s commission | commission timeouts **150 s** @386.9 s & @643.1 s; boot stays 120 s — distinct values | ✅ |
-| Stability | no crash/leak | single POWERON boot, no panic/abort; heap stable ~41 KB, min_ever ~30.6 KB (no leak) | ✅ |
+| C5 re-entrancy | re-entrancy | ✅ **double provision @257 s & @267 s (10 s apart) → no storm/crash**; just periodic @309 + one commission-timeout @419 | ✅ |
+| C6 regression | `#2` / periodic | 5-min periodic fired @309 s & @609 s; UART has 6 `Pub snapshot`, all distinct triggers — no firmware double-send | ✅ |
+| **C7 incremental refresh** | **A** | **still not exercised** — last provision @535 s timed out @685 s with the sensor off and the capture ended before it was powered on. **Code-reviewed `wouldFire=true` (high conf)** — needs the power-off→timeout→**power-on** step captured | 🟡 |
+| C8 cache consistency | D | re-prov snapshot @309 s: both sensors `connected:false` with **null** battery/rssi/fw (no stale 62) | ✅ |
+| C9 decommission (ble+valve) | `#4`+`#1`+E | ble removals reflected (@473 s → 0 sensors); **valve decommission @505 s → UNPROVISIONED, no spurious snapshot, then re-provision reconnects**; `Whitelist reloaded` only on real changes | ✅ |
+| C2D malformed (new) | `929c6c1` | ✅ truncated envelope @452 s → `Malformed C2D JSON — ignoring` + `Unrecognized C2D payload`, **no state change** (whitelist stayed 1) | ✅ |
+| B (separate window) | 150 s commission | commission timeouts **150 s** @181/419/685 s; boot stays 120 s | ✅ |
+| #2 double-send (firmware) | `#2` | UART = 6 `Pub snapshot`; monitor = 7 (one dup @473 s). The dup is **Azure QoS-1 redelivery** (UART sent it once, L659), not a firmware double-send | ✅ |
+| Stability / scan self-heal | — | no panic/abort; heap stable ~41 KB; leak-scan self-heal works (`Scan not active … restarting` on valve reconnect) | ✅ |
 | Change 2 tags | Azure-side | blocked on Brand/Type + DPS edit | ⏳ |
 
-> **9/11 validated; C5 + C7 partial.** C7 (incremental refresh A) is **code-confirmed** correct but not yet
-> hardware-exercised — run the deliberate test (power sensor OFF → let the 150 s window time out → power it
-> ON → expect `Publishing commission refresh snapshot`). C5: run a rapid double-`provision`.
+> **10/11 validated; only C7 still needs the deliberate power-on-after-timeout capture.** C2D-malformed fix
+> CONFIRMED on hardware (`Malformed C2D JSON — ignoring` @452 s, no re-provision). C5 re-entrancy CONFIRMED.
+> Valve decommission CONFIRMED. The monitor's duplicate snapshot @473 s is **Azure QoS-1 redelivery**, not a
+> firmware bug (UART shows a single publish).
 >
-> **New finding (separate from this feature, MAJOR latent risk) — FIXED:** a malformed/truncated C2D
-> *envelope* was force-classified as `provision` (ver=0) by the brace-leading catch-all in `c2d_commands.c`,
-> risking an unintended re-provision from a corrupted message. Fixed: the brace fallback now accepts a
-> provision only when the body is **valid JSON without a `cmd` field**; malformed JSON, or a JSON object that
-> carries a `cmd` with an unrecognized schema, is rejected (logged, no state change). The bare-provisioning-
-> JSON path (no envelope) is preserved. Bench add-on: send a truncated envelope → expect
-> `Malformed C2D JSON — ignoring`, no re-provision.
+> C7 (incremental refresh A) is **code-confirmed** but un-exercised: run **power sensor OFF → wait for
+> `Boot sync: timeout (150 s)` snapshot (sensor offline) → power sensor ON** → expect
+> `Publishing commission refresh snapshot (device heard, N/N seen)` + a snapshot with the sensor online.
 >
-> After C5/C7 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); tag `v1.4.4` if
-> requested. **Do not push unless asked.**
+> After C7: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); tag `v1.4.4` if requested.
+> **Do not push unless asked.**
