@@ -2,6 +2,7 @@
 #include <string.h>
 #include <esp_wifi.h>
 #include <esp_netif.h>
+#include "esp_system.h"
 #include "wifi_manager.h"
 
 #define TAG "RESET_BTN"
@@ -72,23 +73,31 @@ static void execute_wifi_reset(void)
     ESP_LOGW(TAG, "=== LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===");
 
     /*
-     * Clear ONLY the WiFi credentials and drop into AP mode for reconfiguration.
+     * Clear ONLY the WiFi credentials, then reboot so the hub comes up fresh in
+     * AP mode for reconfiguration.
      *
-     * wifi_manager_disconnect_async() sends WM_ORDER_DISCONNECT_STA; the
-     * wifi_manager then:
-     *   1. esp_wifi_disconnect()           — clean disconnect
-     *   2. memset config to 0 + save NVS   — erase stored credentials
-     *                                        (default "nvs" partition only)
-     *   3. WM_ORDER_START_AP               — start the captive portal
+     * wifi_manager_disconnect_async() disconnects STA and memsets the stored WiFi
+     * config to 0 + saves it (default "nvs" partition only — credentials erased).
      *
-     * No esp_restart(): we drop straight into AP mode, so we never hit the
-     * reboot-time default-partition NVS recovery path. Commissioning (valve /
-     * sensors / identity) lives in the dedicated NVS_PROV_PARTITION and is
-     * intentionally NOT touched here — full decommission is app-only (C2D).
+     * We then reboot. A fresh boot gives the SoftAP captive portal a pristine,
+     * unfragmented heap (~130 KB vs ~40 KB when the live BLE/telemetry stack is
+     * still loaded), so it stays responsive under a phone's DNS/HTTP probe storm.
+     *
+     * The reboot does NOT forget provisioned devices: commissioning (valve / LoRa
+     * / BLE-leak sensors), hub identity, and DPS cache live in the dedicated
+     * NVS_PROV_PARTITION, which survives reboots and any default-partition erase —
+     * only the WiFi credentials are cleared. Full decommission stays app-only
+     * (C2D "decommission").
      */
-    ESP_LOGI(TAG, "Erasing WiFi credentials + starting AP for reconfiguration "
-                  "(commissioning preserved)...");
+    ESP_LOGI(TAG, "Erasing WiFi credentials, then rebooting into AP "
+                  "(commissioning preserved in nvs_prov)...");
     wifi_manager_disconnect_async();
+
+    // Let wifi_manager commit the cleared credentials to NVS before we reboot.
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    ESP_LOGW(TAG, "Rebooting into AP mode...");
+    esp_restart();
 }
 
 // ---------------------------------------------------------------------------

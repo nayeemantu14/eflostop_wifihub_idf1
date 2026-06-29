@@ -8,7 +8,7 @@ commissioning/identity, and harden the NVS layout so no boot-time recovery path 
 
 | Aspect | Before | After (this branch) |
 |---|---|---|
-| **Button action** | clears WiFi creds, then `esp_restart()` | clears WiFi creds **only**, **no reboot** — drops straight into AP/captive-portal |
+| **Button action** | clears WiFi creds, then `esp_restart()` | clears WiFi creds **only**, then **reboots** into AP/captive-portal (commissioning in `nvs_prov` survives the reboot) |
 | **Hold time** | 5 s | **10 s** (avoid accidental activation) |
 | **Commissioning storage** | default `"nvs"` partition (shared with WiFi creds) | **dedicated `"nvs_prov"` partition** (button + default-partition erase can't reach it) |
 | **Full factory reset** | (implicit, via any full erase) | **app-only** via C2D `decommission` |
@@ -66,14 +66,14 @@ erase are independent events. The split is enforced by the API: commissioning mo
 | `partitions.csv` | `+ nvs_prov, data, nvs, , 0x4000` after default `nvs` | ✅ DONE |
 | `main/main.c` | `nvs_store_init()` after `nvs_flash_init()`, before `hub_identity_init()` | ✅ DONE |
 | 5 commissioning modules → `nvs_open_from_partition` | move namespaces into `nvs_prov` | ✅ DONE |
-| `main/wifi_reset/reset_button.c` | 10 s hold + no-reboot (AP drop only) | ✅ DONE |
+| `main/wifi_reset/reset_button.c` | 10 s hold + clear-creds-then-reboot into AP | ✅ DONE |
 | `main/CMakeLists.txt` | register `nvs_store` (SRCS + INCLUDE_DIRS) | ✅ DONE |
 | `CMakeLists.txt` | `PROJECT_VER` 1.4.2 → **1.4.3** | ✅ DONE |
 | `docs/wifi_only_reset/FEATURE_TRACKER.md` | this file | ✅ live |
 | `docs/wifi_only_reset/TEST_PLAN.md` | bench procedure | ✅ DONE |
 
 ## Milestone status
-- **DESIGN:** ✅ done (root-cause feasibility analysis → dedicated-partition split chosen; no-reboot + 10 s hold).
+- **DESIGN:** ✅ done (root-cause feasibility analysis → dedicated-partition split chosen; 10 s hold; reboot-into-AP for captive-portal heap responsiveness).
 - **IMPLEMENT:** ✅ done on `feature/wifi-only-reset-nvs-partition`. All five commissioning modules verified on
   the as-built tree to use `nvs_open_from_partition(NVS_PROV_PARTITION, …)`; only `offline_buffer.c` still
   uses plain `nvs_open` (default partition, intentional). `main.c` init order confirmed
@@ -110,10 +110,16 @@ erase are independent events. The split is enforced by the API: commissioning mo
   - `main/rules_engine/rules_engine.c` — ns `"rules_eng"` (`ovr_state` / `ovr_expiry` / `incident`). 6 sites
     incl. `override_clear_nvs()` and `rules_engine_clear_persistent_state()`.
   Each of the five now `#include "nvs_store/nvs_store.h"`.
-- **`main/wifi_reset/reset_button.c`**: `HOLD_TIME_MS` 5000 → **10000** (10 s). `execute_wifi_reset()` now
-  calls **only** `wifi_manager_disconnect_async()` — the `esp_restart()` was removed, so the hub drops
-  straight into AP/captive-portal mode without a reboot (and therefore never re-enters the boot-time
-  default-partition recovery path during a reset). Log lines updated to say "commissioning preserved".
+- **`main/wifi_reset/reset_button.c`**: `HOLD_TIME_MS` 5000 → **10000** (10 s). `execute_wifi_reset()` clears
+  the WiFi creds (`wifi_manager_disconnect_async()`), waits 2 s for the NVS commit, then **`esp_restart()`**.
+  Rebooting is safe now that commissioning lives in `nvs_prov` (it survives the reboot — proven on bench), and
+  a fresh boot gives the SoftAP captive portal a **pristine heap (~130 KB vs ~40 KB)**, so it stays responsive
+  under a phone's DNS/HTTP probe storm. (See "AP responsiveness" below for why no-reboot was abandoned.)
+- **`main/iothub/app_iothub.c` + `main/app_wifi/app_wifi.c`** (AP-responsiveness fix): `iothub_suspend_mqtt()` /
+  `iothub_resume_mqtt()` stop the esp-mqtt client on STA-down and restart it on STA-up, so MQTT doesn't thrash
+  TLS handshakes (heap fragmentation) during any WiFi outage. Wired into `cb_connection_lost` / `cb_connection_ok`.
+- **`sdkconfig.defaults` + `sdkconfig`**: `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y` — frees the ~16 KB mbedTLS handshake
+  buffers between sessions, lowering peak/fragmented heap (relieves a near-OOM `min_ever` floor on this hub).
 - **`main/CMakeLists.txt`**: `+ nvs_store/nvs_store.c` (SRCS) and `+ nvs_store` (INCLUDE_DIRS).
 - **`CMakeLists.txt`** (top level): `PROJECT_VER` 1.4.2 → **1.4.3** (single source — banner / OTA header /
   telemetry `gateway.fw` / twin read it at runtime via the app descriptor).
@@ -144,17 +150,34 @@ default-partition recovery can no longer touch it.
 2. **`offline_buffer` stays on the default partition** — never move it into `nvs_prov`.
 3. **`wifi_manager` is a managed component with LOCAL PATCHES** — not touched; re-apply if it re-resolves.
 4. **Version single-sourced** in `PROJECT_VER` only — never hardcode a version string.
-5. **No reboot on WiFi reset** — the button drops to AP via `wifi_manager_disconnect_async()`; do **not**
-   reintroduce `esp_restart()` (reboot would re-enter the default-partition recovery path).
+5. **Reboot on WiFi reset is intentional** — the button clears creds, then `esp_restart()` so the captive
+   portal comes up on a clean heap. Safe because commissioning is in `nvs_prov` (survives reboot); the
+   default-partition recovery can only touch WiFi/offline data, never commissioning. **Do not** revert to the
+   no-reboot drop-to-AP — it left the captive portal heap-starved (see "AP responsiveness").
 6. Commit only at the milestone boundary **after explicit approval**; never push.
 
 ## Known/intended behaviour notes (for the test plan)
 - A press shorter than **10 s** does nothing — the one-shot hold timer is cancelled on early release, and the
   timer-expiry handler re-checks `button_is_pressed()` before acting.
-- After a successful reset the hub is in AP mode (SSID `WiFi-Hub-XXXX`); WiFi creds must be re-entered via the
-  captive portal. **No power-cycle is needed** to reach AP mode.
+- After a successful reset the hub **reboots** (~2–3 s) and comes up in AP mode (SSID `WiFi-Hub-XXXX`); WiFi
+  creds must be re-entered via the captive portal. The reboot is intentional — see "AP responsiveness" below.
 - Commissioning survival is the headline: valve + sensor pairing, hub identity (Gateway ID is MAC-derived and
   immutable; hub name is in `nvs_prov`), and the DPS cache all persist across the reset **and** across a
   subsequent power-cycle, because they live in `nvs_prov` which the reset never touches.
 - A corrupt / full **default** partition triggers only the default-partition `nvs_flash_erase()` (loses WiFi
   creds + offline buffer) — commissioning in `nvs_prov` is unaffected.
+
+## AP responsiveness — why the button reboots (investigation 2026-06-26)
+Bench testing the no-reboot variant showed the captive portal was slow/flaky to join after a button reset, but
+fine on a fresh power-on. Root cause = **heap headroom**, not the WiFi/AP code:
+- **Cold-boot AP:** ~130 KB free / ~86 KB largest block — BLE valve connection, leak scanner, telemetry caches,
+  offline buffer, and MQTT haven't spun up yet, so the captive portal has a pristine heap.
+- **No-reboot AP:** the live stack stays loaded (~40 KB free / ~24 KB largest, dipping to ~1 KB), and a phone's
+  DNS/HTTP probe storm pushes the http server to `httpd_sock_err`.
+
+Two heap fixes were applied first and did help (they removed the `-0x7F00` MQTT-TLS thrash): MQTT suspend/resume
+on STA down/up, and `MBEDTLS_DYNAMIC_BUFFER`. But neither reclaims the ~80–90 KB held by the live BLE/telemetry
+stack. The decisive fix is to **reboot on reset**, reproducing the clean-heap power-on automatically (which is
+exactly what a manual power-cycle did). Safe now that commissioning is in `nvs_prov` — the original no-reboot
+rationale (dodging the default-partition NVS wipe) is obsolete. Kept the two heap fixes too: they still help
+ordinary WiFi drops and overall heap headroom.

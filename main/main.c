@@ -66,8 +66,8 @@ void app_main(void)
 	app_ble_valve_init();
 	app_ble_leak_init();
 
-	/* WiFi reset button (GPIO 40, hold 10s to clear WiFi credentials + drop into AP
-	 * captive portal — no reboot; commissioning is preserved, decommission is app-only) */
+	/* WiFi reset button (GPIO 40, hold 10s to clear WiFi credentials + reboot into AP
+	 * captive portal; commissioning is preserved in nvs_prov, decommission is app-only) */
 	reset_button_init();
 
 	/* start system monitoring (heap, uptime, diagnostics) */

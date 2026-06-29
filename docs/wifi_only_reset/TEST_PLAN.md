@@ -1,8 +1,8 @@
 # TEST PLAN — WiFi-Only Reset Button + Dedicated Commissioning NVS Partition
 
-Bench procedure to validate that the physical reset button clears **only** WiFi credentials (10 s hold, no
-reboot, drops straight to AP) while **commissioning/identity survive** — and that the survival holds across a
-power-cycle and a near-full / corrupt default partition. Two truths are checked together: what you see on the
+Bench procedure to validate that the physical reset button clears **only** WiFi credentials (10 s hold, then
+reboots into AP) while **commissioning/identity survive** — and that the survival holds across the reset's
+reboot, a power-cycle, and a near-full / corrupt default partition. Two truths are checked together: what you see on the
 **serial console** (button state machine, NVS partition init/erase logs) and what you see in **Azure
 telemetry** (the hub still reports its valve/sensors/identity after the reset).
 
@@ -75,15 +75,17 @@ Legend: **P** = pass criteria. Fill the Result column at the bottom.
    state, and the sensor list/count. Note the DPS-derived `dev_id` from the boot serial.
 - **P:** all of the above are present and correct. *(This is the survival reference for T2/T3.)*
 
-### T2 — Happy path: 10 s hold clears WiFi only, drops to AP, NO reboot  *(headline)*
+### T2 — Happy path: 10 s hold clears WiFi only, reboots into AP, commissioning survives  *(headline)*
 1. **Press and hold** the reset button. On serial confirm `RESET_BTN: Button pressed — starting 10000 ms
    hold timer`. Keep holding past 10 s.
-- **P (a) — no reboot:** at ~10 s, serial shows `10-second hold confirmed — executing WiFi reset` →
-  `=== LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===` →
-  `Erasing WiFi credentials + starting AP for reconfiguration (commissioning preserved)...`, then the hub
-  **starts its AP / captive portal**. There is **NO boot banner, NO `NVS_STORE` re-init line, NO reset
-  reason** — confirming `esp_restart()` did **not** run. The AP SSID `WiFi-Hub-XXXX` appears in your phone's
-  WiFi list.
+- **P (a) — clears creds + reboots into AP, still provisioned:** at ~10 s, serial shows
+  `10-second hold confirmed — executing WiFi reset` → `=== LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===`
+  → `Erasing WiFi credentials, then rebooting into AP (commissioning preserved in nvs_prov)...` →
+  `Rebooting into AP mode...`, then a **reboot** (`rst:0xc (RTC_SW_CPU_RST)`, boot banner, `NVS_STORE:
+  commissioning NVS partition 'nvs_prov' ready`). The hub comes up in **AP mode** (no saved WiFi creds), the
+  SSID `WiFi-Hub-XXXX` appears in your phone's list, and **the captive portal is responsive** (the reboot gives
+  it a clean heap). **Crucially, on this same boot serial MUST show `PROVISIONING: State: PROVISIONED` with the
+  valve + sensors loaded from `nvs_prov` — the reboot does NOT forget commissioning.**
 - **P (b) — WiFi creds gone:** the hub does **not** auto-reconnect to the old AP. Connect to `WiFi-Hub-XXXX`,
   open the captive portal, and confirm you **must re-enter** WiFi credentials (the previous SSID is not
   silently restored). Re-enter creds; the hub joins and comes back online.
@@ -147,7 +149,7 @@ with it.*
 |---|---|---|
 | T0 version 1.4.3 + nvs_prov ready | | |
 | T1 baseline captured | | |
-| T2 10 s hold → AP, no reboot, creds gone, commissioning survives | | |
+| T2 10 s hold → reboot into AP, creds gone, commissioning survives | | |
 | T3 survival across power-cycle | | |
 | T4 short press does nothing | | |
 | T5 factory reset via C2D decommission | | |
@@ -156,11 +158,10 @@ with it.*
 ---
 
 ## 3. Notes / gotchas
-- The `RESET_BTN` confirm log string still reads "5-second hold confirmed" in source even though the hold is
-  now 10 s — the authoritative signal is the `starting 10000 ms hold timer` line and the stopwatch. (Cosmetic;
-  update the string opportunistically.)
-- T2 deliberately checks for the **absence** of a reboot banner — that absence is the whole point of removing
-  `esp_restart()`. If you see a boot banner after the hold, the no-reboot change regressed.
+- T2 now expects a **reboot** after the 10 s hold (`rst:0xc (RTC_SW_CPU_RST)` + boot banner). The button clears
+  WiFi creds, then `esp_restart()` so the captive portal comes up on a clean heap (responsive). The decisive
+  check is that the **post-reboot boot still shows `PROVISIONING: State: PROVISIONED`** — commissioning lives in
+  `nvs_prov` and must survive the reboot.
 - If T2(c)/T3 ever shows "first boot" / "namespace not found" for provisioning or identity, commissioning was
   lost — STOP and check that all five modules open via `nvs_open_from_partition(NVS_PROV_PARTITION, …)` and
   that `nvs_store_init()` runs **before** `hub_identity_init()` in `app_main`.
