@@ -53,6 +53,10 @@ void cb_connection_ok(void *pvParameter)
     // 3. Network LED -> "connecting" (beat blue). The MQTT handler promotes it
     //    to "connected" (ramp blue) once the IoT Hub session is up.
     net_status_set_wifi(true);
+
+    // 4. Restart MQTT if it was stopped while STA was down. No-op on first connect
+    //    (the client isn't created until the IoT Hub task runs after provisioning).
+    iothub_resume_mqtt();
 }
 
 void cb_connection_lost(void *pvParameter)
@@ -66,6 +70,10 @@ void cb_connection_lost(void *pvParameter)
     // Network LED -> "no internet" (ramp red). This also clears the MQTT flag
     // inside net_status so a later reconnect shows "connecting" first.
     net_status_set_wifi(false);
+
+    // Stop the MQTT client so it doesn't thrash TLS handshakes (fragmenting the
+    // heap the SoftAP captive portal needs) while STA is down / in AP mode.
+    iothub_suspend_mqtt();
 }
 
 void wifi_task(void *pvParameter)

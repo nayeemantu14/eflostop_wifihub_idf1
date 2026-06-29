@@ -17,7 +17,7 @@ extern "C" {
 /**
  * @brief Initialize and start the WiFi reset button.
  *        Configures GPIO 40 with pull-up + any-edge ISR,
- *        creates event queue, 5-second one-shot timer, and task.
+ *        creates event queue, 10-second one-shot timer, and task.
  *        Call once from app_main() after NVS and WiFi manager are running.
  */
 void reset_button_init(void);

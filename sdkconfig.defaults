@@ -7,3 +7,9 @@ CONFIG_HTTPD_MAX_REQ_HDR_LEN=1536
 
 # Fast error responses for rejected connections
 CONFIG_HTTPD_ERR_RESP_NO_DELAY=y
+
+# Free the large (~16 KB) mbedTLS handshake buffers between TLS sessions instead of
+# holding them for the connection's lifetime. Drastically lowers peak/fragmented heap
+# so MQTT/TLS can reconnect reliably while the SoftAP captive portal is still up after
+# a button WiFi reset, and relieves the near-OOM heap floor on this memory-tight hub.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
