@@ -50,6 +50,25 @@ Reuses the existing health-engine "sync snapshot" machinery rather than a new bl
 - `CMakeLists.txt`: `PROJECT_VER` → **1.4.4**.
 - (Change 2: no firmware — DPS enrollment config + optional `az` back-fill, external to repo.)
 
+### C4-driven fixes (verification workflow `wf_c706dee9`, all 4 confirmed real)
+C4 passed its own criteria but the bench log exposed four defects (3 adversarially code-confirmed +
+1 audit finding). All fixed:
+- **#1 valve shown OFFLINE after re-provision (major).** `health_engine_reload_devices()` wipes every
+  device's seen-state; an already-connected valve emits no fresh CONNECTED event (NOTIFYs delta-gated),
+  so it read `rating:critical/last_seen:null` while `connected:true`, AND the all-seen path could never
+  complete → always fell to the 120 s timeout on re-provision. Fix: `reseed_valve_health_if_connected()`
+  (`app_iothub.c`) posts a synthetic valve-connected event after every reload that keeps the valve
+  (provision + lora/ble decommission).
+- **#2 double-send (minor).** Periodic + sync snapshot could both publish in one loop iteration. Fix:
+  the periodic block now sets `g_boot_snapshot_sent=true` when the boot snapshot is still pending+complete
+  (coalesce — identical content).
+- **#3 120 s timeout overshoot to ~149 s (minor).** Deadline was only checked at 30 s health-ticks. Fix:
+  `health_is_boot_sync_complete()` evaluates the deadline lazily on read; iothub loop polls at 2 s (not
+  30 s) while a snapshot is pending → publish bounded to ~120 s.
+- **#4 decommission asymmetry (minor).** Decommission reloaded (resetting the window) but never re-armed
+  the snapshot. Fix: the lora/ble/valve decommission branches now set `g_boot_snapshot_sent=false` so a
+  fresh snapshot reflects the removed device within the window instead of waiting for the 5-min periodic.
+
 ## Status
 - **IMPLEMENT (Change 1):** ✅ `aae5c8b` (fast snapshot) + `777fc65` (anchor window to provision)
   + sync-snapshot ordering fix (this change). Merged up to current master (`1380d5f`).
@@ -58,8 +77,11 @@ Reuses the existing health-engine "sync snapshot" machinery rather than a new bl
 - **BENCH (ordering fix `0aab312`):** ✅ re-flashed + tested. Commission snapshot at uptime 94 s
   (~63 s after provision, early-send path) with **all fields populated** (batt 60, rssi -33, fw 1.1.0).
   UART confirms `Event: BLE Leak` (cache update) now precedes `Publishing sync snapshot`.
-- **BUILD/BENCH (full TEST_PLAN):** 🟡 headline tests **C0/C1/C2/C3 PASS**. C4 (degraded/missing
-  sensor), C5 (re-entrancy), C6 (5-min periodic intact) not yet exercised.
+- **BENCH (C4 degraded):** 🟡 criteria PASS (timeout path, `3B:00` null, `3F:59` full, no crash) but
+  exposed defects #1-#4 above — all fixed; **re-flash + re-run C4 (and C5/C6) pending**. Expect on
+  re-test: valve `connected:true/rating:excellent`, single snapshot, timeout ~120 s.
+- **BUILD/BENCH (full TEST_PLAN):** 🟡 **C0/C1/C2/C3 PASS**. C4 fixes pending re-test; C5 (re-entrancy),
+  C6 (5-min periodic intact) not yet exercised.
 - **Change 2:** ⏳ blocked on `DeviceBrand`/`DeviceType` strings + Azure DPS enrollment edit (no firmware).
 - **MERGE:** ⏳ after bench pass → `git merge --no-ff feature/fast-commission-snapshot` into master (1.4.4).
 

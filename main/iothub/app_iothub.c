@@ -426,6 +426,20 @@ static const char *valve_open_reject_reason(void)
     return NULL;
 }
 
+// After a device-table reload that keeps the valve provisioned, re-seed the
+// valve's health record if its BLE link is currently up. health_engine_reload_devices()
+// wipes every device's seen-state (ever_seen=false, rating=CRITICAL), but a valve
+// whose connection is already established emits no fresh CONNECTED event (its GATT
+// NOTIFYs are delta-gated on value change), so without this it would be reported
+// offline in the next snapshot and the boot-sync all-devices-seen path could never
+// complete (forcing the full 120 s timeout). No-op when the valve is disconnected.
+static void reseed_valve_health_if_connected(void)
+{
+    if (ble_valve_is_connected()) {
+        health_post_valve_event(true);
+    }
+}
+
 static void handle_c2d_command(const char *data, size_t data_len)
 {
     c2d_command_t cmd;
@@ -511,6 +525,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 health_engine_reload_devices();
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
+                g_boot_snapshot_sent = false;   // refresh the snapshot if the hub stays provisioned
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -525,6 +540,8 @@ static void handle_c2d_command(const char *data, size_t data_len)
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_LORA: 0x%08lX !!!", (unsigned long)sid);
             if (provisioning_remove_lora_sensor(sid)) {
                 health_engine_reload_devices();
+                reseed_valve_health_if_connected();   // valve stays up across a sensor removal
+                g_boot_snapshot_sent = false;         // publish a fresh snapshot reflecting the removal
                 char lora_id_str[16];
                 snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
                          (unsigned long)sid);
@@ -542,6 +559,8 @@ static void handle_c2d_command(const char *data, size_t data_len)
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_BLE: %s !!!", mac ? mac : "?");
             if (mac && provisioning_remove_ble_sensor(mac)) {
                 health_engine_reload_devices();
+                reseed_valve_health_if_connected();   // valve stays up across a sensor removal
+                g_boot_snapshot_sent = false;         // publish a fresh snapshot reflecting the removal
                 sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac);
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
@@ -643,6 +662,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             provisioning_handle_azure_payload_json(
                 cmd.payload_json, strlen(cmd.payload_json))) {
             health_engine_reload_devices();
+            reseed_valve_health_if_connected();   // re-provision keeps the valve connected (see helper)
             iothub_apply_provisioned_mac();
             // Fast-track the first post-commission snapshot. health_engine_reload_devices()
             // already re-armed the sync window (all-devices-seen, else 120 s timeout, with the
@@ -1094,7 +1114,13 @@ void iothub_task(void *param)
 
     while (1)
     {
-        active_queue = xQueueSelectFromSet(evt_queue_set, pdMS_TO_TICKS(30000));
+        // While a boot/commission sync snapshot is pending, poll briefly so the
+        // snapshot publishes within ~2 s of the window completing (all-seen or the
+        // 120 s timeout); otherwise idle at 30 s. health_is_boot_sync_complete()
+        // evaluates the deadline on read, so this poll cadence bounds the latency.
+        TickType_t evt_wait = (provisioning_is_provisioned() && !g_boot_snapshot_sent)
+                              ? pdMS_TO_TICKS(2000) : pdMS_TO_TICKS(30000);
+        active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
 
         // Periodic rules engine tick (auto-clear timeout, valve override detection)
         rules_engine_tick();
@@ -1183,6 +1209,13 @@ void iothub_task(void *param)
         // ---- Periodic snapshot ----
         if (has_snapshot) {
             telemetry_v2_publish_snapshot();
+            // Coalesce with a still-pending boot/commission sync snapshot: this
+            // periodic snapshot already carries identical state, so mark the boot
+            // snapshot sent to stop the sync block below from publishing a
+            // back-to-back duplicate in this same iteration.
+            if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
+                g_boot_snapshot_sent = true;
+            }
         }
 
         // ---- LoRa sensor events ----

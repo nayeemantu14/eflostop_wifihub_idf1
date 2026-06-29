@@ -632,6 +632,10 @@ bool health_is_boot_sync_complete(void)
         return true;  // Fail-open to avoid stalling iothub
     }
 
+    // Evaluate the deadline on read so the 120 s window can complete promptly
+    // (within the caller's poll cadence) instead of only at the next 30 s health
+    // tick — this bounds the worst-case commission snapshot latency to ~120 s.
+    check_boot_sync_locked();
     bool done = s_boot_sync_done;
     xSemaphoreGive(s_mutex);
     return done;

@@ -163,7 +163,7 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
 | C1 latency ≤120 s | snapshot within 120 s of `provision` | provision uptime 31 s → snapshot uptime 94 s (~63 s) | ✅ |
 | C2 early-send | well under 120 s when live | serial `Boot sync: all devices seen` (not timeout) | ✅ |
 | C3 completeness + full fields | all N + valve, non-null sensor fields | valve + `3F:59` (batt 60, rssi -33, fw 1.1.0) | ✅ |
-| C4 degraded | sends at 120 s timeout; live sensor full, missing sensor null | | |
+| C4 degraded | sends at 120 s timeout; live sensor full, missing sensor null | criteria PASS, but exposed 4 defects (valve-offline-on-reprovision, double-send, ~149 s overshoot, decommission asymmetry) — all fixed; **re-test pending** | 🟡 |
 | C5 re-entrancy | ≤1 extra snapshot, no storm, no crash | | |
 | C6 regression | 5-min cadence intact, no double-send | | |
 | Change 2 tags | tags present service-side | blocked on Brand/Type + DPS edit | ⏳ |
