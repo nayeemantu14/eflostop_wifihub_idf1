@@ -231,12 +231,13 @@ Deterministically forces a sensor to be heard **after** the window closes, then 
 > hardware-exercised — run the deliberate test (power sensor OFF → let the 150 s window time out → power it
 > ON → expect `Publishing commission refresh snapshot`). C5: run a rapid double-`provision`.
 >
-> **New finding (separate from this feature, MAJOR latent risk):** a malformed/truncated C2D *envelope* is
-> force-classified as `provision` (ver=0) by the brace-leading catch-all in `c2d_commands.c`, and sends **no
-> cmd_ack** → cloud sees a silent failure (here the truncated decommission at UART L443 was safely rejected
-> by the JSON re-parse, but a brace-blob with provisioning-like keys could trigger an unintended re-provision).
-> Fix: only fall back to `provision` when the body parses as JSON *without* a `cmd` field, and nack unparseable
-> envelopes. Decide whether to fix in this branch or a separate ticket.
+> **New finding (separate from this feature, MAJOR latent risk) — FIXED:** a malformed/truncated C2D
+> *envelope* was force-classified as `provision` (ver=0) by the brace-leading catch-all in `c2d_commands.c`,
+> risking an unintended re-provision from a corrupted message. Fixed: the brace fallback now accepts a
+> provision only when the body is **valid JSON without a `cmd` field**; malformed JSON, or a JSON object that
+> carries a `cmd` with an unrecognized schema, is rejected (logged, no state change). The bare-provisioning-
+> JSON path (no envelope) is preserved. Bench add-on: send a truncated envelope → expect
+> `Malformed C2D JSON — ignoring`, no re-provision.
 >
 > After C5/C7 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4); tag `v1.4.4` if
 > requested. **Do not push unless asked.**
