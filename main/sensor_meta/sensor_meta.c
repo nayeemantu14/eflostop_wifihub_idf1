@@ -4,6 +4,7 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
+#include "nvs_store/nvs_store.h"
 #include "cJSON.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -32,7 +33,7 @@ _Static_assert(sizeof(s_location_strings) / sizeof(s_location_strings[0]) == LOC
 static bool save_table_to_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(META_TAG, "NVS open failed: %s", esp_err_to_name(err));
         return false;
@@ -72,7 +73,7 @@ static bool save_table_to_nvs(void)
 static bool load_table_from_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
         ESP_LOGD(META_TAG, "NVS namespace not found (first boot?)");
         return false;
@@ -343,7 +344,7 @@ void sensor_meta_clear_all(void)
 
         // Erase NVS
         nvs_handle_t h;
-        esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+        esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
         if (err == ESP_OK) {
             nvs_erase_all(h);
             nvs_commit(h);

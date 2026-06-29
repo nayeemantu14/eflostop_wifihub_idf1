@@ -15,6 +15,7 @@
 #include "esp_system.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
+#include "nvs_store/nvs_store.h"
 #include "wifi_manager.h"
 #include "rgb.h"
 #include "net_status/net_status.h"
@@ -47,6 +48,11 @@ void app_main(void)
 	}
 	ESP_ERROR_CHECK(ret);
 
+	/* dedicated NVS partition for commissioning/identity — survives a WiFi
+	 * reset and any default-partition erase. Must init before hub_identity /
+	 * provisioning / dps / sensor_meta / rules_engine touch their namespaces. */
+	nvs_store_init();
+
 	/* derive Gateway ID + Short ID from MAC, load hub name from NVS */
 	hub_identity_init();
 
@@ -60,7 +66,8 @@ void app_main(void)
 	app_ble_valve_init();
 	app_ble_leak_init();
 
-	/* WiFi reset button (GPIO 40, hold 5s to erase credentials + restart captive portal) */
+	/* WiFi reset button (GPIO 40, hold 10s to clear WiFi credentials + reboot into AP
+	 * captive portal; commissioning is preserved in nvs_prov, decommission is app-only) */
 	reset_button_init();
 
 	/* start system monitoring (heap, uptime, diagnostics) */

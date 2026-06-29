@@ -8,6 +8,7 @@
 #include "mqtt_client.h"
 #include "esp_crt_bundle.h"
 #include "nvs_flash.h"
+#include "nvs_store/nvs_store.h"
 #include "cJSON.h"
 #include "mbedtls/base64.h"
 #include "mbedtls/md.h"
@@ -68,7 +69,7 @@ static dps_ctx_t s_ctx;
 static esp_err_t nvs_load_cache(dps_assignment_t *out)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) return err;
 
     uint8_t cached = 0;
@@ -98,7 +99,7 @@ static esp_err_t nvs_load_cache(dps_assignment_t *out)
 static esp_err_t nvs_save_cache(const dps_assignment_t *a)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
     nvs_set_str(h, NVS_KEY_HUB, a->hub_hostname);
@@ -411,7 +412,7 @@ esp_err_t dps_register(const char *id_scope, const char *group_key,
 esp_err_t dps_clear_cache(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) return err;
 
     nvs_erase_all(h);

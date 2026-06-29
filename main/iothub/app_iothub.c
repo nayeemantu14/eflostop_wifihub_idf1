@@ -38,6 +38,8 @@ extern QueueHandle_t lora_rx_queue;
 TaskHandle_t iothub_task_handle = NULL;
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool g_iot_hub_connected = false;
+// True while the esp-mqtt client task is started; gates suspend/resume on WiFi loss.
+static bool g_mqtt_running = false;
 
 // DPS-assigned credentials (populated at boot)
 static char g_hub_hostname[128] = {0};
@@ -795,6 +797,37 @@ static void handle_twin_desired(const char *data, int data_len)
 }
 
 // ---------------------------------------------------------------------------
+// MQTT suspend / resume on WiFi loss / restore
+//
+// The esp-mqtt client auto-reconnects with TLS. If WiFi STA drops (e.g. a button
+// WiFi reset that brings up the SoftAP captive portal without rebooting), leaving
+// the client running makes it retry TLS handshakes into a dead network. Each
+// handshake wants a large (~16 KB SSL_IN) buffer; with dynamic buffers disabled
+// these fail (MBEDTLS_ERR_SSL_ALLOC_FAILED / -0x7F00) and fragment the heap the
+// captive portal's http/dns servers need, making AP join slow and flaky. Stopping
+// the client while STA is down frees that heap; we restart it when STA returns.
+// (On first boot the client isn't created until after STA connects, so there is no
+//  thrash — this only matters for the post-reset / reconnect case.)
+// ---------------------------------------------------------------------------
+void iothub_suspend_mqtt(void)
+{
+    if (mqtt_client != NULL && g_mqtt_running) {
+        ESP_LOGW(IOTHUB_TAG, "WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)");
+        esp_mqtt_client_stop(mqtt_client);
+        g_mqtt_running = false;
+    }
+}
+
+void iothub_resume_mqtt(void)
+{
+    if (mqtt_client != NULL && !g_mqtt_running) {
+        ESP_LOGI(IOTHUB_TAG, "WiFi up — restarting MQTT client");
+        esp_mqtt_client_start(mqtt_client);
+        g_mqtt_running = true;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MQTT event handler
 // ---------------------------------------------------------------------------
 
@@ -1011,6 +1044,7 @@ void iothub_task(void *param)
     mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
     esp_mqtt_client_register_event(mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
     esp_mqtt_client_start(mqtt_client);
+    g_mqtt_running = true;
 
     // Initialize offline event buffer (loads pending events from NVS)
     offline_buffer_init();

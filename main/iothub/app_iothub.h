@@ -34,6 +34,12 @@ void initialize_iothub(void);
 // Trigger provisioning MAC application to BLE
 void iothub_apply_provisioned_mac(void);
 
+// Suspend/resume the MQTT client on WiFi loss/restore. Stopping the client while
+// STA is down frees the large TLS buffers so the SoftAP captive portal stays
+// responsive after a button WiFi reset (no MQTT TLS-reconnect heap thrash).
+void iothub_suspend_mqtt(void);
+void iothub_resume_mqtt(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,7 @@
 #include "esp_log.h"
 #include "cJSON.h"
 #include "nvs.h"
+#include "nvs_store/nvs_store.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "provisioning_manager.h"
@@ -81,7 +82,7 @@ static TickType_t g_all_clear_since = 0;  // 0 = not yet all clear
 static void override_clear_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) return;
     nvs_erase_key(h, NVS_KEY_OVR_STATE);
     nvs_erase_key(h, NVS_KEY_OVR_EXPIRY);
@@ -92,7 +93,7 @@ static void override_clear_nvs(void)
 static void override_save_to_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(RULES_TAG, "NVS open failed for override save: %s", esp_err_to_name(err));
         return;
@@ -112,7 +113,7 @@ static void override_save_to_nvs(void)
 static void incident_save_to_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(RULES_TAG, "NVS open failed for incident save: %s", esp_err_to_name(err));
         return;
@@ -126,7 +127,7 @@ static void incident_save_to_nvs(void)
 static void incident_load_from_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
         g_leak_incident_active = false;
         return;
@@ -143,7 +144,7 @@ static void incident_load_from_nvs(void)
 static void override_load_from_nvs(void)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READONLY, &h);
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READONLY, &h);
     if (err != ESP_OK) {
         // No stored data — start fresh
         g_override_state = OVERRIDE_STATE_INACTIVE;
@@ -1177,7 +1178,7 @@ void rules_engine_clear_persistent_state(void)
      * Wipes both incident latch and override window NVS entries so the next
      * provisioning cycle starts from a known-clean slate. */
     nvs_handle_t h;
-    if (nvs_open(NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
+    if (nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
         nvs_erase_key(h, NVS_KEY_OVR_STATE);
         nvs_erase_key(h, NVS_KEY_OVR_EXPIRY);
         nvs_erase_key(h, NVS_KEY_INCIDENT);
