@@ -1,11 +1,18 @@
 # TEST PLAN — Fast First Snapshot After Commissioning (FW 1.4.4)
 
-Validate that a `provision` (commission) C2D command makes the hub publish a snapshot **within 120 s** —
-ideally within seconds when the devices are live — instead of waiting for the 5-min periodic timer, and
-that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw_version`).
+Validate that a `provision` (commission) C2D command makes the hub publish a snapshot **within 150 s** —
+ideally within seconds when the devices are live, and as soon as a late device is heard via the
+incremental refresh — instead of waiting for the 5-min periodic timer, and that the snapshot carries
+**complete sensor data** (no null `battery`/`rssi`/`fw_version`).
 
-> Hub under test: `feature/fast-commission-snapshot`, `gateway.fw = 1.4.4`. Includes the window-anchoring
-> fix (`777fc65`) and the snapshot-ordering fix (`0aab312`).
+> Hub under test: `feature/fast-commission-snapshot`, `gateway.fw = 1.4.4`. Includes: fast snapshot
+> (`aae5c8b`), window anchored to provision (`777fc65`), snapshot-after-cache ordering (`0aab312`),
+> valve-offline-on-reprovision + double-send + timeout-granularity + decommission re-arm (`d49d604`),
+> incremental commission refresh + commission window + cache/health consistency + whitelist-log cleanup
+> (`50fb729`), commission window tuned to **150 s** (`8112f0c`).
+>
+> **Commission window is now 150 s** (`HEALTH_COMMISSION_SYNC_TIMEOUT_MS`); the boot window stays 120 s.
+> A device heard after the window still self-reports via an **incremental refresh snapshot** within ~2 s.
 
 ---
 
@@ -51,7 +58,9 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
 > `C2D cmd='provision'` → `PROVISIONING: Provisioning completed` → `HEALTH_ENGINE: Device table loaded`
 > → `IOTHUB: Commission: fast snapshot armed …` → (advert) `BLE_LEAK: eleak …` →
 > `IOTHUB: Event: BLE Leak …` → `HEALTH_ENGINE: Boot sync: all devices seen` **or**
-> `Boot sync: timeout (2 min)` → `IOTHUB: Publishing sync snapshot …` → `TELEMETRY_V2: Pub snapshot …`.
+> `Boot sync: timeout (150 s)` → `IOTHUB: Publishing sync snapshot …` → `TELEMETRY_V2: Pub snapshot …`.
+> A device heard *after* the window logs `IOTHUB: Publishing commission refresh snapshot (device heard, N/N seen)`.
+> `BLE_LEAK: Whitelist reloaded` should now appear **only** on a provision/decommission, not every 10 s.
 
 **"Clean-state" reset procedure (do this before each test below):**
 1. Send the **decommission-all** command.
@@ -70,14 +79,14 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
 
 ---
 
-## C1 — Latency (headline): snapshot ≤120 s of `provision`
+## C1 — Latency (headline): snapshot ≤150 s of `provision`
 1. Do the **clean-state reset**.
 2. Ensure leak sensor A (`3F:59`) is powered and within range.
 3. **Start the stopwatch** and send **Provision — 1 live sensor**.
 4. Watch serial for the commission flow markers (above), ending in `Publishing sync snapshot` →
    `Pub snapshot`.
-5. **P:** a `type:"snapshot"` arrives on the cloud monitor **≤120 s** after the command. Record the
-   measured time. *(Reference run: ~63 s.)*
+5. **P:** a `type:"snapshot"` arrives on the cloud monitor **≤150 s** after the command (usually much
+   sooner — early-send when the sensor is heard). Record the measured time. *(Reference run: ~63 s.)*
 
 ---
 
@@ -87,7 +96,7 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
    power-on boot burst — it will be heard within seconds.
 3. Send **Provision — 1 live sensor**.
 4. **P:** serial shows `HEALTH_ENGINE: Boot sync: all devices seen` (**not** `timeout`), and the
-   snapshot arrives **well under 120 s** — i.e. it does not wait the full window when everything is
+   snapshot arrives **well under 150 s** — i.e. it does not wait the full window when everything is
    already heard.
 
 ---
@@ -104,18 +113,24 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
 
 ---
 
-## C4 — Degraded (a provisioned sensor never advertises)
+## C4 — Degraded (a provisioned sensor never advertises) — also validates #1/#2/#3
 1. Do the **clean-state reset**.
 2. **Make sensor B (`3B:00`) silent** — remove its battery (or take it out of range). Keep sensor A
    (`3F:59`) live.
 3. Send **Provision — 1 live + 1 offline sensor**.
 4. Let the window run to the deadline.
-5. **P (deadline send):** serial shows `HEALTH_ENGINE: Boot sync: timeout (2 min)` ~120 s after the
-   provision, then `Publishing sync snapshot`. No hang, no crash, no reboot.
-6. **P (mixed payload):** in the snapshot —
+5. **P (deadline send, #3):** serial shows `HEALTH_ENGINE: Boot sync: timeout (150 s)` at **~150 s**
+   after the provision (not ~120 s and not overshooting toward ~180 s), then `Publishing sync snapshot`.
+   No hang, no crash, no reboot.
+6. **P (valve NOT offline, #1):** in the snapshot the **valve** is `connected:true`,
+   `rating:"excellent"`, `last_seen_age_s` a real number — **not** "Valve offline"; `system_health.reason`
+   cites only the offline **sensor**, not the valve.
+7. **P (single snapshot, #2):** exactly **one** snapshot at the deadline — no second byte-identical
+   snapshot back-to-back.
+8. **P (mixed payload):** in the snapshot —
    - `3F:59` → `connected:true` with full `battery`/`rssi`/`fw_version`.
    - `3B:00` → `connected:false`, `last_seen_age_s:null`, `battery/rssi/fw_version:null`.
-   - `system_health.rating` = `critical` (or degraded) citing the offline sensor.
+   - `system_health.rating` = `critical` citing the 1 offline sensor.
 
 ---
 
@@ -142,6 +157,45 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
 
 ---
 
+## C7 — Incremental refresh: late sensor self-reports (the headline fix, A) — *most important*
+Deterministically forces a sensor to be heard **after** the window closes, then checks it still reports.
+1. Do the **clean-state reset**.
+2. **Power sensor A (`3F:59`) OFF** (battery out) so it cannot be heard during the window.
+3. Send **Provision — 1 live sensor** (the now-off `3F:59`). Start the stopwatch.
+4. Wait for the window to time out: serial `Boot sync: timeout (150 s)` → `Publishing sync snapshot` at
+   ~150 s. **First snapshot shows `3F:59` `connected:false` / null** (expected — it was off).
+5. **Now power sensor A ON** (reinsert battery) → it fires its power-on boot burst.
+6. **P (A — refresh):** within ~2 s of the hub hearing it (serial `BLE_LEAK: eleak …3F:59`), serial logs
+   `IOTHUB: Publishing commission refresh snapshot (device heard, 2/2 seen)` and a **new snapshot** arrives
+   on the cloud with `3F:59` now `connected:true` + full `battery`/`rssi`/`fw_version`. **This is the
+   "sensor data never arrives" fix** — the data now arrives on its own, not only at the 5-min periodic.
+7. **P (self-limit):** once all devices are seen, no further refresh snapshots stream (the grace closes).
+
+## C8 — Cache/health consistency on re-provision (D)
+1. Do the **clean-state reset**, send **Provision — 1 live sensor** (`3F:59` live), let it go
+   `connected:true` with data (per C1/C3).
+2. **Re-provision** with a *different* list that adds the offline `3B:00`: send **Provision — 1 live +
+   1 offline sensor**. This reloads the device table (wipes seen-state).
+3. Inspect the **next** snapshot **before** `3F:59` is re-heard (the moment right after re-provision).
+4. **P:** `3F:59` reported `connected:false` must have **null** `battery`/`rssi`/`fw_version` — **not**
+   stale values (e.g. not `connected:false` with `battery:61`). Once `3F:59` is re-heard, a refresh
+   snapshot (C7) shows it `connected:true` with data again.
+
+## C9 — Decommission reflects removal + valve stays online (#4, #1, E)
+1. Do the **clean-state reset**, send **Provision — 1 live + 1 offline sensor** (so 2 sensors provisioned).
+2. **Decommission one BLE sensor**:
+   ```json
+   {"schema":"eflostop.cmd","ver":1,"id":"decom-ble","cmd":"decommission","payload":{"target":"ble","sensor_id":"00:80:e1:2a:3b:00"}}
+   ```
+3. **P (#4 — reflects removal):** within the window a snapshot publishes showing only the remaining
+   sensor (`3B:00` gone) — not waiting for the 5-min periodic.
+4. **P (#1 — valve stays online):** the valve remains `connected:true` / `rating:"excellent"` across the
+   decommission (it must not flip to "offline").
+5. **P (E — log):** `BLE_LEAK: Whitelist reloaded: 1 sensor(s)` is logged **once** on the change — and
+   across the whole session it does **not** spam every 10 s.
+
+---
+
 ## Change 2 — Twin tags (Azure-side, NO firmware) — *blocked, do when values arrive*
 > Needs `DeviceBrand` / `DeviceType` strings from the app team (`DeviceModel = "eFloStop"`).
 1. Set `initialTwin.tags = {"DeviceBrand":"<TBD>","DeviceModel":"eFloStop","DeviceType":"<TBD>"}` on the
@@ -156,17 +210,20 @@ that the snapshot carries **complete sensor data** (no null `battery`/`rssi`/`fw
 
 ---
 
-## Result log
-| Test | Expected | Observed | Pass? |
-|---|---|---|---|
-| C0 version 1.4.4 | banner 1.4.4 | `App version: 1.4.4`, `gateway.fw:1.4.4` | ✅ |
-| C1 latency ≤120 s | snapshot within 120 s of `provision` | provision uptime 31 s → snapshot uptime 94 s (~63 s) | ✅ |
-| C2 early-send | well under 120 s when live | serial `Boot sync: all devices seen` (not timeout) | ✅ |
-| C3 completeness + full fields | all N + valve, non-null sensor fields | valve + `3F:59` (batt 60, rssi -33, fw 1.1.0) | ✅ |
-| C4 degraded | sends at 120 s timeout; live sensor full, missing sensor null | criteria PASS, but exposed 4 defects (valve-offline-on-reprovision, double-send, ~149 s overshoot, decommission asymmetry) — all fixed; **re-test pending** | 🟡 |
-| C5 re-entrancy | ≤1 extra snapshot, no storm, no crash | | |
-| C6 regression | 5-min cadence intact, no double-send | | |
-| Change 2 tags | tags present service-side | blocked on Brand/Type + DPS edit | ⏳ |
+## Result log (re-run all on the 150 s build, commits through `8112f0c`)
+| Test | Validates | Expected | Observed | Pass? |
+|---|---|---|---|---|
+| C0 version/build | build compiles, 1.4.4 | banner 1.4.4 | | |
+| C1 latency ≤150 s | fast snapshot | snapshot ≤150 s of `provision` (usually sooner) | | |
+| C2 early-send | early-send | well under 150 s when live (`all devices seen`) | | |
+| C3 completeness + full fields | `0aab312` ordering | valve + sensor, non-null battery/rssi/fw | | |
+| C4 degraded | `#1`+`#2`+`#3` | timeout ~150 s, **valve online**, single snapshot, missing sensor null | | |
+| C5 re-entrancy | re-entrancy | ≤1 extra snapshot, no storm, no crash | | |
+| C6 regression | `#2` / periodic | 5-min cadence intact, no double-send | | |
+| **C7 incremental refresh** | **A (the headline fix)** | late sensor (powered on after window) → `commission refresh snapshot`, goes online | | |
+| C8 cache consistency | D | re-provisioned sensor: `connected:false` has **null** battery/rssi/fw (not stale) | | |
+| C9 decommission | `#4`+`#1`+E | snapshot reflects removal; valve stays online; whitelist log only on change | | |
+| Change 2 tags | Azure-side | tags present service-side | blocked on Brand/Type + DPS edit | ⏳ |
 
-> After C4-C6 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4);
+> After C0–C9 pass: `git merge --no-ff feature/fast-commission-snapshot` → master (1.4.4);
 > tag `v1.4.4` if requested. **Do not push unless asked.**
