@@ -34,6 +34,13 @@ static bool           s_connected      = false;
 static TimerHandle_t  s_snapshot_timer = NULL;
 static QueueHandle_t  s_snapshot_queue = NULL;
 
+// Heartbeat interval in SECONDS. Written by the Twin desired-property handler
+// (telemetry_v2_set_snapshot_interval, esp-mqtt task) as a single 32-bit store —
+// naturally atomic on the 32-bit Xtensa core — and read by the iothub_task
+// snapshot scheduler. The actual heartbeat cadence is driven by that scheduler's
+// monotonic deadline, not by s_snapshot_timer (which stays a fixed liveness backstop).
+static volatile int32_t s_snap_interval_s = SNAPSHOT_INTERVAL_MS / 1000;
+
 // ---- Helpers --------------------------------------------------------------
 
 // Single source of truth for the hub firmware version: the ESP-IDF application
@@ -84,18 +91,27 @@ static cJSON *build_envelope(const char *type)
     return root;
 }
 
-static void publish_json(cJSON *root, const char *type_hint)
+// Returns true ONLY when the message actually reached esp-mqtt (online branch
+// taken AND esp_mqtt_client_publish accepted it, msg_id >= 0). Returns false on
+// a NULL root, offline (buffered or dropped), or a negative msg_id (e.g. outbox
+// saturated). The snapshot scheduler re-arms the heartbeat only on a true return,
+// so an offline/pre-SNTP/outbox-full drop never counts as "sent".
+static bool publish_json(cJSON *root, const char *type_hint)
 {
-    if (!root) return;
+    if (!root) return false;
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
-    if (!json_str) return;
+    if (!json_str) return false;
 
+    bool sent = false;
     if (s_mqtt && s_connected) {
         // Online: publish directly
         ESP_LOGI(TELEM_TAG, "Pub %s: %s", type_hint, json_str);
-        esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
+        int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
+        sent = (msg_id >= 0);
+        if (!sent)
+            ESP_LOGW(TELEM_TAG, "Pub %s failed (msg_id=%d)", type_hint, msg_id);
     } else if (strcmp(type_hint, "event") == 0) {
         // Offline: buffer critical events for replay on reconnect
         ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
@@ -106,6 +122,7 @@ static void publish_json(cJSON *root, const char *type_hint)
     }
 
     free(json_str);
+    return sent;
 }
 
 static const char *reset_reason_str(void)
@@ -258,6 +275,26 @@ QueueHandle_t telemetry_v2_get_snapshot_queue(void)
     return s_snapshot_queue;
 }
 
+void telemetry_v2_wake_snapshot(void)
+{
+    // Non-blocking wake of the iothub_task event loop (e.g. from the esp-mqtt
+    // event task on reconnect). Safe from any task: only enqueues, never publishes.
+    if (s_snapshot_queue) {
+        uint8_t trigger = 1;
+        xQueueSend(s_snapshot_queue, &trigger, 0);
+    }
+}
+
+bool telemetry_v2_is_connected(void)
+{
+    return s_connected;
+}
+
+int32_t telemetry_v2_get_snapshot_interval_s(void)
+{
+    return s_snap_interval_s;
+}
+
 void telemetry_v2_start_snapshot_timer(void)
 {
     if (s_snapshot_timer) {
@@ -269,10 +306,14 @@ void telemetry_v2_start_snapshot_timer(void)
 
 void telemetry_v2_set_snapshot_interval(int seconds)
 {
-    if (!s_snapshot_timer) return;
-    TickType_t new_period = pdMS_TO_TICKS((uint32_t)seconds * 1000);
-    xTimerChangePeriod(s_snapshot_timer, new_period, 0);
-    ESP_LOGI(TELEM_TAG, "Snapshot interval changed to %ds", seconds);
+    if (seconds <= 0) return;
+    // Heartbeat cadence is driven by the iothub_task deadline scheduler, which
+    // latches this value each iteration. Store it as a single 32-bit (atomic on
+    // the Xtensa core) write from this esp-mqtt-task context — do NOT reprogram
+    // s_snapshot_timer (it stays a fixed liveness backstop), which would create a
+    // dual-cadence drift and a cross-task int64 race on the deadline.
+    s_snap_interval_s = seconds;
+    ESP_LOGI(TELEM_TAG, "Snapshot interval set to %ds (heartbeat scheduler)", seconds);
 }
 
 // ---- Lifecycle ------------------------------------------------------------
@@ -315,12 +356,17 @@ void telemetry_v2_publish_lifecycle(void)
 
 // ---- Snapshot -------------------------------------------------------------
 
-void telemetry_v2_publish_snapshot(void)
+bool telemetry_v2_publish_snapshot(const char *reason)
 {
     cJSON *root = build_envelope("snapshot");
-    if (!root) return;
+    if (!root) return false;   // pre-SNTP / alloc fail — treated as "not published"
 
     cJSON *data = cJSON_CreateObject();
+
+    // Trigger reason (heartbeat | event | commission | boot) — lets the app
+    // attribute each snapshot in its event-log-vs-UI-refresh model.
+    if (reason && reason[0])
+        cJSON_AddStringToObject(data, "reason", reason);
 
     // ---- Fetch health device status for all provisioned devices ----
     health_device_status_t health[HEALTH_MAX_DEVICES];
@@ -510,18 +556,37 @@ void telemetry_v2_publish_snapshot(void)
     }
     cJSON_AddItemToObject(data, "ble_leak_sensors", ble_arr);
 
+    // ---- Rules config (master auto-close enable + trigger mask) ----
+    // Mirrors the lifecycle "rules" object EXACTLY (same shape + guard) so the
+    // app reuses one parser. Kept as a GLOBAL object, disjoint from any future
+    // per-sensor auto_close flag, so per-sensor shutoff stays purely additive.
+    rules_config_t rules;
+    if (provisioning_get_rules_config(&rules)) {
+        cJSON *r = cJSON_CreateObject();
+        cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled);
+        cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask);
+        cJSON_AddItemToObject(data, "rules", r);
+    }
+
     // ---- Override window status ----
-    bool ovr_active = rules_engine_is_override_window_active();
+    // Single atomic read of all three fields (no TOCTOU). override_active and
+    // override_remaining_s keep their exact prior semantics; expires_ts is an
+    // additive ABSOLUTE epoch (same field name as the override event) emitted only
+    // when active and the expiry is known/in-future.
+    bool     ovr_active    = false;
+    int32_t  ovr_remaining = -1;
+    uint32_t ovr_expires   = 0;
+    rules_engine_get_override_status(&ovr_active, &ovr_remaining, &ovr_expires);
     cJSON_AddBoolToObject(data, "override_active", ovr_active);
     if (ovr_active) {
-        int32_t remaining = rules_engine_get_override_remaining_s();
-        if (remaining >= 0) {
-            cJSON_AddNumberToObject(data, "override_remaining_s", remaining);
-        }
+        if (ovr_remaining >= 0)
+            cJSON_AddNumberToObject(data, "override_remaining_s", ovr_remaining);
+        if (ovr_expires > 0)
+            cJSON_AddNumberToObject(data, "expires_ts", (double)ovr_expires);
     }
 
     cJSON_AddItemToObject(root, "data", data);
-    publish_json(root, "snapshot");
+    return publish_json(root, "snapshot");
 }
 
 // ---- Events ---------------------------------------------------------------
