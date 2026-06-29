@@ -55,6 +55,17 @@ static bool g_needs_lifecycle = false;
 // post-commission snapshot lands within 120 s instead of waiting for the 5-min timer.
 static bool g_boot_snapshot_sent = false;
 
+// Incremental commission snapshot: after the initial sync snapshot, a far/slow
+// sensor (dry WBA leak sensor advertises on a ~100 s cadence) may not be heard
+// until after the window closed. To avoid "sensor data never arrives until the
+// 5-min periodic", we publish a refreshed snapshot each time the count of heard
+// devices increases, for a bounded grace after a commission. g_commission_until_ms
+// is the grace deadline (esp_timer ms); g_commission_pub_seen is the seen-count
+// already reflected in the last published commission snapshot.
+#define COMMISSION_REFRESH_GRACE_MS (6 * 60 * 1000)   // 6 min after a provision
+static int64_t g_commission_until_ms = 0;
+static uint8_t g_commission_pub_seen = 0;
+
 // Device Twin: request ID counter for twin GET/PATCH operations
 static int g_twin_rid = 0;
 
@@ -440,6 +451,17 @@ static void reseed_valve_health_if_connected(void)
     }
 }
 
+// Arm the commission snapshot after a device-list change (provision/decommission):
+// re-arm the one-shot initial snapshot, reset the published seen-count, and open
+// the incremental-refresh grace window so a device heard after the initial snapshot
+// still gets reported promptly (not only at the next 5-min periodic).
+static void arm_commission_snapshot(void)
+{
+    g_boot_snapshot_sent  = false;
+    g_commission_pub_seen = 0;
+    g_commission_until_ms = (esp_timer_get_time() / 1000) + COMMISSION_REFRESH_GRACE_MS;
+}
+
 static void handle_c2d_command(const char *data, size_t data_len)
 {
     c2d_command_t cmd;
@@ -522,10 +544,10 @@ static void handle_c2d_command(const char *data, size_t data_len)
         else if (strcmp(target, "valve") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE !!!");
             if (provisioning_remove_valve()) {
-                health_engine_reload_devices();
+                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
-                g_boot_snapshot_sent = false;   // refresh the snapshot if the hub stays provisioned
+                arm_commission_snapshot();   // refresh the snapshot if the hub stays provisioned
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -539,9 +561,9 @@ static void handle_c2d_command(const char *data, size_t data_len)
             uint32_t sid = sid_str ? (uint32_t)strtoul(sid_str, NULL, 16) : 0;
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_LORA: 0x%08lX !!!", (unsigned long)sid);
             if (provisioning_remove_lora_sensor(sid)) {
-                health_engine_reload_devices();
+                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
                 reseed_valve_health_if_connected();   // valve stays up across a sensor removal
-                g_boot_snapshot_sent = false;         // publish a fresh snapshot reflecting the removal
+                arm_commission_snapshot();            // publish a fresh snapshot reflecting the removal
                 char lora_id_str[16];
                 snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
                          (unsigned long)sid);
@@ -558,9 +580,9 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 cJSON_GetObjectItem(pl, "sensor_id"));
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_BLE: %s !!!", mac ? mac : "?");
             if (mac && provisioning_remove_ble_sensor(mac)) {
-                health_engine_reload_devices();
+                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
                 reseed_valve_health_if_connected();   // valve stays up across a sensor removal
-                g_boot_snapshot_sent = false;         // publish a fresh snapshot reflecting the removal
+                arm_commission_snapshot();            // publish a fresh snapshot reflecting the removal
                 sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac);
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
@@ -661,19 +683,21 @@ static void handle_c2d_command(const char *data, size_t data_len)
         if (cmd.payload_json &&
             provisioning_handle_azure_payload_json(
                 cmd.payload_json, strlen(cmd.payload_json))) {
-            health_engine_reload_devices();
+            health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
             reseed_valve_health_if_connected();   // re-provision keeps the valve connected (see helper)
             iothub_apply_provisioned_mac();
             // Fast-track the first post-commission snapshot. health_engine_reload_devices()
-            // already re-armed the sync window (all-devices-seen, else 120 s timeout, with the
-            // window clock reset); re-arm the snapshot trigger too so the event loop publishes
-            // as soon as every commissioned device has been heard — or at the 120 s deadline —
-            // instead of waiting for the 5-min periodic snapshot. Best-effort: a device not
-            // heard within 120 s is reported offline/null (no hang, no schema change). The
-            // trigger stays gated to fire once, so this does not introduce a double-send.
-            g_boot_snapshot_sent = false;
+            // already re-armed the sync window (all-devices-seen, else the commission timeout,
+            // with the window clock reset); arm the snapshot trigger + incremental-refresh grace
+            // too so the event loop publishes as soon as every commissioned device has been heard
+            // (or at the deadline), and then refreshes as any late device is first heard — instead
+            // of waiting for the 5-min periodic snapshot. Best-effort: a device not heard within
+            // the window is reported offline/null (no hang, no schema change), then a refresh
+            // snapshot follows once it is heard.
+            arm_commission_snapshot();
             ESP_LOGI(IOTHUB_TAG,
-                     "Commission: fast snapshot armed (publishes on all-devices-seen, else <=120s)");
+                     "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
+                     HEALTH_COMMISSION_SYNC_TIMEOUT_MS / 1000);
         } else {
             success = false;
             error_msg = "provisioning failed";
@@ -1114,12 +1138,17 @@ void iothub_task(void *param)
 
     while (1)
     {
-        // While a boot/commission sync snapshot is pending, poll briefly so the
-        // snapshot publishes within ~2 s of the window completing (all-seen or the
-        // 120 s timeout); otherwise idle at 30 s. health_is_boot_sync_complete()
-        // evaluates the deadline on read, so this poll cadence bounds the latency.
-        TickType_t evt_wait = (provisioning_is_provisioned() && !g_boot_snapshot_sent)
-                              ? pdMS_TO_TICKS(2000) : pdMS_TO_TICKS(30000);
+        // While a boot/commission snapshot is pending OR the post-commission
+        // refresh grace is open, poll briefly so the snapshot publishes within ~2 s
+        // of the window completing (all-seen or the timeout) and the incremental
+        // refresh fires promptly when a late device is heard; otherwise idle at 30 s.
+        // health_is_boot_sync_complete() evaluates the deadline on read, so this poll
+        // cadence bounds the latency.
+        bool commission_pending = provisioning_is_provisioned() &&
+            (!g_boot_snapshot_sent ||
+             (esp_timer_get_time() / 1000) < g_commission_until_ms);
+        TickType_t evt_wait = commission_pending ? pdMS_TO_TICKS(2000)
+                                                 : pdMS_TO_TICKS(30000);
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
 
         // Periodic rules engine tick (auto-clear timeout, valve override detection)
@@ -1299,8 +1328,32 @@ void iothub_task(void *param)
         //      window. Publishing last guarantees the snapshot reflects that advertisement. ----
         if (!g_boot_snapshot_sent && health_is_boot_sync_complete()) {
             g_boot_snapshot_sent = true;
+            uint8_t seen = 0, total = 0;
+            if (health_get_sync_counts(&seen, &total)) {
+                g_commission_pub_seen = seen;
+                if (seen >= total) g_commission_until_ms = 0;  // all heard — no refresh needed
+            }
             ESP_LOGI(IOTHUB_TAG, "Publishing sync snapshot (boot/commission window complete)");
             telemetry_v2_publish_snapshot();
+        }
+        // ---- Incremental commission refresh ----
+        // After the initial snapshot, a commissioned device may be heard for the
+        // first time only after the window closed (a far/slow leak sensor on a
+        // ~100 s cadence). Within the grace window, publish a refreshed snapshot
+        // each time the heard-device count increases, so its data reaches the cloud
+        // immediately instead of waiting for the 5-min periodic. Self-limits once
+        // every device has been heard.
+        else if (g_boot_snapshot_sent &&
+                 (esp_timer_get_time() / 1000) < g_commission_until_ms) {
+            uint8_t seen = 0, total = 0;
+            if (health_get_sync_counts(&seen, &total) && seen > g_commission_pub_seen) {
+                g_commission_pub_seen = seen;
+                ESP_LOGI(IOTHUB_TAG,
+                         "Publishing commission refresh snapshot (device heard, %u/%u seen)",
+                         (unsigned)seen, (unsigned)total);
+                telemetry_v2_publish_snapshot();
+                if (seen >= total) g_commission_until_ms = 0;  // all heard — stop refreshing
+            }
         }
     }
 }

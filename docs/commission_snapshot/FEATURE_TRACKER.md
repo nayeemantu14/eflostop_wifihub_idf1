@@ -69,6 +69,30 @@ C4 passed its own criteria but the bench log exposed four defects (3 adversarial
   the snapshot. Fix: the lora/ble/valve decommission branches now set `g_boot_snapshot_sent=false` so a
   fresh snapshot reflects the removed device within the window instead of waiting for the 5-min periodic.
 
+### Combined valve+sensor commission — "sensor data never arrives" (workflow `wf_e8929bf9`)
+User report: commissioning valve + sensors together, the sensor data never arrives. 5-track diagnosis:
+the data is **not lost** — the BLE scan works and heard the sensor (222 s, 324 s). Root cause = window-vs-
+cadence + one-shot snapshot: the dry WBA sensor (fw 1.1.0) advertises a brief burst then sleeps ~100 s;
+at the edge of range (−75 dBm) with dual-PHY 50%-duty scanning shared with the valve's 250 ms link + WiFi,
+first-hear lands ~180 s after commission — past the 120 s window. The window snapshot showed it offline, and
+the snapshot was **one-shot**, so when the sensor was finally heard no further commission snapshot fired.
+Ruled out: the 10 s "Whitelist reloaded" does NOT disrupt the scan (pure RAM copy); the scan never stalled.
+Fixes (user chose A+B+D+E):
+- **A — Incremental commission snapshot (the real fix).** `app_iothub.c`: after the initial snapshot, while
+  a bounded grace (`COMMISSION_REFRESH_GRACE_MS`=6 min) is open, publish a refreshed snapshot each time the
+  heard-device count increases (`health_get_sync_counts()`), so a late sensor's data reaches the cloud
+  immediately. Self-limits once all devices are heard. New helper `arm_commission_snapshot()` sets it up on
+  provision + every decommission. Loop polls at 2 s during the grace so the refresh lands within ~2 s.
+- **B — Separate, longer commission window.** `HEALTH_COMMISSION_SYNC_TIMEOUT_MS`=240 s (vs 120 s boot);
+  `health_engine_reload_devices(uint32_t sync_window_ms)` now takes the window length (boot passes 120 s,
+  provision/decommission pass 240 s). 240 s ≈ 2 sensor cadences.
+- **D — Cache/health consistency.** `telemetry_v2.c`: only merge cached battery/rssi/fw when
+  `health[i].connected` (LoRa + BLE), so a reloaded-but-not-yet-reheard sensor can't show `connected:false`
+  with stale `battery/rssi/fw` (the 309 s mismatch).
+- **E — Log cleanup.** `app_ble_leak.c`: log "Whitelist reloaded" only when the whitelist actually changes
+  (was every 10 s).
+- (Not done: C — raising scan duty/1M-only during commission. Deferred; A+B already resolve the report.)
+
 ## Status
 - **IMPLEMENT (Change 1):** ✅ `aae5c8b` (fast snapshot) + `777fc65` (anchor window to provision)
   + sync-snapshot ordering fix (this change). Merged up to current master (`1380d5f`).
@@ -80,8 +104,12 @@ C4 passed its own criteria but the bench log exposed four defects (3 adversarial
 - **BENCH (C4 degraded):** 🟡 criteria PASS (timeout path, `3B:00` null, `3F:59` full, no crash) but
   exposed defects #1-#4 above — all fixed; **re-flash + re-run C4 (and C5/C6) pending**. Expect on
   re-test: valve `connected:true/rating:excellent`, single snapshot, timeout ~120 s.
-- **BUILD/BENCH (full TEST_PLAN):** 🟡 **C0/C1/C2/C3 PASS**. C4 fixes pending re-test; C5 (re-entrancy),
-  C6 (5-min periodic intact) not yet exercised.
+- **BENCH (combined valve+sensor commission):** 🟡 reproduced "sensor data never arrives" (far sensor heard
+  at 222 s, past the 120 s window; one-shot snapshot). Fixes A+B+D+E implemented — **re-flash + re-test
+  pending**. Expect: initial snapshot at all-seen or 240 s; a late sensor triggers a **refresh snapshot**
+  within ~2 s of being heard; no `connected:false` + stale `battery/rssi/fw`; `Whitelist reloaded` only on change.
+- **BUILD/BENCH (full TEST_PLAN):** 🟡 **C0/C1/C2/C3 PASS**. C4 + combined-commission fixes pending re-test;
+  C5 (re-entrancy), C6 (5-min periodic intact) not yet exercised.
 - **Change 2:** ⏳ blocked on `DeviceBrand`/`DeviceType` strings + Azure DPS enrollment edit (no firmware).
 - **MERGE:** ⏳ after bench pass → `git merge --no-ff feature/fast-commission-snapshot` into master (1.4.4).
 
