@@ -417,9 +417,12 @@ void telemetry_v2_publish_snapshot(void)
                 cJSON_AddNullToObject(s, "last_seen_age_s");
             }
 
-            // Merge telemetry data from cache
+            // Merge telemetry data from cache — only when the device is currently
+            // connected. A reload (provision/decommission) wipes health seen-state
+            // but not this cache, so without the connected gate a just-reloaded
+            // sensor would emit connected:false yet carry stale battery/rssi/fw.
             const telem_lora_cache_t *cached = NULL;
-            if (s_lora_cache) {
+            if (health[i].connected && s_lora_cache) {
                 for (int j = 0; j < TELEM_MAX_LORA_CACHE; j++) {
                     if (!s_lora_cache[j].valid) continue;
                     char cid[16];
@@ -471,9 +474,11 @@ void telemetry_v2_publish_snapshot(void)
                 cJSON_AddNullToObject(s, "last_seen_age_s");
             }
 
-            // Merge telemetry data from cache
+            // Merge telemetry data from cache — only when the device is currently
+            // connected (see LoRa note): prevents emitting connected:false with
+            // stale battery/rssi/fw after a reload wipes health seen-state.
             const telem_ble_leak_cache_t *cached = NULL;
-            if (s_ble_cache) {
+            if (health[i].connected && s_ble_cache) {
                 for (int j = 0; j < TELEM_MAX_BLE_LEAK_CACHE; j++) {
                     if (!s_ble_cache[j].valid) continue;
                     if (strcasecmp(s_ble_cache[j].mac_str,

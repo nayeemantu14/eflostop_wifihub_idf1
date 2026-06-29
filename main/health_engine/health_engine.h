@@ -23,6 +23,14 @@ extern "C" {
 #define HEALTH_RSSI_GOOD_DBM         (-80)
 #define HEALTH_VALVE_DISC_TIMEOUT_MS (3 * 60 * 1000)      // 3-min grace before CRITICAL
 #define HEALTH_BOOT_SYNC_TIMEOUT_MS  (2 * 60 * 1000)     // 2-min boot window for sensor check-ins
+#define HEALTH_COMMISSION_SYNC_TIMEOUT_MS (150 * 1000)    // 2.5-min window after a provision/commission.
+                                                          // ~1.5x the dry sensor's ~100 s burst cadence:
+                                                          // long enough to catch an in-range sensor in a
+                                                          // single clean snapshot, short enough to report a
+                                                          // genuinely-absent device promptly. Late/far
+                                                          // sensors are still picked up by the incremental
+                                                          // refresh snapshot (app_iothub.c), so the window
+                                                          // need not cover the worst case.
 #define HEALTH_MAX_DEVICES           33                   // 1 valve + 16 LoRa + 16 BLE leak
 
 // ---------------------------------------------------------------------------
@@ -105,9 +113,20 @@ void health_engine_init(void);
 /**
  * @brief Reload device list from provisioning manager.
  *        Call when provisioning changes (add/remove devices).
- *        Resets all health states.
+ *        Resets all health states and re-arms the sync window.
+ * @param sync_window_ms  Length of the "all devices seen, else timeout" window to
+ *                        arm from now (HEALTH_BOOT_SYNC_TIMEOUT_MS at boot,
+ *                        HEALTH_COMMISSION_SYNC_TIMEOUT_MS after a provision).
  */
-void health_engine_reload_devices(void);
+void health_engine_reload_devices(uint32_t sync_window_ms);
+
+/**
+ * @brief Get how many provisioned devices have been heard at least once this
+ *        sync cycle (seen) and how many are provisioned (total). Thread-safe.
+ *        Used by the iothub loop to publish an incremental commission snapshot
+ *        when a late device is first heard. Returns false on mutex timeout.
+ */
+bool health_get_sync_counts(uint8_t *seen, uint8_t *total);
 
 /**
  * @brief Post a health event (thread-safe, non-blocking).

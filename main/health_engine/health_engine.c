@@ -41,8 +41,9 @@ static health_device_t s_devices[HEALTH_MAX_DEVICES];
 static volatile health_rating_t s_system_rating = HEALTH_EXCELLENT;
 static bool s_initialized = false;
 static SemaphoreHandle_t s_mutex = NULL;
-static bool    s_boot_sync_done = false;
-static int64_t s_boot_start_ms  = 0;
+static bool     s_boot_sync_done = false;
+static int64_t  s_boot_start_ms  = 0;
+static uint32_t s_boot_sync_timeout_ms = HEALTH_BOOT_SYNC_TIMEOUT_MS;  // window length, set on reload
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -347,9 +348,10 @@ static void check_boot_sync_locked(void)
     if (all_seen) {
         s_boot_sync_done = true;
         ESP_LOGI(HEALTH_TAG, "Boot sync: all devices seen");
-    } else if ((now_ms() - s_boot_start_ms) >= HEALTH_BOOT_SYNC_TIMEOUT_MS) {
+    } else if ((now_ms() - s_boot_start_ms) >= s_boot_sync_timeout_ms) {
         s_boot_sync_done = true;
-        ESP_LOGW(HEALTH_TAG, "Boot sync: timeout (2 min)");
+        ESP_LOGW(HEALTH_TAG, "Boot sync: timeout (%lu s)",
+                 (unsigned long)(s_boot_sync_timeout_ms / 1000));
     }
 }
 
@@ -410,7 +412,7 @@ static void health_engine_task(void *param)
 // Public API
 // ---------------------------------------------------------------------------
 
-void health_engine_reload_devices(void)
+void health_engine_reload_devices(uint32_t sync_window_ms)
 {
     bool have_mutex = (s_mutex != NULL);
     if (have_mutex) xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000));
@@ -463,6 +465,13 @@ void health_engine_reload_devices(void)
     }
 
     s_boot_sync_done = false;  // Reset boot sync on reload
+    s_boot_sync_timeout_ms = sync_window_ms;  // window length for this cycle (boot vs commission)
+    s_boot_start_ms  = now_ms();  // Restart the sync window from THIS reload (boot OR a
+                                  // `provision` command) so the 120 s "wait for all
+                                  // commissioned devices to be heard" budget is anchored
+                                  // to the commission event, not to power-on. Without this
+                                  // a provision >120 s after boot would fire the snapshot
+                                  // immediately with devices not yet re-heard.
 
     ESP_LOGI(HEALTH_TAG, "Device table loaded: %d device(s)", idx);
 
@@ -501,8 +510,7 @@ void health_engine_init(void)
         return;
     }
 
-    health_engine_reload_devices();
-    s_boot_start_ms = now_ms();
+    health_engine_reload_devices(HEALTH_BOOT_SYNC_TIMEOUT_MS);   // boot window; also stamps s_boot_start_ms
 
     xTaskCreate(health_engine_task, "health_engine", 3072, NULL, 2, NULL);
     xTimerStart(s_tick_timer, 0);
@@ -627,7 +635,29 @@ bool health_is_boot_sync_complete(void)
         return true;  // Fail-open to avoid stalling iothub
     }
 
+    // Evaluate the deadline on read so the window can complete promptly (within
+    // the caller's poll cadence) instead of only at the next 30 s health tick —
+    // this bounds the worst-case commission snapshot latency to the window length.
+    check_boot_sync_locked();
     bool done = s_boot_sync_done;
     xSemaphoreGive(s_mutex);
     return done;
+}
+
+bool health_get_sync_counts(uint8_t *seen, uint8_t *total)
+{
+    if (!s_mutex) return false;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+
+    uint8_t s = 0, t = 0;
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        if (s_devices[i].in_use) {
+            t++;
+            if (s_devices[i].ever_seen) s++;
+        }
+    }
+    if (seen)  *seen  = s;
+    if (total) *total = t;
+    xSemaphoreGive(s_mutex);
+    return true;
 }

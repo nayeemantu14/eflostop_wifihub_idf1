@@ -99,10 +99,18 @@ static void reload_whitelist(void)
 
     if (provisioning_get_ble_leak_sensors(mac_strs, &count)) {
         s_whitelist_count = count;
+        uint32_t sum = count;
         for (int i = 0; i < count; i++) {
             mac_str_to_bytes(mac_strs[i], s_whitelist[i]);
+            for (int b = 0; b < 6; b++) sum = sum * 31u + s_whitelist[i][b];
         }
-        ESP_LOGI(BLE_LEAK_TAG, "Whitelist reloaded: %d sensor(s)", count);
+        // This runs every 10 s; only log when the whitelist actually changes so
+        // the trace isn't flooded with identical "reloaded" lines.
+        static uint32_t s_prev_wl_sum = 0xFFFFFFFFu;
+        if (sum != s_prev_wl_sum) {
+            s_prev_wl_sum = sum;
+            ESP_LOGI(BLE_LEAK_TAG, "Whitelist reloaded: %d sensor(s)", count);
+        }
     } else {
         s_whitelist_count = 0;
     }

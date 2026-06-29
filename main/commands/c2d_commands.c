@@ -264,8 +264,26 @@ static bool parse_legacy(const char *text, c2d_command_t *cmd_out)
     free(upper);
 
     // ---- JSON provisioning payload (fallback) ----
-
+    // A bare provisioning JSON (no command envelope) legitimately reaches here:
+    // it starts with '{' but has no recognized schema, so parse_envelope() bailed.
+    // Only accept it as a provision if it is VALID JSON that does NOT carry a 'cmd'
+    // field. Otherwise a malformed/truncated *envelope* (which also starts with '{'
+    // and fails parse_envelope) would be silently mis-routed into provisioning —
+    // worst case re-provisioning the hub from a corrupted message. Reject those.
     if (text[0] == '{') {
+        cJSON *probe = cJSON_Parse(text);
+        if (!probe) {
+            ESP_LOGW(C2D_TAG, "Malformed C2D JSON — ignoring (not valid JSON)");
+            return false;
+        }
+        bool has_cmd = cJSON_IsString(cJSON_GetObjectItem(probe, "cmd"));
+        cJSON_Delete(probe);
+        if (has_cmd) {
+            // Parses as an object with a 'cmd' but parse_envelope rejected it
+            // (unknown/missing schema) — it's a command, not a provisioning blob.
+            ESP_LOGW(C2D_TAG, "C2D has 'cmd' but unrecognized schema — ignoring");
+            return false;
+        }
         strncpy(cmd_out->cmd, C2D_CMD_PROVISION, sizeof(cmd_out->cmd) - 1);
         cmd_out->payload_json = dup_str(text);
         return true;
