@@ -118,6 +118,18 @@ bool rules_engine_is_override_window_active(void);
 int32_t rules_engine_get_override_remaining_s(void);
 
 /**
+ * @brief Read override window status atomically under a single mutex hold.
+ *        Avoids the TOCTOU of calling is_active + remaining_s separately.
+ * @param active      [out] true if the 24h override window is active (may be NULL)
+ * @param remaining_s [out] seconds remaining (>=0) or -1 if inactive; identical
+ *                    semantics to rules_engine_get_override_remaining_s (may be NULL)
+ * @param expires_ts  [out] absolute Unix epoch expiry, or 0 when inactive / time
+ *                    not yet synced (caller should omit the field when 0) (may be NULL)
+ */
+void rules_engine_get_override_status(bool *active, int32_t *remaining_s,
+                                      uint32_t *expires_ts);
+
+/**
  * @brief Cancel the 24h override window via C2D command.
  *        Re-enables auto-close immediately. If leaks are active, triggers
  *        auto-close right away. Publishes "auto_close_reenabled" telemetry.

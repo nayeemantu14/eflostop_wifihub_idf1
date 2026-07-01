@@ -1172,6 +1172,40 @@ int32_t rules_engine_get_override_remaining_s(void)
     return remaining;
 }
 
+void rules_engine_get_override_status(bool *active, int32_t *remaining_s,
+                                      uint32_t *expires_ts)
+{
+    /* Single mutex hold for all three fields — avoids the TOCTOU between the
+     * separate is_active / remaining_s getters (active could read true and a
+     * later expiry read 0 after a concurrent cancel/expiry on the rules task).
+     * remaining_s keeps the EXACT semantics of rules_engine_get_override_remaining_s()
+     * so the snapshot's override_remaining_s value is unchanged. */
+    bool a = false;
+    int32_t rem = -1;
+    uint32_t exp = 0;
+
+    if (g_initialized && xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (g_override_state == OVERRIDE_STATE_ACTIVE) {
+            a = true;
+            time_t now;
+            time(&now);
+            if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
+                rem = (int32_t)(g_override_window_expiry - now);
+                exp = (uint32_t)g_override_window_expiry;   // absolute epoch (matches event field)
+            } else if (now < EPOCH_VALID_THRESHOLD) {
+                rem = OVERRIDE_WINDOW_DURATION_S;  // time not synced — report full duration, omit expires_ts
+            } else {
+                rem = 0;  // expired but not yet processed by tick
+            }
+        }
+        xSemaphoreGive(g_mutex);
+    }
+
+    if (active)      *active = a;
+    if (remaining_s) *remaining_s = rem;
+    if (expires_ts)  *expires_ts = exp;   // 0 => omit the snapshot field
+}
+
 void rules_engine_clear_persistent_state(void)
 {
     /* No mutex needed — used at decommission_all just before esp_restart.

@@ -72,6 +72,19 @@ void telemetry_v2_init(esp_mqtt_client_handle_t client,
 QueueHandle_t telemetry_v2_get_snapshot_queue(void);
 
 /**
+ * @brief Non-blocking wake of the iothub_task event loop via the snapshot queue.
+ *        Safe to call from any task (e.g. esp-mqtt event task on reconnect):
+ *        it only enqueues a trigger, never publishes.
+ */
+void telemetry_v2_wake_snapshot(void);
+
+/** @brief Current MQTT connectivity state (true once MQTT_EVENT_CONNECTED). */
+bool telemetry_v2_is_connected(void);
+
+/** @brief Current heartbeat interval in seconds (Twin-tunable; default 300). */
+int32_t telemetry_v2_get_snapshot_interval_s(void);
+
+/**
  * @brief Start (or restart) the periodic snapshot timer.
  *        Call after QueueSet is set up and on MQTT reconnect.
  */
@@ -84,8 +97,15 @@ void telemetry_v2_start_snapshot_timer(void);
 /** Publish type="lifecycle" birth message (online, reset_reason, config). */
 void telemetry_v2_publish_lifecycle(void);
 
-/** Publish type="snapshot" with all current device + sensor state. */
-void telemetry_v2_publish_snapshot(void);
+/**
+ * @brief Publish type="snapshot" with all current device + sensor state.
+ * @param trigger Trigger reason string emitted as data.reason
+ *                ("heartbeat" | "event" | "commission" | "boot"); may be NULL.
+ * @return true ONLY if the snapshot actually reached esp-mqtt (online, msg_id>=0);
+ *         false if dropped offline or suppressed pre-SNTP. The caller re-arms the
+ *         heartbeat only on true.
+ */
+bool telemetry_v2_publish_snapshot(const char *trigger);
 
 /** Publish type="event" for valve transitions (state, flood). */
 void telemetry_v2_publish_valve_event(const char *event_name);

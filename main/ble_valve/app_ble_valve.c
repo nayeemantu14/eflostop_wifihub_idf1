@@ -1198,6 +1198,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             g_val_battery = 0;
             g_val_leak = false;
             g_val_state = -1;
+            g_val_rmleak = false;   // reset like the other fields — a missing/failed RMLEAK read must not leak the prior session's value
             g_firmware_rev[0] = '\0';
 
             if (ble_gap_conn_find(valve_conn_handle, &desc) == 0)
@@ -1252,6 +1253,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         g_val_battery = 0;
         g_val_leak = false;
         g_val_state = -1;
+        g_val_rmleak = false;   // reset like the other fields — no stale prior-session RMLEAK across a reconnect
         g_firmware_rev[0] = '\0';
 
         clear_all_state_bits();
