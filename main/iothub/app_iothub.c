@@ -101,6 +101,7 @@ static snap_tier_t   s_snap_tier         = SNAP_TIER_LOW;
 static char          s_snap_evt[32]      = {0};                 // event name (log + observability)
 static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from Twin each iteration
 static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only on lifecycle)
+static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms when the fast snapshot was (re)armed; ceiling is relative to THIS
 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
@@ -1244,6 +1245,7 @@ void iothub_task(void *param)
     // Arm the snapshot scheduler's first heartbeat deadline (now + interval).
     s_hb_interval_ms   = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
     s_snap_last_pub_ms = snap_now_ms();
+    g_fast_arm_ms      = snap_now_ms();   // fast-snapshot ceiling is measured from here (boot)
     snap_rearm_heartbeat();
 
     lora_packet_t pkt;
@@ -1347,6 +1349,7 @@ void iothub_task(void *param)
             snap_rearm_heartbeat();
             g_boot_snapshot_sent  = false;
             g_fast_snapshot_sent  = false;
+            g_fast_arm_ms         = snap_now_ms();
             g_commission_pub_seen = 0;
             g_commission_until_ms = 0;
             continue;
@@ -1360,6 +1363,7 @@ void iothub_task(void *param)
             publish_twin_reported();        // Update Device Twin reported properties
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
             g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
+            g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
         }
 
         // ---- Rules engine events (auto-close, rmleak changes) ----
@@ -1492,7 +1496,8 @@ void iothub_task(void *param)
         // complete-wait behavior. On the successful publish the flush opens the refresh
         // grace window so the remaining sensors fill in via incremental refresh.
         if (!g_fast_snapshot_sent && !g_boot_snapshot_sent &&
-            (ble_valve_is_ready() || snap_now_ms() >= SNAP_FAST_CEILING_MS)) {
+            (ble_valve_is_ready() ||
+             (snap_now_ms() - g_fast_arm_ms) >= SNAP_FAST_CEILING_MS)) {
             snap_request(SNAP_FAST, SNAP_TIER_HIGH, "fast");
         }
 
@@ -1549,6 +1554,7 @@ void iothub_task(void *param)
                     s_snap_last_pub_ms = flush_now;
                     if (reason == SNAP_BOOT || reason == SNAP_COMMISSION) {
                         g_boot_snapshot_sent = true;
+                        g_fast_snapshot_sent = true;   // flag hygiene: a boot/commission snapshot also satisfies the fast one-shot
                         uint8_t seen = 0, total = 0;
                         if (health_get_sync_counts(&seen, &total)) {
                             g_commission_pub_seen = seen;
