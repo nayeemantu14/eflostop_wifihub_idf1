@@ -79,8 +79,9 @@ static uint8_t g_commission_pub_seen = 0;
 typedef enum {
     SNAP_HEARTBEAT = 0,   // periodic ~5-min heartbeat
     SNAP_EVENT,           // coupled to a state-changing event (tiered window)
-    SNAP_COMMISSION,      // incremental commission refresh (urgent, no clamp)
-    SNAP_BOOT,            // first snapshot after boot/reconnect/commission sync
+    SNAP_COMMISSION,      // incremental commission/boot refresh (urgent, no clamp)
+    SNAP_BOOT,            // complete commission-sync snapshot (all-heard or timeout)
+    SNAP_FAST,            // EARLY boot/reconnect snapshot fired at valve-ready (UI ASAP)
 } snap_reason_t;
 
 typedef enum { SNAP_TIER_LOW = 0, SNAP_TIER_HIGH = 1 } snap_tier_t;
@@ -90,6 +91,7 @@ typedef enum { SNAP_TIER_LOW = 0, SNAP_TIER_HIGH = 1 } snap_tier_t;
 #define SNAP_MIN_INTERVAL_MS   5000    // min spacing between EVENT/HEARTBEAT snapshots (<=12/min)
 #define SNAP_OFFLINE_FLOOR_MS  30000   // loop idle cap while offline/unprovisioned with a due deadline
 #define SNAP_RETRY_FLOOR_MS    5000    // retry spacing when connected but a publish failed (no tight-spin)
+#define SNAP_FAST_CEILING_MS   150000  // fire the fast boot snapshot by 150 s even if the valve never connects
 
 static int64_t       s_snap_due_ms       = 0;                   // monotonic ms; next snapshot deadline
 static int64_t       s_snap_last_pub_ms  = 0;                   // monotonic ms of last CONFIRMED publish
@@ -98,6 +100,7 @@ static snap_reason_t s_snap_reason       = SNAP_HEARTBEAT;
 static snap_tier_t   s_snap_tier         = SNAP_TIER_LOW;
 static char          s_snap_evt[32]      = {0};                 // event name (log + observability)
 static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from Twin each iteration
+static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only on lifecycle)
 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
@@ -513,6 +516,7 @@ static const char *snap_reason_str(snap_reason_t r)
         case SNAP_EVENT:      return "event";
         case SNAP_COMMISSION: return "commission";
         case SNAP_BOOT:       return "boot";
+        case SNAP_FAST:       return "fast";
         case SNAP_HEARTBEAT:
         default:              return "heartbeat";
     }
@@ -539,8 +543,8 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
 {
     int64_t now = snap_now_ms();
 
-    if (reason == SNAP_COMMISSION || reason == SNAP_BOOT) {
-        int64_t want = now;
+    if (reason == SNAP_COMMISSION || reason == SNAP_BOOT || reason == SNAP_FAST) {
+        int64_t want = now;   // urgent: fire ASAP, no min-interval clamp
         if (want < s_snap_retry_until_ms) want = s_snap_retry_until_ms;  // honor publish-fail backoff
         s_snap_due_ms = want;
         s_snap_reason = reason;
@@ -1342,6 +1346,7 @@ void iothub_task(void *param)
             // stale state if it arrives via a path that skips arm_commission_snapshot.
             snap_rearm_heartbeat();
             g_boot_snapshot_sent  = false;
+            g_fast_snapshot_sent  = false;
             g_commission_pub_seen = 0;
             g_commission_until_ms = 0;
             continue;
@@ -1354,6 +1359,7 @@ void iothub_task(void *param)
             telemetry_v2_publish_lifecycle();
             publish_twin_reported();        // Update Device Twin reported properties
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
+            g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
         }
 
         // ---- Rules engine events (auto-close, rmleak changes) ----
@@ -1472,6 +1478,21 @@ void iothub_task(void *param)
             }
         }
 
+        // ---- Fast boot/reconnect snapshot ARMING (valve-ready, no publish here) ----
+        // Publish a snapshot as soon as the VALVE connects (~20-30 s) instead of
+        // waiting the full boot-sync timeout (~120 s) for an offline/slow sensor —
+        // the valve is the safety-critical device and connects deterministically
+        // fast. Ceiling: fire by 150 s even if the valve never connects. One-shot per
+        // (re)connect; armed ONLY on the boot/reconnect path (g_fast_snapshot_sent is
+        // reset only in the lifecycle block, never by arm_commission_snapshot), so the
+        // provision/commission path keeps its complete-wait behavior. On the successful
+        // publish the flush opens the refresh grace window so the remaining sensors
+        // fill in via the existing incremental-refresh path as each first beacons.
+        if (!g_fast_snapshot_sent && !g_boot_snapshot_sent &&
+            (ble_valve_is_connected() || snap_now_ms() >= SNAP_FAST_CEILING_MS)) {
+            snap_request(SNAP_FAST, SNAP_TIER_HIGH, "fast");
+        }
+
         // ---- Boot/commission snapshot ARMING (no publish here) ----
         // Arm the deadline when the boot-sync window completes (boot, reconnect,
         // or a `provision` command) or when a late device is heard within the
@@ -1501,11 +1522,13 @@ void iothub_task(void *param)
             snap_reason_t reason = s_snap_reason;
             // Gate: while a boot/commission (re)sync window is OPEN (g_boot_snapshot_sent
             // false), suppress HEARTBEAT/BOOT/COMMISSION until the window closes so we
-            // never emit a value-incomplete snapshot. EVENT always passes (urgent; its
-            // post-event state is already in the cache).
+            // never emit a value-incomplete snapshot. EVENT and FAST always pass:
+            // EVENT carries post-event state already in the cache; FAST is the
+            // deliberately-early valve-ready boot snapshot (incomplete-by-design,
+            // refined afterward by incremental refresh).
             bool window_open = !g_boot_snapshot_sent;
-            bool gate_ok = (reason == SNAP_EVENT) || !window_open
-                           || health_is_boot_sync_complete();
+            bool gate_ok = (reason == SNAP_EVENT) || (reason == SNAP_FAST)
+                           || !window_open || health_is_boot_sync_complete();
             if (!gate_ok) {
                 // Due but the (re)sync window is still open — defer ~one commission
                 // poll instead of busy-spinning at 1 tick (the boot arming above will
@@ -1527,6 +1550,24 @@ void iothub_task(void *param)
                         if (health_get_sync_counts(&seen, &total)) {
                             g_commission_pub_seen = seen;
                             if (seen >= total) g_commission_until_ms = 0;
+                        }
+                    } else if (reason == SNAP_FAST) {
+                        // The fast snapshot IS the boot snapshot, fired early at
+                        // valve-ready. Mark boot sent so the slow all-heard boot path
+                        // does not double-publish, and OPEN the refresh grace window so
+                        // the still-unheard sensors fill in via incremental refresh as
+                        // each first beacons (capped by COMMISSION_REFRESH_GRACE_MS).
+                        g_fast_snapshot_sent = true;
+                        g_boot_snapshot_sent = true;
+                        uint8_t seen = 0, total = 0;
+                        if (health_get_sync_counts(&seen, &total)) {
+                            g_commission_pub_seen = seen;
+                            // Only open the grace window if devices are still unheard;
+                            // if everything was already heard there is nothing to fill.
+                            g_commission_until_ms = (seen >= total) ? 0
+                                : (flush_now + COMMISSION_REFRESH_GRACE_MS);
+                        } else {
+                            g_commission_until_ms = flush_now + COMMISSION_REFRESH_GRACE_MS;
                         }
                     }
                     snap_rearm_heartbeat();   // also clears the retry backoff

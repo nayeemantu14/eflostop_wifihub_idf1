@@ -138,6 +138,29 @@ and a fresh boot banner (`Hub is UNPROVISIONED`) → confirm `IOTHUB: Connected 
 1. Across all tests above, for **every** snapshot confirm both lines appear: `SNAP trigger=…` and
    `SNAP heartbeat=<reset|suppressed>`. Map each acceptance criterion to its asserted line.
 
+## E13 — Fast boot snapshot (reset → UI ASAP)
+*Motivated by the field logs: cold boot with sensor `…3b:00` offline previously left the UI blank for
+~120 s waiting on the boot-sync timeout, even though the valve was READY at ~20–26 s.*
+1. Power-cycle the hub with `…3b:00` offline and `…3f:59` live (dry).
+2. **P:** `SNAP trigger=fast` publishes within ~one HIGH window of `BLE_VALVE: [READY]` valve connect
+   (**~20–30 s cold**, sub-second on a warm MQTT reconnect) — **well before** `HEALTH_ENGINE: Boot sync:
+   timeout (120 s)`. The `fast` snapshot carries the valve state + any already-heard sensors; a not-yet-heard
+   sensor shows `null`.
+3. **P:** when `…3f:59` next beacons, a `SNAP trigger=commission` (incremental refresh) fills its data;
+   `…3b:00` stays `null` (honestly offline). No separate `reason:"boot"` snapshot fires on this path.
+4. **P (regression):** heartbeat re-arm parity holds (every snapshot still logs `SNAP heartbeat=reset`);
+   the commission/provision path is unaffected (a `provision` C2D still waits for all-heard/150 s, not valve-ready).
+
+**Fast-boot behavior notes (for the app team):**
+- New `data.reason` value **`"fast"`** — the early valve-ready boot snapshot; may carry not-yet-heard
+  sensors as `null` (they fill in via subsequent snapshots). Purely additive; schema stays `eflostop.v2`.
+- `data.reason:"commission"` snapshots can now also appear **after a plain reboot** (not only after a
+  `provision` command) — they are the incremental-refresh fills as each sensor first beacons. Treat any
+  snapshot as source-of-truth regardless of `reason`.
+- The dedicated complete `reason:"boot"` snapshot no longer fires on the boot/reconnect path (fast +
+  incremental fills replace it); `reason:"boot"` still fires for the fully-healthy all-heard case and as
+  the ≤120 s fallback when the valve never connects.
+
 ---
 
 ## Residual checks (document, not blockers)

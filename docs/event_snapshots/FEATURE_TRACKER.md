@@ -42,7 +42,19 @@ Plan: `~/.claude/plans/hidden-toasting-storm.md`.
 | C4 | immediate reconnect wake | ✅ code |
 | C5 | `PROJECT_VER` → 1.5.0 + docs | ✅ code |
 | RV | **Adversarial review of the actual diff** — GO after fixes | ✅ done |
-| — | **Bench test (E0–E12 in TEST_PLAN.md)** | ⏳ pending hardware |
+| FV | **Field-log validation (UART + IoT Hub)** — PASS-WITH-NOTES, 0 bugs, 37/37 delivered | ✅ done |
+| C6 | **Fast boot snapshot (SNAP_FAST)** — valve-ready, 150 s ceiling, incremental fill | ✅ code |
+| — | **Bench test (E0–E13 in TEST_PLAN.md)** | ⏳ E0–E12 field-validated; re-bench E13 (fast boot) |
+
+### C6 — Fast boot snapshot (reset → UI ASAP)
+Field logs showed a cold boot with one offline sensor left the UI blank ~114–117 s (waiting the 120 s
+boot-sync timeout) even though the valve was READY at ~20–26 s. Fix (approved: *valve-ready, 150 s
+ceiling, sensors fill via incremental refresh*): additive `SNAP_FAST` reason armed in `iothub_task` when
+`ble_valve_is_connected()` (or a 150 s ceiling), bypasses the completeness gate, and on its confirmed
+publish marks the boot snapshot sent + opens the refresh grace so unheard sensors fill via the existing
+incremental-refresh path. Reset only on the lifecycle (boot/reconnect) edge → the commission/provision
+path keeps its complete-wait behavior. ~30 lines, `app_iothub.c` only; no schema change (`data.reason:"fast"`
+is additive). Cuts post-reset UI latency ~120 s → ~20–30 s (consistently), sub-second on warm reconnect.
 
 ### Diff-review fixes folded in (post-implementation adversarial pass)
 - **FIX 1 (BLOCKER, compile error):** `publish_snapshot` param `reason` collided with the
