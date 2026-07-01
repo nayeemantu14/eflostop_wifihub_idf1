@@ -50,7 +50,9 @@ Plan: `~/.claude/plans/hidden-toasting-storm.md`.
 Field logs showed a cold boot with one offline sensor left the UI blank ~114–117 s (waiting the 120 s
 boot-sync timeout) even though the valve was READY at ~20–26 s. Fix (approved: *valve-ready, 150 s
 ceiling, sensors fill via incremental refresh*): additive `SNAP_FAST` reason armed in `iothub_task` when
-`ble_valve_is_connected()` (or a 150 s ceiling), bypasses the completeness gate, and on its confirmed
+**`ble_valve_is_ready()`** (CONNECTED|ENCRYPTED|DISCOVERY_DONE — every valve characteristic has been read
+and the valve struct is FILLED, NOT merely `ble_valve_is_connected()`/GAP-link-up) or a 150 s ceiling,
+bypasses the completeness gate, and on its confirmed
 publish marks the boot snapshot sent + opens the refresh grace so unheard sensors fill via the existing
 incremental-refresh path. Reset only on the lifecycle (boot/reconnect) edge → the commission/provision
 path keeps its complete-wait behavior. ~30 lines, `app_iothub.c` only; no schema change (`data.reason:"fast"`

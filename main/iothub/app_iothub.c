@@ -1478,18 +1478,21 @@ void iothub_task(void *param)
             }
         }
 
-        // ---- Fast boot/reconnect snapshot ARMING (valve-ready, no publish here) ----
-        // Publish a snapshot as soon as the VALVE connects (~20-30 s) instead of
-        // waiting the full boot-sync timeout (~120 s) for an offline/slow sensor —
-        // the valve is the safety-critical device and connects deterministically
-        // fast. Ceiling: fire by 150 s even if the valve never connects. One-shot per
-        // (re)connect; armed ONLY on the boot/reconnect path (g_fast_snapshot_sent is
-        // reset only in the lifecycle block, never by arm_commission_snapshot), so the
-        // provision/commission path keeps its complete-wait behavior. On the successful
-        // publish the flush opens the refresh grace window so the remaining sensors
-        // fill in via the existing incremental-refresh path as each first beacons.
+        // ---- Fast boot/reconnect snapshot ARMING (valve-READY, no publish here) ----
+        // Publish a snapshot as soon as the valve GATT setup completes (~20-30 s)
+        // instead of waiting the full boot-sync timeout (~120 s) for an offline/slow
+        // sensor. Gate on ble_valve_is_ready() (CONNECTED|ENCRYPTED|DISCOVERY_DONE),
+        // NOT ble_valve_is_connected() (mere GAP link, ~11 s): "ready" means each
+        // valve characteristic (state/flood/rmleak/battery/FW) has been read and the
+        // valve struct is FILLED, so the fast snapshot carries real valve data, not
+        // defaults. Ceiling: fire by 150 s even if the valve never becomes ready.
+        // One-shot per (re)connect; armed ONLY on the boot/reconnect path
+        // (g_fast_snapshot_sent is reset only in the lifecycle block, never by
+        // arm_commission_snapshot), so the provision/commission path keeps its
+        // complete-wait behavior. On the successful publish the flush opens the refresh
+        // grace window so the remaining sensors fill in via incremental refresh.
         if (!g_fast_snapshot_sent && !g_boot_snapshot_sent &&
-            (ble_valve_is_connected() || snap_now_ms() >= SNAP_FAST_CEILING_MS)) {
+            (ble_valve_is_ready() || snap_now_ms() >= SNAP_FAST_CEILING_MS)) {
             snap_request(SNAP_FAST, SNAP_TIER_HIGH, "fast");
         }
 
