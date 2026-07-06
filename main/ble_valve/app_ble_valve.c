@@ -32,7 +32,12 @@
 #include "os/os_mbuf.h"
 
 #define BLE_TAG "BLE_VALVE"
-#define VALVE_DEVICE_NAME "eFlofStopV2"
+/* Must EXACTLY match the valve's advertised Complete Local Name (app_ble.c on the
+ * STM32WB valve). The valve was corrected from the misspelled "eFlofStopV2" to
+ * "eFloStopV2"; this central-side matcher (see handle_valve_disc) does a strict
+ * length+content compare, so a one-char drift silently breaks name-based valve
+ * discovery on an unprovisioned hub. Keep the two in lockstep. */
+#define VALVE_DEVICE_NAME "eFloStopV2"
 
 // -----------------------------------------------------------------------------
 // SECURITY CONFIGURATION

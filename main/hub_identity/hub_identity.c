@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_app_desc.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "nvs_store/nvs_store.h"
@@ -35,8 +36,21 @@ bool hub_identity_init(void)
 
     snprintf(s_short_id, sizeof(s_short_id), "%02X%02X", mac[4], mac[5]);
 
+    /* Firmware version — single source of truth is PROJECT_VER (CMakeLists.txt),
+     * surfaced at runtime via the app descriptor. The production tool parses this
+     * line for its FW-version check and the QR "sw=" field. */
+    const esp_app_desc_t *desc = esp_app_get_description();
+    ESP_LOGI(TAG, "Firmware version: v%s",
+             (desc && desc->version[0]) ? desc->version : "0.0.0");
+
     ESP_LOGI(TAG, "Gateway ID : %s", s_gateway_id);
     ESP_LOGI(TAG, "Short ID   : %s", s_short_id);
+
+    /* Raw WiFi STA MAC in colon form — the production tool needs a
+     * (wifi|sta)+mac+colon-MAC line to record the unit's MAC. The Gateway ID
+     * above carries the same bytes without colons and cannot be parsed as a MAC. */
+    ESP_LOGI(TAG, "WiFi STA MAC: %02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
     /* --- load hub name from NVS --- */
     s_hub_name[0] = '\0';
