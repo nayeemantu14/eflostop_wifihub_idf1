@@ -54,11 +54,12 @@
 #define WHITE_G   25
 #define WHITE_B   25
 
-typedef enum { FLEET_WHITE = 0, FLEET_GREEN, FLEET_ORANGE, FLEET_RED } fleet_state_t;
+typedef enum { FLEET_OFF = 0, FLEET_WHITE, FLEET_GREEN, FLEET_ORANGE, FLEET_RED } fleet_state_t;
 
 static const char *state_name(fleet_state_t s)
 {
     switch (s) {
+    case FLEET_OFF:    return "OFF";
     case FLEET_WHITE:  return "WHITE";
     case FLEET_GREEN:  return "GREEN";
     case FLEET_ORANGE: return "ORANGE";
@@ -108,6 +109,10 @@ static led_strip_handle_t configFleetLED(void)
 /* Drive the LED to a solid colour and hold it (WS2812 latches until next set). */
 static void set_solid(led_strip_handle_t strip, fleet_state_t s)
 {
+    if (s == FLEET_OFF) {
+        ESP_ERROR_CHECK(led_strip_clear(strip));   /* LED dark */
+        return;
+    }
     uint8_t r, g, b;
     switch (s) {
     case FLEET_RED:    r = RED_R;    g = RED_G;    b = RED_B;    break;
@@ -124,9 +129,10 @@ static void set_solid(led_strip_handle_t strip, fleet_state_t s)
 static void fleet_led_task(void *param)
 {
     led_strip_handle_t strip = (led_strip_handle_t)param;
-    int           shown       = -1;              /* last state pushed to the LED (-1 = none yet) */
-    fleet_state_t held        = FLEET_WHITE;     /* last state from a successful query */
-    const char   *held_reason = "unprovisioned"; /* matching reason string for the log */
+    int           shown       = -1;          /* last state pushed to the LED (-1 = none yet) */
+    bool          initialized = false;       /* set after the first successful health read */
+    fleet_state_t held        = FLEET_OFF;   /* last state from a successful query */
+    const char   *held_reason = "startup";   /* matching reason string for the log */
 
     while (1) {
         uint8_t total = 0;
@@ -134,6 +140,7 @@ static void fleet_led_task(void *param)
         const char *reason;
 
         if (health_get_sync_counts(NULL, &total)) {
+            initialized = true;
             if (total == 0) {
                 /* nothing provisioned (fresh/idle hub) -> white */
                 target = FLEET_WHITE;
@@ -153,12 +160,17 @@ static void fleet_led_task(void *param)
             }
             held = target;
             held_reason = reason;
-        } else {
-            /* Pre-init (health engine not up yet) or a rare mutex-busy read:
-             * hold the last known state so a transient failure never flashes
-             * white over a real red/orange. Defaults to white at boot. */
+        } else if (initialized) {
+            /* Rare mutex-busy read after init: hold the last known state so a
+             * transient failure never flashes over a real red/orange. */
             target = held;
             reason = held_reason;
+        } else {
+            /* Health engine not up yet (first ~3 s of boot — it inits from the
+             * iothub task): keep the LED dark until the real system state is
+             * known, rather than showing a misleading white on a provisioned hub. */
+            target = FLEET_OFF;
+            reason = "startup";
         }
 
         if ((int)target != shown) {
