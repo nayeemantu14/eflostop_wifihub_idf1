@@ -33,13 +33,18 @@
 /* Logical (R,G,B) values. led_strip reorders to GRB on the wire internally, so
  * these are passed R,G,B — proven by pulseGREEN(0,45,0) in rgb.c:105 under
  * LED_STRIP_COLOR_COMPONENT_FMT_GRB. Kept dim to match the existing indicators
- * (rgb.c blips/ramps peak at 45–50). Orange G and the white level are tunable
- * on the SK68XXMINI-HS at bring-up. */
+ * (rgb.c blips/ramps peak at 45–50).
+ *
+ * ORANGE: the WS2812 green die is perceptually much brighter than red, so an
+ * sRGB-ratio orange reads as yellow-green. Green is pulled well down vs red
+ * (G/R ~= 0.24) for a true orange. Nudge ORANGE_G at bring-up: ~8 = deeper
+ * red-orange, ~12 = orange, ~18 = amber/yellow-orange. White level is likewise
+ * tunable on the SK68XXMINI-HS. */
 #define GREEN_R    0
 #define GREEN_G   50
 #define GREEN_B    0
 #define ORANGE_R  50
-#define ORANGE_G  30
+#define ORANGE_G  12
 #define ORANGE_B   0
 #define RED_R     50
 #define RED_G      0
