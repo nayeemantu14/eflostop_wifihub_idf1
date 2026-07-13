@@ -1276,6 +1276,12 @@ void iothub_task(void *param)
         // DPS. (The 3 s delay lets esp-mqtt flush the snapshot + cmd_ack, as the
         // original inline-restart path did.)
         if (g_decommission_reboot) {
+            // The valve BLE disconnect (requested in the C2D handler) is async;
+            // wait up to ~1 s for it to complete so the snapshot shows the valve
+            // gone rather than lingering as connected.
+            for (int i = 0; i < 20 && ble_valve_is_connected(); i++) {
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
             telemetry_v2_publish_snapshot("decommission");
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
