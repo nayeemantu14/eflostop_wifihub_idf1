@@ -21,6 +21,7 @@
 #include "esp_log.h"
 
 #include "health_engine.h"   /* health_get_system_rating, health_get_sync_counts, health_rating_to_str */
+#include "app_ble_valve.h"   /* ble_valve_get_leak / _get_rmleak_state / _is_connected */
 
 #define FLEET_TAG        "FLEET_LED"
 #define FLEET_LED_GPIO   48
@@ -123,33 +124,48 @@ static void set_solid(led_strip_handle_t strip, fleet_state_t s)
 static void fleet_led_task(void *param)
 {
     led_strip_handle_t strip = (led_strip_handle_t)param;
-    int           shown = -1;            /* last state pushed to the LED (-1 = none yet) */
-    fleet_state_t held  = FLEET_WHITE;   /* last state from a successful health query */
+    int           shown       = -1;              /* last state pushed to the LED (-1 = none yet) */
+    fleet_state_t held        = FLEET_WHITE;     /* last state from a successful query */
+    const char   *held_reason = "unprovisioned"; /* matching reason string for the log */
 
     while (1) {
         uint8_t total = 0;
         fleet_state_t target;
+        const char *reason;
 
         if (health_get_sync_counts(NULL, &total)) {
-            /* total == 0 -> nothing provisioned (fresh/idle hub) -> white */
-            target = (total == 0) ? FLEET_WHITE
-                                  : rating_to_color(health_get_system_rating());
+            if (total == 0) {
+                /* nothing provisioned (fresh/idle hub) -> white */
+                target = FLEET_WHITE;
+                reason = "unprovisioned";
+            } else if (ble_valve_is_connected() &&
+                       (ble_valve_get_leak() || ble_valve_get_rmleak_state())) {
+                /* An active leak at the valve is CRITICAL even when device
+                 * connectivity/battery is otherwise fine — health_get_system_rating()
+                 * does NOT track leak state. RMLEAK (the latched incident) is included
+                 * so the red stays stable across the flood probe toggling on/off. */
+                target = FLEET_RED;
+                reason = "leak";
+            } else {
+                health_rating_t r = health_get_system_rating();
+                target = rating_to_color(r);
+                reason = health_rating_to_str(r);
+            }
             held = target;
+            held_reason = reason;
         } else {
             /* Pre-init (health engine not up yet) or a rare mutex-busy read:
              * hold the last known state so a transient failure never flashes
              * white over a real red/orange. Defaults to white at boot. */
             target = held;
+            reason = held_reason;
         }
 
         if ((int)target != shown) {
             set_solid(strip, target);
             /* one line per transition; the production tool asserts this exact form */
-            const char *rating_str = (target == FLEET_WHITE)
-                                     ? "unprovisioned"
-                                     : health_rating_to_str(health_get_system_rating());
             ESP_LOGI(FLEET_TAG, "rating=%s color=%s effect=SOLID",
-                     rating_str, state_name(target));
+                     reason, state_name(target));
             shown = (int)target;
         }
 
