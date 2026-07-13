@@ -49,6 +49,12 @@ static char g_device_key[64] = {0};
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
 
+// Full-decommission reboot: set by handle_c2d_command ('decommission all', which
+// runs in the esp-mqtt event task) and consumed by iothub_task, which publishes a
+// final snapshot of the cleared state and reboots. The publish MUST happen in
+// iothub_task (the single snapshot-flush context) so it doesn't race the caches.
+static volatile bool g_decommission_reboot = false;
+
 // Sync snapshot: published once after the health-engine sync window completes
 // (all known devices heard, else the 2-min / 120 s timeout). Re-armed (set false)
 // on MQTT (re)connect AND on a `provision` (commission) command, so the first
@@ -712,17 +718,24 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
 
-                // Send ack before restart
+                // Empty the health table so the final snapshot renders the cleared
+                // (no-device) state instead of the pre-decommission device list.
+                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
+
+                // Ack now, then hand off to iothub_task: it publishes one last
+                // "decommissioned" snapshot and reboots to re-register with DPS. The
+                // snapshot must be published from iothub_task (this handler runs in
+                // the esp-mqtt event task), so we flag + wake instead of publishing
+                // and rebooting here.
                 if (cmd.is_envelope || cmd.id[0]) {
                     telemetry_v2_publish_cmd_ack(cmd.id, cmd.cmd, true, NULL);
                 }
                 c2d_command_free(&cmd);
                 if (pl) cJSON_Delete(pl);
 
-                ESP_LOGI(IOTHUB_TAG, "Restarting in 3s...");
-                vTaskDelay(pdMS_TO_TICKS(3000));
-                esp_restart();
-                return;  // never reached
+                g_decommission_reboot = true;
+                telemetry_v2_wake_snapshot();
+                return;
             } else {
                 success = false;
                 error_msg = "full decommission failed";
@@ -1257,6 +1270,18 @@ void iothub_task(void *param)
 
     while (1)
     {
+        // A C2D 'decommission all' cleared the device set and asked us to reboot.
+        // Publish one final snapshot of the now-empty state — here, in iothub_task,
+        // so it doesn't race the snapshot caches — then restart to re-register with
+        // DPS. (The 3 s delay lets esp-mqtt flush the snapshot + cmd_ack, as the
+        // original inline-restart path did.)
+        if (g_decommission_reboot) {
+            telemetry_v2_publish_snapshot("decommission");
+            ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
+            esp_restart();
+        }
+
         // Latch the (Twin-tunable) heartbeat interval for this iteration.
         s_hb_interval_ms = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
 
