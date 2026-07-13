@@ -1,6 +1,7 @@
 idf_component_register(SRCS "main.c"
                             "app_uart/app_uart.c"
                             "rgb/rgb.c"
+                            "rgb/fleet_led.c"
                             "app_wifi/app_wifi.c"
                             "ble_valve/app_ble_valve.c"
                             "iothub/app_iothub.c"
