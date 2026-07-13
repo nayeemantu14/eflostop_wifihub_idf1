@@ -18,6 +18,7 @@
 #include "nvs_store/nvs_store.h"
 #include "wifi_manager.h"
 #include "rgb.h"
+#include "rgb/fleet_led.h"
 #include "net_status/net_status.h"
 #include "app_wifi/app_wifi.h"
 #include "app_uart/app_uart.h"
@@ -59,6 +60,7 @@ void app_main(void)
 	/* start subsystems */
     setupLEDTask();
     net_status_init();   /* network status LED coordinator (after ledQueue exists) */
+    setupFleetLEDTask(); /* GPIO 48 overall device-health roll-up LED (independent of GPIO 38 network LED) */
 	configureUART();
     app_wifi_start();
 	configurelora();
