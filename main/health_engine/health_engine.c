@@ -294,6 +294,26 @@ static void handle_valve_event(bool connected)
     }
 }
 
+// Valve battery update (from a BLE battery NOTIFY / connect). Refreshes the
+// stored battery and re-rates the valve so a low battery is reflected. Owns
+// ONLY the battery — connectivity (last_seen_ms/disconnect_ms) stays with the
+// connect/disconnect events. Without this the valve path never fed a battery,
+// so compute_valve_rating saw last_battery==0xFF and always returned EXCELLENT.
+static void handle_valve_battery(uint8_t battery)
+{
+    health_device_t *dev = find_valve();
+    if (!dev) return;
+    if (battery == 0xFF) return;   // unknown — ignore
+
+    dev->last_battery = battery;
+
+    int64_t now = now_ms();
+    health_rating_t new_rating = compute_valve_rating(dev, now);
+    maybe_enqueue_alert(dev, new_rating, now);
+    dev->prev_rating = dev->rating;
+    dev->rating = new_rating;
+}
+
 static void evaluate_timeouts(void)
 {
     int64_t now = now_ms();
@@ -397,6 +417,9 @@ static void health_engine_task(void *param)
             case HEALTH_EVT_VALVE_DISCONNECTED:
                 handle_valve_event(false);
                 break;
+            case HEALTH_EVT_VALVE_BATTERY:
+                handle_valve_battery(evt.valve.battery);
+                break;
             case HEALTH_EVT_TICK:
                 evaluate_timeouts();
                 break;
@@ -474,6 +497,15 @@ void health_engine_reload_devices(uint32_t sync_window_ms)
                                   // immediately with devices not yet re-heard.
 
     ESP_LOGI(HEALTH_TAG, "Device table loaded: %d device(s)", idx);
+
+    // Recompute the roll-up NOW so s_system_rating reflects the freshly-loaded
+    // device set immediately, instead of staying at its stale prior value until
+    // the first 30 s tick. Without this, every device is CRITICAL "until seen"
+    // here but the worst-of roll-up read by the fleet LED / snapshot
+    // (health_get_system_rating) still reports the power-on default EXCELLENT,
+    // so a hub with an offline valve shows GREEN for ~30 s before flipping RED.
+    // Safe under the held mutex: recalc_system_rating only reads s_devices[].
+    recalc_system_rating();
 
     if (have_mutex) xSemaphoreGive(s_mutex);
 }

@@ -359,7 +359,7 @@ Payload fields:
 ```json
 {
   "schema": "eflostop.cmd", "ver": 1, "id": "meta-001", "cmd": "sensor_meta",
-  "payload": { "sensor_type": "ble", "sensor_id": "00:80:E1:27:99:E7", "location_code": "laundry", "label": "Downstairs laundry" }
+  "payload": { "sensor_type": "ble", "sensor_id": "00:80:E1:27:99:E7", "location_code": "bedroom", "label": "Study" }
 }
 ```
 
@@ -412,6 +412,7 @@ At least one field is required. Each present array does a **full replace** of th
   "id": "prov-002", 
   "cmd": "provision",
   "payload": {
+    "valve_mac": "00:80:E1:27:F7:BB",
     "ble_leak_sensors": ["00:80:e1:2a:3b:00", "00:80:e1:2a:3f:59"]
   }
 }
@@ -456,8 +457,9 @@ Legacy text: `DECOMMISSION_LORA:0x754A6237`
 ### 4.10.3 target: "ble"
 Removes one BLE leak sensor (and its metadata). Requires `sensor_id`.
 ```json
-{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-001", "cmd": "decommission", "payload": { "target": "ble", "sensor_id": "00:80:E1:27:99:E7" } }
-```
+{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-001", "cmd": "decommission", "payload": { "target": "ble", "sensor_id": "00:80:e1:2a:3f:59" } }
+
+{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-001", "cmd": "decommission", "payload": { "target": "ble", "sensor_id": "00:80:e1:2a:3b:00"} }
 Legacy text: `DECOMMISSION_BLE:00:80:E1:27:99:E7`
 
 ### 4.10.4 target: "all"

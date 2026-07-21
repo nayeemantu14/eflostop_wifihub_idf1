@@ -435,8 +435,14 @@ static void notify_hub_update(ble_update_type_t update_type)
      * state changes are arriving every few minutes. */
     if (update_type == BLE_UPD_DISCONNECTED)
         health_post_valve_event(false);
-    else if (update_type != BLE_UPD_NONE)
+    else if (update_type != BLE_UPD_NONE) {
         health_post_valve_event(true);
+        /* Feed the current battery so a low valve battery actually rates WARNING.
+         * The valve path otherwise never fed battery to the health engine, so it
+         * always rated EXCELLENT (green) regardless of charge. g_val_battery is
+         * the value already read at setup / refreshed on each BATTERY notify. */
+        health_post_valve_battery(g_val_battery);
+    }
 }
 
 static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf *om, void *arg)

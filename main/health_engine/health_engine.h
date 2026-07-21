@@ -55,6 +55,7 @@ typedef enum {
     HEALTH_EVT_BLE_LEAK_CHECKIN,
     HEALTH_EVT_VALVE_CONNECTED,
     HEALTH_EVT_VALVE_DISCONNECTED,
+    HEALTH_EVT_VALVE_BATTERY,
     HEALTH_EVT_TICK
 } health_event_type_t;
 
@@ -73,6 +74,9 @@ typedef struct {
             uint8_t battery;
             int8_t  rssi;
         } ble_leak;
+        struct {
+            uint8_t battery;
+        } valve;
     };
 } health_event_t;
 
@@ -210,6 +214,15 @@ static inline void health_post_valve_event(bool connected)
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
     evt.type = connected ? HEALTH_EVT_VALVE_CONNECTED : HEALTH_EVT_VALVE_DISCONNECTED;
+    health_post_event(&evt);
+}
+
+static inline void health_post_valve_battery(uint8_t battery)
+{
+    health_event_t evt;
+    memset(&evt, 0, sizeof(evt));
+    evt.type = HEALTH_EVT_VALVE_BATTERY;
+    evt.valve.battery = battery;
     health_post_event(&evt);
 }
 

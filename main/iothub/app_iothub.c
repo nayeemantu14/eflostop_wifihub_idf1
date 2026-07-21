@@ -495,6 +495,9 @@ static void reseed_valve_health_if_connected(void)
 {
     if (ble_valve_is_connected()) {
         health_post_valve_event(true);
+        /* A reload wiped last_battery to 0xFF; re-feed it so the valve's rating
+         * reflects a low battery immediately, not only at the next BLE notify. */
+        health_post_valve_battery(ble_valve_get_battery());
     }
 }
 

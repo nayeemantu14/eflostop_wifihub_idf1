@@ -4,7 +4,7 @@
  *            GPIO 38 network LED. Shows a single SOLID colour:
  *              no devices provisioned -> WHITE  (hub not commissioned / idle)
  *              EXCELLENT | GOOD        -> GREEN  (all good)
- *              WARNING                 -> ORANGE (warning)
+ *              WARNING                 -> YELLOW (warning)
  *              CRITICAL                -> RED     (critical)
  *
  *  SOURCE OF TRUTH: health_get_system_rating() (lock-free volatile worst-of
@@ -36,17 +36,18 @@
  * LED_STRIP_COLOR_COMPONENT_FMT_GRB. Kept dim to match the existing indicators
  * (rgb.c blips/ramps peak at 45–50).
  *
- * ORANGE: the WS2812 green die is perceptually much brighter than red, so an
- * sRGB-ratio orange reads as yellow-green. Green is pulled well down vs red
- * (G/R ~= 0.24) for a true orange. Nudge ORANGE_G at bring-up: ~8 = deeper
- * red-orange, ~12 = orange, ~18 = amber/yellow-orange. White level is likewise
- * tunable on the SK68XXMINI-HS. */
+ * YELLOW (warning): the WS2812 green die is perceptually much brighter than
+ * red, so an equal-ratio yellow (50,50,0) reads as lime/green. Green is held
+ * below red (G/R ~= 0.7) for a true yellow that stays clearly distinct from the
+ * RED critical state through the diffusing white housing. Nudge YELLOW_G at
+ * bring-up: ~20 = amber, ~28 = warm yellow, ~35 = yellow, ~42 = leans lime.
+ * White level is likewise tunable on the SK68XXMINI-HS. */
 #define GREEN_R    0
 #define GREEN_G   50
 #define GREEN_B    0
-#define ORANGE_R  50
-#define ORANGE_G  12
-#define ORANGE_B   0
+#define YELLOW_R  50
+#define YELLOW_G  35
+#define YELLOW_B   0
 #define RED_R     50
 #define RED_G      0
 #define RED_B      0
@@ -54,7 +55,7 @@
 #define WHITE_G   25
 #define WHITE_B   25
 
-typedef enum { FLEET_OFF = 0, FLEET_WHITE, FLEET_GREEN, FLEET_ORANGE, FLEET_RED } fleet_state_t;
+typedef enum { FLEET_OFF = 0, FLEET_WHITE, FLEET_GREEN, FLEET_YELLOW, FLEET_RED } fleet_state_t;
 
 static const char *state_name(fleet_state_t s)
 {
@@ -62,19 +63,19 @@ static const char *state_name(fleet_state_t s)
     case FLEET_OFF:    return "OFF";
     case FLEET_WHITE:  return "WHITE";
     case FLEET_GREEN:  return "GREEN";
-    case FLEET_ORANGE: return "ORANGE";
+    case FLEET_YELLOW: return "YELLOW";
     case FLEET_RED:    return "RED";
     default:           return "?";
     }
 }
 
 /* Collapse the 4-level device-health rating to the 3 colour states (LOCK-3):
- * EXCELLENT|GOOD -> GREEN, WARNING -> ORANGE, CRITICAL -> RED. */
+ * EXCELLENT|GOOD -> GREEN, WARNING -> YELLOW, CRITICAL -> RED. */
 static fleet_state_t rating_to_color(health_rating_t r)
 {
     switch (r) {
     case HEALTH_CRITICAL: return FLEET_RED;
-    case HEALTH_WARNING:  return FLEET_ORANGE;
+    case HEALTH_WARNING:  return FLEET_YELLOW;
     default:              return FLEET_GREEN;   /* HEALTH_EXCELLENT, HEALTH_GOOD */
     }
 }
@@ -116,7 +117,7 @@ static void set_solid(led_strip_handle_t strip, fleet_state_t s)
     uint8_t r, g, b;
     switch (s) {
     case FLEET_RED:    r = RED_R;    g = RED_G;    b = RED_B;    break;
-    case FLEET_ORANGE: r = ORANGE_R; g = ORANGE_G; b = ORANGE_B; break;
+    case FLEET_YELLOW: r = YELLOW_R; g = YELLOW_G; b = YELLOW_B; break;
     case FLEET_GREEN:  r = GREEN_R;  g = GREEN_G;  b = GREEN_B;  break;
     case FLEET_WHITE:
     default:           r = WHITE_R;  g = WHITE_G;  b = WHITE_B;  break;
