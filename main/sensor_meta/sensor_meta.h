@@ -67,9 +67,18 @@ bool sensor_meta_set(sensor_type_t type, const char *sensor_id,
 bool sensor_meta_remove(sensor_type_t type, const char *sensor_id);
 
 /**
- * @brief Handle SENSOR_META: C2D JSON command.
+ * @brief Handle a standalone SENSOR_META C2D command (single metadata object).
  */
 bool sensor_meta_handle_command(const char *json_str);
+
+/**
+ * @brief Apply an optional inline "sensor_meta":[...] array carried in a
+ *        `provision` command payload. Shares the exact parse/validate/apply path
+ *        with sensor_meta_handle_command. A payload without the array is a no-op;
+ *        malformed individual entries are skipped (logged), not fatal.
+ * @return number of metadata entries successfully applied (0 if none/absent).
+ */
+int sensor_meta_apply_array_from_payload(const char *payload_json);
 
 /**
  * @brief Clear all metadata (for full decommission). Erases NVS blob.

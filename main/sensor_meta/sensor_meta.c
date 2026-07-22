@@ -273,26 +273,26 @@ bool sensor_meta_remove(sensor_type_t type, const char *sensor_id)
     return ok;
 }
 
-bool sensor_meta_handle_command(const char *json_str)
+// Parse + validate + apply ONE metadata object:
+//   { "sensor_type":"ble"|"lora", "sensor_id":"...",
+//     "location_code":"<name>" (opt), "label":"<text>" (opt) }
+// SINGLE shared apply primitive used by BOTH the standalone `sensor_meta` command
+// (rename) and the inline `sensor_meta[]` array carried in a `provision` command.
+// Operates on a cJSON object (not a string) so there is exactly one
+// parse/validate/apply path — no duplicated parsing between the two entry points.
+static bool apply_one_meta_obj(const cJSON *obj)
 {
-    if (!json_str || !s_initialized) {
+    if (!cJSON_IsObject(obj)) {
+        ESP_LOGE(META_TAG, "meta entry is not an object");
         return false;
     }
 
-    cJSON *root = cJSON_Parse(json_str);
-    if (!root) {
-        ESP_LOGE(META_TAG, "Failed to parse JSON");
-        return false;
-    }
-
-    // Parse sensor_type: "ble" or "lora"
-    cJSON *type_json = cJSON_GetObjectItem(root, "sensor_type");
-    if (!type_json || !cJSON_IsString(type_json)) {
+    // sensor_type: "ble" or "lora" (required)
+    cJSON *type_json = cJSON_GetObjectItem(obj, "sensor_type");
+    if (!cJSON_IsString(type_json)) {
         ESP_LOGE(META_TAG, "Missing sensor_type");
-        cJSON_Delete(root);
         return false;
     }
-
     sensor_type_t type;
     if (strcasecmp(type_json->valuestring, "ble") == 0) {
         type = SENSOR_TYPE_BLE_LEAK;
@@ -300,36 +300,88 @@ bool sensor_meta_handle_command(const char *json_str)
         type = SENSOR_TYPE_LORA;
     } else {
         ESP_LOGE(META_TAG, "Unknown sensor_type: %s", type_json->valuestring);
-        cJSON_Delete(root);
         return false;
     }
 
-    // Parse sensor_id (required)
-    cJSON *id_json = cJSON_GetObjectItem(root, "sensor_id");
-    if (!id_json || !cJSON_IsString(id_json)) {
+    // sensor_id (required, non-empty). Matched case-insensitively downstream
+    // (sensor_meta_set uses strcasecmp), so mixed-case cloud MACs still resolve.
+    cJSON *id_json = cJSON_GetObjectItem(obj, "sensor_id");
+    if (!cJSON_IsString(id_json) || id_json->valuestring[0] == '\0') {
         ESP_LOGE(META_TAG, "Missing sensor_id");
-        cJSON_Delete(root);
         return false;
     }
 
-    // Parse location_code (optional string)
+    // location_code (optional string). Distinguish three cases so a typo can't
+    // silently wipe a stored location: absent -> keep existing (-1); a recognized
+    // name (incl. an explicit "unknown") -> apply it; an UNRECOGNIZED string ->
+    // keep existing + warn. Without this, location_code_from_str returns
+    // LOC_UNKNOWN(0) for any unknown string and sensor_meta_set treats 0 as a
+    // valid set, clobbering e.g. {loc=KITCHEN} on a label-only rename with a typo.
     int loc_code = -1;  // -1 = keep existing
-    cJSON *loc_json = cJSON_GetObjectItem(root, "location_code");
-    if (loc_json && cJSON_IsString(loc_json)) {
-        loc_code = (int)sensor_meta_location_code_from_str(loc_json->valuestring);
+    cJSON *loc_json = cJSON_GetObjectItem(obj, "location_code");
+    if (cJSON_IsString(loc_json)) {
+        location_code_t lc = sensor_meta_location_code_from_str(loc_json->valuestring);
+        if (lc != LOC_UNKNOWN || strcasecmp(loc_json->valuestring, "unknown") == 0) {
+            loc_code = (int)lc;   // recognized location (or explicit "unknown")
+        } else {
+            ESP_LOGW(META_TAG, "unrecognized location_code '%s' — keeping existing",
+                     loc_json->valuestring);
+        }
     }
 
-    // Parse label (optional string)
+    // label (optional string; NULL = keep existing). sensor_meta_set truncates
+    // to SENSOR_META_LABEL_MAX, so an oversized label is safely clamped.
     const char *label = NULL;
-    cJSON *label_json = cJSON_GetObjectItem(root, "label");
-    if (label_json && cJSON_IsString(label_json)) {
+    cJSON *label_json = cJSON_GetObjectItem(obj, "label");
+    if (cJSON_IsString(label_json)) {
         label = label_json->valuestring;
     }
 
-    bool ok = sensor_meta_set(type, id_json->valuestring, loc_code, label);
+    return sensor_meta_set(type, id_json->valuestring, loc_code, label);
+}
 
+bool sensor_meta_handle_command(const char *json_str)
+{
+    if (!json_str || !s_initialized) {
+        return false;
+    }
+    cJSON *root = cJSON_Parse(json_str);
+    if (!root) {
+        ESP_LOGE(META_TAG, "Failed to parse JSON");
+        return false;
+    }
+    bool ok = apply_one_meta_obj(root);
     cJSON_Delete(root);
     return ok;
+}
+
+int sensor_meta_apply_array_from_payload(const char *payload_json)
+{
+    if (!payload_json || !s_initialized) {
+        return 0;
+    }
+    cJSON *root = cJSON_Parse(payload_json);
+    if (!root) {
+        // The provision handler already validated this payload; if it somehow
+        // doesn't parse here, there's simply no inline metadata to apply.
+        return 0;
+    }
+
+    int applied = 0;
+    cJSON *arr = cJSON_GetObjectItem(root, "sensor_meta");
+    if (cJSON_IsArray(arr)) {
+        cJSON *item = NULL;
+        cJSON_ArrayForEach(item, arr) {
+            if (apply_one_meta_obj(item)) {
+                applied++;
+            } else {
+                ESP_LOGW(META_TAG, "inline sensor_meta entry rejected — skipped");
+            }
+        }
+    }
+
+    cJSON_Delete(root);
+    return applied;
 }
 
 void sensor_meta_clear_all(void)
