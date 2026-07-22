@@ -55,6 +55,13 @@ static bool g_needs_lifecycle = false;
 // iothub_task (the single snapshot-flush context) so it doesn't race the caches.
 static volatile bool g_decommission_reboot = false;
 
+// Sensor-meta rename: set by handle_c2d_command (esp-mqtt event task) on a
+// successful standalone `sensor_meta` command; consumed by iothub_task, which
+// converts it into an event snapshot so the app reflects the new label/location
+// promptly instead of at the next heartbeat. Cross-task-safe: a flag + wake, with
+// the snapshot request issued only from iothub_task (the single flush context).
+static volatile bool g_meta_snapshot_pending = false;
+
 // Sync snapshot: published once after the health-engine sync window completes
 // (all known devices heard, else the 2-min / 120 s timeout). Re-armed (set false)
 // on MQTT (re)connect AND on a `provision` (commission) command, so the first
@@ -802,6 +809,12 @@ static void handle_c2d_command(const char *data, size_t data_len)
             !sensor_meta_handle_command(cmd.payload_json)) {
             success = false;
             error_msg = "sensor metadata update failed";
+        } else {
+            // WI-4: reflect the rename in the app promptly (else it waits for the
+            // next periodic/event snapshot). Flag + wake is cross-task-safe here
+            // (esp-mqtt event task); iothub_task turns the flag into an event snapshot.
+            g_meta_snapshot_pending = true;
+            telemetry_v2_wake_snapshot();
         }
     }
     // ---- Provisioning ----
@@ -813,6 +826,14 @@ static void handle_c2d_command(const char *data, size_t data_len)
             health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
             reseed_valve_health_if_connected();   // re-provision keeps the valve connected (see helper)
             iothub_apply_provisioned_mac();
+            // WI-3: apply any inline per-sensor metadata carried in the SAME
+            // provision payload (optional "sensor_meta":[{sensor_type,sensor_id,
+            // location_code,label},...]). Shares the standalone-command apply path;
+            // a bare provision (no array) is a no-op. The commission snapshot armed
+            // below reflects the location/label (add_location_obj reads it live).
+            int meta_n = sensor_meta_apply_array_from_payload(cmd.payload_json);
+            if (meta_n > 0)
+                ESP_LOGI(IOTHUB_TAG, "Provision: applied %d inline sensor_meta entry(ies)", meta_n);
             // Fast-track the first post-commission snapshot. health_engine_reload_devices()
             // already re-armed the sync window (all-devices-seen, else the commission timeout,
             // with the window clock reset); arm the snapshot trigger + incremental-refresh grace
@@ -1289,6 +1310,15 @@ void iothub_task(void *param)
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
             esp_restart();
+        }
+
+        // A standalone sensor_meta rename (from the C2D task) asked for a prompt
+        // snapshot so the app reflects the new label/location without waiting for
+        // the heartbeat. snap_request runs only here in iothub_task (the single
+        // flush context); the earlier wake made this loop iterate promptly.
+        if (g_meta_snapshot_pending) {
+            g_meta_snapshot_pending = false;
+            snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "sensor_meta");
         }
 
         // Latch the (Twin-tunable) heartbeat interval for this iteration.

@@ -390,6 +390,7 @@ Payload fields:
 | `lora_sensors` | string[] | no | Array of LoRa sensor hex IDs, e.g. `["0x754A6237"]` |
 | `ble_leak_sensors` | string[] | no | Array of BLE leak sensor MACs |
 | `rules` | object | no | `{ "auto_close_enabled": bool, "trigger_mask": int }` |
+| `sensor_meta` | object[] | no | Optional inline per-sensor metadata (label / location). Same element schema as the standalone `sensor_meta` command (§4.8). |
 
 At least one field is required. Each present array does a **full replace** of that whole category (e.g. sending `ble_leak_sensors` replaces all BLE sensors but leaves `valve_mac`/`lora_sensors` untouched).
 
@@ -414,6 +415,22 @@ At least one field is required. Each present array does a **full replace** of th
   "payload": {
     "valve_mac": "00:80:E1:27:F7:BB",
     "ble_leak_sensors": ["00:80:e1:2a:3b:00", "00:80:e1:2a:3f:59"]
+  }
+}
+```
+
+**Inline sensor metadata (optional, additive):** a `provision` may also carry a `sensor_meta` array so a sensor's label/location is set in the *same* command that provisions it. Each element is identical to the standalone `sensor_meta` payload (`{sensor_type, sensor_id, location_code, label}`, §4.8) and is applied through the same parse/validate/apply path. Fully optional — a bare `provision` with no `sensor_meta` key behaves exactly as before. Malformed individual entries are skipped (warned), never failing the provision. `sensor_id` is matched case-insensitively, so any-case MACs resolve.
+
+```json
+{
+  "schema": "eflostop.cmd", "ver": 1, "id": "prov-003", "cmd": "provision",
+  "payload": {
+    "valve_mac": "00:80:E1:27:F7:BB",
+    "ble_leak_sensors": ["00:80:e1:2a:3b:00", "00:80:e1:2a:3f:59"],
+    "sensor_meta": [
+      { "sensor_type": "ble", "sensor_id": "00:80:e1:2a:3b:00", "location_code": "bathroom", "label": "Ensuite" },
+      { "sensor_type": "ble", "sensor_id": "00:80:e1:2a:3f:59", "location_code": "kitchen",  "label": "Sink" }
+    ]
   }
 }
 ```
@@ -652,7 +669,7 @@ override_enable      (none)              [envelope-only; fw >= 1.4.0]
 override_cancel      (none)
 rules_config         { auto_close_enabled, trigger_mask, trigger_* }
 sensor_meta          { sensor_type, sensor_id, location_code, label }
-provision            { valve_mac, lora_sensors, ble_leak_sensors, rules }
+provision            { valve_mac, lora_sensors, ble_leak_sensors, rules, sensor_meta[] (opt) }
 decommission         { "target": "valve|lora|ble|all", sensor_id? }
 set_hub_name         { "name": "max 31 chars" }   [envelope-only]
 
