@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eflostop.local/schemas/dps_registration.schema.json",
+  "title": "DPS registration (pre-hub)",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is b62b25e, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: DPS provisioning (a separate broker). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "x-plane": "DPS provisioning (a separate broker)",
+  "x-firmware-version": "1.8.0",
+  "x-firmware-version-source": "CMakeLists.txt:12",
+  "x-tree-state": "working tree, uncommitted",
+  "x-nearest-commit": "b62b25e1106387238f8c0b9c06b7db8eda5aacce",
+  "type": "object",
+  "properties": {
+    "registrationId": {
+      "type": "string",
+      "description": "The device's registration id, which is its gateway id. The only key in the payload: no tags and no model id, so DPS enrolment tags cannot originate in firmware.",
+      "x-source": "main/dps_client/dps_client.c:283-284"
+    }
+  },
+  "required": [
+    "registrationId"
+  ],
+  "additionalProperties": false
+}

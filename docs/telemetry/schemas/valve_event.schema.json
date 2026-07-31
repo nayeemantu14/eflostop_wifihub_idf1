@@ -1,0 +1,149 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eflostop.local/schemas/valve_event.schema.json",
+  "title": "Valve event",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is b62b25e, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "x-plane": "D2C telemetry",
+  "x-firmware-version": "1.8.0",
+  "x-firmware-version-source": "CMakeLists.txt:12",
+  "x-tree-state": "working tree, uncommitted",
+  "x-nearest-commit": "b62b25e1106387238f8c0b9c06b7db8eda5aacce",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Wire-contract identifier. Constant; bump signals a breaking payload change. Range/enum: Fixed literal \"eflostop.v2\".",
+      "x-source": "main/telemetry/telemetry_v2.c:64; constant main/telemetry/telemetry_v2.h:14",
+      "x-category": "12.1",
+      "const": "eflostop.v2"
+    },
+    "ts": {
+      "type": "number",
+      "description": "Device wall-clock at message BUILD time. The whole message is destroyed (never sent, never buffered) if ts < 1704067200, so a pre-SNTP leak event is lost permanently. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
+      "x-source": "main/telemetry/telemetry_v2.c:66-76; SNTP gate :70-74; threshold :57",
+      "x-category": "12.1"
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Immutable hub id derived from the WiFi STA MAC in eFuse. Same string used as the DPS registration id and the MQTT client id. Range/enum: \"GW-\" + 12 uppercase hex.",
+          "x-source": "main/telemetry/telemetry_v2.c:79; derivation main/hub_identity/hub_identity.c:29-37",
+          "x-category": "12.1"
+        },
+        "short_id": {
+          "type": "string",
+          "description": "Last 2 bytes of the STA MAC as 4 hex chars. Also the SoftAP SSID suffix (WiFi-Hub-XXXX) the installer matches during setup. Range/enum: 4 uppercase hex chars.",
+          "x-source": "main/telemetry/telemetry_v2.c:80; main/hub_identity/hub_identity.c:33-37",
+          "x-category": "12.1"
+        },
+        "name": {
+          "type": "string",
+          "description": "User-assigned hub name from twin desired hub_name or C2D set_hub_name. NOTE the opposite convention on the twin plane, where hub_name is always emitted as \"\". Range/enum: free text, max 31 chars (HUB_NAME_MAX_LEN). Presence: conditional: OMITTED when the stored name is empty.",
+          "x-source": "main/telemetry/telemetry_v2.c:81-83; twin counterpart main/iothub/app_iothub.c:956",
+          "x-category": "12.1"
+        },
+        "fw": {
+          "type": "string",
+          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"1.8.0\" in the working tree (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
+          "x-source": "main/telemetry/telemetry_v2.c:84; main/telemetry/telemetry_v2.c:50-54; source CMakeLists.txt:12",
+          "x-category": "12.4"
+        },
+        "uptime_s": {
+          "type": "number",
+          "description": "Seconds since boot from the monotonic esp_timer. On an offline-buffer replay this is the ORIGINAL build-time value, possibly from a previous boot. Units: seconds. Range/enum: >= 0.",
+          "x-source": "main/telemetry/telemetry_v2.c:85-86; replay main/offline_buffer/offline_buffer.c:148",
+          "x-category": "12.3"
+        }
+      },
+      "required": [
+        "id",
+        "short_id",
+        "fw",
+        "uptime_s"
+      ],
+      "additionalProperties": false,
+      "description": "Hub identity + liveness container.",
+      "x-source": "main/telemetry/telemetry_v2.c:78, :87",
+      "x-category": "12.1"
+    },
+    "type": {
+      "type": "string",
+      "description": "Envelope discriminator. Tells the backend which `data` shape to expect. Range/enum: enum: \"lifecycle\" | \"snapshot\" | \"event\".",
+      "x-source": "main/telemetry/telemetry_v2.c:89; values passed at :336, :374, :610, :637, :659, :679, :700",
+      "x-category": "12.1",
+      "const": "event"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "string",
+          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum: enum, 18 values: online | valve_state_changed | valve_flood_detected | valve_flood_cleared | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
+          "x-source": "main/telemetry/telemetry_v2.c:340 (\"online\"), :614, :641, :668, :687, :704; main/rules_engine/rules_engine.c:215, :333, :469, :678, :720, :934, :1025, :1082; main/health_engine/health_engine.c:587-588",
+          "x-category": "12.9",
+          "enum": [
+            "valve_state_changed",
+            "valve_flood_detected",
+            "valve_flood_cleared"
+          ]
+        },
+        "valve_state": {
+          "type": "string",
+          "description": "Valve position at the moment of a valve event. DIFFERENT PATH from data.valve.state and it never carries \"disconnected\". Range/enum: enum: open | closed | unknown. Presence: always (valve events only).",
+          "x-source": "main/telemetry/telemetry_v2.c:616-618",
+          "x-category": "12.6",
+          "enum": [
+            "open",
+            "closed",
+            "unknown"
+          ]
+        },
+        "battery": {
+          "type": "number",
+          "description": "Battery of the peer the event is about. Note the health-alert variant omits the key when unknown while the leak/valve variants always emit it. Units: percent. Range/enum: 0..255 as emitted; sender intent 0..100. Presence: always (leak events, valve events); conditional in health alerts (OMITTED when 0xFF).",
+          "x-source": "main/telemetry/telemetry_v2.c:645 (leak), :619 (valve), main/health_engine/health_engine.c:595-597 (health, omit-on-0xFF)",
+          "x-category": "12.8"
+        },
+        "leak_state": {
+          "type": "boolean",
+          "description": "Leak asserted or cleared at the moment of the event. Range/enum: true | false. Presence: always (leak events and valve events).",
+          "x-source": "main/telemetry/telemetry_v2.c:644 (leak events), :620 (valve events)",
+          "x-category": "12.5"
+        },
+        "rmleak": {
+          "type": "boolean",
+          "description": "Valve remote-leak interlock latch at the moment of a valve event. Range/enum: true | false. Presence: always (valve events only).",
+          "x-source": "main/telemetry/telemetry_v2.c:621",
+          "x-category": "12.6"
+        },
+        "fw_version": {
+          "type": "string",
+          "description": "Valve firmware revision inside a valve event. Note the different absence convention from data.valve.fw_version, which uses an explicit null. Range/enum: free text, max 31 chars. Presence: conditional: OMITTED when the valve DIS read failed (NO null variant here).",
+          "x-source": "main/telemetry/telemetry_v2.c:623-625 vs main/telemetry/telemetry_v2.c:436-440",
+          "x-category": "12.4"
+        }
+      },
+      "required": [
+        "event",
+        "valve_state",
+        "battery",
+        "leak_state",
+        "rmleak"
+      ],
+      "additionalProperties": false,
+      "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
+      "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
+      "x-category": "12.1"
+    }
+  },
+  "required": [
+    "schema",
+    "ts",
+    "gateway",
+    "type",
+    "data"
+  ],
+  "additionalProperties": false
+}
