@@ -1614,9 +1614,56 @@ def assert_no_invented_payload_values():
           "a format string, or an explicit descriptor")
 
 
+def assert_bare_line_refs_resolve():
+    """A citation like 'a.c:10 vs b.c:20; also :30' binds ':30' to b.c, not a.c.
+
+    That rebinding silently pointed the F-01/F-02 evidence line at an unrelated deprecated
+    write in another file. Check every bare ':N' against the file it actually binds to.
+    """
+    cache = {}
+
+    def lines_of(rel):
+        if rel not in cache:
+            fp = os.path.join(REPO, rel)
+            try:
+                cache[rel] = open(fp, encoding="utf-8", errors="replace").read().splitlines()
+            except OSError:
+                cache[rel] = []
+        return cache[rel]
+
+    suspicious = []
+    for f in FIELDS:
+        cit = f.get("citation", "")
+        leaf = f["json_path"].split(".")[-1].replace("[]", "")
+        last_file, checked = None, False
+        for tok in re.finditer(r"([\w/\.\-]+\.(?:c|h|cpp))?\s*:\s*(\d+)", cit):
+            if tok.group(1):
+                last_file = tok.group(1)
+                continue
+            if not last_file:
+                continue
+            checked = True
+            n = int(tok.group(2))
+            src = lines_of(last_file)
+            if not src or n > len(src):
+                continue
+            window = " ".join(src[max(0, n - 3):n + 2])
+            if leaf and leaf not in window:
+                suspicious.append((f["json_path"], f"{last_file}:{n}", src[n - 1].strip()[:70]))
+        del checked
+    if suspicious:
+        print("WARNING - bare :N citations whose bound file does not mention the field leaf:",
+              file=sys.stderr)
+        for path, where, line in suspicious:
+            print(f"  {path}  ->  {where}   {line!r}", file=sys.stderr)
+    else:
+        print("citation binding OK: every bare :N resolves to a line mentioning its field")
+
+
 def main():
     check_contract()
     assert_no_invented_payload_values()
+    assert_bare_line_refs_resolve()
     out_docx = os.path.join(HERE, "eFloStop2_Hub_Telemetry_Catalogue_v1.0.docx")
     written = build_schemas(os.path.join(HERE, "schemas"))
     validate_schemas(written)

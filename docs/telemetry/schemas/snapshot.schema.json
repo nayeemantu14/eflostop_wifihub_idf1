@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/snapshot.schema.json",
   "title": "Snapshot (full state roll-up)",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is b62b25e, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is ac1fc74, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "D2C telemetry",
   "x-firmware-version": "1.8.0",
   "x-firmware-version-source": "CMakeLists.txt:12",
   "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "b62b25e1106387238f8c0b9c06b7db8eda5aacce",
+  "x-nearest-commit": "ac1fc746d1b9ba936cbcadb91e178d74e5d568b8",
   "type": "object",
   "properties": {
     "schema": {
@@ -261,7 +261,7 @@
               "leak_state": {
                 "type": "boolean",
                 "description": "Leak flag. DERIVED WITH A DIFFERENT TEST from the leak event: the snapshot uses leak_status == 1 while the event uses leak_status != 0, so a sensor reporting 2 would auto-close the valve yet read leak_state:false in every snapshot. Range/enum: true | false. Presence: always present; hard-coded false (NOT null) when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:500-501 (== 1) vs main/iothub/app_iothub.c:1750 (!= 0); no-cache placeholder :506",
+                "x-source": "main/telemetry/telemetry_v2.c:500-501 (== 1) vs main/iothub/app_iothub.c:1750 (!= 0); no-cache placeholder main/telemetry/telemetry_v2.c:506",
                 "x-category": "12.5"
               },
               "rssi": {
