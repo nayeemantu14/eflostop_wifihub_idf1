@@ -9,7 +9,7 @@
 |---|---|
 | Document version | 1.0 |
 | Date | 2026-07-31 |
-| Git commit | `ac1fc746d1b9ba936cbcadb91e178d74e5d568b8` (branch `docs/telemetry-catalogue`) |
+| Git commit | `dcdd0dc9b643c6d3e8c2c598671759b2ee340535` (branch `docs/telemetry-catalogue`) |
 | Working tree | Working tree has uncommitted changes at build time; this document describes the working tree, not the committed HEAD. |
 | Firmware version | 1.8.0 — `CMakeLists.txt:12` |
 | Telemetry schema | `eflostop.v2` — `main/telemetry/telemetry_v2.c:64; constant main/telemetry/telemetry_v2.h:14` |
@@ -44,18 +44,25 @@ checked rather than taken on trust.
 
 ## 2.1 Ground rules
 
-**Ground rules — constraints that apply to every option in this document.**
+**Ground rules — how much freedom this conversation actually has.**
 
-There is no over-the-air update client in this firmware image. A repo-wide search for `esp_https_ota`,
-`esp_ota_begin`, `esp_ota_write` and `esp_ota_set_boot_partition` across `main/` returns nothing, even though
-the partition table reserves `ota_0`, `ota_1` and `otadata` (`partitions.csv:4-8`). The consequence chain is:
-no OTA client in the image → a firmware change reaches only units flashed in production, plus any unit
-physically reflashed → **any change to the wire format leaves already-fielded hubs emitting the old format
-indefinitely**.
+Unusually, almost nothing here is locked. Two facts set the boundary, and both point the same way.
 
-This makes cloud-side handling the only option available for the existing fleet, and it is why every option
-set in §7 opens with "no change; the cloud absorbs it". How much this matters depends on how many units are
-fielded — a number this repository cannot tell us, and the first question in §9.3.
+**The product is in prototype phase and every hub can be updated.** There is no fielded fleet to strand, so a
+change to the wire format does not leave older devices emitting an older shape indefinitely. The firmware image
+contains no over-the-air update client — a repo-wide search for `esp_https_ota`, `esp_ota_begin`,
+`esp_ota_write` and `esp_ota_set_boot_partition` across `main/` returns nothing, though the partition table
+does reserve `ota_0`, `ota_1` and `otadata` (`partitions.csv:4-8`). That means updates are delivered by
+reflashing rather than remotely, which is a logistics cost per change, not a compatibility barrier.
+
+**No downstream consumer is committed yet.** The Watts Digital application will be written against the contract
+this document describes, so there is no existing parser to protect and no field that must keep its current name
+or shape for compatibility reasons.
+
+The practical consequence for §7: device-side options are genuinely available, not theoretical. Each option set
+still opens with "no change" so the cost of doing nothing stays visible and comparable, but "no change" is a
+choice here rather than the only reachable outcome. This is the cheapest moment in the product's life to
+normalise the structure, because the cost of a change is a reflash and a not-yet-written parser.
 
 ## 3.2 The four planes
 
@@ -322,7 +329,7 @@ therefore needs two different extraction paths for one physical device.
 
 ### 4.7 Schema version handling across 1.7.0 and 1.8.0
 
-**Severity:** Breaks ingest correctness during rollout · **Fixable where:** Cloud-ingest (no OTA path) · **Meeting time:** 10 minutes
+**Severity:** Breaks ingest correctness during rollout · **Fixable where:** Either side — all hubs updatable · **Meeting time:** 10 minutes
 
 One schema identifier travels on the telemetry plane: the constant string `eflostop.v2`. It is
 emitted on every message and has not changed across the versions examined. It identifies the *envelope shape*,
@@ -506,79 +513,85 @@ schema, gateway.id, gateway.short_id, gateway.name and gateway.fw change either 
 
 ## 6. Compatibility envelope
 
-### 6.1 There is no over-the-air update path
+### 6.1 Updating hubs costs a reflash, not a compatibility break
 
-**Status: FIXED — hard constraint**
+**Status: NOT FIXED — prototype phase**
 
-A repo-wide search of `main/` for `esp_https_ota`, `esp_ota_begin`, `esp_ota_write` and
-`esp_ota_set_boot_partition` returns nothing. The partition table nevertheless reserves `ota_0`, `ota_1` and
-`otadata`, so the flash layout anticipates OTA that the application does not implement.
+The product is in prototype phase and every hub can be updated, so there is no fielded fleet to strand
+and no wire format that must be preserved for devices already in service.
 
-The consequence chain: no OTA client in the image, so a firmware change reaches only units flashed in
-production plus any unit physically reflashed, so **a wire-format change leaves already-fielded hubs emitting
-the old format indefinitely**. This makes cloud-side handling the only option available for the existing fleet,
-and it is why every option set in §7 opens with a no-change option.
+The firmware image contains no over-the-air update client: a repo-wide search of `main/` for `esp_https_ota`,
+`esp_ota_begin`, `esp_ota_write` and `esp_ota_set_boot_partition` returns nothing, although the partition table
+reserves `ota_0`, `ota_1` and `otadata`. Updates therefore reach hubs by reflashing rather than remotely.
 
-How much this costs depends on how many units are fielded and whether the production tool can reflash a
-returned unit — neither is determinable from this repository, and both are the first questions in §9.3.
+Read that as a per-change logistics cost rather than a constraint on what the wire may look like. It argues for
+batching wire changes into as few releases as possible; it does not argue against making them. If remote update
+is wanted before the fleet grows, adding an OTA client is separate work that this document does not size.
 
 *`partitions.csv:4-8; absence verified across main/`*
 
-### 6.2 The Watts Digital app contract
+### 6.2 The application contract is not yet written
 
-**Status: UNKNOWN — cannot be established from this repository**
+**Status: NOT FIXED — greenfield**
 
-No application source is present in this repository. It is therefore not possible to state which telemetry
-fields the app consumes, and no field can be declared safe to rename on the evidence available here.
+The Watts Digital application will be written against the telemetry contract this document describes. No
+parser exists yet that depends on a current field name, nesting or type.
 
-This is stated as an unknown rather than assumed either way, because assuming a field is unused is the specific
-mistake that breaks a shipped app. Resolving it needs the app team, and it is Q-13.
+This is the single most important input to §7. Every rename, reshape and removal option in this document is
+available at ordinary engineering cost, because nothing downstream has to be migrated in step. The usual reason
+to reject normalisation — an existing consumer that would break — does not apply here.
 
-*`[UNVERIFIED] — no app source in this repository`*
+It also raises what is at stake in the other direction: whatever is agreed becomes the contract the application
+is built to, so an irregularity left in place now is one the application will encode and carry forward.
 
-### 6.3 Formats already frozen by production tooling
+*`No application source in this repository; stated by the product owner`*
+
+### 6.3 Formats already consumed by tooling
 
 **Status: PARTIALLY FIXED — evidence in-repo**
 
-The production tool parses the hub's UART boot log to read the gateway ID, firmware version and Wi-Fi MAC
-during manufacture. That is a serial-console contract rather than a cloud contract, so it does not constrain the
-telemetry schema, but it does mean the gateway ID rendering `GW-` + 12 uppercase hex is consumed by tooling
-outside this repository.
+Two couplings exist inside the product itself and would need changing in step rather than independently.
 
-The identifier format is also part of the command plane, not just telemetry: the LoRa `0x%08lX` rendering is
-constructed as a C2D decommission payload, so changing the identifier format on the telemetry plane would
-require changing it on the command plane in the same release.
+The production tool parses the hub's UART boot log for the gateway ID, firmware version and Wi-Fi MAC during
+manufacture. That is a serial-console contract, not a cloud contract, so it does not constrain the telemetry
+schema — but the `GW-` + 12-uppercase-hex rendering is consumed by tooling outside this repository.
+
+The identifier format also spans two planes: the LoRa `0x%08lX` rendering is constructed as a C2D decommission
+payload as well as being emitted in telemetry, so changing it on one plane requires changing it on the other in
+the same release.
 
 *`main/hub_identity/hub_identity.c:31-37; C2D coupling main/commands/c2d_commands.c:173`*
 
 ### 6.4 Historical data already stored cloud-side
 
-**Status: UNKNOWN — but one change is already in flight**
+**Status: NOT FIXED — prototype data**
 
-What the backend has already persisted cannot be determined from this repository. One concrete case exists
-regardless: the health event `dev_type` value for a BLE leak sensor changed from `ble_leak` to
-`ble_leak_sensor` between git HEAD and the working tree. Both spellings will therefore exist in stored history,
-and both will exist in the fleet simultaneously for as long as any 1.7.0 hub remains unflashed.
+Whatever has been ingested so far is prototype data from development hubs rather than customer history, so
+there is no long-lived record whose shape must be preserved and no backfill obligation implied by a rename.
+
+One change is already in flight regardless: the health event `dev_type` value for a BLE leak sensor changed from
+`ble_leak` to `ble_leak_sensor` between git HEAD and the working tree. Since all hubs can be updated, both
+spellings need not coexist for long — but during the transition a hub on either build emits its own spelling,
+so a cutover order is worth agreeing rather than discovering.
 
 *`main/health_engine/health_engine.c:77; intent comment :68-71`*
 
-### 6.5 Constraints that are weaker than they look
+### 6.5 What this leaves genuinely fixed
 
-**Status: NOT ACTUALLY FIXED**
+**Status: ALMOST NOTHING**
 
-Three things are worth explicitly *not* treating as fixed, so the meeting does not rule out options that
-are genuinely available.
+Three things are worth stating explicitly so the meeting does not invent constraints that are not there.
 
-The telemetry schema string `eflostop.v2` is a constant that identifies the envelope shape, not the field set.
-Fields have been added and an enum value renamed without it moving, so nothing in the current design depends on
-it staying still — but equally, bumping it would not by itself tell a consumer anything about field-set
-capability.
+The telemetry schema string `eflostop.v2` is a constant identifying the envelope shape, not the field set.
+Fields have been added and an enum value renamed without it moving, so nothing currently depends on it staying
+still, and bumping it would not by itself tell a consumer anything about capability.
 
-The additive-only pattern is a habit observed in the git history rather than a rule asserted anywhere in code.
-No comment in the telemetry path marks any field as frozen.
+The additive-only pattern is a habit observed in the git history, not a rule asserted anywhere in code. No
+comment in the telemetry path marks any field as frozen.
 
-And the wire is not as locked as the no-OTA constraint suggests for *new* units: anything flashed in production
-from now on can carry a different format. The constraint binds the fielded fleet, not the product.
+The only real costs of change are the ones named above: a reflash per hub, and keeping the two identifier
+couplings in §6.3 in step. Everything else — names, nesting, absence conventions, the device-shape asymmetry,
+the twin/telemetry overlap — is open.
 
 *`main/telemetry/telemetry_v2.c:64; main/telemetry/telemetry_v2.h:14`*
 
@@ -596,7 +609,7 @@ encoding can cause a consumer to under-report a leak.
 | ID | Option | Cost | Risk | Blast radius | Owner | FW change on shipped units? | Reversible? |
 |---|---|---|---|---|---|---|---|
 | O-F01-0 | No change — the cloud gates on connected | Zero device work. The rule is: treat leak_state as meaningful only when connected is true; otherwise treat leak state as unknown and carry forward the last known value. | The rule must be applied in every consumer that touches leak_state, including dashboards and any alerting path. A single consumer that forgets it under-reports a live leak. | Every current and future cloud consumer. | Backend | No | Reversible |
-| O-F01-a | Emit null instead of false when there is no cache entry | A one-line change per array in the device, making leak_state consistent with its four sibling keys. | Changes the JSON type of a field from boolean to nullable boolean. Any consumer with a strict boolean parser breaks. Fielded units keep emitting false regardless, so the cloud rule from Option 0 is still required during the transition. | Device firmware plus every consumer's type handling. | Firmware, then backend | Yes — shipped units unaffected | Reversible |
+| O-F01-a | Emit null instead of false when there is no cache entry | A one-line change per array in the device, making leak_state consistent with its four sibling keys. | Changes the JSON type of a field from boolean to nullable boolean. Any consumer with a strict boolean parser breaks. Hubs still on the older build keep emitting false until reflashed, so the cloud rule from Option 0 is worth keeping until the rollout completes. | Device firmware plus every consumer's type handling. | Firmware, then backend | Yes — shipped units unaffected | Reversible |
 | O-F01-b | Omit the key entirely when there is no cache entry | Aligns leak_state with the class-1 omission convention used elsewhere in the payload. | Same breakage profile as O-F01-a, and additionally changes the object's key set, which affects consumers that assume a fixed shape for array elements. The sensor arrays are currently the one place with a guaranteed-fixed shape. | Device firmware plus consumers assuming fixed array-element shape. | Firmware, then backend | Yes | Reversible |
 | O-F01-c | Add a separate freshness field rather than changing leak_state | Leaves the existing field untouched and adds an explicit indicator such as a data-age or validity flag. | Purely additive, so nothing breaks — but it grows the payload and leaves the misleading field in place for any consumer that does not adopt the new one. | Additive only. | Firmware | Yes | Reversible |
 
@@ -632,8 +645,8 @@ for what is conceptually one entity.
 
 | ID | Option | Cost | Risk | Blast radius | Owner | FW change on shipped units? | Reversible? |
 |---|---|---|---|---|---|---|---|
-| O-46-0 | No change — the cloud normalises at ingest | Zero device work. A mapping layer converts all three shapes plus the flat event form into one internal entity model. | The mapping is permanent and must be maintained as fields are added. Note that it is also the only option in this set that reaches already-fielded units (§6.1) — what follows from that is for the meeting to decide. | Backend ingest layer. | Backend | No | Reversible |
-| O-46-a | Converge the device shapes on new firmware, keep both readable | New units emit one consistent device object; the ingest mapping is retained for older units. | Two shapes in flight simultaneously and indefinitely, because fielded units never converge without a reflash. The mapping layer is not removed, only frozen. | Firmware plus backend, with a long dual-support tail. | Both | Yes | Reversible |
+| O-46-0 | No change — the cloud normalises at ingest | Zero device work. A mapping layer converts all three shapes plus the flat event form into one internal entity model. | The mapping is permanent and must be maintained as fields are added. Note this is the only option that requires no reflash, which matters for how changes are batched rather than for whether they are possible (§6.1). | Backend ingest layer. | Backend | No | Reversible |
+| O-46-a | Converge the device shapes on new firmware, keep both readable | New units emit one consistent device object; the ingest mapping is retained for older units. | Two shapes in flight during the rollout window. Because every hub can be reflashed the fleet does converge, so the mapping layer can eventually be retired rather than frozen indefinitely. | Firmware plus backend, with a long dual-support tail. | Both | Yes | Reversible |
 | O-46-b | Additive convergence — emit the new shape alongside the old | Nothing breaks, because the existing keys stay. Consumers migrate at their own pace. | Materially increases payload size on a message that is already the largest, and leaves two representations of the same data in one message, which is its own consistency problem. | Payload size; every consumer eventually. | Firmware | Yes | Reversible |
 
 ### 4.2 — Identifier rendering is not guaranteed join-safe
@@ -669,10 +682,10 @@ diff is internal: no cJSON_Add* call was added or removed anywhere in main/, so 
 | data.dev_type value for a BLE leak sensor | ble_leak | ble_leak_sensor | Breaking for any consumer matching the exact string. Deliberate, to match source_type on leak events; the intent is stated in an in-source comment. | main/health_engine/health_engine.c:77; comment :68-71 |
 | Accepted sensor_type aliases on the sensor_meta command | "ble" only, case-insensitively | ble_leak_sensor, ble_leak and ble all accepted case-insensitively | Additive and inbound only. Widens what the command plane accepts; changes nothing outbound. | main/sensor_meta/sensor_meta.h:51-56; sensor_meta handler main/iothub/app_iothub.c:859-873; the same helper is also used by the decommission target test at :758 |
 
-Because there is no OTA path, both versions will exist in the fleet simultaneously and
-indefinitely. A 1.7.0 hub emits `ble_leak`; a 1.8.0 hub emits `ble_leak_sensor`; both spellings will appear in
-stored history. Any consumer matching that value needs to accept both, and the decision on whether that
-acceptance is permanent is Q-04.
+During a rollout a hub on 1.7.0 emits `ble_leak` while a hub on 1.8.0 emits `ble_leak_sensor`,
+so both spellings can appear at once. Because every hub can be reflashed this is a transitional state rather
+than a permanent one, and it ends when the rollout completes. What is worth agreeing is the order: whether the
+cloud accepts both spellings first and the hubs are reflashed after, or the reverse. Q-04.
 
 ## 9. Open questions
 
@@ -706,12 +719,12 @@ acceptance is permanent is Q-04.
 
 ### Product / owner decisions
 
-- **Q-03** How many hubs are fielded, how many are in inventory, and can the production tool reflash a returned unit and at what cost? This single answer determines how much the no-OTA constraint costs and therefore how seriously to take every device-side option in §7.  
-  *Gates every option marked "requires firmware change on shipped units".*
-- **Q-13** Which fields does the Watts Digital app consume? No app source is in this repository, so no field can currently be declared safe to rename.  
-  *Gates every rename option.*
-- **Q-14** Is there an agreed path to update fielded hubs at all — OTA added later, service reflash, or replacement? The answer decides whether "change the wire format" is ever available for the existing fleet.  
-  *Gates the long-term shape of every option set.*
+- **Q-03** Given that every hub can be reflashed, how many wire-format releases are we willing to absorb — one combined cutover, or incremental changes as they are agreed? This decides whether options are batched or taken piecemeal.  
+  *Sequences every device-side option in §7.*
+- **Q-13** Since the application will be written against whatever is agreed here, which parts of the current shape should be treated as the starting point and which as open for redesign? Left unstated, the application will encode the current irregularities by default.  
+  *Sets the scope of every reshape option.*
+- **Q-14** Should an OTA client be added before the fleet grows beyond what reflashing can practically cover? Not required for anything in this document, but it changes the cost of every future wire change.  
+  *Affects the cost of change after this round.*
 - **Q-15** This product reports no flow or consumption data at all. Is that a permanent product decision, or a gap the backend is expected to fill later? It determines whether usage analytics and consumption billing are off the table.  
   *Scopes future work.*
 - **Q-16** There is no audit surface: cmd_ack records that a command succeeded but carries no actor identity and no authentication result. Is a who-closed-my-valve trail required?  

@@ -634,11 +634,13 @@ def build_docx(out_path):
          "The valve, a LoRa sensor and a BLE leak sensor are described by three differently-shaped objects, and "
          "the same sensor appears nested inside an array in a snapshot but flattened onto `data` in an event. "
          "Any consumer needs several extraction paths for what is conceptually one entity."),
-        ("There is no over-the-air update path (§6.1)",
-         "No OTA client exists in this firmware image, although the partition table reserves space for one. A "
-         "wire-format change therefore reaches only newly-flashed units, and already-fielded hubs keep emitting "
-         "the old format indefinitely. This is why every option in §7 opens with a cloud-side option — for the "
-         "existing fleet it is the only one available."),
+        ("The constraints are unusually weak, and that is the opportunity (§6)",
+         "This is a prototype-phase product: every hub can be updated, and the Watts Digital application has not "
+         "been written yet, so no downstream parser has to be migrated in step. Almost nothing about the current "
+         "wire format is actually frozen. The practical cost of a change is a reflash per hub plus keeping two "
+         "identifier couplings in step (§6.3). That makes this the cheapest moment in the product's life to "
+         "settle the structure — and it means an irregularity left in place now is one the application will be "
+         "built around and will carry forward."),
     ], 1):
         h(doc, f"1.{n} {title}", 3)
         rich_para(doc, body)
@@ -803,9 +805,11 @@ def build_docx(out_path):
     # ---- 7 Options ----
     h(doc, "7. Options per issue", 1)
     rich_para(doc,
-        "Every option set below opens with **Option 0 — no change**, stated with its ongoing cost, because for "
-        "the already-fielded fleet that is the only option actually available (§6.1). Nothing here is "
-        "recommended and nothing is chosen. Each set ends with a decision box for the meeting to fill in.")
+        "Every option set below opens with **Option 0 — no change**, stated with its ongoing cost, so the price of "
+        "doing nothing stays visible and comparable. Note that Option 0 is a genuine choice here rather than the "
+        "only reachable outcome: all hubs can be updated and no downstream parser is committed yet (§6), so the "
+        "device-side options are as available as the cloud-side ones. Nothing here is recommended and nothing is "
+        "chosen. Each set ends with a decision box for the meeting to fill in.")
     rich_para(doc,
         f"**Scope of this section.** Option analysis was deliberately limited to the "
         f"{len(O.OPTIONS)} issues judged most likely to need a joint decision. Sixteen findings are raised in "
@@ -837,9 +841,9 @@ def build_docx(out_path):
         "the current constant already has.")
     rich_para(doc,
         "**Dual-schema support cost.** Because fielded units cannot be updated, any change means the cloud "
-        "parses two formats simultaneously and indefinitely, not for a transition window. That is a permanent "
-        "maintenance cost rather than a migration cost, and it is the single most important input to whether a "
-        "change is worth making at all.")
+        "parses two formats only for the duration of a rollout, not permanently, because every hub can be reflashed. "
+        "The cost is a transition window whose length is set by how quickly hubs are updated, rather than an "
+        "open-ended maintenance burden. That materially lowers the bar for making a change at all.")
     rich_para(doc,
         "**Rollback.** A device-side change cannot be rolled back remotely, for the same reason it cannot be "
         "deployed remotely. Cloud-side changes remain reversible. The reversibility of each option is recorded "

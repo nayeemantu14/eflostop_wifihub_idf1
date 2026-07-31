@@ -46,18 +46,25 @@ checked rather than taken on trust.""",
     "citation": "Composition derived from fields.json; constants cited individually in §12.9, §12.10 and §4.5.",
 }
 
-GROUND_RULES = """**Ground rules — constraints that apply to every option in this document.**
+GROUND_RULES = """**Ground rules — how much freedom this conversation actually has.**
 
-There is no over-the-air update client in this firmware image. A repo-wide search for `esp_https_ota`,
-`esp_ota_begin`, `esp_ota_write` and `esp_ota_set_boot_partition` across `main/` returns nothing, even though
-the partition table reserves `ota_0`, `ota_1` and `otadata` (`partitions.csv:4-8`). The consequence chain is:
-no OTA client in the image → a firmware change reaches only units flashed in production, plus any unit
-physically reflashed → **any change to the wire format leaves already-fielded hubs emitting the old format
-indefinitely**.
+Unusually, almost nothing here is locked. Two facts set the boundary, and both point the same way.
 
-This makes cloud-side handling the only option available for the existing fleet, and it is why every option
-set in §7 opens with "no change; the cloud absorbs it". How much this matters depends on how many units are
-fielded — a number this repository cannot tell us, and the first question in §9.3."""
+**The product is in prototype phase and every hub can be updated.** There is no fielded fleet to strand, so a
+change to the wire format does not leave older devices emitting an older shape indefinitely. The firmware image
+contains no over-the-air update client — a repo-wide search for `esp_https_ota`, `esp_ota_begin`,
+`esp_ota_write` and `esp_ota_set_boot_partition` across `main/` returns nothing, though the partition table
+does reserve `ota_0`, `ota_1` and `otadata` (`partitions.csv:4-8`). That means updates are delivered by
+reflashing rather than remotely, which is a logistics cost per change, not a compatibility barrier.
+
+**No downstream consumer is committed yet.** The Watts Digital application will be written against the contract
+this document describes, so there is no existing parser to protect and no field that must keep its current name
+or shape for compatibility reasons.
+
+The practical consequence for §7: device-side options are genuinely available, not theoretical. Each option set
+still opens with "no change" so the cost of doing nothing stays visible and comparable, but "no change" is a
+choice here rather than the only reachable outcome. This is the cheapest moment in the product's life to
+normalise the structure, because the cost of a change is a reflash and a not-yet-written parser."""
 
 # --------------------------------------------------------------------------------------
 # §4 Consistency audit.  Each subsection is self-contained: evidence inline.
@@ -287,7 +294,7 @@ therefore needs two different extraction paths for one physical device.""",
     },
     {
         "id": "4.7", "title": "Schema version handling across 1.7.0 and 1.8.0",
-        "severity": "Breaks ingest correctness during rollout", "fixable_where": "Cloud-ingest (no OTA path)", "meeting_time": "10 minutes",
+        "severity": "Breaks ingest correctness during rollout", "fixable_where": "Either side — all hubs updatable", "meeting_time": "10 minutes",
         "summary": """One schema identifier travels on the telemetry plane: the constant string `eflostop.v2`. It is
 emitted on every message and has not changed across the versions examined. It identifies the *envelope shape*,
 not the field set — fields have been added and one enum value renamed without it moving, so a consumer cannot
