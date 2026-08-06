@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -14,6 +15,7 @@
 #include "freertos/event_groups.h"
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 #include "nimble/nimble_port.h"
@@ -138,6 +140,40 @@ static bool g_val_rmleak = false;
 
 static int g_pending_valve_cmd = -1;
 static int g_pending_rmleak_cmd = -1;
+
+// ---- Hub-issued command settle barrier -------------------------------------
+// ble_valve_open/close/set_rmleak only ENQUEUE onto ble_cmd_queue; the cached
+// valve state (g_val_state / g_val_rmleak) is written later, on the ble_valve
+// task, inside write_valve_command() / write_rmleak_command(). iothub_task runs
+// at the same priority, so it is not preempted and can publish an event AND its
+// coupled snapshot before that write lands — reporting the PRE-transition valve
+// state in a snapshot the UI renders.
+//
+// The enqueue arms this barrier; each write_* exit releases it. The snapshot
+// flush block consults ble_valve_cmd_settling() and defers while it is set. The
+// deadline is the backstop for commands that never reach GATT (link down, mutex
+// timeout) so the snapshot is at worst late, never blocked.
+#define VALVE_CMD_SETTLE_MS 1500
+
+static atomic_int      g_cmd_inflight    = 0;
+static _Atomic int64_t g_cmd_deadline_us = 0;
+
+static void cmd_settle_arm(void)
+{
+    atomic_fetch_add(&g_cmd_inflight, 1);
+    atomic_store(&g_cmd_deadline_us,
+                 esp_timer_get_time() + (int64_t)VALVE_CMD_SETTLE_MS * 1000);
+}
+
+// Idempotent-ish: clamps at zero so the apply_pending_* replay path — which
+// reaches write_*_command() without a matching arm — cannot drive the count
+// negative and wedge the barrier permanently open.
+static void cmd_settle_release(void)
+{
+    int prev = atomic_fetch_sub(&g_cmd_inflight, 1);
+    if (prev <= 0)
+        atomic_store(&g_cmd_inflight, 0);
+}
 
 static TimerHandle_t sec_timeout_timer = NULL;
 static TimerHandle_t discovery_timeout_timer = NULL;
@@ -426,7 +462,28 @@ static void notify_hub_update(ble_update_type_t update_type)
 {
     if (ble_update_queue != NULL)
     {
-        (void)xQueueSend(ble_update_queue, &update_type, 0);
+        /* Non-blocking, deliberately. An earlier version waited 50 ms for
+         * CONNECTED/DISCONNECTED on the theory that losing one skips the
+         * reconnect reconciliation — true, but the wait cannot help: the only
+         * consumer is iothub_task, which frees a slot only by completing a whole
+         * loop iteration, and that iteration contains the MQTT/DPS calls that can
+         * block it for seconds. A slot never appears within 50 ms in any state
+         * where the queue is actually full. All the wait bought was up to 50 ms
+         * of stalled NimBLE host task — shared with the leak scanner — in the
+         * disconnect path, precisely when scanning needs to restart.
+         *
+         * The real protection is queue depth (16) plus the correctly-sized
+         * QueueSet in app_iothub.c. What matters here is that a drop is LOUD: it
+         * used to be cast to void, so a full queue looked exactly like a healthy
+         * one in every log. */
+        bool critical = (update_type == BLE_UPD_CONNECTED ||
+                         update_type == BLE_UPD_DISCONNECTED);
+        if (xQueueSend(ble_update_queue, &update_type, 0) != pdTRUE) {
+            ESP_LOGE(BLE_TAG, "[QUEUE] ble_update_queue FULL — dropped update type=%d%s",
+                     (int)update_type,
+                     critical ? " (CONNECTED/DISCONNECTED — reconnect reconciliation SKIPPED)"
+                              : "");
+        }
     }
     /* Health engine: every notification proves the valve link is alive, so
      * any data-bearing update (STATE/LEAK/RMLEAK/BATTERY) refreshes
@@ -1506,11 +1563,15 @@ static void start_scan(void)
 // -----------------------------------------------------------------------------
 static void write_valve_command(uint8_t val)
 {
+    // Every return path releases the settle barrier armed at enqueue: once we
+    // know whether the cache was updated (or that it will not be), the snapshot
+    // has nothing left to wait for.
     if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0)
     {
         ESP_LOGW(BLE_TAG, "[CMD] Valve write not ready. Queuing val=%u", val);
         g_pending_valve_cmd = (int)val;
         g_connect_requested = true;
+        cmd_settle_release();
         start_scan();
         return;
     }
@@ -1526,11 +1587,13 @@ static void write_valve_command(uint8_t val)
             notify_hub_update(BLE_UPD_STATE);
         }
         xSemaphoreGive(gatt_mutex);
+        cmd_settle_release();
     }
     else
     {
         ESP_LOGW(BLE_TAG, "[CMD] Failed to acquire mutex. Queuing val=%u", val);
         g_pending_valve_cmd = (int)val;
+        cmd_settle_release();
     }
 }
 
@@ -1544,6 +1607,7 @@ static void write_rmleak_command(uint8_t val)
         ESP_LOGW(BLE_TAG, "[CMD] RMLEAK write not ready. Queuing val=%u", val);
         g_pending_rmleak_cmd = (int)val;
         g_connect_requested = true;
+        cmd_settle_release();
         start_scan();
         return;
     }
@@ -1556,13 +1620,21 @@ static void write_rmleak_command(uint8_t val)
         if (rc == 0)
         {
             g_val_rmleak = (val != 0);
+            // Wake the publisher. Without this a hub-driven RMLEAK change was
+            // invisible until some unrelated event happened to trigger a
+            // snapshot; it also refreshes valve liveness in the health engine.
+            // BLE_UPD_RMLEAK emits no D2C event of its own, so this adds a wake,
+            // not traffic.
+            notify_hub_update(BLE_UPD_RMLEAK);
         }
         xSemaphoreGive(gatt_mutex);
+        cmd_settle_release();
     }
     else
     {
         ESP_LOGW(BLE_TAG, "[CMD] Failed to acquire mutex for RMLEAK. Queuing val=%u", val);
         g_pending_rmleak_cmd = (int)val;
+        cmd_settle_release();
     }
 }
 
@@ -1787,7 +1859,12 @@ void app_ble_valve_init(void)
         return;
     }
 
-    ble_update_queue = xQueueCreate(5, sizeof(ble_update_type_t));
+    /* Depth 16, not 5. One auto-close alone posts RMLEAK + STATE + BATTERY, and
+     * iothub_task dequeues only ONE item per loop iteration — so a burst during
+     * a leak incident could previously overrun a 5-slot queue and drop a
+     * CONNECTED, skipping reconnect reconciliation. 16 * sizeof(enum) is a few
+     * dozen bytes against ~37 KB free heap. */
+    ble_update_queue = xQueueCreate(16, sizeof(ble_update_type_t));
     if (ble_update_queue == NULL)
     {
         ESP_LOGE(BLE_TAG, "[INIT] Failed to create update queue");
@@ -1810,16 +1887,25 @@ void app_ble_valve_signal_start(void)
     }
 }
 
+// Arming here rather than at the call sites means every caller — rules engine
+// auto-close, C2D valve_open/valve_close, the override paths — gets the snapshot
+// settle barrier without having to remember it.
 bool ble_valve_open(void)
 {
     ble_valve_msg_t m = {.command = BLE_CMD_OPEN_VALVE};
-    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    bool queued = xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (queued) cmd_settle_arm();
+    else ESP_LOGE(BLE_TAG, "[CMD] OPEN ENQUEUE FAILED — command queue full, valve NOT commanded");
+    return queued;
 }
 
 bool ble_valve_close(void)
 {
     ble_valve_msg_t m = {.command = BLE_CMD_CLOSE_VALVE};
-    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    bool queued = xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (queued) cmd_settle_arm();
+    else ESP_LOGE(BLE_TAG, "[CMD] CLOSE ENQUEUE FAILED — command queue full, valve NOT commanded");
+    return queued;
 }
 
 bool ble_valve_connect(void)
@@ -1915,7 +2001,16 @@ void ble_valve_clear_bonds(void)
 bool ble_valve_set_rmleak(bool enabled)
 {
     ble_valve_msg_t m = {.command = enabled ? BLE_CMD_SET_RMLEAK : BLE_CMD_CLEAR_RMLEAK};
-    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    bool queued = xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (queued) cmd_settle_arm();
+    else ESP_LOGE(BLE_TAG, "[CMD] RMLEAK ENQUEUE FAILED — command queue full, valve NOT commanded");
+    return queued;
+}
+
+bool ble_valve_cmd_settling(void)
+{
+    return atomic_load(&g_cmd_inflight) > 0 &&
+           esp_timer_get_time() < atomic_load(&g_cmd_deadline_us);
 }
 
 bool ble_valve_get_rmleak_state(void)

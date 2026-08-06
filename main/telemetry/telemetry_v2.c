@@ -8,7 +8,9 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
+#include "nvs.h"
 #include "cJSON.h"
+#include "nvs_store/nvs_store.h"
 
 #include "app_ble_valve.h"
 #include "provisioning_manager.h"
@@ -19,6 +21,14 @@
 #include "hub_identity.h"
 
 #define TELEM_TAG "TELEMETRY_V2"
+
+// Settings live in the dedicated commissioning partition, not the default "nvs".
+// The physical button wipes only WiFi credentials from the default partition, and
+// app_main()'s corruption recovery can erase all of it — a user who chose a 15-min
+// cadence should not silently get 5-min back after re-entering their WiFi password.
+// Cleared deliberately by decommission, which is the factory-reset path.
+#define NVS_NS_TELEM       "telemetry"
+#define NVS_KEY_SNAP_INT   "snap_int"
 
 // ---- Module state (all accessed from iothub_task only) --------------------
 
@@ -152,6 +162,50 @@ static void add_location_obj(cJSON *parent, sensor_type_t type,
     cJSON_AddItemToObject(parent, "location", loc);
 }
 
+// location for a water-detection source. `location` is part of the required core
+// of a leak event, so it is emitted for EVERY source — including the valve, which
+// has no sensor_meta entry (sensor_type_t has no valve member and the C2D
+// sensor_meta command cannot address one). The valve therefore always reports
+// {"code":"unknown","label":""} rather than being looked up in the wrong table.
+static void add_location_for_source(cJSON *parent, leak_source_t source,
+                                    const char *device_id)
+{
+    switch (source) {
+        case LEAK_SOURCE_BLE:
+            add_location_obj(parent, SENSOR_TYPE_BLE_LEAK, device_id);
+            break;
+        case LEAK_SOURCE_LORA:
+            add_location_obj(parent, SENSOR_TYPE_LORA, device_id);
+            break;
+        default: {   // LEAK_SOURCE_VALVE — no metadata exists for the valve
+            cJSON *loc = cJSON_CreateObject();
+            cJSON_AddStringToObject(loc, "code",
+                sensor_meta_location_code_to_str(LOC_UNKNOWN));
+            cJSON_AddStringToObject(loc, "label", "");
+            cJSON_AddItemToObject(parent, "location", loc);
+            break;
+        }
+    }
+}
+
+// source_type spelling comes from leak_source_to_str() in rules_engine.c — one
+// definition shared with the auto_close and health events, so they cannot drift.
+
+// Identity key for an event that DESCRIBES a device: the key names the device
+// type, so the valve reports valve_id and a leak sensor reports sensor_id. Both
+// sit in the same position (3rd key, right after source_type) and carry the same
+// string form, so a consumer that switches on source_type reads one key either
+// way. Derived from the enum, never from a call-site literal.
+//
+// Hub-generated events ABOUT a device — health alerts, auto_close — deliberately
+// keep the generic device_id: those engines iterate one heterogeneous table and
+// a type-specific key there would force the emitter to branch on a value it does
+// not otherwise care about.
+static const char *identity_key_for_source(leak_source_t source)
+{
+    return (source == LEAK_SOURCE_VALVE) ? "valve_id" : "sensor_id";
+}
+
 // ---- System health reason builder ----------------------------------------
 
 static void build_system_health_reason(const health_device_status_t *health,
@@ -266,8 +320,24 @@ void telemetry_v2_init(esp_mqtt_client_handle_t client,
                                    NULL,
                                    snapshot_timer_cb);
 
+    // Report the EFFECTIVE interval, which telemetry_v2_load_settings() may
+    // already have restored from NVS — not the compile-time default, which was
+    // what this line printed before and made a restored value look unapplied.
     ESP_LOGI(TELEM_TAG, "Init: schema=%s interval=%ds",
-             TELEMETRY_SCHEMA, SNAPSHOT_INTERVAL_MS / 1000);
+             TELEMETRY_SCHEMA, (int)s_snap_interval_s);
+}
+
+void telemetry_v2_attach_client(esp_mqtt_client_handle_t client,
+                                const char *device_id)
+{
+    s_mqtt = client;
+    if (device_id && device_id[0]) {
+        strncpy(s_device_id, device_id, sizeof(s_device_id) - 1);
+        s_device_id[sizeof(s_device_id) - 1] = '\0';
+        snprintf(s_topic, sizeof(s_topic),
+                 "devices/%s/messages/events/", s_device_id);
+    }
+    ESP_LOGI(TELEM_TAG, "Client attached: device=%s", s_device_id);
 }
 
 QueueHandle_t telemetry_v2_get_snapshot_queue(void)
@@ -304,16 +374,108 @@ void telemetry_v2_start_snapshot_timer(void)
     }
 }
 
-void telemetry_v2_set_snapshot_interval(int seconds)
+bool telemetry_v2_set_snapshot_interval(int seconds)
 {
-    if (seconds <= 0) return;
+    // ONE range rule for every caller (see telemetry_v2.h). Rejecting here rather
+    // than at the Twin call site is what guarantees the stored value is always
+    // usable: nothing out of range can reach RAM, so nothing out of range can
+    // reach flash either.
+    if (seconds < SNAPSHOT_INTERVAL_MIN_S || seconds > SNAPSHOT_INTERVAL_MAX_S) {
+        ESP_LOGW(TELEM_TAG, "Snapshot interval %ds rejected — outside [%d..%d], keeping %ds",
+                 seconds, SNAPSHOT_INTERVAL_MIN_S, SNAPSHOT_INTERVAL_MAX_S,
+                 (int)s_snap_interval_s);
+        return false;
+    }
+
+    if (seconds == s_snap_interval_s) {
+        // Azure re-delivers the whole desired document on every twin GET, so this
+        // is the common case on each reconnect. Returning early keeps it off the
+        // flash — an unconditional write here would burn an erase cycle per
+        // reconnect for a value that never changed.
+        ESP_LOGD(TELEM_TAG, "Snapshot interval already %ds — no write", seconds);
+        return true;
+    }
+
     // Heartbeat cadence is driven by the iothub_task deadline scheduler, which
     // latches this value each iteration. Store it as a single 32-bit (atomic on
     // the Xtensa core) write from this esp-mqtt-task context — do NOT reprogram
     // s_snapshot_timer (it stays a fixed liveness backstop), which would create a
     // dual-cadence drift and a cross-task int64 race on the deadline.
     s_snap_interval_s = seconds;
-    ESP_LOGI(TELEM_TAG, "Snapshot interval set to %ds (heartbeat scheduler)", seconds);
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NS_TELEM,
+                                            NVS_READWRITE, &h);
+    if (err == ESP_OK) {
+        err = nvs_set_i32(h, NVS_KEY_SNAP_INT, (int32_t)seconds);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+        nvs_close(h);
+    }
+    if (err != ESP_OK) {
+        // The cadence still changed — the scheduler already latched it. Say so
+        // plainly rather than implying the setting is durable when it is not.
+        ESP_LOGE(TELEM_TAG,
+                 "Snapshot interval %ds applied but NOT persisted (%s) — reverts on reboot",
+                 seconds, esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TELEM_TAG, "Snapshot interval set to %ds (persisted)", seconds);
+    }
+    return true;
+}
+
+void telemetry_v2_load_settings(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NS_TELEM,
+                                            NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        ESP_LOGI(TELEM_TAG, "No stored telemetry settings — snapshot interval %ds (default)",
+                 (int)s_snap_interval_s);
+        return;
+    }
+
+    int32_t stored = 0;
+    err = nvs_get_i32(h, NVS_KEY_SNAP_INT, &stored);
+    nvs_close(h);
+
+    if (err != ESP_OK) {
+        ESP_LOGI(TELEM_TAG, "Snapshot interval %ds (default, none stored)",
+                 (int)s_snap_interval_s);
+        return;
+    }
+
+    // Re-validate on the way out of flash. The range could tighten in a future
+    // build, and a value written by an older one must not survive that change.
+    if (stored < SNAPSHOT_INTERVAL_MIN_S || stored > SNAPSHOT_INTERVAL_MAX_S) {
+        ESP_LOGW(TELEM_TAG,
+                 "Stored snapshot interval %ds is outside [%d..%d] — using default %ds",
+                 (int)stored, SNAPSHOT_INTERVAL_MIN_S, SNAPSHOT_INTERVAL_MAX_S,
+                 SNAPSHOT_INTERVAL_MS / 1000);
+        return;
+    }
+
+    s_snap_interval_s = stored;
+    ESP_LOGI(TELEM_TAG, "Snapshot interval %ds restored from NVS", (int)stored);
+}
+
+void telemetry_v2_clear_settings(void)
+{
+    s_snap_interval_s = SNAPSHOT_INTERVAL_MS / 1000;
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NS_TELEM,
+                                            NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        ESP_LOGW(TELEM_TAG, "Telemetry settings erase skipped: %s", esp_err_to_name(err));
+        return;
+    }
+    nvs_erase_all(h);
+    nvs_commit(h);
+    nvs_close(h);
+    ESP_LOGI(TELEM_TAG, "Telemetry settings cleared — snapshot interval back to %ds",
+             (int)s_snap_interval_s);
 }
 
 // ---- Lifecycle ------------------------------------------------------------
@@ -330,7 +492,7 @@ void telemetry_v2_publish_lifecycle(void)
 
     char valve_mac[18];
     if (provisioning_get_valve_mac(valve_mac))
-        cJSON_AddStringToObject(data, "valve_mac", valve_mac);
+        cJSON_AddStringToObject(data, "valve_id", valve_mac);
 
     uint32_t ids[MAX_LORA_SENSORS];
     uint8_t cnt = 0;
@@ -404,11 +566,15 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         }
     }
 
-    // MAC: prefer live BLE, fall back to health (provisioned) entry
+    // Identity: prefer live BLE, fall back to health (provisioned) entry.
+    // Key is valve_id — on objects and events that DESCRIBE a device, the
+    // identity key names the device type (valve_id / sensor_id). The generic
+    // device_id survives only on hub-generated events about a device (health
+    // alerts, auto_close), where the subject is heterogeneous by nature.
     if (vconn) {
-        cJSON_AddStringToObject(valve, "mac", vmac);
+        cJSON_AddStringToObject(valve, "valve_id", vmac);
     } else if (valve_hs) {
-        cJSON_AddStringToObject(valve, "mac", valve_hs->dev_id);
+        cJSON_AddStringToObject(valve, "valve_id", valve_hs->dev_id);
     }
 
     if (vconn) {
@@ -592,13 +758,28 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
 
 // ---- Events ---------------------------------------------------------------
 
-void telemetry_v2_publish_valve_event(const char *event_name)
+// Valve POSITION transitions only (valve_state_changed). Water at the valve's own
+// flood probe is NOT reported here — it goes through the unified leak event below.
+void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_id)
 {
+    if (!valve_id) return;
+
     cJSON *root = build_envelope("event");
     if (!root) return;
 
     cJSON *data = cJSON_CreateObject();
     cJSON_AddStringToObject(data, "event", event_name);
+
+    // Same identity pair every device-reported event carries, so the cloud can
+    // resolve "which device" without special-casing the valve.
+    //
+    // valve_id is passed in, NOT re-read from ble_valve_get_mac() here: the
+    // caller has already validated the MAC against the provisioned one, and a
+    // GAP disconnect on the NimBLE host task (which preempts iothub_task) would
+    // otherwise make the getter fail between that check and this line, shipping
+    // the event with the identity key silently absent.
+    cJSON_AddStringToObject(data, "source_type", leak_source_to_str(LEAK_SOURCE_VALVE));
+    cJSON_AddStringToObject(data, identity_key_for_source(LEAK_SOURCE_VALVE), valve_id);
 
     int st = ble_valve_get_state();
     cJSON_AddStringToObject(data, "valve_state",
@@ -615,26 +796,35 @@ void telemetry_v2_publish_valve_event(const char *event_name)
     publish_json(root, "event");
 }
 
-void telemetry_v2_publish_leak_event(const char *event_name,
-                                     const char *source_type,
-                                     const char *sensor_id,
-                                     bool leak_state,
-                                     uint8_t battery, int8_t rssi)
+void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev)
 {
+    if (!ev || !ev->event || !ev->device_id) return;
+
     cJSON *root = build_envelope("event");
     if (!root) return;
 
     cJSON *data = cJSON_CreateObject();
-    cJSON_AddStringToObject(data, "event", event_name);
-    cJSON_AddStringToObject(data, "source_type", source_type);
-    cJSON_AddStringToObject(data, "sensor_id", sensor_id);
-    cJSON_AddBoolToObject(data, "leak_state", leak_state);
-    cJSON_AddNumberToObject(data, "battery", battery);
-    cJSON_AddNumberToObject(data, "rssi", rssi);
 
-    sensor_type_t mt = (strcmp(source_type, "lora") == 0)
-                        ? SENSOR_TYPE_LORA : SENSOR_TYPE_BLE_LEAK;
-    add_location_obj(data, mt, sensor_id);
+    // ---- required core: same keys, order and types for every source; the 3rd
+    // key is the identity, named for the device type (valve_id | sensor_id) ----
+    cJSON_AddStringToObject(data, "event", ev->event);
+    cJSON_AddStringToObject(data, "source_type", leak_source_to_str(ev->source));
+    cJSON_AddStringToObject(data, identity_key_for_source(ev->source), ev->device_id);
+    cJSON_AddBoolToObject(data, "leak_state", ev->leak_state);
+    cJSON_AddNumberToObject(data, "battery", ev->battery);
+    add_location_for_source(data, ev->source, ev->device_id);
+
+    // ---- source-specific extras ----
+    if (ev->has_rssi)
+        cJSON_AddNumberToObject(data, "rssi", ev->rssi);
+
+    if (ev->has_valve_ext) {
+        cJSON_AddStringToObject(data, "valve_state",
+            ev->valve_state ? ev->valve_state : "unknown");
+        cJSON_AddBoolToObject(data, "rmleak", ev->rmleak);
+        if (ev->fw_version && ev->fw_version[0])
+            cJSON_AddStringToObject(data, "fw_version", ev->fw_version);
+    }
 
     cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "event");

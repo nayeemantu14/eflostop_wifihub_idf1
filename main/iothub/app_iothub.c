@@ -1,11 +1,13 @@
 #include "app_iothub.h"
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>   // strcasecmp — decommission targets match case-insensitively
 #include <time.h>
 #include <sys/time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "esp_sntp.h"
@@ -46,6 +48,52 @@ static char g_hub_hostname[128] = {0};
 static char g_device_id[64] = {0};
 static char g_device_key[64] = {0};
 
+// ---------------------------------------------------------------------------
+// SAS token lifecycle
+//
+// The IoT Hub password is a SAS token whose expiry is baked in at mint time from
+// the wall clock. Two things follow, and both used to be unhandled:
+//   1. Minting before SNTP has synced yields se=<1970+ttl>, which IoT Hub rejects
+//      with a 401 forever — esp-mqtt keeps retrying the same dead credential.
+//      SNTP can legitimately still be unsynced here: initialize_sntp() gives up
+//      after ~120 s, and on every boot after the first, DPS returns straight from
+//      its NVS cache so nothing else stalls long enough for NTP to land.
+//   2. A token always expires eventually; when it does, the hub drops off and
+//      reconnects with the same expired credential until someone power-cycles it.
+// So: never start the client without a valid clock, and re-mint well before expiry.
+// ---------------------------------------------------------------------------
+#define SAS_TTL_SEC           (24 * 3600)  // token lifetime
+#define SAS_RENEW_MARGIN_SEC  (6 * 3600)   // re-mint once less than this remains (~18 h)
+
+static char   s_resource_uri[256]  = {0};
+static char   s_mqtt_uri[192]      = {0};
+static char   s_mqtt_username[256] = {0};
+// Absolute expiry of the token currently held by the client. 0 = we have never
+// minted one against a valid clock, so the client must not be started yet.
+static volatile time_t s_sas_expiry     = 0;
+// True only while a WiFi-loss suspend is in effect, so token maintenance doesn't
+// restart the client behind iothub_suspend_mqtt()'s back.
+static volatile bool   s_mqtt_suspended = false;
+// Serialises client start/stop/reconfigure. iothub_suspend_mqtt/resume_mqtt run on
+// the WiFi event task while sas_refresh() runs on iothub_task; without this they can
+// interleave a stop/set_config/start sequence and leave g_mqtt_running lying.
+// Statically allocated so creation cannot fail — the alternative (bailing out of
+// iothub_task) would silently take leak evaluation and rules_engine_tick with it.
+// Initialised before mqtt_client, so a non-NULL mqtt_client implies a live mutex.
+static StaticSemaphore_t s_mqtt_ctl_mutex_buf;
+static SemaphoreHandle_t s_mqtt_ctl_mutex = NULL;
+
+// Cloud bring-up state. DPS registration is NOT allowed to block iothub_task before
+// its event loop: this task is the sole caller of rules_engine_tick() and
+// rules_engine_evaluate_leak(), so spinning on an unreachable DPS would disable leak
+// auto-close entirely. Registration is attempted a bounded number of times at boot
+// and then retried from inside the loop by dps_maintain().
+#define DPS_BOOT_ATTEMPTS     6
+#define DPS_RETRY_INTERVAL_MS (5 * 60 * 1000)
+
+static bool    g_cloud_ready      = false;   // DPS assigned + MQTT client built
+static int64_t s_dps_next_try_ms  = 0;
+
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
 
@@ -60,7 +108,16 @@ static volatile bool g_decommission_reboot = false;
 // converts it into an event snapshot so the app reflects the new label/location
 // promptly instead of at the next heartbeat. Cross-task-safe: a flag + wake, with
 // the snapshot request issued only from iothub_task (the single flush context).
-static volatile bool g_meta_snapshot_pending = false;
+// A successfully-handled C2D command asks iothub_task for a snapshot, labelled with
+// the command name so the UART trace says WHICH command caused it. Written on the
+// esp-mqtt event task, consumed by iothub_task — the tolerant cross-task flag pattern
+// used elsewhere in this file. The label is filled before the flag is set; two
+// commands arriving back-to-back are handled sequentially on the one task, so the
+// worst case is a single snapshot carrying the newer command's label while covering
+// both. That is accurate enough to be useful and never wrong about the state it
+// reports. Buffer matches c2d_command_t.cmd[32], so the name is never truncated.
+static volatile bool g_cmd_snap_pending = false;
+static char          g_cmd_snap_label[32] = {0};
 
 // Sync snapshot: published once after the health-engine sync window completes
 // (all known devices heard, else the 2-min / 120 s timeout). Re-armed (set false)
@@ -123,6 +180,12 @@ static int s_valve_pub_state = -2;
 // Device Twin: request ID counter for twin GET/PATCH operations
 static int g_twin_rid = 0;
 
+// msg_id of the in-flight "$iothub/twin/res/#" SUBSCRIBE, or -1 when there is
+// none. The twin GET is deferred until the matching SUBACK so the response cannot
+// arrive before the broker has us on the response topic. Reset on every connect,
+// cleared once the GET is sent, so exactly one GET is issued per connection.
+static int g_twin_res_sub_id = -1;
+
 // ---------------------------------------------------------------------------
 // Telemetry v2 caches (shared with telemetry module for snapshot reads)
 // ---------------------------------------------------------------------------
@@ -171,11 +234,13 @@ void url_encode(const char *src, char *dst, size_t dst_len)
 
 char *generate_sas_token(const char *resource_uri, const char *key, long expiry_seconds)
 {
-    char expiry_str[20];
+    char expiry_str[24];
     time_t now;
     time(&now);
-    long expiry = now + expiry_seconds;
-    snprintf(expiry_str, sizeof(expiry_str), "%ld", expiry);
+    // 64-bit: time_t/long are 32-bit here, so a 32-bit expiry goes negative after
+    // 2038-01-18 and Azure rejects the token. The wire format is plain seconds.
+    int64_t expiry = (int64_t)now + (int64_t)expiry_seconds;
+    snprintf(expiry_str, sizeof(expiry_str), "%lld", (long long)expiry);
 
     char encoded_uri[128];
     url_encode(resource_uri, encoded_uri, sizeof(encoded_uri));
@@ -199,6 +264,7 @@ char *generate_sas_token(const char *resource_uri, const char *key, long expiry_
     char encoded_signature[128];
     url_encode((char *)signature_b64, encoded_signature, sizeof(encoded_signature));
     char *sas_token = (char *)malloc(512);
+    if (!sas_token) return NULL;   // callers check; without this we'd fault in snprintf
     snprintf(sas_token, 512, "SharedAccessSignature sr=%s&sig=%s&se=%s", encoded_uri, encoded_signature, expiry_str);
     return sas_token;
 }
@@ -473,7 +539,8 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 // C2D command dispatch (uses c2d_commands parser)
 // ---------------------------------------------------------------------------
 
-static void publish_twin_reported(void);  // forward declaration
+static void publish_twin_reported(void);   // forward declaration
+static void mark_mqtt_disconnected(void);  // forward declaration (used by iothub_suspend_mqtt)
 
 // Reject an "open the valve" request while the valve's RMLEAK latch is asserted
 // (valve locked after an auto-close). Forwarding the open anyway lets the valve
@@ -575,7 +642,19 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
         : 0;
     int64_t want  = now + window;
     int64_t floor = s_snap_last_pub_ms + SNAP_MIN_INTERVAL_MS;   // min-interval clamp
-    if (want < floor) want = floor;
+    if (want < floor) {
+        // Log it. The settle barrier announces itself when it holds a snapshot
+        // back, but this clamp — which fires far more often, whenever two events
+        // land inside 5 s of the last publish — used to be silent. A 1.85 s
+        // snapshot delay on the bench then looked like an unexplained stall and
+        // cost a log-forensics session to attribute. Bounded by SNAP_MIN_INTERVAL_MS,
+        // Emitted per REQUEST, not per interval: one loop iteration can raise
+        // several (health, LoRa, valve, BLE, rules), so a burst may log a few
+        // identical lines. Acceptable for the diagnostic value.
+        ESP_LOGI(IOTHUB_TAG, "SNAP clamped by min-interval: +%lld ms",
+                 (long long)(floor - want));
+        want = floor;
+    }
     if (want < s_snap_retry_until_ms) want = s_snap_retry_until_ms;  // honor publish-fail backoff
 
     bool upgrade = (reason == SNAP_EVENT && s_snap_reason == SNAP_EVENT &&
@@ -668,7 +747,11 @@ static void handle_c2d_command(const char *data, size_t data_len)
             success = false;
             error_msg = "missing decommission target";
         }
-        else if (strcmp(target, "valve") == 0) {
+        // Targets match case-insensitively, like the BLE family below (which has
+        // always used strcasecmp via sensor_type_is_ble_leak). Before 2.0.0 these
+        // three used strcmp, so "BLE" was accepted but "ALL" was rejected as an
+        // unknown target — the destructive one being the strict one.
+        else if (strcasecmp(target, "valve") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE !!!");
             if (provisioning_remove_valve()) {
                 health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
@@ -682,7 +765,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 error_msg = "valve decommission failed";
             }
         }
-        else if (strcmp(target, "lora") == 0) {
+        else if (strcasecmp(target, "lora") == 0) {
             const char *sid_str = cJSON_GetStringValue(
                 cJSON_GetObjectItem(pl, "sensor_id"));
             uint32_t sid = sid_str ? (uint32_t)strtoul(sid_str, NULL, 16) : 0;
@@ -702,7 +785,9 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 error_msg = "lora sensor decommission failed";
             }
         }
-        else if (strcmp(target, "ble") == 0) {
+        // Canonical target is "ble_leak_sensor"; "ble" / "ble_leak" stay accepted
+        // forever (every deployed app sends "ble"). See sensor_type_is_ble_leak().
+        else if (sensor_type_is_ble_leak(target)) {
             const char *mac = cJSON_GetStringValue(
                 cJSON_GetObjectItem(pl, "sensor_id"));
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_BLE: %s !!!", mac ? mac : "?");
@@ -718,13 +803,14 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 error_msg = "ble sensor decommission failed";
             }
         }
-        else if (strcmp(target, "all") == 0) {
+        else if (strcasecmp(target, "all") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_ALL !!!");
             if (provisioning_decommission()) {
                 sensor_meta_clear_all();
                 hub_identity_clear();
                 dps_clear_cache();
                 rules_engine_clear_persistent_state();
+                telemetry_v2_clear_settings();   // heartbeat cadence back to default
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
 
@@ -800,6 +886,13 @@ static void handle_c2d_command(const char *data, size_t data_len)
             !rules_engine_handle_config_command(cmd.payload_json)) {
             success = false;
             error_msg = "rules config update failed";
+        } else {
+            // auto_close_enabled and trigger_mask are twin-reported properties, so
+            // refresh them here too. Without this they stayed stale until the next
+            // MQTT reconnect — an app polling the twin to confirm the write read the
+            // OLD value and could not tell the command had worked. The snapshot
+            // requested at the ack site covers data.rules; this covers the twin.
+            publish_twin_reported();
         }
     }
     // ---- Sensor metadata ----
@@ -809,13 +902,12 @@ static void handle_c2d_command(const char *data, size_t data_len)
             !sensor_meta_handle_command(cmd.payload_json)) {
             success = false;
             error_msg = "sensor metadata update failed";
-        } else {
-            // WI-4: reflect the rename in the app promptly (else it waits for the
-            // next periodic/event snapshot). Flag + wake is cross-task-safe here
-            // (esp-mqtt event task); iothub_task turns the flag into an event snapshot.
-            g_meta_snapshot_pending = true;
-            telemetry_v2_wake_snapshot();
         }
+        // WI-4's prompt snapshot (so a rename reaches the app without waiting for the
+        // heartbeat) is now the generic on-success snapshot at the ack site, which
+        // every command gets. The dedicated flag this branch used to set has been
+        // removed — two mechanisms for one job is what let rules_config end up with
+        // neither.
     }
     // ---- Provisioning ----
     else if (strcmp(cmd.cmd, C2D_CMD_PROVISION) == 0) {
@@ -846,6 +938,15 @@ static void handle_c2d_command(const char *data, size_t data_len)
             ESP_LOGI(IOTHUB_TAG,
                      "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
                      HEALTH_COMMISSION_SYNC_TIMEOUT_MS / 1000);
+            // Push the new commissioning state into twin reported NOW, same as
+            // set_hub_name does below. Without this the twin only refreshes on the
+            // next MQTT (re)connect, so reported.auto_close_enabled / trigger_mask —
+            // the setup-flow answer this command just collected — would read stale
+            // for as long as the connection happens to stay up. The device lists and
+            // valve_id are equally affected. The commission snapshot carries the same
+            // values, but an app that reads the twin to confirm setup must not have
+            // to wait for a reconnect to see the answer it just sent.
+            publish_twin_reported();
         } else {
             success = false;
             error_msg = "provisioning failed";
@@ -881,6 +982,31 @@ static void handle_c2d_command(const char *data, size_t data_len)
         telemetry_v2_publish_cmd_ack(cmd.id, cmd.cmd, success, error_msg);
     }
 
+    // Every command that succeeded is followed by a snapshot, so the cmd_ack is
+    // never the app's only evidence of what changed.
+    //
+    // Done HERE rather than per-command on purpose. Handling it in each branch is
+    // what left rules_config with no feedback at all — no snapshot and no twin
+    // publish — while sensor_meta and provision beside it had both. One site means
+    // a new command cannot be added without inheriting the behaviour.
+    //
+    // Requested unconditionally on success, including for commands that changed
+    // nothing (an open on an already-open valve, a leak_reset with nothing latched).
+    // The app should not have to distinguish "accepted and no-op" from "accepted and
+    // applied" by inference; the snapshot states the resulting truth either way.
+    //
+    // NOTE this runs on the esp-mqtt event task, so it MUST NOT call snap_request()
+    // — the deadline scheduler is iothub_task-only (see arm_commission_snapshot).
+    // Flag + wake, the pattern already used for sensor_meta. Requests coalesce:
+    // snap_request() is pull-in-only and clamped to SNAP_MIN_INTERVAL_MS, so a burst
+    // of commands still yields one snapshot, and provision's urgent COMMISSION
+    // request already scheduled below still wins over this EVENT one.
+    if (success) {
+        snprintf(g_cmd_snap_label, sizeof(g_cmd_snap_label), "%s", cmd.cmd);
+        g_cmd_snap_pending = true;
+        telemetry_v2_wake_snapshot();
+    }
+
     c2d_command_free(&cmd);
 }
 
@@ -890,6 +1016,10 @@ static void handle_c2d_command(const char *data, size_t data_len)
 
 static void publish_twin_reported(void)
 {
+    // mqtt_client is NULL until cloud_bringup() succeeds; every caller today runs
+    // only after MQTT_EVENT_CONNECTED, but guard rather than rely on that.
+    if (mqtt_client == NULL) return;
+
     cJSON *root = cJSON_CreateObject();
     if (!root) return;
 
@@ -899,9 +1029,26 @@ static void publish_twin_reported(void)
     cJSON_AddStringToObject(root, "hub_name", hub_identity_get_name());
     cJSON_AddBoolToObject(root, "provisioned", provisioning_is_provisioned());
 
+    // Same identity key as the lifecycle message and the snapshot valve object —
+    // twin reported is hub->cloud like telemetry, so it uses the D2C vocabulary.
+    // A twin reported PATCH is a MERGE: a key we simply stop writing is not
+    // removed, it freezes at its last value forever. So the two older spellings
+    // are explicitly nulled — in a reported patch, null DELETES the property —
+    // otherwise a hub upgraded in place would report valve_id alongside a stale
+    // valve_device_id, and a backend reading `valve_device_id ?? valve_id` would
+    // silently prefer the frozen one. Drop these two lines one release after
+    // every hub has upgraded.
+    cJSON_AddNullToObject(root, "valve_mac");
+    cJSON_AddNullToObject(root, "valve_device_id");
+
+    // Null rather than omitted when no valve is provisioned, for the same reason:
+    // omitting it after a decommission would leave the twin claiming a valve that
+    // no longer exists.
     char valve_mac[18];
     if (provisioning_get_valve_mac(valve_mac))
-        cJSON_AddStringToObject(root, "valve_mac", valve_mac);
+        cJSON_AddStringToObject(root, "valve_id", valve_mac);
+    else
+        cJSON_AddNullToObject(root, "valve_id");
 
     uint32_t ids[MAX_LORA_SENSORS];
     uint8_t cnt = 0;
@@ -921,6 +1068,13 @@ static void publish_twin_reported(void)
 
     cJSON_AddNumberToObject(root, "uptime_s",
                             (double)(esp_timer_get_time() / 1000000));
+    // The heartbeat cadence actually IN FORCE, not the value the twin asked for.
+    // Every other writable setting is echoed here (hub_name, auto_close_enabled,
+    // trigger_mask); this one was not, so an app had no way to read back what the
+    // hub applied — nor to notice that an out-of-range write had been rejected.
+    cJSON_AddNumberToObject(root, "snapshot_interval_s",
+                            (double)telemetry_v2_get_snapshot_interval_s());
+
     cJSON_AddNumberToObject(root, "free_heap",
                             (double)esp_get_free_heap_size());
 
@@ -942,6 +1096,48 @@ static void publish_twin_reported(void)
 // Device Twin — handle desired property patches
 // ---------------------------------------------------------------------------
 
+// Apply a desired-properties OBJECT. Split out from the message handler because
+// the same keys arrive in two different envelopes: a PATCH delivers them at the
+// top level, while the response to a twin GET nests them under "desired". Both
+// paths must behave identically — a setting that only takes effect when someone
+// happens to edit it is the bug this split exists to prevent.
+static void apply_twin_desired(cJSON *obj)
+{
+    if (!obj) return;
+
+    // Handle snapshot_interval_s. Range validation lives in the setter, so the
+    // Twin path, the NVS restore and any future C2D command share one rule and
+    // cannot drift apart. The setter also persists, so this survives a reboot.
+    cJSON *interval = cJSON_GetObjectItem(obj, "snapshot_interval_s");
+    if (interval && cJSON_IsNumber(interval)) {
+        int val = interval->valueint;
+        ESP_LOGI(IOTHUB_TAG, "Twin: snapshot_interval_s = %d", val);
+        if (!telemetry_v2_set_snapshot_interval(val)) {
+            // Rejected. The reported echo below still carries the value actually
+            // in force, so the app can see that its write did not take.
+            ESP_LOGW(IOTHUB_TAG,
+                     "Twin: snapshot_interval_s %d rejected — reported will show %d",
+                     val, (int)telemetry_v2_get_snapshot_interval_s());
+        }
+    }
+
+    // Handle hub_name
+    cJSON *name = cJSON_GetObjectItem(obj, "hub_name");
+    if (name && cJSON_IsString(name)) {
+        if (strlen(name->valuestring) <= HUB_NAME_MAX_LEN) {
+            hub_identity_set_name(name->valuestring);
+            ESP_LOGI(IOTHUB_TAG, "Twin: hub_name = '%s'", hub_identity_get_name());
+        } else {
+            ESP_LOGW(IOTHUB_TAG, "Twin: hub_name too long (%d chars, max %d)",
+                     (int)strlen(name->valuestring), HUB_NAME_MAX_LEN);
+        }
+    }
+
+    // Acknowledge: publish reported back so twin stays in sync. Always — including
+    // after a rejected value, which is how the app learns what is actually in force.
+    publish_twin_reported();
+}
+
 static void handle_twin_desired(const char *data, int data_len)
 {
     char *buf = malloc(data_len + 1);
@@ -958,34 +1154,40 @@ static void handle_twin_desired(const char *data, int data_len)
         return;
     }
 
-    // Handle snapshot_interval_s
-    cJSON *interval = cJSON_GetObjectItem(root, "snapshot_interval_s");
-    if (interval && cJSON_IsNumber(interval)) {
-        int val = interval->valueint;
-        if (val >= 60 && val <= 3600) {
-            ESP_LOGI(IOTHUB_TAG, "Twin: snapshot_interval_s = %d", val);
-            telemetry_v2_set_snapshot_interval(val);
-        } else {
-            ESP_LOGW(IOTHUB_TAG, "Twin: snapshot_interval_s %d out of range [60..3600]", val);
-        }
-    }
-
-    // Handle hub_name
-    cJSON *name = cJSON_GetObjectItem(root, "hub_name");
-    if (name && cJSON_IsString(name)) {
-        if (strlen(name->valuestring) <= HUB_NAME_MAX_LEN) {
-            hub_identity_set_name(name->valuestring);
-            ESP_LOGI(IOTHUB_TAG, "Twin: hub_name = '%s'", hub_identity_get_name());
-        } else {
-            ESP_LOGW(IOTHUB_TAG, "Twin: hub_name too long (%d chars, max %d)",
-                     (int)strlen(name->valuestring), HUB_NAME_MAX_LEN);
-        }
-    }
-
+    apply_twin_desired(root);
     cJSON_Delete(root);
+}
 
-    // Acknowledge: publish reported back so twin stays in sync
-    publish_twin_reported();
+// Response to our twin GET: the FULL twin document, {"desired":{...},"reported":{...}}.
+//
+// This is what makes a desired property survive a reboot. IoT Hub sends a
+// desired-properties PATCH only when the document CHANGES; it does not replay the
+// current state to a device that just connected. Without an explicit GET the hub
+// would come back from any reboot running compile-time defaults while the twin
+// still advertised the operator's chosen values, and nothing would ever reconcile
+// the two until somebody edited the twin again.
+//
+// The same topic also carries the (empty-bodied) acknowledgement of our own
+// reported PATCH, so key off the presence of "desired" rather than the status code.
+static void handle_twin_get_response(const char *data, int data_len)
+{
+    if (data_len <= 0) return;          // reported-PATCH ack: empty body, nothing to do
+
+    char *buf = malloc(data_len + 1);
+    if (!buf) return;
+    memcpy(buf, data, data_len);
+    buf[data_len] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    free(buf);
+    if (!root) return;                  // not JSON — not a twin document
+
+    cJSON *desired = cJSON_GetObjectItem(root, "desired");
+    if (cJSON_IsObject(desired)) {
+        ESP_LOGI(IOTHUB_TAG, "Twin GET: applying desired properties from full document");
+        apply_twin_desired(desired);
+    }
+    cJSON_Delete(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,20 +1205,38 @@ static void handle_twin_desired(const char *data, int data_len)
 // ---------------------------------------------------------------------------
 void iothub_suspend_mqtt(void)
 {
-    if (mqtt_client != NULL && g_mqtt_running) {
+    s_mqtt_suspended = true;   // also blocks sas_maintain() from restarting behind us
+    if (mqtt_client == NULL) return;
+
+    xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
+    if (g_mqtt_running) {
         ESP_LOGW(IOTHUB_TAG, "WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)");
         esp_mqtt_client_stop(mqtt_client);
         g_mqtt_running = false;
+        mark_mqtt_disconnected();   // stop() dispatches no event; clear the flags ourselves
     }
+    xSemaphoreGive(s_mqtt_ctl_mutex);
 }
 
 void iothub_resume_mqtt(void)
 {
-    if (mqtt_client != NULL && !g_mqtt_running) {
-        ESP_LOGI(IOTHUB_TAG, "WiFi up — restarting MQTT client");
-        esp_mqtt_client_start(mqtt_client);
-        g_mqtt_running = true;
+    s_mqtt_suspended = false;
+    if (mqtt_client == NULL) return;
+
+    xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
+    if (!g_mqtt_running) {
+        // Starting with a token that is missing, or too close to expiry to be worth
+        // a TLS handshake, would just 401. Leave it: sas_maintain() mints a fresh one
+        // and starts the client within one loop iteration (<=30 s).
+        if (s_sas_expiry == 0 || time(NULL) >= s_sas_expiry - SAS_RENEW_MARGIN_SEC) {
+            ESP_LOGW(IOTHUB_TAG, "WiFi up — MQTT held pending SAS token refresh");
+        } else {
+            ESP_LOGI(IOTHUB_TAG, "WiFi up — restarting MQTT client");
+            esp_mqtt_client_start(mqtt_client);
+            g_mqtt_running = true;
+        }
     }
+    xSemaphoreGive(s_mqtt_ctl_mutex);
 }
 
 // ---------------------------------------------------------------------------
@@ -1041,11 +1261,29 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             snprintf(sub_topic, sizeof(sub_topic),
                      "devices/%s/messages/devicebound/#", g_device_id);
             esp_mqtt_client_subscribe(mqtt_client, sub_topic, 1);
-            // Device Twin — response to GET/PATCH requests
-            esp_mqtt_client_subscribe(mqtt_client, "$iothub/twin/res/#", 1);
+            // Device Twin — response to GET/PATCH requests.
+            // Remember the msg_id: the twin GET must not be published until this
+            // subscription is CONFIRMED, or the response can arrive before the
+            // broker has us on the topic and be dropped. See MQTT_EVENT_SUBSCRIBED.
+            g_twin_res_sub_id = esp_mqtt_client_subscribe(mqtt_client,
+                                                          "$iothub/twin/res/#", 1);
             // Device Twin — desired property change notifications
             esp_mqtt_client_subscribe(mqtt_client,
                                       "$iothub/twin/PATCH/properties/desired/#", 1);
+        }
+        break;
+
+    case MQTT_EVENT_SUBSCRIBED:
+        // Fetch the full twin exactly once per connection, as soon as the response
+        // topic is live. IoT Hub pushes a desired PATCH only on CHANGE, so without
+        // this the hub runs compile-time defaults after every reboot while the twin
+        // still advertises the operator's values.
+        if (g_twin_res_sub_id > 0 && event->msg_id == g_twin_res_sub_id) {
+            g_twin_res_sub_id = -1;             // one GET per connection
+            char topic[64];
+            snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", ++g_twin_rid);
+            esp_mqtt_client_publish(mqtt_client, topic, "", 0, 1, 0);
+            ESP_LOGI(IOTHUB_TAG, "Twin GET requested (rid=%d)", g_twin_rid);
         }
         break;
 
@@ -1058,18 +1296,38 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_DATA:
     {
-        if (event->topic_len > 0 && event->data_len > 0) {
+        // NOTE the twin/res branch is checked BEFORE the data_len test. The
+        // acknowledgement of our own reported PATCH has an EMPTY body, so the old
+        // `data_len > 0` gate discarded it before any routing ran — which is why
+        // "Twin response:" never appeared in a bench log despite the twin working.
+        // Logging it is the observable proof that the response topic is live, and
+        // therefore that a twin GET will be answered.
+        if (event->topic_len > 17 &&
+            strncmp(event->topic, "$iothub/twin/res/", 17) == 0) {
+            ESP_LOGI(IOTHUB_TAG, "Twin response: %.*s (%d bytes)",
+                     event->topic_len, event->topic, event->data_len);
+            if (event->total_data_len > event->data_len) {
+                // The twin document did not fit the MQTT receive buffer. esp-mqtt
+                // delivers the remainder as further events and this handler does
+                // not reassemble, so parsing the first fragment would fail
+                // silently and the desired properties would never be applied.
+                // Say so explicitly — a twin GET that quietly does nothing is the
+                // exact failure this whole change exists to remove.
+                ESP_LOGE(IOTHUB_TAG,
+                         "Twin document truncated: %d of %d bytes — desired properties NOT applied. "
+                         "Raise CONFIG_MQTT_BUFFER_SIZE above %d.",
+                         event->data_len, event->total_data_len, event->total_data_len);
+            } else {
+                handle_twin_get_response(event->data, event->data_len);
+            }
+        }
+        else if (event->topic_len > 0 && event->data_len > 0) {
             // Route based on topic prefix
             if (event->topic_len > 30 &&
                 strncmp(event->topic, "$iothub/twin/PATCH/properties/desired/",
                         37) == 0) {
                 // Desired property change notification
                 handle_twin_desired(event->data, event->data_len);
-            } else if (event->topic_len > 17 &&
-                       strncmp(event->topic, "$iothub/twin/res/", 17) == 0) {
-                // Twin GET/PATCH response (status code in topic)
-                ESP_LOGI(IOTHUB_TAG, "Twin response: %.*s",
-                         event->topic_len, event->topic);
             } else {
                 // C2D command
                 ESP_LOGI(IOTHUB_TAG, "Received C2D Message!");
@@ -1109,8 +1367,8 @@ void iothub_apply_provisioned_mac(void)
     }
 }
 
-// Minimum epoch to consider time synced (2024-01-01 00:00:00 UTC)
-#define SNTP_EPOCH_VALID  1704067200
+// SNTP_EPOCH_VALID now lives in app_iothub.h — dps_client.c needs the same
+// threshold to gate its own registration SAS token.
 
 static TimerHandle_t s_sntp_retry_timer = NULL;
 
@@ -1162,6 +1420,210 @@ static void initialize_sntp(void)
 }
 
 // ---------------------------------------------------------------------------
+// SAS token maintenance
+// ---------------------------------------------------------------------------
+
+// Fill a COMPLETE client config. esp_mqtt_set_config() applies its own defaults to
+// every field left unset, so a partial config would silently drop the certificate
+// bundle and the keepalive. Build it here and nowhere else.
+static void build_mqtt_cfg(esp_mqtt_client_config_t *cfg, const char *password)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->broker.address.uri                    = s_mqtt_uri;
+    cfg->broker.verification.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg->credentials.username                  = s_mqtt_username;
+    cfg->credentials.client_id                 = g_device_id;
+    cfg->credentials.authentication.password   = password;
+    cfg->session.keepalive                     = 60;
+}
+
+// esp_mqtt_client_stop() does NOT dispatch MQTT_EVENT_DISCONNECTED — the client task
+// simply exits. Without this, s_connected stays true across a deliberate stop, so
+// publish_json() takes the online branch, hands a leak event to an outbox that is
+// about to be discarded, and skips the NVS offline buffer entirely. Call after every
+// explicit stop.
+static void mark_mqtt_disconnected(void)
+{
+    g_iot_hub_connected = false;
+    telemetry_v2_set_connected(false);
+    net_status_set_mqtt(false);
+}
+
+// Mint a fresh token and hand it to the client. Caller guarantees a valid clock.
+static bool sas_refresh(void)
+{
+    time_t now = time(NULL);
+
+    char *tok = generate_sas_token(s_resource_uri, g_device_key, SAS_TTL_SEC);
+    if (!tok) {
+        ESP_LOGE(IOTHUB_TAG, "SAS: mint failed (out of memory)");
+        return false;
+    }
+
+    esp_mqtt_client_config_t cfg;
+    build_mqtt_cfg(&cfg, tok);
+
+    xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
+
+    // set_config reallocates the client's RX/TX buffers, so it must not run under a
+    // live connection: stop, swap, start — the sequence suspend/resume already uses.
+    if (g_mqtt_running) {
+        esp_mqtt_client_stop(mqtt_client);
+        g_mqtt_running = false;
+        mark_mqtt_disconnected();
+    }
+
+    esp_err_t err = esp_mqtt_set_config(mqtt_client, &cfg);
+    free(tok);   // esp-mqtt strdup'd it into its own storage
+    if (err != ESP_OK) {
+        // esp_mqtt_set_config() is NOT transactional. Every failure path inside it
+        // runs esp_mqtt_destroy_config(), which frees the buffers and credentials,
+        // deletes the client's event loop, and leaves client->config == NULL.
+        // Restarting the client here would dereference that NULL (panic), and even
+        // if it didn't, the deleted event loop means mqtt_event_handler never fires
+        // again — the hub would go permanently mute while looking healthy.
+        // The client is unusable; a clean reboot is the only recovery. NVS-persisted
+        // commissioning, incident latch and override window all survive it.
+        ESP_LOGE(IOTHUB_TAG,
+                 "SAS: esp_mqtt_set_config failed (%s) — client destroyed, rebooting",
+                 esp_err_to_name(err));
+        xSemaphoreGive(s_mqtt_ctl_mutex);
+        vTaskDelay(pdMS_TO_TICKS(200));   // let the log drain
+        esp_restart();
+    }
+
+    s_sas_expiry = now + SAS_TTL_SEC;
+    if (!s_mqtt_suspended) {
+        esp_mqtt_client_start(mqtt_client);
+        g_mqtt_running = true;
+    }
+    xSemaphoreGive(s_mqtt_ctl_mutex);
+
+    ESP_LOGI(IOTHUB_TAG, "SAS: token renewed (valid %d h, expires ts=%ld)",
+             SAS_TTL_SEC / 3600, (long)s_sas_expiry);
+    return true;
+}
+
+// Called every iteration of the iothub_task loop (which wakes at least every 30 s).
+// Covers both "the clock finally arrived, mint the first real token and connect"
+// and periodic renewal well before expiry.
+static void sas_maintain(void)
+{
+    if (mqtt_client == NULL) return;
+    // Nothing to maintain while the client is deliberately stopped for a WiFi-down
+    // captive-portal window; re-minting every 30 s would churn heap it needs.
+    // iothub_resume_mqtt() defers to us, so a stale token is refreshed on the next
+    // pass after WiFi returns.
+    if (s_mqtt_suspended) return;
+
+    time_t now = time(NULL);
+    if (now < SNTP_EPOCH_VALID) return;   // no trustworthy clock: can't mint a usable token
+
+    if (s_sas_expiry != 0 && now < s_sas_expiry - SAS_RENEW_MARGIN_SEC) {
+        return;                            // still comfortably valid
+    }
+
+    if (s_sas_expiry == 0) {
+        ESP_LOGW(IOTHUB_TAG, "SAS: clock valid (ts=%ld) — minting first token, starting MQTT",
+                 (long)now);
+    } else {
+        ESP_LOGI(IOTHUB_TAG, "SAS: within %d h of expiry — renewing",
+                 SAS_RENEW_MARGIN_SEC / 3600);
+    }
+    sas_refresh();
+}
+
+// ---------------------------------------------------------------------------
+// Cloud bring-up (DPS registration + MQTT client construction)
+// ---------------------------------------------------------------------------
+
+// One attempt at the whole chain: DPS assignment -> client config -> client.
+// Safe to call repeatedly; it does nothing lasting until every step has succeeded,
+// and mqtt_client is only published once the client is fully built and its event
+// handler registered. Returns true when the cloud path is ready.
+static bool cloud_bringup(void)
+{
+    dps_assignment_t dps = {0};
+    if (dps_register(AZURE_DPS_ID_SCOPE, AZURE_DPS_GROUP_KEY,
+                     hub_identity_get_gateway_id(), &dps) != ESP_OK) {
+        return false;
+    }
+
+    strncpy(g_hub_hostname, dps.hub_hostname, sizeof(g_hub_hostname) - 1);
+    strncpy(g_device_id,    dps.device_id,    sizeof(g_device_id) - 1);
+    strncpy(g_device_key,   dps.device_key,   sizeof(g_device_key) - 1);
+    ESP_LOGI(IOTHUB_TAG, "DPS: hub=%s device=%s", g_hub_hostname, g_device_id);
+
+    // These back the client config for the life of the process — sas_refresh()
+    // rebuilds the same config on every renewal, so they must outlive this scope.
+    snprintf(s_resource_uri, sizeof(s_resource_uri), "%s/devices/%s",
+             g_hub_hostname, g_device_id);
+    snprintf(s_mqtt_uri, sizeof(s_mqtt_uri), "mqtts://%s", g_hub_hostname);
+    snprintf(s_mqtt_username, sizeof(s_mqtt_username),
+             "%s/%s/?api-version=2021-04-12", g_hub_hostname, g_device_id);
+
+    // Mint the initial token only against a trustworthy clock. If SNTP hasn't landed
+    // the client is still built (so the handle exists) but is NOT started — a token
+    // minted at ts~0 expires in 1971 and IoT Hub 401s it forever. sas_maintain()
+    // mints the real one and starts the client within one loop iteration.
+    time_t now       = time(NULL);
+    char  *sas_token = (now >= SNTP_EPOCH_VALID)
+                     ? generate_sas_token(s_resource_uri, g_device_key, SAS_TTL_SEC)
+                     : NULL;
+    s_sas_expiry = sas_token ? now + SAS_TTL_SEC : 0;
+
+    esp_mqtt_client_config_t mqtt_cfg;
+    build_mqtt_cfg(&mqtt_cfg, sas_token);
+
+    // Must be live before mqtt_client is published: suspend/resume gate on a non-NULL
+    // mqtt_client and then take this mutex unconditionally.
+    if (s_mqtt_ctl_mutex == NULL) {
+        s_mqtt_ctl_mutex = xSemaphoreCreateMutexStatic(&s_mqtt_ctl_mutex_buf);
+    }
+
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    free(sas_token);   // esp-mqtt copied it into its own storage
+    if (client == NULL) {
+        ESP_LOGE(IOTHUB_TAG, "esp_mqtt_client_init failed — will retry");
+        s_sas_expiry = 0;
+        return false;
+    }
+    esp_mqtt_client_register_event(client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID,
+                                   mqtt_event_handler, NULL);
+
+    mqtt_client = client;   // publish only once fully constructed
+    telemetry_v2_attach_client(client, g_device_id);
+    g_cloud_ready = true;
+
+    if (s_sas_expiry != 0 && !s_mqtt_suspended) {
+        esp_mqtt_client_start(client);
+        g_mqtt_running = true;
+    } else {
+        ESP_LOGW(IOTHUB_TAG, "Clock not synced (ts=%ld) — holding MQTT until SNTP lands",
+                 (long)now);
+    }
+    return true;
+}
+
+// Retry cloud bring-up from inside the event loop, so a DPS outage never stops leak
+// evaluation. Rate-limited, and gated on a valid clock because DPS registration
+// stamps its own SAS token.
+static void dps_maintain(void)
+{
+    if (g_cloud_ready) return;
+    if (time(NULL) < SNTP_EPOCH_VALID) return;
+
+    int64_t now_ms_ = snap_now_ms();
+    if (s_dps_next_try_ms != 0 && now_ms_ < s_dps_next_try_ms) return;
+    s_dps_next_try_ms = now_ms_ + DPS_RETRY_INTERVAL_MS;
+
+    ESP_LOGI(IOTHUB_TAG, "DPS: retrying registration...");
+    if (cloud_bringup()) {
+        ESP_LOGI(IOTHUB_TAG, "DPS: registration recovered — cloud path up");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main IoT Hub task
 // ---------------------------------------------------------------------------
 
@@ -1197,54 +1659,41 @@ void iothub_task(void *param)
 
     initialize_sntp();
 
-    // ---- DPS Registration (or load from NVS cache) ----
-    dps_assignment_t dps = {0};
-    int dps_retries = 0;
-    while (dps_register(AZURE_DPS_ID_SCOPE, AZURE_DPS_GROUP_KEY,
-                        hub_identity_get_gateway_id(), &dps) != ESP_OK) {
-        dps_retries++;
-        int backoff = (dps_retries < 5) ? dps_retries * 5 : 30;
-        ESP_LOGW(IOTHUB_TAG, "DPS failed (attempt %d), retry in %ds",
-                 dps_retries, backoff);
-        vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
-    }
-    strncpy(g_hub_hostname, dps.hub_hostname, sizeof(g_hub_hostname) - 1);
-    strncpy(g_device_id, dps.device_id, sizeof(g_device_id) - 1);
-    strncpy(g_device_key, dps.device_key, sizeof(g_device_key) - 1);
-    ESP_LOGI(IOTHUB_TAG, "DPS: hub=%s device=%s", g_hub_hostname, g_device_id);
-
-    // ---- Connect to assigned IoT Hub ----
-    char resource_uri[256];
-    snprintf(resource_uri, sizeof(resource_uri), "%s/devices/%s",
-             g_hub_hostname, g_device_id);
-    char *sas_token = generate_sas_token(resource_uri, g_device_key, 31536000);
-
-    char uri[192], username[256];
-    snprintf(uri, sizeof(uri), "mqtts://%s", g_hub_hostname);
-    snprintf(username, sizeof(username), "%s/%s/?api-version=2021-04-12",
-             g_hub_hostname, g_device_id);
-
-    const esp_mqtt_client_config_t mqtt_cfg = {
-        .broker.address.uri = uri,
-        .broker.verification.crt_bundle_attach = esp_crt_bundle_attach,
-        .credentials = {
-            .username = username,
-            .client_id = g_device_id,
-            .authentication = {.password = sas_token}},
-        .session.keepalive = 60,
-    };
-
-    mqtt_client = esp_mqtt_client_init(&mqtt_cfg);
-    esp_mqtt_client_register_event(mqtt_client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
-    esp_mqtt_client_start(mqtt_client);
-    g_mqtt_running = true;
-
     // Initialize offline event buffer (loads pending events from NVS)
     offline_buffer_init();
 
-    // Initialize telemetry v2 (creates snapshot timer + queue)
-    telemetry_v2_init(mqtt_client, g_device_id, hub_identity_get_gateway_id(),
+    // Restore the persisted heartbeat cadence BEFORE telemetry_v2_init(), so the
+    // scheduler starts on the operator's value rather than running one default-length
+    // heartbeat first and correcting itself only once the twin GET response lands.
+    telemetry_v2_load_settings();
+
+    // Initialize telemetry v2 (creates snapshot timer + queue) BEFORE DPS, with no
+    // client yet. publish_json() gates on a non-NULL client, so until the cloud path
+    // is up every event — including a leak — takes the offline-buffer branch instead
+    // of being dropped. cloud_bringup() attaches the client and corrects the topic.
+    telemetry_v2_init(NULL, hub_identity_get_gateway_id(),
+                      hub_identity_get_gateway_id(),
                       g_telem_lora_cache, g_telem_ble_cache);
+
+    // ---- DPS registration: bounded here, retried from the event loop ----
+    // This must NOT spin indefinitely. iothub_task is the sole caller of
+    // rules_engine_tick() and rules_engine_evaluate_leak(), so blocking before the
+    // loop disables leak auto-close. A provisioning-epoch bump sends every fielded
+    // hub through live registration on its first boot after the upgrade, and that
+    // needs both WAN reachability and a synced clock — neither is guaranteed.
+    for (int attempt = 1; attempt <= DPS_BOOT_ATTEMPTS; attempt++) {
+        if (cloud_bringup()) break;
+        int backoff = (attempt < 5) ? attempt * 5 : 30;
+        ESP_LOGW(IOTHUB_TAG, "DPS failed (attempt %d/%d), retry in %ds",
+                 attempt, DPS_BOOT_ATTEMPTS, backoff);
+        vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
+    }
+    if (!g_cloud_ready) {
+        ESP_LOGE(IOTHUB_TAG,
+                 "DPS unavailable after %d attempts — entering event loop without cloud. "
+                 "Leak detection and valve auto-close run normally; DPS retried every %d min.",
+                 DPS_BOOT_ATTEMPTS, DPS_RETRY_INTERVAL_MS / 60000);
+    }
 
     // Drain queues before adding to QueueSet
     lora_packet_t dummy_pkt;
@@ -1264,8 +1713,25 @@ void iothub_task(void *param)
     // Reset BLE leak sensor tracking so next advertisement triggers a fresh event
     app_ble_leak_reset_tracking();
 
-    // QueueSet: 3 existing queues + 1 snapshot trigger queue
-    QueueSetHandle_t evt_queue_set = xQueueCreateSet(26);
+    // QueueSet length MUST be >= the SUM of every member queue's depth. FreeRTOS
+    // pushes one handle into the set per successful member send and asserts
+    // (queue.c: uxMessagesWaiting < uxLength) if the set overflows — with
+    // assertions enabled that is a panic reboot, not a dropped event.
+    //
+    //   lora_rx_queue     10   (app_lora.cpp)
+    //   ble_update_queue  16   (app_ble_valve.c)
+    //   ble_leak_rx_queue 10   (app_ble_leak.c)
+    //   snap_q             1   (telemetry_v2.c)
+    //                    ---
+    //                     37
+    //
+    // Keep this in step with those four depths. It was 26 (= 10+5+10+1) and the
+    // valve queue then went 5 -> 16 without this being updated, which would have
+    // aborted the firmware on the 27th pending item — reachable exactly when
+    // iothub_task stalls in dps_maintain()/sas_maintain() while sensors are
+    // filling their queues, i.e. during a leak incident with the cloud down.
+    #define EVT_QUEUE_SET_LEN  (10 + 16 + 10 + 1)
+    QueueSetHandle_t evt_queue_set = xQueueCreateSet(EVT_QUEUE_SET_LEN);
     xQueueAddToSet(lora_rx_queue, evt_queue_set);
     xQueueAddToSet(ble_update_queue, evt_queue_set);
     if (ble_leak_rx_queue) {
@@ -1316,13 +1782,42 @@ void iothub_task(void *param)
         // snapshot so the app reflects the new label/location without waiting for
         // the heartbeat. snap_request runs only here in iothub_task (the single
         // flush context); the earlier wake made this loop iterate promptly.
-        if (g_meta_snapshot_pending) {
-            g_meta_snapshot_pending = false;
-            snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "sensor_meta");
+        // Snapshot owed to a command that succeeded (see handle_c2d_command).
+        if (g_cmd_snap_pending) {
+            g_cmd_snap_pending = false;
+            char label[sizeof(g_cmd_snap_label)];
+            snprintf(label, sizeof(label), "%s", g_cmd_snap_label);
+            snap_request(SNAP_EVENT, SNAP_TIER_HIGH, label[0] ? label : "c2d_command");
         }
 
         // Latch the (Twin-tunable) heartbeat interval for this iteration.
-        s_hb_interval_ms = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
+        //
+        // A CHANGE must also re-aim the deadline that is already pending, not just
+        // the ones after it. snap_rearm_heartbeat() runs only after a successful
+        // publish, so without this a hub asked to go from 3600 s down to 60 s would
+        // sit on the old hour-long deadline before the new cadence ever started —
+        // the operator asks for faster telemetry and waits up to an hour for it.
+        //
+        // Only re-aim when the pending snapshot IS the heartbeat. s_snap_due_ms may
+        // currently hold an EVENT deadline pulled in by snap_request(), and pushing
+        // that back would delay a leak snapshot to serve a cadence change.
+        {
+            int64_t new_hb_ms = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
+            // s_snap_retry_until_ms != 0 means a publish failed and we are backing
+            // off; snap_rearm_heartbeat() would clear that backoff, so leave it be
+            // and let the next confirmed publish pick the new interval up.
+            if (new_hb_ms != s_hb_interval_ms && s_snap_reason == SNAP_HEARTBEAT &&
+                s_snap_retry_until_ms == 0) {
+                s_hb_interval_ms = new_hb_ms;
+                snap_rearm_heartbeat();          // re-aims from the last CONFIRMED publish
+                ESP_LOGI(IOTHUB_TAG,
+                         "SNAP heartbeat=re-aimed interval_ms=%lld next_in_ms=%lld",
+                         (long long)s_hb_interval_ms,
+                         (long long)(s_snap_due_ms - snap_now_ms()));
+            } else {
+                s_hb_interval_ms = new_hb_ms;
+            }
+        }
 
         bool provisioned = provisioning_is_provisioned();
 
@@ -1356,6 +1851,18 @@ void iothub_task(void *param)
         // =================================================================
         bool has_lora = false, has_valve = false, has_ble_leak = false;
 
+        // Valve flood-probe reading, sampled ONCE per iteration in Phase 2 and
+        // reused by the publish in Phase 3. See the capture site below for why
+        // re-reading the getters at publish time is a race.
+        bool  vlk_wet     = false;
+        int   vlk_state   = -1;
+        bool  vlk_rmleak  = false;
+        int   vlk_batt    = 0;
+        char  vlk_fw[32]  = {0};
+        bool  vlk_have_fw = false;
+        bool  vlk_mac_ok  = false;
+        char  vlk_mac[18] = {0};
+
         if (active_queue == lora_rx_queue) {
             has_lora = xQueueReceive(lora_rx_queue, &pkt, 0);
         } else if (active_queue == ble_update_queue) {
@@ -1384,9 +1891,72 @@ void iothub_task(void *param)
                                        ble_leak_evt.leak_detected,
                                        ble_leak_evt.sensor_mac_str);
         }
+        if (has_valve) {
+            // Validate the valve's identity HERE, in the same breath as the leak
+            // sample below — not later at publish time. The publish used to
+            // re-derive it, so a GAP disconnect on the NimBLE host task (which
+            // preempts this one) between the two points made ble_valve_get_mac()
+            // fail, silently dropping the leak event while the auto_close it
+            // caused still published. That is the exact "auto-close with no
+            // stated cause" this release set out to remove, arriving in the
+            // window where a disconnect is MOST likely — the hub has just queued
+            // RMLEAK and close writes to that very valve. Sampling here NARROWS
+            // that window to a single iteration; it cannot close it entirely,
+            // since the link can still drop before the update is dequeued.
+            char prov_mac[18];
+            bool have_live = ble_valve_get_mac(vlk_mac);
+            bool have_prov = provisioning_get_valve_mac(prov_mac);
+            if (have_live && have_prov) {
+                vlk_mac_ok = (strcasecmp(vlk_mac, prov_mac) == 0);
+                if (!vlk_mac_ok) {
+                    ESP_LOGW(IOTHUB_TAG,
+                        "Connected valve MAC %s != provisioned %s, skipping",
+                        vlk_mac, prov_mac);
+                }
+            } else {
+                // Say WHY, don't just drop. Failing this check suppresses the whole
+                // valve event family for this iteration, and the old code logged
+                // only on MISMATCH — so "valve unreachable" and "valve fine" looked
+                // identical in the log. Dropping is still correct: the cached valve
+                // state is zeroed on disconnect, so there is nothing truthful to
+                // publish. Only the silence was the defect.
+                ESP_LOGW(IOTHUB_TAG,
+                    "Valve identity unavailable (live=%d provisioned=%d) — "
+                    "valve events suppressed this iteration",
+                    (int)have_live, (int)have_prov);
+            }
+        }
+
         if (has_valve && ble_upd_type == BLE_UPD_LEAK) {
-            rules_engine_evaluate_leak(LEAK_SOURCE_VALVE_FLOOD,
-                                       ble_valve_get_leak(), "valve");
+            // Sample the valve BEFORE the rules engine runs. rules_engine_evaluate_leak()
+            // queues an RMLEAK write, and the cached rmleak flips only when that write
+            // completes on the ble_valve task — so reading the getters at publish time
+            // yields false or true depending purely on write timing (observed on the
+            // bench: leak_detected shipped rmleak:false 40 ms after RMLEAK=1 was issued,
+            // contradicting the auto_close beside it).
+            //
+            // These values are the valve's state as of the moment this update was
+            // DEQUEUED — the closest the hub can get to "at detection". If the GAP
+            // link dropped between the notify and this point, app_ble_valve.c zeroes
+            // the cache first, and the vlk_mac_ok check above then suppresses the
+            // publish entirely rather than shipping the zeros. That is what a leak
+            // event should report: water seen, interlock not yet applied. The auto_close
+            // that follows carries rmleak_asserted for the interlock itself — true only
+            // when the valve was actually reachable to receive it.
+            //
+            // Sampling leak ONCE also removes a second race: the rules engine and the
+            // publish used to call ble_valve_get_leak() independently, so a fast toggle
+            // between the two calls could evaluate one state and report the other.
+            vlk_wet     = ble_valve_get_leak();
+            vlk_state   = ble_valve_get_state();
+            vlk_rmleak  = ble_valve_get_rmleak_state();
+            vlk_batt    = ble_valve_get_battery();
+            vlk_have_fw = ble_valve_get_firmware_rev(vlk_fw, sizeof(vlk_fw));
+
+            // VALVE_SOURCE_ID, not the MAC: this is the rules engine's internal
+            // tracking key and must stay stable across a BLE dropout. The wire
+            // device_id is resolved to the real MAC inside the rules engine.
+            rules_engine_evaluate_leak(LEAK_SOURCE_VALVE, vlk_wet, VALVE_SOURCE_ID);
         }
 
         // Valve reconnect reconciliation: re-evaluate active leaks and hub/valve sync
@@ -1399,6 +1969,13 @@ void iothub_task(void *param)
 
         // Check for pending rules engine telemetry (auto-close, rmleak events)
         char *auto_close_json = rules_engine_take_pending_telemetry();
+
+        // ---- Connection maintenance ----
+        // Deliberately AFTER Phase 2: both can block this task (esp_mqtt_client_stop()
+        // waits on the mqtt task, and DPS registration runs a whole MQTT session), and
+        // leak evaluation must never queue behind that within an iteration.
+        dps_maintain();   // no cloud yet? keep trying, without stalling the loop
+        sas_maintain();   // mint on first valid clock, then renew before expiry
 
         // =================================================================
         // Phase 3: PUBLISH (only when connected + provisioned)
@@ -1430,17 +2007,12 @@ void iothub_task(void *param)
             g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
         }
 
-        // ---- Rules engine events (auto-close, rmleak changes) ----
-        if (auto_close_json) {
-            telemetry_v2_publish_rules_event(auto_close_json);
-            // Couple a snapshot: auto_close_blocked_override is low-priority (it is
-            // rate-limited and the override state is unchanged); all other rules
-            // events (auto_close, rmleak_cleared, override enable/re-enable) are
-            // safety-critical and flush at the HIGH cadence.
-            bool low = (strstr(auto_close_json, "auto_close_blocked_override") != NULL);
-            snap_request(SNAP_EVENT, low ? SNAP_TIER_LOW : SNAP_TIER_HIGH, "rules");
-            free(auto_close_json);
-        }
+        // NOTE: the rules-engine events (auto_close, rmleak_*) are held in
+        // auto_close_json and published FURTHER DOWN, after the device events.
+        // Publishing them here put the CONSEQUENCE on the wire before its CAUSE:
+        // rules evaluation runs in Phase 2, so a valve/sensor leak produced
+        // auto_close ~40 ms ahead of the leak_detected that triggered it, and a
+        // cloud consumer reading in order saw an unexplained auto-close.
 
         // ---- Health alerts (Critical transitions) ----
         {
@@ -1476,12 +2048,18 @@ void iothub_task(void *param)
                     char lora_id[16];
                     snprintf(lora_id, sizeof(lora_id), "0x%08lX",
                              (unsigned long)pkt.sensorId);
-                    telemetry_v2_publish_leak_event(
-                        pkt.leakStatus ? "leak_detected" : "leak_cleared",
-                        "lora", lora_id,
-                        (pkt.leakStatus != 0), pkt.batteryPercentage, pkt.rssi);
-                    snap_request(SNAP_EVENT, SNAP_TIER_HIGH,
-                        pkt.leakStatus ? "leak_detected" : "leak_cleared");
+                    bool wet = (pkt.leakStatus != 0);
+                    const char *ev = wet ? "leak_detected" : "leak_cleared";
+                    telemetry_v2_publish_leak_event(&(telem_leak_event_t){
+                        .event      = ev,
+                        .source     = LEAK_SOURCE_LORA,
+                        .device_id  = lora_id,
+                        .leak_state = wet,
+                        .battery    = pkt.batteryPercentage,
+                        .has_rssi   = true,
+                        .rssi       = pkt.rssi,
+                    });
+                    snap_request(SNAP_EVENT, SNAP_TIER_HIGH, ev);
                 }
             }
         }
@@ -1490,26 +2068,40 @@ void iothub_task(void *param)
         if (has_valve) {
             ESP_LOGI(IOTHUB_TAG, "Event: BLE Update type=%d", ble_upd_type);
 
-            // Verify connected valve MAC matches provisioned MAC
-            char connected_mac[18];
-            char provisioned_mac[18];
-            bool mac_ok = false;
-            if (ble_valve_get_mac(connected_mac) &&
-                provisioning_get_valve_mac(provisioned_mac)) {
-                if (strcasecmp(connected_mac, provisioned_mac) == 0) {
-                    mac_ok = true;
-                } else {
-                    ESP_LOGW(IOTHUB_TAG,
-                        "Connected valve MAC %s != provisioned %s, skipping",
-                        connected_mac, provisioned_mac);
-                }
-            }
+            // Identity was validated in Phase 2, in the same iteration and BEFORE
+            // the rules engine ran — see the capture site. Re-deriving it here
+            // would reopen the disconnect window it closes.
+            const char *connected_mac = vlk_mac;
 
-            if (mac_ok) {
+            if (vlk_mac_ok) {
                 if (ble_upd_type == BLE_UPD_LEAK) {
-                    const char *ev = ble_valve_get_leak() ? "valve_flood_detected"
-                                                          : "valve_flood_cleared";
-                    telemetry_v2_publish_valve_event(ev);
+                    // Water at the valve's own flood probe. Since 1.9.0 this is
+                    // reported through the SAME leak_detected/leak_cleared family
+                    // as the BLE and LoRa sensors, discriminated by
+                    // source_type:"valve" — one cloud handler for "water was
+                    // detected somewhere". (It was valve_flood_detected /
+                    // valve_flood_cleared with an unrelated payload shape.)
+                    //
+                    // EVERY field here — including the identity — comes from the
+                    // single sample taken in Phase 2, before the rules engine ran.
+                    // Nothing is re-read: the same value that selected the event
+                    // name populates leak_state (so leak_detected can never carry
+                    // leak_state:false), and rmleak is the pre-interlock state
+                    // rather than a coin-flip on GATT write timing.
+                    const char *ev = vlk_wet ? "leak_detected" : "leak_cleared";
+
+                    telemetry_v2_publish_leak_event(&(telem_leak_event_t){
+                        .event         = ev,
+                        .source        = LEAK_SOURCE_VALVE,
+                        .device_id     = connected_mac,
+                        .leak_state    = vlk_wet,
+                        .battery       = vlk_batt,
+                        .has_valve_ext = true,
+                        .valve_state   = vlk_state == 1 ? "open"
+                                       : vlk_state == 0 ? "closed" : "unknown",
+                        .rmleak        = vlk_rmleak,
+                        .fw_version    = vlk_have_fw ? vlk_fw : NULL,
+                    });
                     snap_request(SNAP_EVENT, SNAP_TIER_HIGH, ev);
                 } else if (ble_upd_type == BLE_UPD_STATE) {
                     // Delta-gate: only emit on a REAL state change (was emitted on
@@ -1518,7 +2110,8 @@ void iothub_task(void *param)
                     int vstate = ble_valve_get_state();
                     if (vstate != s_valve_pub_state) {
                         s_valve_pub_state = vstate;
-                        telemetry_v2_publish_valve_event("valve_state_changed");
+                        telemetry_v2_publish_valve_event("valve_state_changed",
+                                                         connected_mac);
                         snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "valve_state_changed");
                     }
                 }
@@ -1536,14 +2129,36 @@ void iothub_task(void *param)
 
             bool leak_changed = update_ble_leak_cache_check_leak(&ble_leak_evt);
             if (leak_changed) {
-                telemetry_v2_publish_leak_event(
-                    ble_leak_evt.leak_detected ? "leak_detected" : "leak_cleared",
-                    "ble_leak_sensor", ble_leak_evt.sensor_mac_str,
-                    ble_leak_evt.leak_detected,
-                    ble_leak_evt.battery, ble_leak_evt.rssi);
-                snap_request(SNAP_EVENT, SNAP_TIER_HIGH,
-                    ble_leak_evt.leak_detected ? "leak_detected" : "leak_cleared");
+                const char *ev = ble_leak_evt.leak_detected ? "leak_detected"
+                                                            : "leak_cleared";
+                telemetry_v2_publish_leak_event(&(telem_leak_event_t){
+                    .event      = ev,
+                    .source     = LEAK_SOURCE_BLE,
+                    .device_id  = ble_leak_evt.sensor_mac_str,
+                    .leak_state = ble_leak_evt.leak_detected,
+                    .battery    = ble_leak_evt.battery,
+                    .has_rssi   = true,
+                    .rssi       = ble_leak_evt.rssi,
+                });
+                snap_request(SNAP_EVENT, SNAP_TIER_HIGH, ev);
             }
+        }
+
+        // ---- Rules engine events (auto-close, rmleak changes) ----
+        // DELIBERATELY LAST among the event publishers, so the cause reaches the
+        // cloud before the consequence: leak_detected (above) then auto_close
+        // (here). The rules engine still EVALUATES in Phase 2 and the valve close
+        // is issued there — only the telemetry is held back, so this reorders the
+        // wire, never the safety action.
+        if (auto_close_json) {
+            telemetry_v2_publish_rules_event(auto_close_json);
+            // Couple a snapshot: auto_close_blocked_override is low-priority (it is
+            // rate-limited and the override state is unchanged); all other rules
+            // events (auto_close, rmleak_cleared, override enable/re-enable) are
+            // safety-critical and flush at the HIGH cadence.
+            bool low = (strstr(auto_close_json, "auto_close_blocked_override") != NULL);
+            snap_request(SNAP_EVENT, low ? SNAP_TIER_LOW : SNAP_TIER_HIGH, "rules");
+            free(auto_close_json);
         }
 
         // ---- Fast boot/reconnect snapshot ARMING (valve-READY, no publish here) ----
@@ -1601,7 +2216,29 @@ void iothub_task(void *param)
             bool window_open = !g_boot_snapshot_sent;
             bool gate_ok = (reason == SNAP_EVENT) || (reason == SNAP_FAST)
                            || !window_open || health_is_boot_sync_complete();
-            if (!gate_ok) {
+
+            // Settle gate: a hub-issued valve command (auto-close, C2D
+            // valve_open/close, override) is only QUEUED by ble_valve_*; the
+            // cached valve state is written later on the ble_valve task. Both
+            // tasks are priority 5, so without this we can publish the event and
+            // its coupled snapshot in the same loop iteration and report the
+            // PRE-transition valve.state — which the UI renders. Applies to every
+            // reason: a heartbeat landing mid-command is equally stale.
+            //
+            // Bounded by ble_valve_cmd_settling()'s own deadline; the +100 ms
+            // deferral feeds the select timeout at the top of the loop, and the
+            // BLE_UPD_STATE that follows the write wakes us sooner than that.
+            bool settling = gate_ok && ble_valve_cmd_settling();
+
+            if (settling) {
+                // INFO, not DEBUG: this fires only while a hub-issued valve command
+                // is genuinely in flight, so it is rare — and it is the only direct
+                // evidence that the settle barrier held a snapshot back. The build
+                // compiles out ESP_LOGD (CONFIG_LOG_MAXIMUM_LEVEL=3), so at DEBUG it
+                // would be invisible on the bench.
+                ESP_LOGI(IOTHUB_TAG, "SNAP deferred — valve command settling");
+                s_snap_due_ms = flush_now + 100;
+            } else if (!gate_ok) {
                 // Due but the (re)sync window is still open — defer ~one commission
                 // poll instead of busy-spinning at 1 tick (the boot arming above will
                 // pull the deadline in the instant the window closes).

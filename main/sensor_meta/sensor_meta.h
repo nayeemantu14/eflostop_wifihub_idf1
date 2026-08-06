@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <strings.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +34,28 @@ typedef enum {
     LOC_OUTDOOR,
     LOC_COUNT
 } location_code_t;
+
+/**
+ * @brief Does this inbound type string name the BLE leak sensor?
+ *
+ * The canonical wire spelling is "ble_leak_sensor" — it matches `source_type` on
+ * every outbound message (leak, auto_close and health events all use that one key
+ * as of 2.0.0), so the backend needs only one lookup table. "ble" and "ble_leak"
+ * are PERMANENT legacy aliases: "ble" is what every already-deployed app/backend
+ * sends in `sensor_meta.sensor_type` and in the `decommission` target, and
+ * "ble_leak" is what the hub itself emitted for a BLE sensor's device type before
+ * 2.0.0 (under the old key name `dev_type`), so a backend may echo it back.
+ * Never remove either alias.
+ *
+ * Single source of truth for the aliases — used by sensor_meta and by the C2D
+ * decommission handler.
+ */
+static inline bool sensor_type_is_ble_leak(const char *s)
+{
+    return s && (strcasecmp(s, "ble_leak_sensor") == 0 ||
+                 strcasecmp(s, "ble_leak") == 0 ||
+                 strcasecmp(s, "ble") == 0);
+}
 
 typedef struct {
     uint8_t sensor_type;                    // sensor_type_t

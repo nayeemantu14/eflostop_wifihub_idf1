@@ -251,19 +251,93 @@ static uint8_t source_to_trigger_bit(leak_source_t source)
     switch (source) {
         case LEAK_SOURCE_BLE:         return RULES_TRIGGER_BLE_LEAK;
         case LEAK_SOURCE_LORA:        return RULES_TRIGGER_LORA;
-        case LEAK_SOURCE_VALVE_FLOOD: return RULES_TRIGGER_VALVE_FLOOD;
+        case LEAK_SOURCE_VALVE:       return RULES_TRIGGER_VALVE_FLOOD;
         default:                      return 0;
     }
 }
 
-static const char *source_to_str(leak_source_t source)
+// Wire spelling of a water-detection source — the ONLY definition of the
+// device-type vocabulary. Public (declared in rules_engine.h) so telemetry_v2.c
+// and health_engine.c emit these exact strings rather than keeping copies that
+// can drift; every outbound message carries them under the same key, source_type.
+const char *leak_source_to_str(leak_source_t source)
 {
     switch (source) {
-        case LEAK_SOURCE_BLE:         return "ble_leak_sensor";
-        case LEAK_SOURCE_LORA:        return "lora";
-        case LEAK_SOURCE_VALVE_FLOOD: return "valve_flood";
-        default:                      return "unknown";
+        case LEAK_SOURCE_BLE:   return "ble_leak_sensor";
+        case LEAK_SOURCE_LORA:  return "lora";
+        case LEAK_SOURCE_VALVE: return "valve";
+        default:                return "unknown";
     }
+}
+
+// Wire device_id for a leak source.
+//
+// Sensors are tracked internally under their real id, so they pass straight
+// through. The valve is tracked under the stable pseudo-id VALVE_SOURCE_ID (the
+// active-leak table matches by string and must survive a BLE dropout), but the
+// cloud joins events to devices on the id VALUE — so on the wire the valve must
+// report the same MAC that its leak event (data.valve_id), the snapshot
+// (data.valve.valve_id) and its health alerts (data.device_id) report. Without
+// this an auto_close would name a device that appears nowhere else in the
+// incident. The KEY here stays device_id: auto_close is a hub decision about a
+// heterogeneous source, not a device reporting itself.
+//
+// ble_valve_get_mac() only answers while the GATT link is up, and an auto_close
+// can fire in the moments around a dropout — so the PROVISIONED MAC is tried
+// second. Without it the same incident would name the valve by its MAC on one
+// event and by the literal "valve" on the next, which is worse for joining than
+// being uniformly wrong: the cloud would see a phantom device called "valve"
+// appear intermittently alongside the real one. provisioning_get_valve_mac()
+// works while disconnected and returns the same upper-case normalised string
+// every other message carries.
+#define WIRE_DEVICE_ID_BUF  18   // "XX:XX:XX:XX:XX:XX" + NUL
+
+// Returns NULL when no real identity exists, so callers OMIT the key rather than
+// shipping a placeholder. It used to fall back to the literal "valve", which put
+// a device on the wire that matches nothing in any snapshot, twin or other event
+// — worse for joining than no identity at all, because it looks like a real id.
+static const char *wire_device_id(const char *source_id, char *buf)
+{
+    if (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0) {
+        if (ble_valve_get_mac(buf) || provisioning_get_valve_mac(buf))
+            return buf;
+        return NULL;                  // valve has no resolvable MAC
+    }
+    return source_id;                 // sensors carry their own id (may be NULL)
+}
+
+// device_id, emitted only when it resolves. Keeps every call site honest without
+// repeating the NULL check.
+static void add_device_id(cJSON *root, const char *source_id, char *buf)
+{
+    const char *id = wire_device_id(source_id, buf);
+    if (id) {
+        cJSON_AddStringToObject(root, "device_id", id);
+    } else if (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0) {
+        // Say so. On a valve-less hub this is expected, but the SAME NULL comes
+        // back if provisioning_get_valve_mac() merely timed out on its mutex —
+        // and then a valve-equipped hub ships an unattributable event, which is
+        // the failure this release exists to remove. Without this line the two
+        // cases are indistinguishable from the log.
+        ESP_LOGW(RULES_TAG, "No valve identity available — event emitted without device_id");
+    }
+}
+
+// device_id for the RMLEAK interlock events, which are always about the valve.
+//
+// Deliberately NO source_type. Everywhere else on the wire source_type answers
+// "what kind of device DETECTED the water" — and the incident these events close
+// may well have been latched by a BLE or LoRa sensor. Emitting source_type:"valve"
+// here would make one key mean two different things, and a backend grouping an
+// incident on (source_type, device_id) would split it in half. The valve is
+// already named unambiguously by device_id.
+//
+// Omitted entirely on a hub provisioned with sensors and no valve, which is a
+// supported configuration in which these events are still reachable.
+static void add_interlock_device_id(cJSON *root)
+{
+    char idbuf[WIRE_DEVICE_ID_BUF];
+    add_device_id(root, VALVE_SOURCE_ID, idbuf);
 }
 
 static sensor_type_t source_to_sensor_type(leak_source_t source)
@@ -271,7 +345,7 @@ static sensor_type_t source_to_sensor_type(leak_source_t source)
     switch (source) {
         case LEAK_SOURCE_BLE:  return SENSOR_TYPE_BLE_LEAK;
         case LEAK_SOURCE_LORA: return SENSOR_TYPE_LORA;
-        default:               return SENSOR_TYPE_BLE_LEAK;  // valve flood has no metadata
+        default:               return SENSOR_TYPE_BLE_LEAK;  // valve has no metadata
     }
 }
 
@@ -325,18 +399,27 @@ static void track_leak_source(const char *source_id, bool leak_active)
     }
 }
 
-static void build_auto_close_telemetry(leak_source_t source, const char *source_id)
+// rmleak_issued: whether the valve was actually reachable, so the RMLEAK+close
+// writes are genuinely being sent. It used to be a hardcoded true, emitted from
+// here — which runs BEFORE the connectivity test — so an auto_close raised while
+// the valve was offline still told the cloud the interlock had been applied. On
+// the bench that produced an auto_close claiming rmleak_asserted:true alongside a
+// snapshot 300 ms later reporting connected:false. The false claim is the one an
+// alerting rule reads as success, which is the worst way to be wrong.
+static void build_auto_close_telemetry(leak_source_t source, const char *source_id,
+                                       bool rmleak_issued)
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) return;
 
+    char idbuf[WIRE_DEVICE_ID_BUF];
     cJSON_AddStringToObject(root, "event", "auto_close");
-    cJSON_AddStringToObject(root, "source_type", source_to_str(source));
-    cJSON_AddStringToObject(root, "sensor_id", source_id ? source_id : "unknown");
-    cJSON_AddBoolToObject(root, "rmleak_asserted", true);
+    cJSON_AddStringToObject(root, "source_type", leak_source_to_str(source));
+    add_device_id(root, source_id, idbuf);
+    cJSON_AddBoolToObject(root, "rmleak_asserted", rmleak_issued);
 
     // Add location if available
-    if (source_id && source != LEAK_SOURCE_VALVE_FLOOD) {
+    if (source_id && source != LEAK_SOURCE_VALVE) {
         const sensor_meta_entry_t *meta = sensor_meta_find(
             source_to_sensor_type(source), source_id);
         if (meta) {
@@ -431,7 +514,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     uint8_t trigger_bit = source_to_trigger_bit(source);
     if (!(rules.trigger_mask & trigger_bit)) {
         ESP_LOGD(RULES_TAG, "Source %s not in trigger mask (0x%02X), ignoring",
-                 source_to_str(source), rules.trigger_mask);
+                 leak_source_to_str(source), rules.trigger_mask);
         xSemaphoreGive(g_mutex);
         return;
     }
@@ -441,7 +524,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // and can immediately auto-close.
     if (!g_leak_incident_active) {
         ESP_LOGW(RULES_TAG, "LEAK INCIDENT latched by %s sensor %s",
-                 source_to_str(source), source_id ? source_id : "unknown");
+                 leak_source_to_str(source), source_id ? source_id : "unknown");
         g_leak_incident_active = true;
         incident_save_to_nvs();
     }
@@ -462,13 +545,14 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
                 ? (int32_t)(g_override_window_expiry - now_epoch) : -1;
 
             ESP_LOGI(RULES_TAG, "Override active — auto-close BLOCKED for %s sensor %s (remaining=%lds)",
-                     source_to_str(source), source_id ? source_id : "unknown", (long)remaining);
+                     leak_source_to_str(source), source_id ? source_id : "unknown", (long)remaining);
 
             cJSON *root = cJSON_CreateObject();
             if (root) {
+                char idbuf[WIRE_DEVICE_ID_BUF];
                 cJSON_AddStringToObject(root, "event", "auto_close_blocked_override");
-                cJSON_AddStringToObject(root, "source_type", source_to_str(source));
-                cJSON_AddStringToObject(root, "sensor_id", source_id ? source_id : "unknown");
+                cJSON_AddStringToObject(root, "source_type", leak_source_to_str(source));
+                add_device_id(root, source_id, idbuf);
                 if (remaining >= 0) {
                     cJSON_AddNumberToObject(root, "override_remaining_s", remaining);
                 }
@@ -501,14 +585,19 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
 
     // === AUTO-CLOSE + RMLEAK: All conditions met ===
     ESP_LOGW(RULES_TAG, "AUTO-CLOSE + RMLEAK triggered by %s sensor %s",
-             source_to_str(source), source_id ? source_id : "unknown");
+             leak_source_to_str(source), source_id ? source_id : "unknown");
 
     g_auto_close_triggered = true;
     g_last_auto_close_tick = now;
     g_rmleak_assert_tick = now;  // Grace period: don't check valve override until BLE write propagates
 
+    // Sample the link ONCE, here, and use the same value for the telemetry and for
+    // the branch below. Reading ble_valve_is_connected() twice would let the event
+    // and the action disagree if the link dropped between them.
+    bool valve_reachable = ble_valve_is_connected();
+
     // Build telemetry before releasing mutex
-    build_auto_close_telemetry(source, source_id);
+    build_auto_close_telemetry(source, source_id, valve_reachable);
 
     xSemaphoreGive(g_mutex);
 
@@ -516,17 +605,28 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // that would fire on reconnect even if the leak has since cleared.
     // If disconnected, the reconciliation (on_valve_connected) handles it.
     //
-    // Order matters for telemetry correctness: ble_valve_set_rmleak() silently
-    // updates the cached RMLEAK state, then ble_valve_close() updates the
-    // cached valve state AND wakes the iothub task via BLE_UPD_STATE. By
-    // issuing RMLEAK first, the cached RMLEAK is already true when the
-    // valve_state_changed event is built, so it correctly reports rmleak=true
-    // alongside the close. (Reverse order races the telemetry build against
-    // the RMLEAK cache update and emits rmleak=false on the close event.)
-    if (ble_valve_is_connected()) {
-        ble_valve_set_rmleak(true);
-        ble_valve_close();
+    // Both calls are QUEUE POSTS ONLY — neither writes the cached valve state.
+    // The cache is written later, on the ble_valve task, inside
+    // write_rmleak_command() / write_valve_command(). RMLEAK-before-close
+    // ordering therefore holds only because both land on the same FIFO
+    // (ble_cmd_queue) drained by one task.
+    //
+    // Because we run on iothub_task and the writes land on ble_valve task, the
+    // snapshot coupled to this event could otherwise flush while the cache still
+    // holds the PRE-close state. ble_valve_open/close/set_rmleak arm a settle
+    // barrier on enqueue; the snapshot flush block honours it via
+    // ble_valve_cmd_settling() and defers until the write lands (or ~1.5 s).
+    if (valve_reachable) {
+        // Enqueue failures are surfaced, not swallowed: a full command queue means
+        // the interlock/close never reaches the valve, and silence there looks
+        // identical to success in every log and every telemetry field.
+        if (!ble_valve_set_rmleak(true))
+            ESP_LOGE(RULES_TAG, "AUTO-CLOSE: RMLEAK enqueue FAILED — interlock not applied");
+        if (!ble_valve_close())
+            ESP_LOGE(RULES_TAG, "AUTO-CLOSE: close enqueue FAILED — valve NOT closed");
     } else {
+        ESP_LOGW(RULES_TAG, "AUTO-CLOSE: valve not connected — scanning; "
+                            "close deferred to reconnect reconciliation");
         ble_valve_connect();  // Trigger scan; reconciliation closes on connect
     }
 }
@@ -676,6 +776,19 @@ bool rules_engine_reset_leak_incident(void)
         cJSON *root = cJSON_CreateObject();
         if (root) {
             cJSON_AddStringToObject(root, "event", "rmleak_cleared");
+            // The RMLEAK interlock lives on the valve, so this event names the
+            // valve like every other device-scoped message. Hub-generated, hence
+            // the generic device_id (same rule as health alerts and auto_close).
+            // Before 2.0.1 it carried neither key and was unattributable.
+            //
+            // BOTH keys are omitted unless a real MAC resolves. A hub can be
+            // provisioned with sensors and NO valve (see should_remain_provisioned),
+            // and a sensor leak still latches an incident — so these events are
+            // reachable with no valve in existence. wire_device_id() would then
+            // fall back to the literal "valve", inventing a phantom device that
+            // appears in no snapshot, no twin and no other event. No identity is
+            // better than a wrong one.
+            add_interlock_device_id(root);
             if (had_override) {
                 cJSON_AddBoolToObject(root, "override_cancelled", true);
             }
@@ -932,10 +1045,28 @@ void rules_engine_on_valve_connected(void)
             cJSON *root = cJSON_CreateObject();
             if (root) {
                 cJSON_AddStringToObject(root, "event", "auto_close");
-                cJSON_AddStringToObject(root, "source_type", "reconnect");
-                cJSON_AddStringToObject(root, "sensor_id",
-                    g_active_leak_count > 0 ? g_active_leak_ids[0] : "unknown");
-                cJSON_AddBoolToObject(root, "rmleak_asserted", true);
+                char idbuf[WIRE_DEVICE_ID_BUF];
+                // Why this auto_close fired, NOT what kind of device reported it.
+                // Before 2.0.0 this was source_type:"reconnect" — a value outside
+                // the device-type vocabulary, so a consumer validating source_type
+                // against the enum saw a member that does not exist. The real
+                // source type is not recoverable here: the active-leak table keys
+                // by id only, and re-deriving a type from the id's string format
+                // is the fragility this release removed everywhere else.
+                cJSON_AddStringToObject(root, "cause", "reconnect");
+                if (g_active_leak_count > 0)
+                    add_device_id(root, g_active_leak_ids[0], idbuf);
+                // Same honesty rule as the main auto_close path: report whether the
+                // writes are actually being issued, not what we intended.
+                //
+                // The previous comment here claimed this "fires FROM the connect
+                // handler" so the link must be up. It does not — it runs on
+                // iothub_task when BLE_UPD_CONNECTED is DEQUEUED, which can be
+                // arbitrarily later than the connect itself (the queue is 16 deep
+                // and one item is dequeued per loop iteration). The link can have
+                // dropped again by the time we get here.
+                cJSON_AddBoolToObject(root, "rmleak_asserted",
+                                      ble_valve_is_connected());
                 cJSON_AddNumberToObject(root, "active_leak_count", g_active_leak_count);
                 if (g_pending_telemetry) free(g_pending_telemetry);
                 g_pending_telemetry = cJSON_PrintUnformatted(root);
@@ -944,9 +1075,14 @@ void rules_engine_on_valve_connected(void)
 
             xSemaphoreGive(g_mutex);
 
-            /* RMLEAK before close — see comment in rules_engine_evaluate_leak. */
-            ble_valve_set_rmleak(true);
-            ble_valve_close();
+            /* RMLEAK before close — see comment in rules_engine_evaluate_leak.
+             * Enqueue failures surfaced, as on the main auto-close path: a full
+             * command queue here means the deferred close never happens, and
+             * this is the recovery path for a leak the hub already missed once. */
+            if (!ble_valve_set_rmleak(true))
+                ESP_LOGE(RULES_TAG, "RECONNECT AUTO-CLOSE: RMLEAK enqueue FAILED");
+            if (!ble_valve_close())
+                ESP_LOGE(RULES_TAG, "RECONNECT AUTO-CLOSE: close enqueue FAILED — valve NOT closed");
             return;
         }
     }
@@ -1080,6 +1216,11 @@ void rules_engine_tick(void)
             cJSON *root = cJSON_CreateObject();
             if (root) {
                 cJSON_AddStringToObject(root, "event", "rmleak_auto_cleared");
+                // Same rule as rmleak_cleared above: the interlock is the valve's,
+                // so name it — but only when a real MAC resolves. Added in 2.0.1;
+                // before that this event reached the cloud with no source_type and
+                // no identity at all, so a backend could not attribute it.
+                add_interlock_device_id(root);
                 cJSON_AddNumberToObject(root, "clear_after_seconds", AUTO_CLEAR_TIMEOUT_MS / 1000);
                 if (g_pending_telemetry) free(g_pending_telemetry);
                 g_pending_telemetry = cJSON_PrintUnformatted(root);

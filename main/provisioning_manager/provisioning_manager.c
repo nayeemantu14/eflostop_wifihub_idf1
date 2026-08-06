@@ -1,6 +1,7 @@
 #include "provisioning_manager.h"
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "nvs.h"
@@ -398,21 +399,62 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
     provisioning_config_t new_config = g_config; // Start with current config
     bool has_updates = false;
 
-    // Parse valve_mac
-    cJSON *valve_mac_json = cJSON_GetObjectItem(root, "valve_mac");
-    if (valve_mac_json && cJSON_IsString(valve_mac_json)) {
-        const char *mac_str = valve_mac_json->valuestring;
-        if (validate_mac_string(mac_str)) {
-            strncpy(new_config.valve_mac, mac_str, sizeof(new_config.valve_mac) - 1);
-            new_config.valve_mac[sizeof(new_config.valve_mac) - 1] = '\0';
-            ESP_LOGI(PROV_TAG, "Valve MAC: %s", new_config.valve_mac);
-            has_updates = true;
-        } else {
-            ESP_LOGE(PROV_TAG, "Invalid valve MAC format: %s", mac_str);
-            xSemaphoreGive(g_prov_mutex);
-            cJSON_Delete(root);
-            return false;
+    // Parse the valve identifier.
+    //
+    // Canonical key is "valve_id" — the same name the hub reports back on the
+    // snapshot, the leak/valve events, the lifecycle message and twin reported,
+    // so the app sends and receives one spelling.
+    //
+    // "valve_mac" is the pre-2.0.0 name, still accepted so an app or production
+    // tool built against the old contract keeps commissioning. Remove the
+    // fallback once both are updated. valve_id wins if a payload carries both.
+    // Each key is validated on its own and the first USABLE one wins, rather than
+    // the first one merely present. During the transition a backend may populate
+    // both — sending valve_mac always and valve_id only once it knows it — and a
+    // malformed valve_id must not discard a perfectly good valve_mac beside it.
+    const char *valve_id_str  = NULL;
+    bool        valve_key_seen = false;
+
+    // NOTE the guard is cJSON_IsString, not mere presence. A non-string value —
+    // in practice JSON null, which is what an app emits for "no valve in this
+    // payload" when it serialises optional fields — must be SKIPPED, exactly as
+    // it was before 2.0.0. Treating null as "a valve was offered" would fail the
+    // whole provision and take the sensor arrays down with it.
+    cJSON *vj = cJSON_GetObjectItem(root, "valve_id");
+    if (vj && cJSON_IsString(vj)) {
+        valve_key_seen = true;
+        if (validate_mac_string(vj->valuestring))
+            valve_id_str = vj->valuestring;
+        else
+            ESP_LOGW(PROV_TAG, "provision: 'valve_id' is not a valid MAC string");
+    }
+    if (!valve_id_str) {
+        vj = cJSON_GetObjectItem(root, "valve_mac");
+        if (vj && cJSON_IsString(vj)) {
+            valve_key_seen = true;
+            ESP_LOGW(PROV_TAG,
+                     "provision: 'valve_mac' is deprecated — send 'valve_id'");
+            if (validate_mac_string(vj->valuestring))
+                valve_id_str = vj->valuestring;
+            else
+                ESP_LOGW(PROV_TAG, "provision: 'valve_mac' is not a valid MAC string");
         }
+    }
+
+    if (valve_id_str) {
+        strncpy(new_config.valve_mac, valve_id_str, sizeof(new_config.valve_mac) - 1);
+        new_config.valve_mac[sizeof(new_config.valve_mac) - 1] = '\0';
+        ESP_LOGI(PROV_TAG, "Valve MAC: %s", new_config.valve_mac);
+        has_updates = true;
+    } else if (valve_key_seen) {
+        // A valve key was offered AS A STRING and no spelling of it yielded a
+        // usable MAC. Abort the whole provision, as before — silently keeping the
+        // previously stored valve while acking "ok" would be worse than a visible
+        // failure.
+        ESP_LOGE(PROV_TAG, "No usable valve identifier in provision payload");
+        xSemaphoreGive(g_prov_mutex);
+        cJSON_Delete(root);
+        return false;
     }
 
     // Parse lora_sensors
@@ -474,7 +516,53 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
         has_updates = true;
     }
 
-    // Parse optional rules config
+    // Parse the setup-flow auto-close opt-in.
+    //
+    // Top-level "auto_close_enabled" is the COMMISSIONING form: the app asks the
+    // user one yes/no question while adding the valve and sensors — "should a leak
+    // shut the water off?" — and sends the answer in the same payload as the
+    // devices it applies to.
+    //
+    // Opting IN also arms EVERY trigger source, not just the sensor ones. A user
+    // who wants leaks to close the valve means all of them, including the valve's
+    // own flood probe (bit 2) — the valve standing in water is the least ambiguous
+    // leak there is. Per-source tuning stays available afterwards via rules_config.
+    //
+    // Opting OUT flips the master flag ONLY and leaves trigger_mask untouched.
+    // rules_engine_evaluate_leak() tests auto_close_enabled BEFORE the mask, so the
+    // mask is not consulted while the flag is false; clearing it would buy nothing
+    // and would destroy a per-source selection the user gets back for free by
+    // re-enabling.
+    //
+    // NOTE this deliberately differs from the same key in rules_config, which is a
+    // pure master switch and never touches the mask. There the caller is editing
+    // settings and says exactly what it wants; here it is answering a setup
+    // question and expects the obvious whole-system behaviour.
+    cJSON *auto_close_top = cJSON_GetObjectItem(root, "auto_close_enabled");
+    if (auto_close_top && cJSON_IsBool(auto_close_top)) {
+        new_config.rules.auto_close_enabled = cJSON_IsTrue(auto_close_top);
+        if (new_config.rules.auto_close_enabled) {
+            new_config.rules.trigger_mask = RULES_TRIGGER_ALL;
+        }
+        ESP_LOGI(PROV_TAG, "Auto-close opt-in: %s (triggers=0x%02X)",
+                 new_config.rules.auto_close_enabled ? "ENABLED" : "disabled",
+                 new_config.rules.trigger_mask);
+        has_updates = true;
+    } else if (auto_close_top) {
+        // Same guard style as valve_id: a non-bool is ignored, not an error. In
+        // practice this is JSON null from an app that serialises optional fields —
+        // "the user was not asked", which must leave the stored setting alone
+        // rather than silently disarming auto-close.
+        ESP_LOGW(PROV_TAG,
+                 "provision: 'auto_close_enabled' is not a JSON boolean — ignored");
+    }
+
+    // Parse optional rules config.
+    //
+    // Parsed AFTER the top-level flag on purpose: an explicit rules object is the
+    // specific form and wins over the setup-flow shorthand, so a payload carrying
+    // both {"auto_close_enabled":true} and {"rules":{"trigger_mask":3}} ends up
+    // enabled with only the two sensor bits armed.
     cJSON *rules_json = cJSON_GetObjectItem(root, "rules");
     if (rules_json && cJSON_IsObject(rules_json)) {
         cJSON *auto_close = cJSON_GetObjectItem(rules_json, "auto_close_enabled");
@@ -520,6 +608,9 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
     ESP_LOGI(PROV_TAG, "Valve MAC: %s", g_config.valve_mac);
     ESP_LOGI(PROV_TAG, "LoRa sensors: %d", g_config.lora_sensor_count);
     ESP_LOGI(PROV_TAG, "BLE leak sensors: %d", g_config.ble_leak_sensor_count);
+    ESP_LOGI(PROV_TAG, "Auto-close: %s triggers=0x%02X",
+             g_config.rules.auto_close_enabled ? "enabled" : "disabled",
+             g_config.rules.trigger_mask);
 
     return true;
 }
@@ -580,6 +671,29 @@ bool provisioning_decommission(void)
     return true;
 }
 
+// Canonical MAC rendering on the wire is UPPERCASE colon-separated, matching what the
+// radio path already produces ("%02X" in app_ble_leak.c mac_bytes_to_str and in
+// app_ble_valve.c for g_valve_mac). A PROVISIONED mac arrives in whatever case the
+// cloud sent it, and it reaches the wire by a different route — the health table, and
+// from there the snapshot device arrays, health events, the lifecycle message and twin
+// reported. Before this, a sensor commissioned in lower case appeared as
+// "00:80:e1:2a:3b:00" in every snapshot and "00:80:E1:2A:3B:00" in every event: one
+// physical device under two values of data.device_id, which is the key the cloud joins
+// on. Confirmed on a real capture, 26 lower-case vs 11 upper-case occurrences.
+//
+// Normalising on READ rather than on store also repairs hubs already commissioned with
+// a lower-case MAC, with no NVS migration. Safe: every lookup against these strings is
+// strcasecmp (health_engine find_device, sensor_meta_find, the connected-MAC gate in
+// app_iothub) or an sscanf "%02X" parse (the BLE whitelist), which accept either case.
+// The rules engine's three case-sensitive strcmp calls compare tracking ids that never
+// originate here.
+static void mac_normalize_upper(char *s)
+{
+    if (!s) return;
+    for (; *s; s++)
+        *s = (char)toupper((unsigned char)*s);
+}
+
 bool provisioning_get_valve_mac(char *mac_out)
 {
     if (!mac_out || !g_initialized || g_prov_mutex == NULL) {
@@ -590,6 +704,7 @@ bool provisioning_get_valve_mac(char *mac_out)
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         if (g_config.state == PROV_STATE_PROVISIONED && g_config.valve_mac[0] != '\0') {
             strcpy(mac_out, g_config.valve_mac);
+            mac_normalize_upper(mac_out);
             result = true;
         }
         xSemaphoreGive(g_prov_mutex);
@@ -660,6 +775,8 @@ bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out)
         if (g_config.state == PROV_STATE_PROVISIONED && g_config.ble_leak_sensor_count > 0) {
             for (int i = 0; i < g_config.ble_leak_sensor_count; i++) {
                 strncpy(macs_out[i], g_config.ble_leak_sensors[i], 18);
+                macs_out[i][17] = '\0';
+                mac_normalize_upper(macs_out[i]);
             }
             *count_out = g_config.ble_leak_sensor_count;
             result = true;

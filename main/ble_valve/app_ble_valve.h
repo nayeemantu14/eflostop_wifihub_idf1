@@ -125,6 +125,19 @@ extern "C"
     bool ble_valve_is_connected(void);
 
     /**
+     * @brief True while a hub-issued valve command has been queued but its effect
+     *        on the cached valve state has not yet landed.
+     *
+     * ble_valve_open/close/set_rmleak only enqueue; the cache is written later on
+     * the ble_valve task. Publishing a snapshot in that window reports the
+     * PRE-transition valve state, which the UI then renders. The snapshot flush
+     * block defers while this is true. Self-clearing after VALVE_CMD_SETTLE_MS so
+     * a command that never reaches GATT (link down, mutex timeout) makes the
+     * snapshot late, never blocked.
+     */
+    bool ble_valve_cmd_settling(void);
+
+    /**
      * @brief Cancel any pending auto-close commands (valve CLOSE + RMLEAK SET).
      * Called by the rules engine when all leak sources clear before the valve
      * reconnects, so stale close commands are not applied on reconnect.
