@@ -15,8 +15,7 @@ Four pieces of state drive everything:
 | **Override window** | The 24 h "water access" state. While active, auto-close is **blocked** (leaks still reported). |
 | **Active-leak count** | How many sources are currently wet *and* eligible to shut off. Drives the 30 s auto-clear and the leak-reset guard. |
 
-Two **independent** things happen on every leak: it is always **reported** (`leak_detected` /
-`valve_flood_detected`), and *separately* it may **shut off** the valve (only when eligible). Turning
+Two **independent** things happen on every leak: it is always **reported** (`leak_detected`), and *separately* it may **shut off** the valve (only when eligible). Turning
 the valve off and reporting a leak are different code paths.
 
 ### Lifecycle at a glance
@@ -35,9 +34,9 @@ the valve off and reporting a leak are different code paths.
 
 | # | Scenario | Valve | Events |
 |---|---|---|---|
-| **A1** | Eligible (provisioned + auto-close ON + source in trigger mask + no override) | **Closes**, RMLEAK set | `leak_detected`/`valve_flood_detected`, `auto_close`, `valve_state_changed{closed,rmleak:true}` |
+| **A1** | Eligible (provisioned + auto-close ON + source in trigger mask + no override) | **Closes**, RMLEAK set | `leak_detected`, `auto_close`, `valve_state_changed{closed,rmleak:true}` |
 | **A2** | Override window **active** | **Stays open** (auto-close blocked) | `leak_detected`…, `auto_close_blocked_override` (max once/60 s) |
-| **A3** | Auto-close **OFF** *or* source **not in trigger mask** | **Stays open** | `leak_detected`/`valve_flood_detected` **only** (rules engine emits nothing) |
+| **A3** | Auto-close **OFF** *or* source **not in trigger mask** | **Stays open** | `leak_detected` **only** (rules engine emits nothing) |
 | **A4** | Eligible but valve **already closed + RMLEAK already set** | Unchanged (idempotent) | `leak_detected`… only (no second `auto_close`) |
 
 *Note (A2/A4): the incident is latched even when the close is blocked/redundant, so the valve can close the moment the override ends.*
@@ -60,7 +59,7 @@ the valve off and reporting a leak are different code paths.
 
 | # | Scenario | Valve | Events |
 |---|---|---|---|
-| **C1** | Any further leak while window active | **Stays open** (blocked) | `leak_detected`/`valve_flood_detected` (per change), `auto_close_blocked_override` (rate-limited, ≤1/60 s) |
+| **C1** | Any further leak while window active | **Stays open** (blocked) | `leak_detected` (per change), `auto_close_blocked_override` (rate-limited, ≤1/60 s) |
 
 ---
 
@@ -89,7 +88,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 
 | # | Scenario | Valve | Events |
 |---|---|---|---|
-| **E1** | All sources dry for **30 s** while an incident is active | **Stays closed**, RMLEAK lifted (does *not* reopen) | `leak_cleared`/`valve_flood_cleared`, then `rmleak_auto_cleared{clear_after_seconds:30}` |
+| **E1** | All sources dry for **30 s** while an incident is active | **Stays closed**, RMLEAK lifted (does *not* reopen) | `leak_cleared`/`leak_cleared`, then `rmleak_auto_cleared{clear_after_seconds:30}` |
 | **E2** | `leak_reset` while a leak is **still wet** → **refused** (guard) | Unchanged (interlock held) | `cmd_ack{error: "A leak is still active. Fix the leak first, or use override to open the valve during a leak."}` |
 | **E3** | `leak_reset` when **all dry** (incident/RMLEAK/window to clear) | Unchanged (interlock cleared, **valve not opened**) | `rmleak_cleared` (`override_cancelled:true` if a window was active), `cmd_ack{ok}` |
 
@@ -122,7 +121,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 
 | # | Scenario | Valve | Events |
 |---|---|---|---|
-| **H1** | The valve is standing in water (its own flood probe wet) | **No override (remote or physical) can keep it open**; it also drives normal auto-close like A1/A2 | `valve_flood_detected`; an attempted `override_enable` returns `cmd_ack{error:"Water detected at the valve…"}` |
+| **H1** | The valve is standing in water (its own flood probe wet) | **No override (remote or physical) can keep it open**; it also drives normal auto-close like A1/A2 | `leak_detected`; an attempted `override_enable` returns `cmd_ack{error:"Water detected at the valve…"}` |
 
 ---
 
@@ -141,4 +140,10 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 *Event-name glossary: `auto_close` (hub shut the valve), `auto_close_blocked_override` (leak ignored during
 window), `water_access_override_enabled`/`_expired`, `auto_close_reenabled` (override cancelled),
 `rmleak_cleared` (manual reset), `rmleak_auto_cleared` (30 s auto), `valve_state_changed`, `cmd_ack`,
-`leak_detected`/`leak_cleared`, `valve_flood_detected`/`valve_flood_cleared`.*
+`leak_detected`/`leak_cleared`.*
+
+> **Changed in firmware 1.9.0.** Water at the valve's own probe used to be reported as
+> `valve_flood_detected` / `valve_flood_cleared`. It is now reported as `leak_detected` / `leak_cleared`,
+> the same as any sensor, with `data.source_type: "valve"` telling you where the water was seen. Every
+> row above that says `leak_detected` therefore covers both the sensors and the valve probe. The
+> identity key on these events is `data.device_id` (it was `data.sensor_id`).

@@ -3,8 +3,12 @@
 """Build the telemetry message catalogue: every real message, as a concrete example.
 
 Outputs:
-    eFloStop2_Telemetry_Messages_v1.0.docx
+    eFloStop2_Telemetry_Messages_v3.0.docx
     telemetry_messages.md
+
+Earlier .docx revisions are deliberately NOT regenerated — each stays on disk as the
+record of the firmware it described, so any two can be compared side by side.
+Bump DOC_VERSION / PREV_* (and only those) when the wire format changes again.
 
 Run: python docs/telemetry/build_messages.py
 """
@@ -27,6 +31,17 @@ from docx.shared import Inches, Pt, RGBColor                 # noqa: E402
 
 MONO = "Consolas"
 TITLE = "eFloStop II Wi-Fi Hub — Telemetry Message Catalogue"
+
+# Document revision, independent of the firmware version below it.
+# v1.0 = firmware 1.8.0, separate valve_flood_* events, sensor_id identity key.
+# v2.0 = firmware 1.9.0, unified leak events, device_id identity key everywhere.
+# v3.0 = firmware 2.0.0, type-named identity keys (valve_id / sensor_id), one
+#        source_type vocabulary on every outbound message.
+DOC_VERSION = "3.0"
+
+# The revision this one supersedes, named in the "What changed" section.
+PREV_VERSION = "2.0"
+PREV_FW = "1.9.0"
 
 
 def git(*a):
@@ -80,17 +95,41 @@ def mono(doc, text, size=8.5, shade=True):
     return p
 
 
+def _runs(p, text, size, bold=False, italic=False):
+    """Emit runs for `text`, honouring `code` spans NESTED inside bold/italic.
+
+    Without this, **bold with `code` inside** matches as one bold chunk and the
+    backticks render literally on the page.
+    """
+    for part in re.split(r"(`[^`]+`)", text):
+        if not part:
+            continue
+        if part.startswith("`") and part.endswith("`"):
+            r = p.add_run(part[1:-1]); r.font.name = MONO; r.font.size = Pt(size - 1)
+        else:
+            r = p.add_run(part); r.font.size = Pt(size)
+        r.bold = bold
+        r.italic = italic
+
+
 def rich(doc, text, size=10.5, italic=False):
+    """Inline markdown -> Word runs: `code`, **bold**, *italic*, and code nested in either.
+
+    The bold alternative MUST precede the italic one in the pattern, or `**x**`
+    matches as an empty italic and the asterisks leak into the rendered page.
+    """
     p = doc.add_paragraph()
-    for chunk in re.split(r"(`[^`]+`|\*\*[^*]+\*\*)", text):
+    for chunk in re.split(r"(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*)", text):
         if not chunk:
             continue
         if chunk.startswith("`") and chunk.endswith("`"):
             r = p.add_run(chunk[1:-1]); r.font.name = MONO; r.font.size = Pt(size - 1)
         elif chunk.startswith("**") and chunk.endswith("**"):
-            r = p.add_run(chunk[2:-2]); r.bold = True; r.font.size = Pt(size)
+            _runs(p, chunk[2:-2], size, bold=True)
+        elif chunk.startswith("*") and chunk.endswith("*"):
+            _runs(p, chunk[1:-1], size, italic=True)
         else:
-            r = p.add_run(chunk); r.font.size = Pt(size); r.italic = italic
+            _runs(p, chunk, size, italic=italic)
     return p
 
 
@@ -115,10 +154,12 @@ def build_docx(path):
 
     doc.add_heading(TITLE, level=0)
     p = doc.add_paragraph()
-    r = p.add_run("Every message the hub can send, as a real example"); r.italic = True; r.font.size = Pt(13)
+    r = p.add_run(f"Every message the hub can send, as a real example  ·  v{DOC_VERSION}")
+    r.italic = True; r.font.size = Pt(13)
 
     t = doc.add_table(rows=0, cols=2); t.style = "Table Grid"
-    for k, v in [("Firmware version", f"{FW}  [{FW_CITE}]"),
+    for k, v in [("Document version", f"{DOC_VERSION}  (supersedes v{PREV_VERSION}, which documented firmware {PREV_FW})"),
+                 ("Firmware version", f"{FW}  [{FW_CITE}]"),
                  ("Git commit", SHA),
                  ("Schema", "eflostop.v2"),
                  ("Topic", "devices/<device_id>/messages/events/  (QoS 1)"),
@@ -135,6 +176,31 @@ def build_docx(path):
     doc.add_heading("Contents", 1)
     p = doc.add_paragraph(); add_field(p, 'TOC \\o "1-2" \\h \\z \\u')
     doc.add_paragraph("Word fills this in when fields are updated: select all (Ctrl+A) then press F9.")
+
+    # What changed against the previous document revision — for side-by-side comparison.
+    doc.add_heading(f"What changed since v{PREV_VERSION}", 1)
+    rich(doc, f"Document **v{PREV_VERSION}** described firmware **{PREV_FW}**; this is **v"
+              f"{DOC_VERSION}**, describing firmware **{FW}**. v{PREV_VERSION} is kept unchanged so the two "
+              "can be read side by side. Every row below is a breaking change — there is no "
+              "compatibility shim on the telemetry plane, and every hub runs the new shape.")
+    ct = doc.add_table(rows=1, cols=3); ct.style = "Table Grid"
+    for i, h in enumerate(["", f"v{PREV_VERSION} — firmware {PREV_FW}", f"v{DOC_VERSION} — firmware {FW}"]):
+        cell = ct.rows[0].cells[i]; cell.text = ""
+        rr = cell.paragraphs[0].add_run(h); rr.bold = True; rr.font.size = Pt(8.5)
+        shd = OxmlElement("w:shd"); shd.set(qn("w:val"), "clear"); shd.set(qn("w:fill"), "DDDDDD")
+        cell._tc.get_or_add_tcPr().append(shd)
+    for what, old, new in M.CHANGES:
+        cells = ct.add_row().cells
+        for i, val in enumerate([what, old, new]):
+            cells[i].text = ""
+            rr = cells[i].paragraphs[0].add_run(val)
+            rr.font.size = Pt(8)
+            if i:
+                rr.font.name = MONO
+                rr.font.size = Pt(7.5)
+        for i, w in enumerate([1.6, 2.5, 2.6]):
+            cells[i].width = Inches(w)
+    doc.add_page_break()
 
     # Index of every message.
     doc.add_heading("Index of messages", 1)
@@ -159,6 +225,8 @@ def build_docx(path):
 
     for group in M.GROUP_ORDER:
         doc.add_heading(group, 1)
+        if group in M.GROUP_NOTES:
+            rich(doc, M.GROUP_NOTES[group], size=10)
         for m in [x for x in M.MESSAGES if x["group"] == group]:
             doc.add_heading(f"{m['id']} — {m['title']}", 2)
             rich(doc, m["when"])
@@ -168,19 +236,44 @@ def build_docx(path):
             r.font.color.rgb = RGBColor(0x70, 0x70, 0x70)
 
     cp = doc.core_properties
-    cp.title = TITLE
+    cp.title = f"{TITLE} v{DOC_VERSION}"
     cp.author = "Claude Code"
     import datetime
-    fixed = datetime.datetime(2026, 7, 31, 0, 0, 0)
+    # Pinned so rebuilds are byte-comparable. Distinct per doc version so the two
+    # revisions do not look identical in Windows file properties.
+    fixed = datetime.datetime(2026, 8, 3, 0, 0, 0)
     cp.created = cp.modified = fixed
     doc.save(path)
+    assert_no_leaked_markdown(doc)
     print(f"docx OK: {path}")
 
 
+def assert_no_leaked_markdown(doc):
+    """No `code`, **bold** or *italic* marker may survive into the rendered page.
+
+    JSON bodies legitimately contain no markers, so any hit is a renderer bug —
+    historically a bold span swallowing a nested code span. Fails the build rather
+    than shipping a page with visible asterisks.
+    """
+    bad = []
+    for p in doc.paragraphs:
+        t = p.text
+        if "`" in t or "**" in t or re.search(r"(?<!\*)\*(?!\*)", t):
+            bad.append(t[:160].replace("\n", " "))
+    if bad:
+        print("BUILD FAILED: markdown markers leaked into the rendered document:",
+              file=sys.stderr)
+        for b in bad:
+            print("  -", b, file=sys.stderr)
+        raise SystemExit(1)
+
+
 def build_md(path):
-    L = [f"# {TITLE}", "", "*Every message the hub can send, as a real example*", "",
+    L = [f"# {TITLE}", "",
+         f"*Every message the hub can send, as a real example — v{DOC_VERSION}*", "",
          "> GENERATED FILE — produced by `docs/telemetry/build_messages.py` from `messages_data.py`.", "",
          "| | |", "|---|---|",
+         f"| Document version | {DOC_VERSION} (supersedes v{PREV_VERSION}, which documented firmware {PREV_FW}) |",
          f"| Firmware version | {FW} — `{FW_CITE}` |",
          f"| Git commit | `{SHA}` |",
          "| Schema | `eflostop.v2` |",
@@ -188,6 +281,14 @@ def build_md(path):
          f"| Message count | {len(M.MESSAGES)} distinct messages across {len(M.GROUP_ORDER)} families |",
          ""]
     L.append(M.INTRO)
+    L += ["", f"## What changed since v{PREV_VERSION}", "",
+          f"Document **v{PREV_VERSION}** described firmware **{PREV_FW}**; this is **v{DOC_VERSION}**, describing "
+          f"firmware **{FW}**. v{PREV_VERSION} of the `.docx` is kept unchanged so the two can be read side by "
+          "side. Every row below is a breaking change — there is no compatibility shim on the "
+          "telemetry plane.", "",
+          f"| | v{PREV_VERSION} — firmware {PREV_FW} | v{DOC_VERSION} — firmware {FW} |", "|---|---|---|"]
+    for what, old, new in M.CHANGES:
+        L.append(f"| {what} | `{old}` | `{new}` |")
     L += ["", "## Index of messages", "", "| ID | `type` | `data.event` | Message |", "|---|---|---|---|"]
     for m in M.MESSAGES:
         ev = m["msg"]["data"].get("event", "—")
@@ -195,6 +296,8 @@ def build_md(path):
     L.append("")
     for group in M.GROUP_ORDER:
         L += [f"## {group}", ""]
+        if group in M.GROUP_NOTES:
+            L += ["> " + M.GROUP_NOTES[group], ""]
         for m in [x for x in M.MESSAGES if x["group"] == group]:
             L += [f"### {m['id']} — {m['title']}", "", m["when"], "", "```json", j(m["msg"]), "```", "",
                   f"*`{m['cite']}`*", ""]
@@ -236,5 +339,7 @@ def check():
 if __name__ == "__main__":
     check()
     build_md(os.path.join(HERE, "telemetry_messages.md"))
-    build_docx(os.path.join(HERE, "eFloStop2_Telemetry_Messages_v1.0.docx"))
+    # v1.0 is NOT regenerated — it stays on disk as the firmware-1.8.0 record.
+    build_docx(os.path.join(
+        HERE, f"eFloStop2_Telemetry_Messages_v{DOC_VERSION}.docx"))
     print("\nDone.")
