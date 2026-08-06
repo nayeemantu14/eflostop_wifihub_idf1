@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eflostop.local/schemas/rules_event.schema.json",
+  "title": "Rules-engine event",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "x-plane": "D2C telemetry",
+  "x-firmware-version": "1.8.0",
+  "x-firmware-version-source": "CMakeLists.txt:12",
+  "x-tree-state": "working tree, uncommitted",
+  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Wire-contract identifier. Constant; bump signals a breaking payload change. Range/enum: Fixed literal \"eflostop.v2\".",
+      "x-source": "main/telemetry/telemetry_v2.c:64; constant main/telemetry/telemetry_v2.h:14",
+      "x-category": "12.1",
+      "const": "eflostop.v2"
+    },
+    "ts": {
+      "type": "number",
+      "description": "Device wall-clock at message BUILD time. The whole message is destroyed (never sent, never buffered) if ts < 1704067200, so a pre-SNTP leak event is lost permanently. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
+      "x-source": "main/telemetry/telemetry_v2.c:66-76; SNTP gate :70-74; threshold :57",
+      "x-category": "12.1"
+    },
+    "gateway": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Immutable hub id derived from the WiFi STA MAC in eFuse. Same string used as the DPS registration id and the MQTT client id. Range/enum: \"GW-\" + 12 uppercase hex.",
+          "x-source": "main/telemetry/telemetry_v2.c:79; derivation main/hub_identity/hub_identity.c:29-37",
+          "x-category": "12.1"
+        },
+        "short_id": {
+          "type": "string",
+          "description": "Last 2 bytes of the STA MAC as 4 hex chars. Also the SoftAP SSID suffix (WiFi-Hub-XXXX) the installer matches during setup. Range/enum: 4 uppercase hex chars.",
+          "x-source": "main/telemetry/telemetry_v2.c:80; main/hub_identity/hub_identity.c:33-37",
+          "x-category": "12.1"
+        },
+        "name": {
+          "type": "string",
+          "description": "User-assigned hub name from twin desired hub_name or C2D set_hub_name. NOTE the opposite convention on the twin plane, where hub_name is always emitted as \"\". Range/enum: free text, max 31 chars (HUB_NAME_MAX_LEN). Presence: conditional: OMITTED when the stored name is empty.",
+          "x-source": "main/telemetry/telemetry_v2.c:81-83; twin counterpart main/iothub/app_iothub.c:956",
+          "x-category": "12.1"
+        },
+        "fw": {
+          "type": "string",
+          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"1.8.0\" in the working tree (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
+          "x-source": "main/telemetry/telemetry_v2.c:84; main/telemetry/telemetry_v2.c:50-54; source CMakeLists.txt:12",
+          "x-category": "12.4"
+        },
+        "uptime_s": {
+          "type": "number",
+          "description": "Seconds since boot from the monotonic esp_timer. On an offline-buffer replay this is the ORIGINAL build-time value, possibly from a previous boot. Units: seconds. Range/enum: >= 0.",
+          "x-source": "main/telemetry/telemetry_v2.c:85-86; replay main/offline_buffer/offline_buffer.c:148",
+          "x-category": "12.3"
+        }
+      },
+      "required": [
+        "id",
+        "short_id",
+        "fw",
+        "uptime_s"
+      ],
+      "additionalProperties": false,
+      "description": "Hub identity + liveness container.",
+      "x-source": "main/telemetry/telemetry_v2.c:78, :87",
+      "x-category": "12.1"
+    },
+    "type": {
+      "type": "string",
+      "description": "Envelope discriminator. Tells the backend which `data` shape to expect. Range/enum: enum: \"lifecycle\" | \"snapshot\" | \"event\".",
+      "x-source": "main/telemetry/telemetry_v2.c:89; values passed at :336, :374, :610, :637, :659, :679, :700",
+      "x-category": "12.1",
+      "const": "event"
+    },
+    "data": {
+      "type": "object",
+      "properties": {
+        "event": {
+          "type": "string",
+          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum: enum, 18 values: online | valve_state_changed | valve_flood_detected | valve_flood_cleared | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
+          "x-source": "main/telemetry/telemetry_v2.c:340 (\"online\"), :614, :641, :668, :687, :704; main/rules_engine/rules_engine.c:215, :333, :469, :678, :720, :934, :1025, :1082; main/health_engine/health_engine.c:587-588",
+          "x-category": "12.9",
+          "enum": [
+            "auto_close",
+            "auto_close_blocked_override",
+            "auto_close_reenabled",
+            "rmleak_cleared",
+            "rmleak_auto_cleared",
+            "water_access_override_enabled",
+            "water_access_override_expired",
+            "rules_engine"
+          ]
+        },
+        "source_type": {
+          "type": "string",
+          "description": "Which transport/peer class the leak came from. \"reconnect\" is a pseudo-source used only by the valve-reconnect auto_close. Range/enum: enum: lora | ble_leak_sensor | valve_flood | reconnect | unknown. Presence: always in leak events and in the auto_close / auto_close_blocked_override rules events.",
+          "x-source": "main/telemetry/telemetry_v2.c:642 (leak events, \"lora\" | \"ble_leak_sensor\" from main/iothub/app_iothub.c:1749, :1809); main/rules_engine/rules_engine.c:334, :470 via source_to_str main/rules_engine/rules_engine.c:259-267; reconnect variant main/rules_engine/rules_engine.c:935",
+          "x-category": "12.5",
+          "enum": [
+            "lora",
+            "ble_leak_sensor",
+            "valve_flood",
+            "reconnect",
+            "unknown"
+          ]
+        },
+        "sensor_id": {
+          "type": "string",
+          "description": "Identifies the sensor. LoRa uses 0x+8hex, BLE uses a colon MAC, the valve's own flood sensor uses the literal \"valve\", and an unresolved id becomes \"unknown\". Range/enum: \"0x\"+8hex | colon MAC | \"valve\" | \"unknown\". Presence: always in leak events, auto_close, auto_close_blocked_override and health alerts.",
+          "x-source": "main/telemetry/telemetry_v2.c:643; main/rules_engine/rules_engine.c:335, :471, :936; main/health_engine/health_engine.c:591; \"valve\" literal main/iothub/app_iothub.c:1650",
+          "x-category": "12.5"
+        },
+        "rmleak_asserted": {
+          "type": "boolean",
+          "description": "Confirms the hub asserted the valve's RMLEAK interlock as part of the auto-close. Hardcoded true at both sites. Range/enum: always true when present. Presence: always (auto_close events only).",
+          "x-source": "main/rules_engine/rules_engine.c:336, :938",
+          "x-category": "12.10"
+        },
+        "location": {
+          "type": "object",
+          "properties": {
+            "code": {
+              "type": "string",
+              "description": "Machine-readable room code. Range/enum: enum, 13 values: unknown | bathroom | kitchen | laundry | garage | garden | basement | utility | hallway | bedroom | living_room | attic | outdoor. Presence: present whenever data.location is present.",
+              "x-source": "main/telemetry/telemetry_v2.c:148; main/rules_engine/rules_engine.c:344; table main/sensor_meta/sensor_meta.c:23-27",
+              "x-category": "12.5",
+              "enum": [
+                "unknown",
+                "bathroom",
+                "kitchen",
+                "laundry",
+                "garage",
+                "garden",
+                "basement",
+                "utility",
+                "hallway",
+                "bedroom",
+                "living_room",
+                "attic",
+                "outdoor"
+              ]
+            },
+            "label": {
+              "type": "string",
+              "description": "User-entered free-text location label. Range/enum: free text, max 31 chars. Presence: present whenever data.location is present.",
+              "x-source": "main/telemetry/telemetry_v2.c:151; main/rules_engine/rules_engine.c:346",
+              "x-category": "12.5"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Installed-location metadata for the sensor that raised the event. TWO DIFFERENT ABSENCE CONVENTIONS on the same path depending on the producer. Presence: leak events: ALWAYS. auto_close: OMITTED when the source is valve_flood or no metadata is stored..",
+          "x-source": "always-emit main/telemetry/telemetry_v2.c:650 -> :143-153; omit-when-unknown main/rules_engine/rules_engine.c:338-349",
+          "x-category": "12.5"
+        },
+        "active_leak_count": {
+          "type": "number",
+          "description": "How many sensors were simultaneously asserting a leak. Present ONLY in these two shapes, so the normal auto_close lacks it. Units: count. Range/enum: >= 0. Presence: always in the valve-reconnect auto_close and in water_access_override_expired.",
+          "x-source": "main/rules_engine/rules_engine.c:939, :1028",
+          "x-category": "12.10"
+        },
+        "override_remaining_s": {
+          "type": "number",
+          "description": "Seconds left in the override window. Reports the FULL window duration when the clock is unsynced, and 0 when expired but not yet processed by the rules tick. Units: seconds. Range/enum: >= 0 when present. Presence: snapshot: OMITTED unless override_active AND remaining >= 0. auto_close_blocked_override event: OMITTED when remaining < 0..",
+          "x-source": "main/telemetry/telemetry_v2.c:595-597; main/rules_engine/rules_engine.c:472-474; semantics main/rules_engine/rules_engine.c:1187-1200",
+          "x-category": "12.10"
+        },
+        "trigger": {
+          "type": "string",
+          "description": "What opened the override window: a physical long-press on the valve, or the override_enable C2D command. Range/enum: enum: button | c2d_command. Presence: always (water_access_override_enabled only).",
+          "x-source": "main/rules_engine/rules_engine.c:216; callers :846 (\"c2d_command\"), :978 and :1128 (\"button\")",
+          "x-category": "12.10",
+          "enum": [
+            "button",
+            "c2d_command"
+          ]
+        },
+        "expires_ts": {
+          "type": "number",
+          "description": "Absolute epoch at which the override window expires. Same field name and meaning on both message types. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200. Presence: snapshot: OMITTED unless override_active AND the expiry is known/in-future. water_access_override_enabled event: always..",
+          "x-source": "main/telemetry/telemetry_v2.c:598-599; main/rules_engine/rules_engine.c:217",
+          "x-category": "12.10"
+        },
+        "remaining_s": {
+          "type": "number",
+          "description": "Full override window duration at the moment the window was started or refreshed. A CONSTANT, not a countdown; the countdown is override_remaining_s. Units: seconds. Range/enum: 86400 in a production build (compile-overridable via -D OVERRIDE_WINDOW_DURATION_S). Presence: always (water_access_override_enabled only).",
+          "x-source": "main/rules_engine/rules_engine.c:218; constant main/rules_engine/rules_engine.c:28-30",
+          "x-category": "12.10"
+        },
+        "override_cancelled": {
+          "type": "boolean",
+          "description": "A leak_reset also tore down an open override window. Range/enum: always true when present. Presence: conditional: OMITTED when no override window was open.",
+          "x-source": "main/rules_engine/rules_engine.c:679-681",
+          "x-category": "12.10"
+        },
+        "previous_remaining_s": {
+          "type": "number",
+          "description": "How much of the override window was discarded when it was cancelled early. Units: seconds. Range/enum: >= 0. Presence: always (auto_close_reenabled only).",
+          "x-source": "main/rules_engine/rules_engine.c:721; value returned by cancel_override_window() at :715",
+          "x-category": "12.10"
+        },
+        "reason": {
+          "type": "string",
+          "description": "TWO DISTINCT MEANINGS ON ONE PATH. In a snapshot it is the trigger that caused the snapshot. In the auto_close_reenabled rules event it is the cause of the override cancellation. Range/enum: enum, 7 values total. snapshot: heartbeat | event | commission | boot | fast | decommission. rules event: c2d_command. Presence: snapshot: always in practice; rules event: always.",
+          "x-source": "snapshot main/telemetry/telemetry_v2.c:383 with main/iothub/app_iothub.c:581-591 and :1570; rules event main/rules_engine/rules_engine.c:722",
+          "x-category": "12.10",
+          "enum": [
+            "c2d_command"
+          ]
+        },
+        "auto_close_resumed": {
+          "type": "boolean",
+          "description": "Whether leaks were still active when the window expired, i.e. whether auto-close fired immediately on resume. Range/enum: true | false. Presence: always (water_access_override_expired only).",
+          "x-source": "main/rules_engine/rules_engine.c:1026-1027",
+          "x-category": "12.10"
+        },
+        "clear_after_seconds": {
+          "type": "number",
+          "description": "The all-clear dwell time that had to elapse before the hub auto-cleared the RMLEAK interlock. Units: seconds. Range/enum: AUTO_CLEAR_TIMEOUT_MS / 1000. Presence: always (rmleak_auto_cleared only).",
+          "x-source": "main/rules_engine/rules_engine.c:1083; constant main/rules_engine/rules_engine.c:18",
+          "x-category": "12.10"
+        },
+        "raw": {
+          "type": "string",
+          "description": "Verbatim rules-/health-engine JSON string, emitted only when re-parsing that string fails. The string was itself produced by cJSON_PrintUnformatted, so this is reachable only on allocation failure. Presence: conditional: OMITTED unless cJSON_Parse of the engine JSON fails.",
+          "x-source": "main/telemetry/telemetry_v2.c:669 (rules), :688 (health); guarded by :662, :682",
+          "x-category": "12.12"
+        }
+      },
+      "required": [
+        "event"
+      ],
+      "additionalProperties": false,
+      "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
+      "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
+      "x-category": "12.1"
+    }
+  },
+  "required": [
+    "schema",
+    "ts",
+    "gateway",
+    "type",
+    "data"
+  ],
+  "additionalProperties": false
+}

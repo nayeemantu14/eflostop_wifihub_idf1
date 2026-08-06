@@ -8,11 +8,35 @@
 extern "C" {
 #endif
 
+// Water-detection sources. The wire spelling of each member is produced by
+// leak_source_to_str() below, which health_engine.c now calls directly instead
+// of keeping a parallel table — one device-type vocabulary, one definition,
+// across leak events, auto_close events and health events.
 typedef enum {
     LEAK_SOURCE_BLE = 0,
     LEAK_SOURCE_LORA,
-    LEAK_SOURCE_VALVE_FLOOD
+    LEAK_SOURCE_VALVE       // The valve's own on-board flood probe
 } leak_source_t;
+
+/**
+ * @brief Wire spelling of a water-detection source ("ble_leak_sensor" | "lora" |
+ *        "valve"). The single source of truth for data.source_type on leak events
+ *        (telemetry_v2.c), auto_close events (rules_engine.c) and health events
+ *        (health_engine.c) — do not re-spell these literals at a call site.
+ */
+const char *leak_source_to_str(leak_source_t source);
+
+/**
+ * @brief Internal tracking id for the valve as a leak SOURCE.
+ *
+ * The active-leak table (g_active_leak_ids) matches sources by string, so the
+ * valve's key must be stable even while the BLE link is down — hence a constant
+ * rather than its MAC. This value is NOT what goes on the wire: data.device_id
+ * carries the valve's real MAC so the cloud can join auto_close to the same
+ * device that the leak event (data.valve_id), the snapshot (data.valve.valve_id)
+ * and the health alert (data.device_id) name.
+ */
+#define VALVE_SOURCE_ID  "valve"
 
 // Result of a remote (C2D) override_enable request. Maps 1:1 to the cmd_ack
 // error.detail strings produced by the IoT Hub command dispatcher.

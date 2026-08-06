@@ -6,13 +6,21 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "mqtt_client.h"
+#include "rules_engine.h"   // leak_source_t — the water-detection source vocabulary
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define TELEMETRY_SCHEMA        "eflostop.v2"
-#define SNAPSHOT_INTERVAL_MS    (5 * 60 * 1000)   // 5 minutes
+#define SNAPSHOT_INTERVAL_MS    (5 * 60 * 1000)   // 5 minutes (default)
+
+// Accepted range for the Twin-tunable heartbeat interval. Declared here rather
+// than at the Twin call site so ONE rule governs every path into the setting —
+// the Twin handler, the NVS restore and any future C2D command. A value outside
+// this range can therefore never reach the scheduler or the flash.
+#define SNAPSHOT_INTERVAL_MIN_S 60
+#define SNAPSHOT_INTERVAL_MAX_S 3600
 
 // Hub firmware version (gateway.fw / twin fw_version). Single source of truth =
 // PROJECT_VER in the top-level CMakeLists.txt, read at runtime from the ESP-IDF
@@ -66,6 +74,17 @@ void telemetry_v2_init(esp_mqtt_client_handle_t client,
                        const telem_ble_leak_cache_t *ble_cache);
 
 /**
+ * @brief Attach (or replace) the MQTT client and correct the publish topic once
+ *        DPS has assigned a device id.
+ *
+ * telemetry_v2_init() may be called with a NULL client so the snapshot queue and
+ * timer exist — and so leak events are buffered rather than dropped — before DPS
+ * registration has succeeded. Call this when the cloud connection comes up.
+ */
+void telemetry_v2_attach_client(esp_mqtt_client_handle_t client,
+                                const char *device_id);
+
+/**
  * @brief Get the snapshot trigger queue handle.
  *        Add this to the QueueSet so the event loop wakes when due.
  */
@@ -107,15 +126,54 @@ void telemetry_v2_publish_lifecycle(void);
  */
 bool telemetry_v2_publish_snapshot(const char *trigger);
 
-/** Publish type="event" for valve transitions (state, flood). */
-void telemetry_v2_publish_valve_event(const char *event_name);
+/**
+ * @brief Publish type="event" for valve position transitions (valve_state_changed).
+ * @param valve_id  The valve MAC, already validated by the caller. Required —
+ *                  the event is dropped if NULL. Passed in rather than re-read
+ *                  here so a GAP disconnect racing the publish cannot strip the
+ *                  identity key off an otherwise complete event. Emitted under
+ *                  the wire key `valve_id`.
+ */
+void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_id);
 
-/** Publish type="event" for leak sensor transitions. */
-void telemetry_v2_publish_leak_event(const char *event_name,
-                                     const char *source_type,
-                                     const char *sensor_id,
-                                     bool leak_state,
-                                     uint8_t battery, int8_t rssi);
+/**
+ * @brief One water-detection event, from any source.
+ *
+ * Since 1.9.0 the valve's own flood probe reports through this same family
+ * instead of the separate valve_flood_detected / valve_flood_cleared events, so
+ * the cloud has ONE handler for "water was detected somewhere", discriminated by
+ * source_type.
+ *
+ * Required core, emitted for every source:
+ *      event, source_type, <identity>, leak_state, battery, location
+ * where <identity> is `valve_id` when source_type is "valve" and `sensor_id`
+ * otherwise — same position, same string form, key named for the device type.
+ * Source-specific extras, emitted only where they apply:
+ *      sensors: rssi        valve: valve_state, rmleak, fw_version
+ */
+typedef struct {
+    const char   *event;         // "leak_detected" | "leak_cleared"
+    leak_source_t source;        // selects the source_type spelling, the identity
+                                 // KEY NAME, and the sensor_meta table — never
+                                 // re-derived from a string, so a call-site typo
+                                 // cannot silently look up the wrong table.
+    const char   *device_id;     // the identity VALUE: valve MAC | sensor MAC |
+                                 // "0xNNNNNNNN". The wire key it lands under is
+                                 // chosen from `source`, not from this name.
+    bool          leak_state;    // the value that selected `event`, not a re-read
+    uint8_t       battery;       // percent, 0-100
+
+    bool          has_rssi;      // sensors only — the valve link has no cached RSSI
+    int8_t        rssi;          // dBm, as heard at the hub
+
+    bool          has_valve_ext; // valve only
+    const char   *valve_state;   // "open" | "closed" | "unknown"
+    bool          rmleak;
+    const char   *fw_version;    // NULL -> key omitted (DIS read failed)
+} telem_leak_event_t;
+
+/** Publish type="event" for a water-detection transition from any source. */
+void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev);
 
 /** Publish type="event" wrapping existing rules-engine JSON in v2 envelope. */
 void telemetry_v2_publish_rules_event(const char *rules_json);
@@ -133,8 +191,36 @@ void telemetry_v2_publish_health_event(const char *health_json);
 // Device Twin integration
 // ---------------------------------------------------------------------------
 
-/** Change the snapshot timer period at runtime (from Device Twin desired). */
-void telemetry_v2_set_snapshot_interval(int seconds);
+/**
+ * @brief Change the heartbeat interval at runtime (from Device Twin desired).
+ *
+ * Validates against [SNAPSHOT_INTERVAL_MIN_S, SNAPSHOT_INTERVAL_MAX_S] and
+ * persists to NVS so the setting survives a reboot. Writes flash only when the
+ * value actually changes, so a Twin that re-delivers the same desired document
+ * on every reconnect costs no erase cycles.
+ *
+ * @return true if accepted and applied; false if out of range (the previous
+ *         value is left untouched, in RAM and in flash).
+ */
+bool telemetry_v2_set_snapshot_interval(int seconds);
+
+/**
+ * @brief Restore persisted telemetry settings from NVS.
+ *
+ * Call once at boot, after nvs_store_init() and before telemetry_v2_init().
+ * Absent or out-of-range stored values fall back to the compile-time default,
+ * so a corrupt entry degrades to 300 s rather than to something unusable.
+ */
+void telemetry_v2_load_settings(void);
+
+/**
+ * @brief Erase persisted telemetry settings (factory reset).
+ *
+ * Called from the decommission path alongside the other namespace wipes. Also
+ * resets the in-RAM value, so the hub does not keep running on a cadence the
+ * flash no longer records.
+ */
+void telemetry_v2_clear_settings(void);
 
 // ---------------------------------------------------------------------------
 // Offline buffer integration

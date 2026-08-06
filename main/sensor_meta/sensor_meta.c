@@ -274,8 +274,10 @@ bool sensor_meta_remove(sensor_type_t type, const char *sensor_id)
 }
 
 // Parse + validate + apply ONE metadata object:
-//   { "sensor_type":"ble"|"lora", "sensor_id":"...",
+//   { "sensor_type":"ble_leak_sensor"|"lora", "sensor_id":"...",
 //     "location_code":"<name>" (opt), "label":"<text>" (opt) }
+// "ble_leak_sensor" is canonical; "ble" and "ble_leak" are accepted forever as
+// legacy aliases so already-deployed app/backend versions keep working.
 // SINGLE shared apply primitive used by BOTH the standalone `sensor_meta` command
 // (rename) and the inline `sensor_meta[]` array carried in a `provision` command.
 // Operates on a cJSON object (not a string) so there is exactly one
@@ -287,14 +289,15 @@ static bool apply_one_meta_obj(const cJSON *obj)
         return false;
     }
 
-    // sensor_type: "ble" or "lora" (required)
+    // sensor_type: "ble_leak_sensor" (canonical) or "lora" (required).
+    // "ble" / "ble_leak" are permanent legacy aliases — do NOT remove them.
     cJSON *type_json = cJSON_GetObjectItem(obj, "sensor_type");
     if (!cJSON_IsString(type_json)) {
         ESP_LOGE(META_TAG, "Missing sensor_type");
         return false;
     }
     sensor_type_t type;
-    if (strcasecmp(type_json->valuestring, "ble") == 0) {
+    if (sensor_type_is_ble_leak(type_json->valuestring)) {
         type = SENSOR_TYPE_BLE_LEAK;
     } else if (strcasecmp(type_json->valuestring, "lora") == 0) {
         type = SENSOR_TYPE_LORA;

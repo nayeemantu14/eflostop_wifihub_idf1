@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "provisioning_manager.h"
+#include "rules_engine.h"   // leak_source_to_str() — shared device-type vocabulary
 
 #define HEALTH_TAG "HEALTH_ENGINE"
 
@@ -65,12 +66,23 @@ const char *health_rating_to_str(health_rating_t rating)
     }
 }
 
-static const char *dev_type_to_str(health_dev_type_t dt)
+// Wire vocabulary for device types. Health events emit this under the key
+// `source_type` — the SAME key and the SAME spellings as leak and auto_close
+// events, so the backend has one device-type vocabulary across every outbound
+// message. (Health called the key `dev_type` before 2.0.0, which made the same
+// concept a third name alongside outbound source_type and inbound sensor_type.)
+//
+// The strings themselves are not repeated here: each arm delegates to
+// leak_source_to_str() in rules_engine.c, which is now the single definition.
+// The mapping stays explicit rather than casting between the two enums — they
+// are declared in a different order (HEALTH_DEV_VALVE=0 vs LEAK_SOURCE_BLE=0),
+// so an index cast would silently mislabel every device.
+static const char *dev_type_to_source_type(health_dev_type_t dt)
 {
     switch (dt) {
-        case HEALTH_DEV_VALVE:    return "valve";
-        case HEALTH_DEV_LORA:     return "lora";
-        case HEALTH_DEV_BLE_LEAK: return "ble_leak";
+        case HEALTH_DEV_VALVE:    return leak_source_to_str(LEAK_SOURCE_VALVE);
+        case HEALTH_DEV_LORA:     return leak_source_to_str(LEAK_SOURCE_LORA);
+        case HEALTH_DEV_BLE_LEAK: return leak_source_to_str(LEAK_SOURCE_BLE);
         default:                  return "unknown";
     }
 }
@@ -221,7 +233,7 @@ static void maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating
     if (xQueueSend(s_alert_queue, &alert, 0) == pdTRUE) {
         dev->last_alert_ms = now;
         ESP_LOGW(HEALTH_TAG, "ALERT: %s %s %s -> %s",
-                 dev_type_to_str(dev->dev_type), dev->dev_id,
+                 dev_type_to_source_type(dev->dev_type), dev->dev_id,
                  health_rating_to_str(old_rating),
                  health_rating_to_str(new_rating));
     }
@@ -583,8 +595,8 @@ char *health_alert_to_json(const health_alert_t *alert)
     cJSON_AddStringToObject(root, "event",
                             is_offline ? "device_offline" : "device_recovered");
 
-    cJSON_AddStringToObject(root, "dev_type", dev_type_to_str(alert->dev_type));
-    cJSON_AddStringToObject(root, "sensor_id", alert->dev_id);
+    cJSON_AddStringToObject(root, "source_type", dev_type_to_source_type(alert->dev_type));
+    cJSON_AddStringToObject(root, "device_id", alert->dev_id);
     cJSON_AddStringToObject(root, "rating", health_rating_to_str(alert->new_rating));
     cJSON_AddStringToObject(root, "prev_rating", health_rating_to_str(alert->old_rating));
 

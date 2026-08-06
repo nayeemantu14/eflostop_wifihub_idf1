@@ -23,6 +23,7 @@
 #define NVS_KEY_DEV_ID  "dev_id"
 #define NVS_KEY_DEV_KEY "dev_key"
 #define NVS_KEY_CACHED  "cached"
+#define NVS_KEY_EPOCH   "prov_epoch"
 
 // ---------------------------------------------------------------------------
 // DPS protocol constants
@@ -79,6 +80,22 @@ static esp_err_t nvs_load_cache(dps_assignment_t *out)
         return ESP_ERR_NOT_FOUND;
     }
 
+    // Reject an assignment cached against a different DPS instance / enrollment
+    // group. Caches written before epoch tracking existed have no key at all and
+    // read back as 0, which is never a valid epoch — so they are discarded too.
+    // The stale entries are left in place until a fresh registration overwrites
+    // them, so a failed migration cannot destroy the previous assignment.
+    uint32_t epoch = 0;
+    esp_err_t eerr = nvs_get_u32(h, NVS_KEY_EPOCH, &epoch);
+    if (eerr != ESP_OK || epoch != AZURE_DPS_PROV_EPOCH) {
+        nvs_close(h);
+        ESP_LOGW(DPS_TAG,
+                 "Cached assignment is from provisioning epoch %lu, firmware expects %d "
+                 "— discarding and re-registering",
+                 (unsigned long)epoch, AZURE_DPS_PROV_EPOCH);
+        return ESP_ERR_INVALID_VERSION;
+    }
+
     size_t len;
     len = sizeof(out->hub_hostname);
     err = nvs_get_str(h, NVS_KEY_HUB, out->hub_hostname, &len);
@@ -105,11 +122,13 @@ static esp_err_t nvs_save_cache(const dps_assignment_t *a)
     nvs_set_str(h, NVS_KEY_HUB, a->hub_hostname);
     nvs_set_str(h, NVS_KEY_DEV_ID, a->device_id);
     nvs_set_str(h, NVS_KEY_DEV_KEY, a->device_key);
+    nvs_set_u32(h, NVS_KEY_EPOCH, AZURE_DPS_PROV_EPOCH);
     nvs_set_u8(h, NVS_KEY_CACHED, 1);
     nvs_commit(h);
     nvs_close(h);
 
-    ESP_LOGI(DPS_TAG, "Cached assignment in NVS");
+    ESP_LOGI(DPS_TAG, "Cached assignment in NVS (provisioning epoch %d)",
+             AZURE_DPS_PROV_EPOCH);
     return ESP_OK;
 }
 
@@ -328,6 +347,17 @@ esp_err_t dps_register(const char *id_scope, const char *group_key,
         ESP_LOGI(DPS_TAG, "Loaded cached assignment from NVS");
         ESP_LOGI(DPS_TAG, "hub=%s device=%s", out->hub_hostname, out->device_id);
         return ESP_OK;
+    }
+
+    // Live registration stamps its OWN SAS token from the wall clock
+    // (generate_sas_token below), so an unsynced clock produces a credential DPS
+    // rejects at CONNACK. Fail fast rather than burning a 60 s MQTT session per
+    // attempt — the caller retries once the clock lands. This matters most on a
+    // provisioning-epoch bump, which sends every already-registered hub back
+    // through this path on its first boot after the upgrade.
+    if (time(NULL) < SNTP_EPOCH_VALID) {
+        ESP_LOGW(DPS_TAG, "Clock not synced — deferring DPS registration");
+        return ESP_ERR_INVALID_STATE;
     }
 
     ESP_LOGI(DPS_TAG, "No cached assignment, performing DPS registration...");

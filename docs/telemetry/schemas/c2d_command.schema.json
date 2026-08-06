@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eflostop.local/schemas/c2d_command.schema.json",
+  "title": "C2D command (inbound)",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: C2D commands (INBOUND — not telemetry). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "x-plane": "C2D commands (INBOUND — not telemetry)",
+  "x-firmware-version": "1.8.0",
+  "x-firmware-version-source": "CMakeLists.txt:12",
+  "x-tree-state": "working tree, uncommitted",
+  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "type": "string",
+      "description": "Envelope identifier. Canonical \"eflostop.cmd\"; the legacy form is \"eflostop.cmd.v1\". A legacy plain-text form carries no envelope at all.",
+      "x-source": "main/commands/c2d_commands.h:13-17; rejected otherwise main/commands/c2d_commands.c:80-86"
+    },
+    "ver": {
+      "type": "number",
+      "description": "Envelope version. C2D_CMD_SCHEMA_VER is 1.",
+      "x-source": "main/commands/c2d_commands.h:14"
+    },
+    "id": {
+      "type": "string",
+      "description": "Optional correlation id, echoed back as data.id on the resulting cmd_ack. If absent, cmd_ack omits data.id entirely.",
+      "x-source": "main/telemetry/telemetry_v2.c:705-706"
+    },
+    "cmd": {
+      "type": "string",
+      "description": "Which command to run. One of the eleven names in section 14.",
+      "x-source": "main/commands/c2d_commands.h:35-45"
+    },
+    "payload": {
+      "type": "object",
+      "properties": {
+        "target": {
+          "type": "string"
+        },
+        "sensor_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "Command-specific arguments. The shape depends entirely on cmd, so this schema does not constrain it - see section 14 for each command's keys.",
+      "x-source": "main/iothub/app_iothub.c:657-935"
+    }
+  },
+  "required": [
+    "cmd"
+  ],
+  "additionalProperties": false
+}

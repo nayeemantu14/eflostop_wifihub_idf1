@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://eflostop.local/schemas/twin_desired.schema.json",
+  "title": "twin_desired",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: DEVICE TWIN DESIRED — INBOUND, cloud to device. Shown for completeness of the cloud interface.. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "x-plane": "DEVICE TWIN DESIRED — INBOUND, cloud to device. Shown for completeness of the cloud interface.",
+  "x-firmware-version": "1.8.0",
+  "x-firmware-version-source": "CMakeLists.txt:12",
+  "x-tree-state": "working tree, uncommitted",
+  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "type": "object",
+  "properties": {
+    "hub_name": {
+      "type": "string",
+      "description": "Sets the user-assigned hub name. Written to NVS, then echoed into twin reported and into telemetry gateway.name. Max 31 characters; a longer value is rejected and logged, leaving the stored name unchanged.",
+      "x-source": "main/iothub/app_iothub.c:1030-1040; length limit main/hub_identity/hub_identity.h:10"
+    },
+    "snapshot_interval_s": {
+      "type": "number",
+      "description": "Sets the snapshot heartbeat period. Range-checked against 60..3600; a value outside that range is DISCARDED with a warning, not clamped, so the previous interval stays in force. This is the only validated numeric on any plane. Held in RAM only, so it reverts to the 300 s default on every reboot, and it is NOT echoed into twin reported, so the cloud gets no acknowledgement that it was applied.",
+      "x-source": "main/iothub/app_iothub.c:1019-1028; range check :1022; default main/telemetry/telemetry_v2.c:42"
+    }
+  },
+  "additionalProperties": false
+}

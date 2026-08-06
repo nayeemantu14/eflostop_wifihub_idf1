@@ -330,6 +330,8 @@ Enable all + all triggers:
 
 What happens: parsed and merged into the current config (defaults `auto_close_enabled=true`, `trigger_mask=7` if no prior value), persisted to NVS, takes effect on the next leak event. The new state shows up in the next snapshot's `data.rules` and in Twin reported (`auto_close_enabled`, `trigger_mask`). No dedicated rules event is emitted for a config change — only the `cmd_ack`.
 
+> **Here `auto_close_enabled` is a pure master switch — it never touches `trigger_mask`.** That is the opposite of the same key at the top level of a `provision` payload (§4.9), where `true` also arms all three trigger bits. This command is for *editing settings*, so it changes exactly what you send; `provision` is for *answering a setup question*, so it does the obvious whole-system thing. Use this command for per-source tuning after commissioning.
+
 | Error detail | Why |
 |--------------|-----|
 | `rules config update failed` | Missing payload, JSON parse failure, or NVS write error |
@@ -351,7 +353,7 @@ Payload fields:
 
 | Field | Type | Required | What it is |
 |-------|------|----------|------------|
-| `sensor_type` | string | yes | `"ble"` or `"lora"` (case-insensitive) |
+| `sensor_type` | string | yes | `"ble_leak_sensor"` or `"lora"` (case-insensitive). **Legacy aliases `"ble"` and `"ble_leak"` are accepted permanently** — see §4.8.1. |
 | `sensor_id` | string | yes | MAC address (BLE) or `0x`-hex ID (LoRa) |
 | `location_code` | string | no | One of: `bathroom`, `kitchen`, `laundry`, `garage`, `garden`, `basement`, `utility`, `hallway`, `bedroom`, `living_room`, `attic`, `outdoor` (unknown value → `unknown`; omitted → keep existing) |
 | `label` | string | no | Free text, **max 31 chars** (silently truncated, not rejected). Omitted → keep existing. |
@@ -359,7 +361,7 @@ Payload fields:
 ```json
 {
   "schema": "eflostop.cmd", "ver": 1, "id": "meta-001", "cmd": "sensor_meta",
-  "payload": { "sensor_type": "ble", "sensor_id": "00:80:E1:27:99:E7", "location_code": "bedroom", "label": "Study" }
+  "payload": { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3B:00", "location_code": "Kitchen", "label": "Sink" }
 }
 ```
 
@@ -370,6 +372,61 @@ What happens: find-or-create the entry by `(type, id)`, persist to NVS (namespac
 | `sensor metadata update failed` | Missing/invalid `sensor_type` or `sensor_id`, table full (32), or NVS error |
 
 Legacy text: `SENSOR_META:{"sensor_type":"ble","sensor_id":"00:80:E1:27:99:E7","location_code":"laundry","label":"Downstairs laundry"}`
+
+### 4.8.1 Device type vocabulary — one name, three accepted spellings
+
+From FW **1.8.0** the BLE leak sensor is called **`ble_leak_sensor`** everywhere in the contract, in
+both directions. Before 1.8.0 the same physical device had three different names depending on which
+field you were looking at, which meant no single lookup table worked:
+
+| Field | Direction | Before 1.8.0 | From 1.8.0 |
+|---|---|---|---|
+| `data.source_type` (leak / auto_close events) | outbound | `ble_leak_sensor` | `ble_leak_sensor` (unchanged) |
+| health events' device-type field | outbound | `ble_leak` | **`ble_leak_sensor`** |
+| `payload.sensor_type` (`sensor_meta`, inline `sensor_meta[]`) | inbound | `ble` | **`ble_leak_sensor`** (aliases kept) |
+| `payload.target` (`decommission`) | inbound | `ble` | **`ble_leak_sensor`** (aliases kept) |
+
+**Inbound is fully backward compatible.** `ble_leak_sensor`, `ble_leak` and `ble` are all accepted,
+case-insensitively, and **the aliases are permanent** — nothing you send today will stop working. New
+integrations should send `ble_leak_sensor`.
+
+**One outbound field changed:** the health events' device-type field now reads `ble_leak_sensor` instead
+of `ble_leak`. If you match on that value, accept both — hubs on firmware older than 1.8.0 still emit
+`ble_leak`. Note the *key* carrying it also changed in 2.0.0 — see the note below.
+
+`lora` was already consistent and is unchanged.
+
+**MAC letter case (inbound):** send a MAC in whatever case you like — every inbound comparison is
+`strcasecmp`, so `00:80:e1:2a:3b:00` and `00:80:E1:2A:3B:00` address the same sensor for
+`sensor_meta`, `decommission` and `provision`. **Outbound is always UPPERCASE** from FW **1.9.0**:
+the hub normalises the provisioned string on read, so the outbound identifier is a single value you
+can join on exactly. Before 1.9.0 a sensor commissioned in lower case appeared lower case in snapshot
+arrays and upper case in events — the same device under two keys. The examples in this document use
+uppercase to match what comes back.
+
+> **Superseded in 1.9.0.** This section previously stated that `valve` (a device) and `valve_flood` (water
+> seen by the valve's own probe) were deliberately different values. That distinction has been removed.
+> `data.source_type` now names the **device** in every case, so the valve is `valve` everywhere — in leak
+> events, in `auto_close` events and in health events. The value `valve_flood` is no longer emitted on any
+> outbound message. The inbound `rules_config` field `trigger_valve_flood` is a *config key*, not a device
+> type, and is unchanged.
+
+> **Changed again in 2.0.0 — the outbound key names.** Two things moved on the telemetry plane. Neither
+> affects anything you *send*, but both affect what you *parse*.
+>
+> 1. **The device-type key is `data.source_type` on every outbound message.** Health events carried it as
+>    `data.dev_type` up to 1.9.0, which made this one concept a third name alongside outbound `source_type`
+>    and inbound `sensor_type`. The three values are unchanged.
+> 2. **The identity key is named for the device type.** A valve reports `valve_id`, a leak sensor reports
+>    `sensor_id`, replacing the single `device_id` that 1.9.0 used. It keeps the same position and the same
+>    string form, so switch on `source_type` and read the matching key. Two message families keep the
+>    generic `device_id` on purpose — **health alerts** and **`auto_close`** — because the hub raises those
+>    *about* a device rather than the device reporting itself.
+>
+> Full detail, with a worked example of every message: `docs/telemetry/eFloStop2_Telemetry_Messages_v3.0.docx`.
+
+Unchanged, because they already use the canonical stem: the snapshot/provision array key
+`ble_leak_sensors`, and the count field `ble_leak_sensor_count`.
 
 ---
 
@@ -386,23 +443,49 @@ Payload fields:
 
 | Field | Type | Required | What it is |
 |-------|------|----------|------------|
-| `valve_mac` | string | no | BLE MAC of the valve, e.g. `"00:80:E1:27:F7:BB"` |
+| `valve_id` | string | no | BLE MAC of the valve, e.g. `"00:80:E1:27:F7:BB"`. **Canonical from FW 2.0.0.** |
+| `valve_mac` | string | no | **Deprecated** alias of `valve_id`, still accepted. See the note below. |
 | `lora_sensors` | string[] | no | Array of LoRa sensor hex IDs, e.g. `["0x754A6237"]` |
 | `ble_leak_sensors` | string[] | no | Array of BLE leak sensor MACs |
-| `rules` | object | no | `{ "auto_close_enabled": bool, "trigger_mask": int }` |
+| `auto_close_enabled` | bool | no | **The setup-flow opt-in.** `true` = a leak shuts the water off, and **all three** trigger sources are armed. `false` = master switch off. See below. |
+| `rules` | object | no | `{ "auto_close_enabled": bool, "trigger_mask": int }` — the explicit form, for when you want a specific mask. |
 | `sensor_meta` | object[] | no | Optional inline per-sensor metadata (label / location). Same element schema as the standalone `sensor_meta` command (§4.8). |
 
-At least one field is required. Each present array does a **full replace** of that whole category (e.g. sending `ble_leak_sensors` replaces all BLE sensors but leaves `valve_mac`/`lora_sensors` untouched).
+At least one field is required. Each present array does a **full replace** of that whole category (e.g. sending `ble_leak_sensors` replaces all BLE sensors but leaves the valve and `lora_sensors` untouched).
+
+**`auto_close_enabled` — the one-question opt-in (FW 2.0.2).** The app asks the user once, while adding the valve and sensors, whether a leak should close the valve, and sends the answer in the same `provision` payload as the devices it applies to.
+
+- **`true`** sets the master flag **and** arms `trigger_mask` to `7` — BLE leak sensors, LoRa sensors *and* the valve's own flood probe. A user who wants leaks to shut the water off means all of them; the valve standing in water is the least ambiguous leak there is. The user can narrow this afterwards with `rules_config` (§4.7).
+- **`false`** flips the master flag only and **leaves `trigger_mask` untouched**. The mask is never consulted while the master flag is off, so clearing it would buy nothing and would throw away a per-source selection the user gets back for free by re-enabling.
+- **Omitted, or JSON `null`** leaves the stored setting alone. Fresh hubs default to enabled with all triggers armed. Emit `null` rather than `false` for "the user was not asked" — `false` disarms automatic shutoff.
+
+> **Send it only when the user actually answered.** A later `provision` that adds a sensor and re-sends `auto_close_enabled: true` out of habit will re-arm all three trigger bits, silently undoing any per-source narrowing the user made through `rules_config` in between. Omit the key on incremental provisions.
+- Only a **real JSON boolean** counts. `1` and `"true"` are ignored with a warning, leaving the stored value unchanged.
+
+> **This key does not mean quite the same thing in `rules_config`.** There it is a pure master switch and never touches the mask, because that caller is editing settings and says exactly what it wants. Here it is answering a setup question and gets the obvious whole-system behaviour. If you want an explicit mask during commissioning, send `rules` instead of (or as well as) this key.
+
+**Precedence when both are present.** The top-level flag is applied first, then `rules` is merged over it — specific beats shorthand. So `{"auto_close_enabled": true, "rules": {"trigger_mask": 3}}` ends up **enabled with only the two sensor bits armed**, the valve probe excluded.
+
+`auto_close_enabled` also satisfies the at-least-one-field requirement on its own — which means a payload whose only key is `auto_close_enabled` marks an unprovisioned hub as commissioned with no devices. Send it with the devices it describes, as the setup flow does.
+
+> **Renamed in 2.0.0: `valve_mac` → `valve_id`.** The hub reports the valve's identity as `valve_id` on the
+> snapshot, on valve and leak events, on the lifecycle message and in twin reported — so the same spelling now
+> works in both directions. `valve_mac` remains accepted so existing app and production-tool builds keep
+> commissioning; it logs a deprecation warning and will be removed. **Migrate to `valve_id`.**
+>
+> If a payload carries both, `valve_id` wins. If `valve_id` is present but malformed, the hub still tries
+> `valve_mac` before failing the command — so a transitional backend that always sends `valve_mac` and
+> populates `valve_id` only when it knows the value cannot lose a good commissioning to a bad one.
 
 **Validation asymmetry (important):**
-- An **invalid `valve_mac`** format (not exactly `XX:XX:XX:XX:XX:XX` hex) is a **hard fail of the entire provision** → `cmd_ack error`.
+- If a valve key is offered and **no spelling of it yields a valid MAC** (`XX:XX:XX:XX:XX:XX` hex, exactly 17 characters), the **entire provision hard-fails** → `cmd_ack error`, and the sensor arrays and rules in the same payload are discarded too.
 - Invalid entries inside `lora_sensors` / `ble_leak_sensors` are **silently skipped** (warned, not added) and the command can still ack `ok`. → **Verify the resulting counts** in the snapshot/twin; don't assume `ok` means every sensor was added.
 
 ```json
 {
   "schema": "eflostop.cmd", "ver": 1, "id": "prov-002", "cmd": "provision",
   "payload": {
-    "valve_mac": "00:80:E1:27:F7:BB",
+    "valve_id": "00:80:E1:27:F7:BB",
     "ble_leak_sensors": ["00:80:E1:27:99:E7", "00:80:E1:2A:AD:6D"],
     "lora_sensors": ["0x754A6237"]
   }
@@ -413,7 +496,7 @@ At least one field is required. Each present array does a **full replace** of th
   "id": "prov-002", 
   "cmd": "provision",
   "payload": {
-    "valve_mac": "00:80:E1:27:F7:BB",
+    "valve_id": "00:80:E1:27:F7:BB",
     "ble_leak_sensors": ["00:80:e1:2a:3b:00", "00:80:e1:2a:3f:59"]
   }
 }
@@ -425,15 +508,43 @@ At least one field is required. Each present array does a **full replace** of th
 {
   "schema": "eflostop.cmd", "ver": 1, "id": "prov-003", "cmd": "provision",
   "payload": {
-    "valve_mac": "00:80:E1:27:F7:BB",
+    "valve_id": "00:80:E1:27:F7:BB",
     "ble_leak_sensors": ["00:80:e1:2a:3b:00", "00:80:e1:2a:3f:59"],
     "sensor_meta": [
-      { "sensor_type": "ble", "sensor_id": "00:80:e1:2a:3b:00", "location_code": "bathroom", "label": "Ensuite" },
-      { "sensor_type": "ble", "sensor_id": "00:80:e1:2a:3f:59", "location_code": "kitchen",  "label": "Sink" }
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3B:00", "location_code": "bathroom", "label": "Ensuite" },
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3F:59", "location_code": "kitchen",  "label": "Sink" }
+    ]
+  }
+}
+{
+  "schema": "eflostop.cmd", "ver": 1, "id": "prov-003", "cmd": "provision",
+  "payload": {
+    "valve_id": "00:80:E1:27:F7:BB",
+    "ble_leak_sensors": ["00:80:e1:2a:3b:00"],
+    "sensor_meta": [
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3B:00", "location_code": "bathroom", "label": "Ensuite" }
     ]
   }
 }
 ```
+
+**The complete setup-flow payload** — valve, sensors, their labels and the auto-close answer, in one command:
+
+```json
+{
+  "schema": "eflostop.cmd", "ver": 1, "id": "prov-004", "cmd": "provision",
+  "payload": {
+    "valve_id": "00:80:E1:27:F7:BB",
+    "ble_leak_sensors": ["00:80:e1:2a:3b:00"],
+    "sensor_meta": [
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3B:00", "location_code": "bathroom", "label": "Ensuite" }
+    ],
+    "auto_close_enabled": true
+  }
+}
+```
+
+Confirm the result two ways. Twin reported is republished **immediately** on a successful provision (FW 2.0.2 — before that it only refreshed on the next MQTT reconnect, so the twin could read stale for hours), carrying `auto_close_enabled`, `trigger_mask`, `valve_id` and the device counts. The commission snapshot that follows carries the same rules values under `data.rules`.
 
 Limits: 1 valve · up to 16 LoRa sensors · up to 16 BLE leak sensors.
 
@@ -441,7 +552,7 @@ What happens: config saved to NVS, health devices reloaded, and (if a valve MAC 
 
 | Error detail | Why |
 |--------------|-----|
-| `provisioning failed` | Invalid `valve_mac` format, no recognizable fields, NVS write failure, or empty payload |
+| `provisioning failed` | No usable valve identifier (neither `valve_id` nor `valve_mac` valid), no recognizable fields, NVS write failure, or empty payload |
 
 Legacy: a **bare JSON object** (text starting with `{`) that does **not** match the envelope schema is treated as a provisioning payload. Note: a well-formed envelope is consumed by the envelope parser first, so this fallback only fires for non-envelope JSON.
 
@@ -454,8 +565,8 @@ Removes devices from the hub. The `target` field says what to remove.
 | Field | Value |
 |-------|-------|
 | `cmd` | `"decommission"` |
-| `payload.target` | `"valve"`, `"lora"`, `"ble"`, or `"all"` (required) |
-| `payload.sensor_id` | required for `"lora"` / `"ble"` |
+| `payload.target` | `"valve"`, `"lora"`, `"ble_leak_sensor"`, or `"all"` (required). Legacy aliases `"ble"` / `"ble_leak"` accepted permanently — see §4.8.1. |
+| `payload.sensor_id` | required for `"lora"` / `"ble_leak_sensor"` |
 
 ### 4.10.1 target: "valve"
 Removes the valve, clears its target MAC, and disconnects BLE.
@@ -474,9 +585,9 @@ Legacy text: `DECOMMISSION_LORA:0x754A6237`
 ### 4.10.3 target: "ble"
 Removes one BLE leak sensor (and its metadata). Requires `sensor_id`.
 ```json
-{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-001", "cmd": "decommission", "payload": { "target": "ble", "sensor_id": "00:80:e1:2a:3f:59" } }
+{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-001", "cmd": "decommission", "payload": { "target": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3F:59" } }
 
-{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-001", "cmd": "decommission", "payload": { "target": "ble", "sensor_id": "00:80:e1:2a:3b:00"} }
+{ "schema": "eflostop.cmd", "ver": 1, "id": "decom-b-002", "cmd": "decommission", "payload": { "target": "ble_leak_sensor", "sensor_id": "00:80:E1:2A:3B:00"} }
 Legacy text: `DECOMMISSION_BLE:00:80:E1:27:99:E7`
 
 ### 4.10.4 target: "all"
@@ -572,7 +683,7 @@ Keyword detection is case-insensitive; JSON after a `:` keeps its original case.
 | `override_cancel` | `override cancel failed` | Internal error (mutex/init) — not the no-window case |
 | `rules_config` | `rules config update failed` | Bad/missing JSON or NVS error |
 | `sensor_meta` | `sensor metadata update failed` | Missing fields, table full (32), or NVS error |
-| `provision` | `provisioning failed` | Bad `valve_mac`, empty/unknown payload, or NVS error |
+| `provision` | `provisioning failed` | No usable `valve_id`/`valve_mac`, empty/unknown payload, or NVS error |
 | `decommission` | `missing decommission target` | No `target` |
 | `decommission` | `unknown decommission target` | `target` not valve/lora/ble/all |
 | `decommission` | `valve decommission failed` | Valve not provisioned / NVS error |
@@ -604,7 +715,7 @@ Even a successful command produces no `cmd_ack` if the hub's clock isn't SNTP-sy
 | `decommission` (target: `all`) | High | Wipes all config + identity + DPS cache and restarts. Back to unprovisioned. |
 | `decommission` (target: `valve`) | Medium | Removes the valve → auto-close protection gone. |
 | `provision` | Medium | Replaces device identities. Could point valve control at a different device. |
-| `rules_config` (`auto_close_enabled:false`) | Medium | Disables automatic shutoff for all sensors. |
+| `rules_config` / `provision` (`auto_close_enabled:false`) | Medium | Disables automatic shutoff for all sensors. Note that an app which serialises optional fields must emit `null`, not `false`, for "not asked". |
 | `override_enable` | Medium | Deliberately pauses auto-close for 24 h during a known leak. |
 
 Commands are authenticated through the Azure IoT Hub device identity (SAS token or X.509 cert). There's no extra command-level auth on the device side — the security boundary is the Azure IoT Hub connection.
@@ -625,33 +736,62 @@ Published on connect and after relevant changes (e.g. `set_hub_name`). This PATC
 
 ```json
 {
-  "fw_version": "1.4.1",
+  "fw_version": "2.0.0",
   "gateway_id": "GW-50787D0E28CC",
   "short_id": "28CC",
   "hub_name": "Beach House",
   "provisioned": true,
-  "valve_mac": "00:80:E1:27:F7:BB",
+  "valve_mac": null,
+  "valve_device_id": null,
+  "valve_id": "00:80:E1:27:F7:BB",
   "lora_sensor_count": 1,
   "ble_leak_sensor_count": 3,
   "auto_close_enabled": true,
   "trigger_mask": 7,
+  "snapshot_interval_s": 900,
   "uptime_s": 12345,
   "free_heap": 98000
 }
 ```
 
-`fw_version` is the same runtime value as `gateway.fw` (from `PROJECT_VER`). `valve_mac` is present only when a valve is provisioned; `auto_close_enabled`/`trigger_mask` only when the rules config reads back.
+`fw_version` is the same runtime value as `gateway.fw` (from `PROJECT_VER`).
+`auto_close_enabled`/`trigger_mask` appear only when the rules config reads back.
+`snapshot_interval_s` (added 2.0.2) is unconditional and reports the cadence **in force** — compare it
+against `desired.snapshot_interval_s` to confirm a write was accepted (§8.2).
+
+**`valve_id` is always present, and is `null` when no valve is provisioned.** It is not omitted — a twin
+reported PATCH is a *merge*, so an omitted key keeps its previous value forever, and a decommissioned hub
+would go on reporting the valve it no longer has.
+
+> **Renamed in 2.0.0 — and read this before you write the parser.** The valve identity property has now had
+> three names: `valve_mac` (≤ 1.7.0), `valve_device_id` (1.8.0–1.9.0), and **`valve_id`** from 2.0.0, which
+> matches what telemetry and the `provision` command both use (§4.9).
+>
+> Because twin PATCHes merge, an in-place upgrade would otherwise leave a hub reporting `valve_id` **next to**
+> a frozen `valve_device_id`, and a backend written as `reported.valve_device_id ?? reported.valve_id` would
+> silently keep reading the stale one — including after a valve swap. So 2.0.0 explicitly writes
+> `"valve_mac": null` and `"valve_device_id": null`, which **deletes** those properties from the twin. You may
+> see the nulls in a raw twin fetch; treat both keys as gone. They will stop being sent one release after
+> every hub has upgraded.
+>
+> **Read `reported.valve_id` and nothing else.**
 
 ## 8.2 Desired properties (cloud → device)
 
 | Property | Type | Range | Description |
 |----------|------|-------|-------------|
-| `snapshot_interval_s` | int | 60–3600 | Telemetry snapshot interval (not persisted across reboot — re-apply after each lifecycle) |
+| `snapshot_interval_s` | int | 60–3600 | Heartbeat snapshot interval. Persisted; takes effect immediately. Default 300. |
 | `hub_name` | string | max 31 chars | User-assigned friendly name (persisted; `""` clears) |
 
 ```json
-{ "hub_name": "Beach House" }
+{ "snapshot_interval_s": 900, "hub_name": "Beach House" }
 ```
+
+**Changed in 2.0.2 — you no longer have to re-apply after a reboot.** Before this release the interval lived only in RAM, and the hub never fetched the twin on connect (IoT Hub pushes a desired PATCH only when the document *changes*). A hub that rebooted therefore ran the 300 s default while the twin still advertised your value, and nothing reconciled the two until somebody edited the twin again. Now the value is persisted, and the hub issues a `$iothub/twin/GET` once per connection and applies whatever the twin says.
+
+**Both writable settings are echoed in reported.** `reported.snapshot_interval_s` carries the interval **actually in force**, which is how you confirm a write landed — and how you detect one that didn't. An out-of-range value is rejected and the previous value is kept, in RAM and in flash; the hub still publishes reported afterwards, so `desired.snapshot_interval_s: 30` followed by `reported.snapshot_interval_s: 300` is the signature of a rejected write. Desired properties produce no `cmd_ack`, so this echo is the only acknowledgement you get.
+
+Cleared to the 300 s default by `decommission` with target `all`, alongside the other factory-reset state.
 
 ---
 
@@ -669,16 +809,21 @@ override_enable      (none)              [envelope-only; fw >= 1.4.0]
 override_cancel      (none)
 rules_config         { auto_close_enabled, trigger_mask, trigger_* }
 sensor_meta          { sensor_type, sensor_id, location_code, label }
-provision            { valve_mac, lora_sensors, ble_leak_sensors, rules, sensor_meta[] (opt) }
+provision            { valve_id, lora_sensors, ble_leak_sensors, auto_close_enabled,
+                       rules, sensor_meta[] (opt) }
+                     auto_close_enabled:true also arms trigger_mask=7; rules{} wins if both sent
 decommission         { "target": "valve|lora|ble|all", sensor_id? }
 set_hub_name         { "name": "max 31 chars" }   [envelope-only]
 
 Acks:  envelope cmds always ack (id optional); legacy text never acks;
        all acks suppressed until SNTP clock sync.
 
-Device Twin Desired:
+Device Twin Desired:  (both persisted; both echoed in reported)
 Property             Range
 -----------------    ----------------------------------------
-snapshot_interval_s  60-3600 (seconds)
+snapshot_interval_s  60-3600 (seconds, default 300)
 hub_name             max 31 chars (friendly name)
+
+Read reported.snapshot_interval_s for the value ACTUALLY in force —
+out-of-range writes are rejected and the previous value is kept.
 ```
