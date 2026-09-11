@@ -116,6 +116,12 @@ static SemaphoreHandle_t gatt_mutex = NULL;
 
 static uint16_t valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static bool is_scanning = false;
+
+// True between issuing ble_gap_connect() and the BLE_GAP_EVENT_CONNECT that
+// resolves it. Guards handle_valve_disc() against duplicate advertisement reports
+// queued in the host before ble_gap_disc_cancel() took effect — see the guard
+// there for why this became load-bearing when filter_duplicates was turned off.
+static bool g_connecting = false;
 static bool g_ble_synced = false;
 static bool g_connect_requested = false;
 
@@ -721,12 +727,8 @@ static void apply_pending_valve_cmd_if_any(void)
         if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
             int rc = ble_gattc_write_flat(valve_conn_handle, h_valve_char, &v, 1, NULL, NULL);
-            ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d", rc);
-            if (rc == 0)
-            {
-                g_val_state = v;
-                notify_hub_update(BLE_UPD_STATE);
-            }
+            ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d (position awaits the valve's own report)", rc);
+            // Deliberately does NOT cache `v` — see write_valve_command().
             xSemaphoreGive(gatt_mutex);
         }
         g_pending_valve_cmd = -1;
@@ -1193,6 +1195,20 @@ static void handle_valve_disc(const ble_addr_t *addr, const uint8_t *data,
 
     if ((g_has_target_mac && mac_match) || (!g_has_target_mac && name_match))
     {
+        // Re-entrancy guard. ble_gap_disc_cancel() stops the scan but does NOT
+        // flush advertisement reports already queued in the host, so a second
+        // report for the same valve can reach this function while the first
+        // ble_gap_connect() is still in flight. That second call fails, and the
+        // old code responded by calling start_scan() — cancelling the connection
+        // attempt that was about to succeed.
+        //
+        // This was survivable while the scan ran with filter_duplicates=1, which
+        // capped the valve at one report per session. That filter is now off (it
+        // was making the hub deaf to leak sensors, see start_scan), so duplicate
+        // reports are the normal case and this guard is load-bearing.
+        if (g_connecting)
+            return;
+
         if (g_has_target_mac)
             ESP_LOGI(BLE_TAG, "[SCAN] Connecting to provisioned valve: %s", discovered_mac);
         else
@@ -1203,11 +1219,13 @@ static void handle_valve_disc(const ble_addr_t *addr, const uint8_t *data,
 
         ble_gap_disc_cancel();
         is_scanning = false;
+        g_connecting = true;
 
         int rc = ble_gap_connect(g_own_addr_type, addr, 30000, NULL, ble_gap_event, NULL);
         if (rc != 0)
         {
             ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
+            g_connecting = false;
             start_scan();
         }
     }
@@ -1246,6 +1264,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "║            GAP CONNECT EVENT                                 ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGI(BLE_TAG, "[CONNECT] status=%d", event->connect.status);
+
+        // The connect attempt is resolved either way — release the re-entrancy
+        // guard before branching, so a failure path that calls start_scan() can
+        // legitimately attempt the next connection.
+        g_connecting = false;
 
         if (event->connect.status == 0)
         {
@@ -1423,6 +1446,26 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGE(BLE_TAG, "[ENC_CHANGE] Encryption failed: status=%d", event->enc_change.status);
             clear_state_bit(BLE_STATE_BIT_PAIRING);
 
+            // A valve that has been reflashed or factory-reset no longer holds the
+            // LTK we bonded with, and answers every encryption attempt with
+            // "PIN or Key Missing". Without this the hub re-offers that dead key
+            // forever in a ~5 s connect/fail/rescan loop.
+            //
+            // This matters more than it looks: that loop's CLOUD signature is
+            // indistinguishable from a marginal-RF flapper, so the disconnect
+            // suppression this release adds would hide a PERMANENT failure
+            // indefinitely. Dropping the stale bond lets the next attempt re-pair.
+            //
+            // Deliberately narrow — only this status. Deleting the bond on any
+            // encryption failure would turn a transient error into a needless
+            // re-pair, and re-pairing is the expensive, user-visible path.
+            if (event->enc_change.status == BLE_HS_HCI_ERR(BLE_ERR_PINKEY_MISSING) &&
+                ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0)
+            {
+                ESP_LOGW(BLE_TAG, "[ENC_CHANGE] Peer no longer holds our bond — deleting stale LTK");
+                ble_store_util_delete_peer(&desc.peer_id_addr);
+            }
+
             if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE)
                 ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
@@ -1516,25 +1559,51 @@ static void start_scan(void)
     // Cancel any active scan (e.g. BLE leak scanner) before starting valve scan
     ble_gap_disc_cancel();
 
+    // filter_duplicates is DISABLED below, and that is a safety fix, not a
+    // latency one.
+    //
+    // This scan and the leak scanner's share one controller. The controller's
+    // duplicate cache keys on ADDRESS ONLY and never refreshes
+    // (CONFIG_BT_CTRL_SCAN_DUPL_TYPE=0, CONFIG_BT_CTRL_DUPL_SCAN_CACHE_REFRESH_PERIOD=0),
+    // so with the filter on, a leak sensor whose payload changes from dry to WET
+    // is suppressed — the address has already been seen. The leak scanner runs
+    // with the filter off for exactly this reason (app_ble_leak.c), but its
+    // self-heal is gated on !ble_gap_disc_active(), which is false while THIS
+    // scan owns the radio.
+    //
+    // The result: while the hub is hunting for a lost valve, it can be deaf to
+    // the leak sensors. Worst case — valve truly dead, so it never advertises and
+    // no connect attempt ever flushes the cache — one continuous duration-0
+    // session spans the entire outage. The exact condition in which we cannot
+    // close the valve is the condition in which we are least likely to learn
+    // there is water on the floor.
+    //
+    // Cost of turning it off: duplicate valve advertisement reports, which
+    // handle_valve_disc()'s g_connecting guard absorbs.
     ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for '%s'...", VALVE_DEVICE_NAME);
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
     // Extended scan: 1M PHY (valve + legacy leak sensors) + Coded PHY (long-range leak sensors)
+    // itvl 176 = 110 ms, window 88 = 55 ms. Deliberately NOT 160/80 (100/50 ms):
+    // the valve advertises at 500-700 ms, and 100 ms against 500 ms is a 5:1
+    // harmonic lock in which escape depends solely on the 0-10 ms per-event
+    // advDelay drifting the phase. 110 ms breaks the lock at an identical radio
+    // duty cycle (50 %), so it costs nothing.
     struct ble_gap_ext_disc_params uncoded_params = {0};
-    uncoded_params.itvl = 160;      // 100ms interval
-    uncoded_params.window = 80;     // 50ms window
+    uncoded_params.itvl = 176;      // 110ms interval — de-harmonised, see above
+    uncoded_params.window = 88;     // 55ms window
     uncoded_params.passive = 0;     // Active scan for valve name resolution
 
     struct ble_gap_ext_disc_params coded_params = {0};
-    coded_params.itvl = 160;
-    coded_params.window = 80;
+    coded_params.itvl = 176;
+    coded_params.window = 88;
     coded_params.passive = 1;       // Passive for Coded PHY (leak sensors only)
 
     int rc = ble_gap_ext_disc(
         g_own_addr_type,
         0,                          // duration: 0 = continuous
         0,                          // period: 0 = no periodic restart
-        1,                          // filter_duplicates: enabled for valve discovery
+        0,                          // filter_duplicates: DISABLED — see below
         0,                          // filter_policy: accept all
         0,                          // limited: disabled
         &uncoded_params,            // 1M PHY scan params
@@ -1544,10 +1613,10 @@ static void start_scan(void)
     );
 #else
     struct ble_gap_disc_params disc_params = {
-        .filter_duplicates = 1,
+        .filter_duplicates = 0,     // see below
         .passive = 0,
-        .itvl = 160,
-        .window = 80,
+        .itvl = 176,
+        .window = 88,
     };
     int rc = ble_gap_disc(g_own_addr_type, BLE_HS_FOREVER, &disc_params, ble_gap_event, NULL);
 #endif
@@ -1580,12 +1649,36 @@ static void write_valve_command(uint8_t val)
     {
         ESP_LOGI(BLE_TAG, "[CMD] Writing valve command=%u", val);
         int rc = ble_gattc_write_flat(valve_conn_handle, h_valve_char, &val, 1, NULL, NULL);
-        ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d", rc);
-        if (rc == 0)
-        {
-            g_val_state = val;
-            notify_hub_update(BLE_UPD_STATE);
-        }
+        ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d (position awaits the valve's own report)", rc);
+
+        // The cache is DELIBERATELY not written here.
+        //
+        // This used to do `g_val_state = val; notify_hub_update(BLE_UPD_STATE);`
+        // on rc == 0. But rc == 0 is local NimBLE host acceptance — the write has
+        // been queued, not delivered, not acknowledged, and certainly not acted
+        // on. The hub was therefore publishing its own INTENT as fact: both wire
+        // legs (valve_state_changed and the snapshot's data.valve.state) read
+        // g_val_state. A valve that never received the command, or received it
+        // and failed to move, was reported as closed.
+        //
+        // Worse, it was self-concealing: when the valve's real value did arrive,
+        // on_notify()'s delta gate (old_state == g_val_state) saw no change and
+        // suppressed the correcting event.
+        //
+        // Leaving the cache alone makes the valve the source of truth. The valve
+        // notifies CUSTOM_STM_VALVESTATE from its own BLE-write handler
+        // (DK-Servo_Motor app_main.c, the `echo` push), so a command that lands
+        // produces a genuine old != new transition and emits
+        // valve_state_changed sourced from the device. A command that does not
+        // land produces no event, and the snapshot keeps honestly reporting the
+        // last state the valve actually reported. Setup step 5 re-reads the
+        // characteristic on every reconnect, so a lost notify self-corrects.
+        //
+        // Honest limitation: the valve reports its COMMANDED state, not a sensed
+        // position — it has no position feedback. This upgrades the hub from
+        // "reports what it asked for" to "reports what the valve says it did",
+        // which proves delivery and actuation intent. It does not prove the gate
+        // physically moved.
         xSemaphoreGive(gatt_mutex);
         cmd_settle_release();
     }

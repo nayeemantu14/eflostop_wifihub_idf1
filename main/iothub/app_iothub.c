@@ -178,6 +178,26 @@ static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms 
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
 static int s_valve_pub_state = -2;
 
+// Delta-gate for the valve LINK edge, same sentinel convention (-1 = nothing
+// published yet, 1 = linked, 0 = unlinked). Holds the last PUBLISHED link state,
+// updated only when a snapshot is actually requested, so a valve flapping at
+// supervision-timeout cadence produces one snapshot per real transition rather
+// than one per GAP teardown.
+//
+// Why this exists at all: before it, the disconnect edge produced NO cloud
+// message whatsoever. The valve-event block below is gated on vlk_mac_ok, and
+// that flag is derived from ble_valve_get_mac(), which app_ble_valve.c zeroes on
+// disconnect — so the gate is structurally false exactly when the link drops. The
+// first the cloud heard of an unreachable valve was the CRITICAL health alert
+// ~245 s later, or the next heartbeat. The link edge is therefore published from
+// OUTSIDE that gate.
+//
+// Note the live MAC is deliberately NOT needed here: the snapshot builder falls
+// back to the health table's dev_id when the valve is disconnected
+// (telemetry_v2.c, the `else if (valve_hs)` arm), so the identity on the wire is
+// correct without it.
+static int s_valve_pub_linked = -1;
+
 // Device Twin: request ID counter for twin GET/PATCH operations
 static int g_twin_rid = 0;
 
@@ -2339,6 +2359,23 @@ void iothub_task(void *param)
             // the rules engine ran — see the capture site. Re-deriving it here
             // would reopen the disconnect window it closes.
             const char *connected_mac = vlk_mac;
+
+            // ---- Link edge: published OUTSIDE the vlk_mac_ok gate ----
+            // This must not sit inside that gate: the gate reads the LIVE valve
+            // MAC, which is zeroed on disconnect, so it is always false on the
+            // very edge we need to report. The snapshot itself carries the valve
+            // identity from the health table, so nothing here depends on the live
+            // MAC. Delta-gated so a flapping link produces one snapshot per real
+            // transition, and the tier only sets the coalescing window — the 5 s
+            // SNAP_MIN_INTERVAL_MS rate cap still applies.
+            int linked = (ble_upd_type == BLE_UPD_CONNECTED)    ? 1
+                       : (ble_upd_type == BLE_UPD_DISCONNECTED) ? 0
+                       : -1;
+            if (linked >= 0 && linked != s_valve_pub_linked) {
+                s_valve_pub_linked = linked;
+                snap_request(SNAP_EVENT, SNAP_TIER_HIGH,
+                             linked ? "valve_linked" : "valve_unlinked");
+            }
 
             if (vlk_mac_ok) {
                 if (ble_upd_type == BLE_UPD_LEAK) {

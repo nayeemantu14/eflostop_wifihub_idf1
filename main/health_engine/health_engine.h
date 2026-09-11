@@ -209,12 +209,33 @@ static inline void health_post_ble_leak_checkin(const char *mac_str, uint8_t bat
     health_post_event(&evt);
 }
 
+/**
+ * @brief Sticky fallback for a valve DISCONNECTED that the input queue rejected.
+ *
+ * Every other dropped health event self-heals: the next check-in or notify posts
+ * the same truth again. A dropped valve DISCONNECTED does not. disconnect_ms is
+ * never stamped, and evaluate_timeouts() only re-rates the valve when
+ * disconnect_ms > 0 — so the rating stays at its last healthy value indefinitely.
+ * Written by health_post_valve_event(), drained by health_engine_task().
+ */
+extern volatile bool g_health_valve_disc_pending;
+
 static inline void health_post_valve_event(bool connected)
 {
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
     evt.type = connected ? HEALTH_EVT_VALVE_CONNECTED : HEALTH_EVT_VALVE_DISCONNECTED;
-    health_post_event(&evt);
+
+    bool queued = health_post_event(&evt);
+
+    if (connected) {
+        // A CONNECTED that actually landed supersedes any pending disconnect —
+        // without this, a drop followed by a fast relink would replay a stale
+        // disconnect over the top of the recovery.
+        if (queued) g_health_valve_disc_pending = false;
+    } else if (!queued) {
+        g_health_valve_disc_pending = true;
+    }
 }
 
 static inline void health_post_valve_battery(uint8_t battery)

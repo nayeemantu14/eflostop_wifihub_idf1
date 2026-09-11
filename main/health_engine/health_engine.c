@@ -12,6 +12,7 @@
 #include "cJSON.h"
 #include "provisioning_manager.h"
 #include "rules_engine.h"   // leak_source_to_str() / leak_identity_key() — shared wire vocabulary
+#include "telemetry/telemetry_v2.h"   // telemetry_v2_wake_snapshot() — wake the publisher on alert
 
 #define HEALTH_TAG "HEALTH_ENGINE"
 
@@ -42,6 +43,10 @@ static health_device_t s_devices[HEALTH_MAX_DEVICES];
 static volatile health_rating_t s_system_rating = HEALTH_EXCELLENT;
 static bool s_initialized = false;
 static SemaphoreHandle_t s_mutex = NULL;
+// Set by health_post_valve_event() when a valve DISCONNECTED could not be queued;
+// drained by health_engine_task(). See the recovery block there for why only this
+// one event needs a fallback.
+volatile bool   g_health_valve_disc_pending = false;
 static bool     s_boot_sync_done = false;
 static int64_t  s_boot_start_ms  = 0;
 static uint32_t s_boot_sync_timeout_ms = HEALTH_BOOT_SYNC_TIMEOUT_MS;  // window length, set on reload
@@ -196,7 +201,15 @@ static void recalc_system_rating(void)
 // Alert generation
 // ---------------------------------------------------------------------------
 
-static void maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating, int64_t now)
+// Returns true when it is SAFE for the caller to commit the new rating: either no
+// alert was warranted, the alert was deliberately suppressed (debounce / boot), or
+// the alert was successfully enqueued.
+//
+// Returns FALSE only when an alert was genuinely required and the queue rejected
+// it. That distinction matters: the alert fires on a TRANSITION, so if the caller
+// commits the rating anyway the transition is consumed and the alert can never be
+// re-detected — it is lost permanently, not merely delayed. See apply_rating().
+static bool maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating, int64_t now)
 {
     health_rating_t old_rating = dev->rating;
 
@@ -205,18 +218,18 @@ static void maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating
     bool out_of_critical = (new_rating != HEALTH_CRITICAL && old_rating == HEALTH_CRITICAL);
 
     if (!into_critical && !out_of_critical) {
-        return;
+        return true;                 // nothing to raise — commit freely
     }
 
     // Suppress boot-time "recovered" alerts — first check-in is not a real recovery
     if (out_of_critical && !dev->ever_seen) {
-        return;
+        return true;                 // deliberately suppressed, not dropped
     }
 
     // Debounce check
     if (dev->last_alert_ms != 0 &&
         (now - dev->last_alert_ms) < HEALTH_ALERT_DEBOUNCE_MS) {
-        return;
+        return true;                 // deliberately suppressed, not dropped
     }
 
     // Build alert
@@ -233,13 +246,43 @@ static void maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating
         alert.offline_duration_s = (uint32_t)((now - dev->last_seen_ms) / 1000);
     }
 
-    if (xQueueSend(s_alert_queue, &alert, 0) == pdTRUE) {
-        dev->last_alert_ms = now;
-        ESP_LOGW(HEALTH_TAG, "ALERT: %s %s %s -> %s",
+    if (xQueueSend(s_alert_queue, &alert, 0) != pdTRUE) {
+        ESP_LOGE(HEALTH_TAG, "ALERT QUEUE FULL — %s %s %s -> %s held for retry",
                  dev_type_to_source_type(dev->dev_type), dev->dev_id,
                  health_rating_to_str(old_rating),
                  health_rating_to_str(new_rating));
+        return false;                // caller must NOT advance dev->rating
     }
+
+    dev->last_alert_ms = now;
+    ESP_LOGW(HEALTH_TAG, "ALERT: %s %s %s -> %s",
+             dev_type_to_source_type(dev->dev_type), dev->dev_id,
+             health_rating_to_str(old_rating),
+             health_rating_to_str(new_rating));
+
+    // Wake the publisher. The alert queue is NOT a member of iothub_task's
+    // QueueSet, so without this the alert waits for whatever wakes that loop next
+    // — up to the 30 s idle cap.
+    //
+    // Adding the queue to the set instead would be wrong: iothub_task drains
+    // alerts in its PUBLISH phase, which sits behind `if (!provisioned) continue;`
+    // and behind dps_maintain()/sas_maintain(). On an unprovisioned hub the set
+    // would signal on a queue nothing ever reads, and xQueueSelectFromSet would
+    // return it immediately every iteration — a busy loop. This wake reuses the
+    // snapshot trigger queue, which IS in the set and IS always consumed.
+    telemetry_v2_wake_snapshot();
+    return true;
+}
+
+// Raise whatever alert the transition warrants, then commit the rating — but only
+// if the alert survived. Holding the old rating on failure is what allows the next
+// evaluation to re-detect the same transition and retry; committing would consume
+// it forever.
+static void apply_rating(health_device_t *dev, health_rating_t new_rating, int64_t now)
+{
+    if (!maybe_enqueue_alert(dev, new_rating, now)) return;
+    dev->prev_rating = dev->rating;
+    dev->rating      = new_rating;
 }
 
 // ---------------------------------------------------------------------------
@@ -260,9 +303,7 @@ static void handle_lora_checkin(const health_event_t *evt)
     dev->last_rssi     = evt->lora.rssi;
 
     health_rating_t new_rating = compute_sensor_rating(dev, now);
-    maybe_enqueue_alert(dev, new_rating, now);
-    dev->prev_rating = dev->rating;
-    dev->rating = new_rating;
+    apply_rating(dev, new_rating, now);
     dev->ever_seen = true;
     check_boot_sync_locked();
 }
@@ -278,9 +319,7 @@ static void handle_ble_leak_checkin(const health_event_t *evt)
     dev->last_rssi     = evt->ble_leak.rssi;
 
     health_rating_t new_rating = compute_sensor_rating(dev, now);
-    maybe_enqueue_alert(dev, new_rating, now);
-    dev->prev_rating = dev->rating;
-    dev->rating = new_rating;
+    apply_rating(dev, new_rating, now);
     dev->ever_seen = true;
     check_boot_sync_locked();
 }
@@ -295,14 +334,28 @@ static void handle_valve_event(bool connected)
     if (connected) {
         dev->last_seen_ms = now;
         dev->disconnect_ms = 0;   // Clear grace period
-    } else {
+    } else if (dev->disconnect_ms == 0) {
+        // LATCH the stamp. This was an unconditional `dev->disconnect_ms = now`,
+        // and compute_valve_rating() measures the grace ONLY from this field — so
+        // every repeat DISCONNECTED restarted the clock. A valve that keeps
+        // linking and keeps failing setup re-stamps faster than the grace expires
+        // and NEVER reaches CRITICAL: the most degraded valve in the fleet was the
+        // one the design guaranteed would stay silent.
+        //
+        // It also fixes a second bug. Once the valve was CRITICAL, a repeat
+        // DISCONNECTED re-stamped, compute_valve_rating() returned WARNING again,
+        // and maybe_enqueue_alert() took the out_of_critical branch with ever_seen
+        // already true — publishing `device_recovered` for a valve that never came
+        // back. With the latch, a repeat recomputes CRITICAL and falls out of
+        // maybe_enqueue_alert() silently.
+        //
+        // The grace now means "time since the link was last usable", which is what
+        // the rating already claimed it meant.
         dev->disconnect_ms = now;  // Start grace period (keep last_seen_ms)
     }
 
     health_rating_t new_rating = compute_valve_rating(dev, now);
-    maybe_enqueue_alert(dev, new_rating, now);
-    dev->prev_rating = dev->rating;
-    dev->rating = new_rating;
+    apply_rating(dev, new_rating, now);
     if (connected) {
         dev->ever_seen = true;
         check_boot_sync_locked();
@@ -324,9 +377,7 @@ static void handle_valve_battery(uint8_t battery)
 
     int64_t now = now_ms();
     health_rating_t new_rating = compute_valve_rating(dev, now);
-    maybe_enqueue_alert(dev, new_rating, now);
-    dev->prev_rating = dev->rating;
-    dev->rating = new_rating;
+    apply_rating(dev, new_rating, now);
 }
 
 static void evaluate_timeouts(void)
@@ -342,9 +393,7 @@ static void evaluate_timeouts(void)
             if (dev->disconnect_ms > 0) {
                 health_rating_t new_rating = compute_valve_rating(dev, now);
                 if (new_rating != dev->rating) {
-                    maybe_enqueue_alert(dev, new_rating, now);
-                    dev->prev_rating = dev->rating;
-                    dev->rating = new_rating;
+                    apply_rating(dev, new_rating, now);
                 }
             }
             continue;
@@ -356,9 +405,7 @@ static void evaluate_timeouts(void)
         health_rating_t new_rating = compute_sensor_rating(dev, now);
 
         if (new_rating != dev->rating) {
-            maybe_enqueue_alert(dev, new_rating, now);
-            dev->prev_rating = dev->rating;
-            dev->rating = new_rating;
+            apply_rating(dev, new_rating, now);
         }
     }
 
@@ -418,6 +465,26 @@ static void health_engine_task(void *param)
         }
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
+
+        // Recover a valve DISCONNECTED that never made it onto the queue.
+        //
+        // health_post_valve_event() posts non-blocking from the NimBLE host task.
+        // If that send fails the event is gone, and for a DISCONNECTED that is
+        // UNRECOVERABLE by any other path: disconnect_ms is never stamped, and
+        // evaluate_timeouts() gates the valve re-rate on `disconnect_ms > 0`, so no
+        // tick can ever notice. The rating pins at its last healthy value forever
+        // — and since the app colours its tile from the rating, that is a green
+        // valve that is not there.
+        //
+        // The asymmetry is the point: a dropped CONNECTED self-heals on the next
+        // data-bearing notify, a dropped DISCONNECTED does not. So the fallback is
+        // biased toward applying the disconnect — if it turns out to be stale, the
+        // next notify corrects it, which is the safe direction to be wrong in.
+        if (g_health_valve_disc_pending) {
+            g_health_valve_disc_pending = false;
+            ESP_LOGW(HEALTH_TAG, "Recovering dropped valve DISCONNECTED event");
+            handle_valve_event(false);
+        }
 
         switch (evt.type) {
             case HEALTH_EVT_LORA_CHECKIN:
@@ -535,7 +602,11 @@ void health_engine_init(void)
         return;
     }
 
-    s_alert_queue = xQueueCreate(4, sizeof(health_alert_t));
+    // Depth 8, was 4. An alert fires on a TRANSITION, so a rejected send used to
+    // lose it permanently (the caller advanced dev->rating regardless, consuming
+    // the edge). apply_rating() now holds the rating back on failure so the next
+    // tick retries — this depth is the first line of defence, that is the second.
+    s_alert_queue = xQueueCreate(8, sizeof(health_alert_t));
     if (!s_alert_queue) {
         ESP_LOGE(HEALTH_TAG, "Failed to create alert queue");
         return;
