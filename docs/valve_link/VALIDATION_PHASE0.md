@@ -245,6 +245,29 @@ sensors present.
 
 ---
 
+### V11 — RMLEAK is also sourced from the valve  · review finding D2
+
+*Added after review. `bfbf304` removed the optimistic cache write for valve position but left
+it for RMLEAK; `734af0f` made them symmetric. `rules_engine_on_valve_connected()` disambiguates a
+physical override by comparing the two, so a mismatched pair can start a 24 h window that
+**blocks auto-close**.*
+
+**Stimulus A — normal interlock:**
+1. Wet a leak sensor to trigger auto-close.
+2. **PASS if** the snapshot after the sequence shows `valve.rmleak: true` *and* `valve.state: "closed"`.
+   A `rmleak: false` here means the valve's notify is not arriving and the removal went too far.
+
+**Stimulus B — the override inference is not falsely triggered:**
+1. Let the incident auto-clear (30 s dry) so `rmleak_auto_cleared` fires.
+2. Power-cycle the valve so the hub reconnects.
+3. **PASS if** the hub does **not** report `water_access_override_enabled` with
+   `trigger: "button"`. You did not press anything.
+
+**FAIL if** an override window opens by itself — that is the false-positive D2 describes, and it
+disables auto-close for 24 hours.
+
+---
+
 ### V10 — Regressions
 
 Run the normal flows and confirm nothing broke:
@@ -275,9 +298,10 @@ Run the normal flows and confirm nothing broke:
 | **V7** | **Unachieved close not reported closed** | ☐ PASS ☐ FAIL ☐ N/T | **blocker if FAIL** |
 | V8 | Reflashed valve re-pairs | ☐ PASS ☐ FAIL ☐ N/T | |
 | V9 | Host load stable, 30 min | ☐ PASS ☐ FAIL ☐ N/T | |
+| **V11** | **RMLEAK sourced from valve; no false override** | ☐ PASS ☐ FAIL ☐ N/T | **blocker if FAIL** |
 | V10 | Regressions (6 sub-cases) | ☐ PASS ☐ FAIL ☐ N/T | |
 
-**Ship criteria:** V6 and V7 must PASS. V1, V2, V4 and V10 must PASS. V3, V5, V8, V9 may be
+**Ship criteria:** V6, V7 and V11 must PASS. V1, V2, V4 and V10 must PASS. V3, V5, V8, V9 may be
 deferred with a written note, but V9 must complete before any fleet rollout.
 
 ---
