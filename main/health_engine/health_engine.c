@@ -11,7 +11,7 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "provisioning_manager.h"
-#include "rules_engine.h"   // leak_source_to_str() — shared device-type vocabulary
+#include "rules_engine.h"   // leak_source_to_str() / leak_identity_key() — shared wire vocabulary
 
 #define HEALTH_TAG "HEALTH_ENGINE"
 
@@ -77,6 +77,9 @@ const char *health_rating_to_str(health_rating_t rating)
 // The mapping stays explicit rather than casting between the two enums — they
 // are declared in a different order (HEALTH_DEV_VALVE=0 vs LEAK_SOURCE_BLE=0),
 // so an index cast would silently mislabel every device.
+//
+// The identity KEY that accompanies it comes from leak_identity_key(), the
+// matching single definition — see health_alert_to_json().
 static const char *dev_type_to_source_type(health_dev_type_t dt)
 {
     switch (dt) {
@@ -596,7 +599,13 @@ char *health_alert_to_json(const health_alert_t *alert)
                             is_offline ? "device_offline" : "device_recovered");
 
     cJSON_AddStringToObject(root, "source_type", dev_type_to_source_type(alert->dev_type));
-    cJSON_AddStringToObject(root, "device_id", alert->dev_id);
+    // valve_id / sensor_id, per the device type — the same key, in the same
+    // position, that the snapshot and the leak events use for this device. Health
+    // kept a generic device_id until 2.1.0 on the argument that it iterates one
+    // heterogeneous table; the branch costs one comparison and removes the last
+    // place on the D2C plane where the identity key had a third spelling.
+    cJSON_AddStringToObject(root, leak_identity_key(alert->dev_type == HEALTH_DEV_VALVE),
+                            alert->dev_id);
     cJSON_AddStringToObject(root, "rating", health_rating_to_str(alert->new_rating));
     cJSON_AddStringToObject(root, "prev_rating", health_rating_to_str(alert->old_rating));
 

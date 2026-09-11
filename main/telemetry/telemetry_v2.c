@@ -197,13 +197,12 @@ static void add_location_for_source(cJSON *parent, leak_source_t source,
 // string form, so a consumer that switches on source_type reads one key either
 // way. Derived from the enum, never from a call-site literal.
 //
-// Hub-generated events ABOUT a device — health alerts, auto_close — deliberately
-// keep the generic device_id: those engines iterate one heterogeneous table and
-// a type-specific key there would force the emitter to branch on a value it does
-// not otherwise care about.
+// Spelling comes from leak_identity_key() in rules_engine.c — the same single
+// definition the hub-generated events (auto_close, RMLEAK interlock, health
+// alerts) use, so the two families cannot drift apart.
 static const char *identity_key_for_source(leak_source_t source)
 {
-    return (source == LEAK_SOURCE_VALVE) ? "valve_id" : "sensor_id";
+    return leak_identity_key(source == LEAK_SOURCE_VALVE);
 }
 
 // ---- System health reason builder ----------------------------------------
@@ -567,10 +566,11 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     }
 
     // Identity: prefer live BLE, fall back to health (provisioned) entry.
-    // Key is valve_id — on objects and events that DESCRIBE a device, the
-    // identity key names the device type (valve_id / sensor_id). The generic
-    // device_id survives only on hub-generated events about a device (health
-    // alerts, auto_close), where the subject is heterogeneous by nature.
+    // Key is valve_id — the identity key names the device type (valve_id /
+    // sensor_id) on every outbound message, whether the device is reporting
+    // itself or the hub is reporting about it. Literal rather than
+    // leak_identity_key() only because the enclosing object is statically the
+    // valve; the dynamic sites all delegate.
     if (vconn) {
         cJSON_AddStringToObject(valve, "valve_id", vmac);
     } else if (valve_hs) {

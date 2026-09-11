@@ -158,8 +158,11 @@ typedef struct {
                                  // re-derived from a string, so a call-site typo
                                  // cannot silently look up the wrong table.
     const char   *device_id;     // the identity VALUE: valve MAC | sensor MAC |
-                                 // "0xNNNNNNNN". The wire key it lands under is
-                                 // chosen from `source`, not from this name.
+                                 // "0xNNNNNNNN". A struct field name, not a wire
+                                 // key — the key it lands under is valve_id or
+                                 // sensor_id, chosen from `source`. No outbound
+                                 // message has carried a literal device_id since
+                                 // 2.1.0.
     bool          leak_state;    // the value that selected `event`, not a re-read
     uint8_t       battery;       // percent, 0-100
 

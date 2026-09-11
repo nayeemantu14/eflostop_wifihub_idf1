@@ -270,17 +270,33 @@ const char *leak_source_to_str(leak_source_t source)
     }
 }
 
-// Wire device_id for a leak source.
+// Wire spelling of the identity KEY — the ONLY definition, shared with
+// telemetry_v2.c (leak events, snapshots, valve_state_changed) and
+// health_engine.c (device_offline / device_recovered). See rules_engine.h for
+// why this takes a bool rather than a leak_source_t.
+const char *leak_identity_key(bool is_valve)
+{
+    return is_valve ? "valve_id" : "sensor_id";
+}
+
+// Wire identity for a leak source.
 //
 // Sensors are tracked internally under their real id, so they pass straight
 // through. The valve is tracked under the stable pseudo-id VALVE_SOURCE_ID (the
 // active-leak table matches by string and must survive a BLE dropout), but the
 // cloud joins events to devices on the id VALUE — so on the wire the valve must
-// report the same MAC that its leak event (data.valve_id), the snapshot
-// (data.valve.valve_id) and its health alerts (data.device_id) report. Without
-// this an auto_close would name a device that appears nowhere else in the
-// incident. The KEY here stays device_id: auto_close is a hub decision about a
-// heterogeneous source, not a device reporting itself.
+// report the same MAC that its leak event, the snapshot (data.valve.valve_id)
+// and its health alerts report. Without this an auto_close would name a device
+// that appears nowhere else in the incident.
+//
+// The KEY is chosen by the same valve-vs-sensor test, via leak_identity_key().
+// Until 2.1.0 these hub-generated events kept a generic device_id, on the
+// argument that the rules engine reasons about a heterogeneous source and should
+// not adopt a type-specific key. That argument served the emitter, not the
+// consumer: it left the backend switching on the message name to know which key
+// held the identity, and it put a third spelling of one concept on the wire
+// beside valve_id and sensor_id. The emitter already performs the test — it must,
+// to resolve the MAC at all — so naming the key from it costs nothing.
 //
 // ble_valve_get_mac() only answers while the GATT link is up, and an auto_close
 // can fire in the moments around a dropout — so the PROVISIONED MAC is tried
@@ -306,31 +322,34 @@ static const char *wire_device_id(const char *source_id, char *buf)
     return source_id;                 // sensors carry their own id (may be NULL)
 }
 
-// device_id, emitted only when it resolves. Keeps every call site honest without
-// repeating the NULL check.
+// valve_id / sensor_id, emitted only when the identity resolves. Keeps every call
+// site honest without repeating the NULL check or the key selection.
 static void add_device_id(cJSON *root, const char *source_id, char *buf)
 {
+    bool is_valve  = (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0);
     const char *id = wire_device_id(source_id, buf);
     if (id) {
-        cJSON_AddStringToObject(root, "device_id", id);
-    } else if (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0) {
+        cJSON_AddStringToObject(root, leak_identity_key(is_valve), id);
+    } else if (is_valve) {
         // Say so. On a valve-less hub this is expected, but the SAME NULL comes
         // back if provisioning_get_valve_mac() merely timed out on its mutex —
         // and then a valve-equipped hub ships an unattributable event, which is
         // the failure this release exists to remove. Without this line the two
         // cases are indistinguishable from the log.
-        ESP_LOGW(RULES_TAG, "No valve identity available — event emitted without device_id");
+        ESP_LOGW(RULES_TAG, "No valve identity available — event emitted without valve_id");
     }
 }
 
-// device_id for the RMLEAK interlock events, which are always about the valve.
+// Identity for the RMLEAK interlock events, which are always about the valve —
+// so they always carry valve_id.
 //
 // Deliberately NO source_type. Everywhere else on the wire source_type answers
 // "what kind of device DETECTED the water" — and the incident these events close
 // may well have been latched by a BLE or LoRa sensor. Emitting source_type:"valve"
 // here would make one key mean two different things, and a backend grouping an
-// incident on (source_type, device_id) would split it in half. The valve is
-// already named unambiguously by device_id.
+// incident on (source_type, identity) would split it in half. Since 2.1.0 the key
+// itself names the device type, so dropping source_type costs no information: an
+// event carrying valve_id is about the valve whether or not source_type says so.
 //
 // Omitted entirely on a hub provisioned with sensors and no valve, which is a
 // supported configuration in which these events are still reachable.
@@ -777,9 +796,9 @@ bool rules_engine_reset_leak_incident(void)
         if (root) {
             cJSON_AddStringToObject(root, "event", "rmleak_cleared");
             // The RMLEAK interlock lives on the valve, so this event names the
-            // valve like every other device-scoped message. Hub-generated, hence
-            // the generic device_id (same rule as health alerts and auto_close).
-            // Before 2.0.1 it carried neither key and was unattributable.
+            // valve like every other device-scoped message — under valve_id,
+            // the same key the snapshot and the leak event use. Before 2.0.1 it
+            // carried no identity at all and was unattributable.
             //
             // BOTH keys are omitted unless a real MAC resolves. A hub can be
             // provisioned with sensors and NO valve (see should_remain_provisioned),
@@ -1053,6 +1072,12 @@ void rules_engine_on_valve_connected(void)
                 // source type is not recoverable here: the active-leak table keys
                 // by id only, and re-deriving a type from the id's string format
                 // is the fragility this release removed everywhere else.
+                //
+                // The identity KEY is still correct without it — valve-vs-sensor
+                // is decidable from the tracking id (== VALVE_SOURCE_ID), and
+                // both sensor types share sensor_id. So this event names its
+                // device under the same key as every other message even though
+                // it cannot name the device's type.
                 cJSON_AddStringToObject(root, "cause", "reconnect");
                 if (g_active_leak_count > 0)
                     add_device_id(root, g_active_leak_ids[0], idbuf);

@@ -27,14 +27,37 @@ typedef enum {
 const char *leak_source_to_str(leak_source_t source);
 
 /**
+ * @brief Wire KEY under which a message names the device it is about.
+ *
+ * The single source of truth for the identity-key vocabulary, in the same spirit
+ * as leak_source_to_str() is for the device-type vocabulary: two spellings, one
+ * definition, every emitter delegating here rather than keeping a literal.
+ *
+ * The key names the device TYPE — `valve_id` for the valve, `sensor_id` for a
+ * leak sensor — and always sits in the same position with the same string form,
+ * so a consumer that switches on source_type reads one key either way. As of
+ * 2.1.0 this holds on EVERY outbound message: snapshots, leak events,
+ * valve_state_changed, auto_close, the RMLEAK interlock events and health
+ * alerts. The generic `device_id` no longer appears anywhere on the D2C plane.
+ *
+ * Deliberately a bool, not a leak_source_t. Both sensor sources share one key,
+ * so valve-vs-sensor is the whole rule — which is why the valve-reconnect
+ * auto_close, the one path that genuinely cannot recover a leak_source_t, can
+ * still name its identity key correctly from the tracking id alone.
+ *
+ * @param is_valve true for the valve, false for any leak sensor.
+ */
+const char *leak_identity_key(bool is_valve);
+
+/**
  * @brief Internal tracking id for the valve as a leak SOURCE.
  *
  * The active-leak table (g_active_leak_ids) matches sources by string, so the
  * valve's key must be stable even while the BLE link is down — hence a constant
- * rather than its MAC. This value is NOT what goes on the wire: data.device_id
+ * rather than its MAC. This value is NOT what goes on the wire: data.valve_id
  * carries the valve's real MAC so the cloud can join auto_close to the same
- * device that the leak event (data.valve_id), the snapshot (data.valve.valve_id)
- * and the health alert (data.device_id) name.
+ * device that the leak event, the snapshot (data.valve.valve_id) and the health
+ * alert name — all of them under that one key.
  */
 #define VALVE_SOURCE_ID  "valve"
 

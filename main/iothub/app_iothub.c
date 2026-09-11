@@ -1,5 +1,6 @@
 #include "app_iothub.h"
 #include <stdio.h>
+#include <stdlib.h>    // malloc/free — inbound fragment reassembly
 #include <string.h>
 #include <strings.h>   // strcasecmp — decommission targets match case-insensitively
 #include <time.h>
@@ -1240,6 +1241,282 @@ void iothub_resume_mqtt(void)
 }
 
 // ---------------------------------------------------------------------------
+// Inbound message reassembly
+// ---------------------------------------------------------------------------
+//
+// esp-mqtt delivers a message larger than the RX buffer as a SEQUENCE of
+// MQTT_EVENT_DATA events (deliver_publish(), mqtt_client.c). Before this, the
+// handler treated every event as a whole message, so an oversized one was parsed
+// from its first fragment, failed as truncated JSON, and was dropped — silently
+// for C2D, because the ack is only published once a command has parsed. A
+// `provision` carrying inline sensor_meta crosses 1024 bytes at about the sixth
+// sensor, which is well inside the 16 the firmware supports.
+//
+// Three things the esp-mqtt contract guarantees, all of which this code relies on:
+//
+//   1. The FIRST fragment has current_data_offset == 0 and carries the topic.
+//      Later fragments carry topic == NULL / topic_len == 0, because
+//      CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS is not enabled — so the routing
+//      decision must be latched on the first fragment and remembered.
+//   2. total_data_len is the FULL message length on every fragment, including
+//      the first, so the final size is known before any of the body arrives.
+//   3. Every fragment of one message is dispatched from a single loop inside
+//      deliver_publish(), on the esp-mqtt task, with nothing else interleaved.
+//      That is why this state can be plain statics with no lock: two messages
+//      can never be in flight at once.
+//
+// The reassembly buffer is allocated per message at exactly total_data_len and
+// freed on completion — nothing is held between messages.
+
+#define MQTT_RX_BUFFER_BYTES   4096   // esp_mqtt_client_config_t buffer.size
+#define MQTT_TX_BUFFER_BYTES   1024   // buffer.out_size — see build_mqtt_cfg()
+
+// Hard ceiling on a reassembled message. The largest legal `provision` (16 BLE +
+// 16 LoRa sensors + 32 metadata entries at the full SENSOR_META_LABEL_MAX label)
+// is about 5.1 KB, so this admits every payload the firmware can act on while
+// still bounding what a malformed or hostile length field can make us allocate.
+#define MQTT_RX_MAX_MESSAGE    8192
+
+typedef enum {
+    RX_KIND_NONE = 0,
+    RX_KIND_TWIN_RES,
+    RX_KIND_TWIN_DESIRED,
+    RX_KIND_C2D,
+} rx_kind_t;
+
+static char     *s_rx_buf;            // NULL when not reassembling, or when discarding
+static int       s_rx_len;            // bytes accumulated so far
+static int       s_rx_total;          // 0 == no message in flight
+static rx_kind_t s_rx_kind;
+static char      s_rx_topic[96];      // fragment 1's topic, for logging after reassembly
+static char      s_rx_corr[64];       // correlation id recovered from fragment 1 (C2D)
+static char      s_rx_cmd[32];        // command name recovered from fragment 1 (C2D)
+
+// Which handler owns this topic. Returns C2D for anything that is not a twin
+// topic, matching the original routing: Azure delivers C2D on
+// devices/<id>/messages/devicebound/... plus an optional property bag.
+// Prefix lengths are DERIVED, never typed. The desired-properties prefix is 38
+// characters and the old code compared 37 of them against a `topic_len > 30`
+// guard: it happened to route correctly, because 37 characters are already
+// unique, but it ignored the trailing '/' and would let a 31-to-36 character
+// topic run strncmp past the end of a buffer esp-mqtt does not NUL-terminate.
+// sizeof-1 makes both the guard and the comparison exactly right by construction.
+static rx_kind_t classify_topic(const char *topic, int topic_len)
+{
+    static const char PFX_RES[]     = "$iothub/twin/res/";
+    static const char PFX_DESIRED[] = "$iothub/twin/PATCH/properties/desired/";
+    const int res_len = (int)sizeof(PFX_RES) - 1;
+    const int des_len = (int)sizeof(PFX_DESIRED) - 1;
+
+    if (!topic || topic_len <= 0) return RX_KIND_NONE;
+    if (topic_len >= res_len && strncmp(topic, PFX_RES, (size_t)res_len) == 0)
+        return RX_KIND_TWIN_RES;
+    if (topic_len >= des_len && strncmp(topic, PFX_DESIRED, (size_t)des_len) == 0)
+        return RX_KIND_TWIN_DESIRED;
+    return RX_KIND_C2D;
+}
+
+// Pull a TOP-LEVEL string field out of a PARTIAL JSON envelope, so an oversized
+// command can still be acked against its correlation id. cJSON is no use here —
+// the document is truncated by definition and will not parse.
+//
+// This walks the document tracking brace/bracket depth and string state, and
+// accepts a key only at depth 1. That is stricter than it looks and the
+// strictness is the point:
+//
+//   - `"sensor_id"` / `"valve_id"` never match, because the literal `"id"`
+//     requires a quote immediately before the 'i'.
+//   - `"label":"id"` never matches, because a value is inside a string token,
+//     which the scanner skips wholesale.
+//   - `"payload":{"id":"..."}` never matches, because that key sits at depth 2.
+//     Acking with an id lifted out of the payload would correlate the failure to
+//     the wrong request, which is worse than acking with none.
+//
+// Every index is bounds-checked against len, so a fragment cut at any byte is
+// safe to scan.
+static void json_scan_top_string(const char *data, int len, const char *key,
+                                 char *out, size_t out_sz)
+{
+    out[0] = '\0';
+    int  klen   = (int)strlen(key);
+    int  depth  = 0;
+    bool in_str = false;
+
+    for (int i = 0; i < len; i++) {
+        char c = data[i];
+
+        if (in_str) {                       // inside a string we care about nothing
+            if (c == '\\')      i++;        // but an escape can hide a quote
+            else if (c == '"')  in_str = false;
+            continue;
+        }
+        if (c == '{' || c == '[') { depth++; continue; }
+        if (c == '}' || c == ']') { depth--; continue; }
+        if (c != '"') continue;
+
+        // A string token starts here, outside any string. If it is our key at the
+        // top level, take its value; otherwise fall through and skip the token.
+        if (depth == 1 && i + klen + 1 < len &&
+            strncmp(&data[i + 1], key, klen) == 0 && data[i + 1 + klen] == '"') {
+            int j = i + klen + 2;
+            while (j < len && (data[j] == ' ' || data[j] == '\t')) j++;
+            if (j < len && data[j] == ':') {
+                j++;
+                while (j < len && (data[j] == ' ' || data[j] == '\t')) j++;
+                if (j < len && data[j] == '"') {
+                    j++;
+                    size_t o = 0;
+                    while (j < len && data[j] != '"' && o + 1 < out_sz) {
+                        if (data[j] == '\\' && j + 1 < len) j++;
+                        out[o++] = data[j++];
+                    }
+                    out[o] = '\0';
+                    return;
+                }
+            }
+        }
+        in_str = true;
+    }
+}
+
+static void rx_reset(void)
+{
+    free(s_rx_buf);
+    s_rx_buf   = NULL;
+    s_rx_len   = 0;
+    s_rx_total = 0;
+    s_rx_kind  = RX_KIND_NONE;
+    s_rx_topic[0] = '\0';
+    s_rx_corr[0]  = '\0';
+    s_rx_cmd[0]   = '\0';
+}
+
+static void rx_dispatch(rx_kind_t kind, const char *topic, const char *data, int len)
+{
+    switch (kind) {
+    case RX_KIND_TWIN_RES:
+        // Logged BEFORE the length test: the ack of our own reported PATCH has an
+        // EMPTY body, and this line is the observable proof the response topic is
+        // live — and therefore that a twin GET will be answered.
+        ESP_LOGI(IOTHUB_TAG, "Twin response: %s (%d bytes)", topic, len);
+        if (len > 0) handle_twin_get_response(data, len);
+        break;
+    case RX_KIND_TWIN_DESIRED:
+        if (len > 0) handle_twin_desired(data, len);
+        break;
+    case RX_KIND_C2D:
+        ESP_LOGI(IOTHUB_TAG, "Received C2D Message! (%d bytes)", len);
+        if (len > 0) handle_c2d_command(data, len);
+        break;
+    default:
+        break;
+    }
+}
+
+// A message we cannot accept. The point of this path is that the sender finds
+// out: a dropped command used to look identical to a lost one from the cloud
+// side, because the ack is only published once a command has parsed.
+static void rx_reject(rx_kind_t kind, const char *why, int total)
+{
+    ESP_LOGE(IOTHUB_TAG, "Inbound %s message DROPPED: %s (%d bytes, limit %d)",
+             kind == RX_KIND_C2D ? "C2D" : "twin", why, total, MQTT_RX_MAX_MESSAGE);
+
+    if (kind == RX_KIND_C2D) {
+        char detail[96];
+        snprintf(detail, sizeof(detail), "%s: %d bytes exceeds the %d byte limit",
+                 why, total, MQTT_RX_MAX_MESSAGE);
+        telemetry_v2_publish_cmd_ack(s_rx_corr, s_rx_cmd[0] ? s_rx_cmd : "unknown",
+                                     false, detail);
+    }
+}
+
+// First (or only) fragment: classify, and either dispatch straight through or
+// open a reassembly.
+static void rx_begin(esp_mqtt_event_handle_t e)
+{
+    if (s_rx_total) {
+        // Cannot happen given guarantee 3 above, but if a future IDF ever
+        // interleaves, fail loudly rather than splicing two messages together.
+        ESP_LOGW(IOTHUB_TAG, "Reassembly abandoned at %d/%d bytes — new message started",
+                 s_rx_len, s_rx_total);
+        rx_reset();
+    }
+
+    rx_kind_t kind = classify_topic(e->topic, e->topic_len);
+    if (kind == RX_KIND_NONE) return;
+
+    // Whole message in one event — the overwhelmingly common case, and the only
+    // one that existed before. No allocation, no state.
+    if (e->total_data_len <= e->data_len) {
+        char topic[sizeof(s_rx_topic)];
+        int n = e->topic_len < (int)sizeof(topic) - 1 ? e->topic_len : (int)sizeof(topic) - 1;
+        memcpy(topic, e->topic, n);
+        topic[n] = '\0';
+        rx_dispatch(kind, topic, e->data, e->data_len);
+        return;
+    }
+
+    ESP_LOGI(IOTHUB_TAG, "Inbound message spans fragments: %d of %d bytes — reassembling",
+             e->data_len, e->total_data_len);
+
+    s_rx_kind  = kind;
+    s_rx_total = e->total_data_len;
+    s_rx_len   = e->data_len;
+
+    int n = e->topic_len < (int)sizeof(s_rx_topic) - 1 ? e->topic_len : (int)sizeof(s_rx_topic) - 1;
+    memcpy(s_rx_topic, e->topic, n);
+    s_rx_topic[n] = '\0';
+
+    // Recover id/cmd now, while we still hold the head of the envelope — the
+    // reject path below needs them and the tail may never be usable.
+    if (kind == RX_KIND_C2D) {
+        json_scan_top_string(e->data, e->data_len, "id", s_rx_corr, sizeof(s_rx_corr));
+        json_scan_top_string(e->data, e->data_len, "cmd", s_rx_cmd, sizeof(s_rx_cmd));
+    }
+
+    if (e->total_data_len > MQTT_RX_MAX_MESSAGE) {
+        rx_reject(kind, "exceeds the reassembly limit", e->total_data_len);
+        return;                       // s_rx_buf stays NULL: swallow the remainder
+    }
+
+    s_rx_buf = malloc((size_t)e->total_data_len + 1);
+    if (!s_rx_buf) {
+        rx_reject(kind, "out of memory", e->total_data_len);
+        return;
+    }
+    memcpy(s_rx_buf, e->data, e->data_len);
+}
+
+// Continuation fragment. Runs with no topic, so everything comes from the state
+// latched by rx_begin(). A NULL s_rx_buf means the message is being swallowed
+// (rejected above) — the byte count still has to be tracked so the end of it is
+// recognised and the next message starts clean.
+static void rx_continue(esp_mqtt_event_handle_t e)
+{
+    if (!s_rx_total) return;          // no message in flight; nothing to attach to
+
+    if (s_rx_buf) {
+        if (s_rx_len + e->data_len > s_rx_total) {
+            ESP_LOGE(IOTHUB_TAG, "Reassembly overflow (%d + %d > %d) — message dropped",
+                     s_rx_len, e->data_len, s_rx_total);
+            rx_reset();
+            return;
+        }
+        memcpy(s_rx_buf + s_rx_len, e->data, e->data_len);
+    }
+    s_rx_len += e->data_len;
+
+    if (s_rx_len < s_rx_total) return;
+
+    if (s_rx_buf) {
+        s_rx_buf[s_rx_total] = '\0';
+        ESP_LOGI(IOTHUB_TAG, "Reassembled %d bytes from fragments", s_rx_total);
+        rx_dispatch(s_rx_kind, s_rx_topic, s_rx_buf, s_rx_total);
+    }
+    rx_reset();
+}
+
+// ---------------------------------------------------------------------------
 // MQTT event handler
 // ---------------------------------------------------------------------------
 
@@ -1296,43 +1573,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
     case MQTT_EVENT_DATA:
     {
-        // NOTE the twin/res branch is checked BEFORE the data_len test. The
-        // acknowledgement of our own reported PATCH has an EMPTY body, so the old
-        // `data_len > 0` gate discarded it before any routing ran — which is why
-        // "Twin response:" never appeared in a bench log despite the twin working.
-        // Logging it is the observable proof that the response topic is live, and
-        // therefore that a twin GET will be answered.
-        if (event->topic_len > 17 &&
-            strncmp(event->topic, "$iothub/twin/res/", 17) == 0) {
-            ESP_LOGI(IOTHUB_TAG, "Twin response: %.*s (%d bytes)",
-                     event->topic_len, event->topic, event->data_len);
-            if (event->total_data_len > event->data_len) {
-                // The twin document did not fit the MQTT receive buffer. esp-mqtt
-                // delivers the remainder as further events and this handler does
-                // not reassemble, so parsing the first fragment would fail
-                // silently and the desired properties would never be applied.
-                // Say so explicitly — a twin GET that quietly does nothing is the
-                // exact failure this whole change exists to remove.
-                ESP_LOGE(IOTHUB_TAG,
-                         "Twin document truncated: %d of %d bytes — desired properties NOT applied. "
-                         "Raise CONFIG_MQTT_BUFFER_SIZE above %d.",
-                         event->data_len, event->total_data_len, event->total_data_len);
-            } else {
-                handle_twin_get_response(event->data, event->data_len);
-            }
-        }
-        else if (event->topic_len > 0 && event->data_len > 0) {
-            // Route based on topic prefix
-            if (event->topic_len > 30 &&
-                strncmp(event->topic, "$iothub/twin/PATCH/properties/desired/",
-                        37) == 0) {
-                // Desired property change notification
-                handle_twin_desired(event->data, event->data_len);
-            } else {
-                // C2D command
-                ESP_LOGI(IOTHUB_TAG, "Received C2D Message!");
-                handle_c2d_command(event->data, event->data_len);
-            }
+        // Routing and the truncation guard both live in the reassembly layer
+        // above, because neither can be decided from a single event: a message
+        // too big for the RX buffer arrives as several of these, and only the
+        // first one carries the topic. current_data_offset is what tells them
+        // apart — 0 on the first (or only) fragment, rising on the rest.
+        if (event->current_data_offset == 0) {
+            rx_begin(event);
+        } else {
+            rx_continue(event);
         }
         break;
     }
@@ -1435,6 +1684,24 @@ static void build_mqtt_cfg(esp_mqtt_client_config_t *cfg, const char *password)
     cfg->credentials.client_id                 = g_device_id;
     cfg->credentials.authentication.password   = password;
     cfg->session.keepalive                     = 60;
+
+    // RX buffer. Left unset this defaults to MQTT_BUFFER_SIZE_BYTE (1024, since
+    // CONFIG_MQTT_USE_CUSTOM_CONFIG is off), and that 1024 covers the WHOLE
+    // packet — fixed header plus topic plus payload — so the usable payload was
+    // nearer 970. A `provision` with inline sensor_meta costs ~135 bytes per
+    // sensor, which put the ceiling at about five. 4096 admits all 16 sensors
+    // the firmware supports even at the maximum label length, and does it in one
+    // event, so reassembly stays an exception rather than the normal path.
+    cfg->buffer.size = MQTT_RX_BUFFER_BYTES;
+
+    // TX buffer, pinned explicitly. out_size DEFAULTS TO buffer.size, so raising
+    // the line above on its own would silently allocate a second 4096 buffer for
+    // publishing — and buy nothing, because esp_mqtt_client_publish() already
+    // fragments outbound messages that do not fit (mqtt_client.c, "Provide
+    // support for sending fragmented message if it doesn't fit buffer"). That is
+    // why snapshots have always gone out intact at ~978 bytes. Keeping this at
+    // the historical 1024 holds the net cost of the change to +3 KB.
+    cfg->buffer.out_size = MQTT_TX_BUFFER_BYTES;
 }
 
 // esp_mqtt_client_stop() does NOT dispatch MQTT_EVENT_DISCONNECTED — the client task
@@ -1955,7 +2222,7 @@ void iothub_task(void *param)
 
             // VALVE_SOURCE_ID, not the MAC: this is the rules engine's internal
             // tracking key and must stay stable across a BLE dropout. The wire
-            // device_id is resolved to the real MAC inside the rules engine.
+            // valve_id is resolved to the real MAC inside the rules engine.
             rules_engine_evaluate_leak(LEAK_SOURCE_VALVE, vlk_wet, VALVE_SOURCE_ID);
         }
 

@@ -678,7 +678,7 @@ bool provisioning_decommission(void)
 // from there the snapshot device arrays, health events, the lifecycle message and twin
 // reported. Before this, a sensor commissioned in lower case appeared as
 // "00:80:e1:2a:3b:00" in every snapshot and "00:80:E1:2A:3B:00" in every event: one
-// physical device under two values of data.device_id, which is the key the cloud joins
+// physical device under two values of data.sensor_id, which is the key the cloud joins
 // on. Confirmed on a real capture, 26 lower-case vs 11 upper-case occurrences.
 //
 // Normalising on READ rather than on store also repairs hubs already commissioned with
