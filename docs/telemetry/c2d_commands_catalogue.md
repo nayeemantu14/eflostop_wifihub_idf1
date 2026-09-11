@@ -7,8 +7,8 @@
 | | |
 |---|---|
 | Document version | 2.0 (supersedes v1.0, which documented firmware 1.9.0) |
-| Firmware version | 2.0.2 — `CMakeLists.txt:12` |
-| Git commit | `f852ddf7b4209db1fbd2539babcb791898eed94a` |
+| Firmware version | 2.1.0 — `CMakeLists.txt:12` |
+| Git commit | `33f7af69ef2a2604353ee25af32be61cf7f27b35` |
 | Schema | `eflostop.cmd` |
 | Direction | cloud → hub (C2D) |
 | Transport | devices/<device_id>/messages/devicebound/#  (MQTT, QoS 1) |
@@ -28,10 +28,11 @@ still execute while sending you no acknowledgement at all.
 
 ## What changed since v1.0
 
-Document **v1.0** described firmware **1.9.0**; this is **v2.0**, describing firmware **2.0.2**. Unlike the telemetry plane, the command plane keeps a compatibility path: the one renamed key still accepts its old spelling.
+Document **v1.0** described firmware **1.9.0**; this is **v2.0**, describing firmware **2.1.0**. Unlike the telemetry plane, the command plane keeps a compatibility path: the one renamed key still accepts its old spelling.
 
-| | v1.0 — firmware 1.9.0 | v2.0 — firmware 2.0.2 |
+| | v1.0 — firmware 1.9.0 | v2.0 — firmware 2.1.0 |
 |---|---|---|
+| Maximum command size | `~1 KB shared with the topic; anything larger was dropped silently, with no ack — a provision with inline sensor_meta broke at about six sensors` | `4 KB buffer plus fragment reassembly, so all 16 sensors fit in one provision. Over 8 KB is rejected WITH a cmd_ack error correlated to your id  (2.1.0)` |
 | provision — valve identifier | `payload.valve_mac` | `payload.valve_id  (valve_mac still accepted, deprecated, logs a warning)` |
 | provision — auto-close opt-in | `only payload.rules.auto_close_enabled (+ trigger_mask), nested` | `top-level payload.auto_close_enabled added: true also arms trigger_mask=7 (BLE + LoRa + valve probe), false flips the master flag only. The nested rules object still works and wins when both are sent.` |
 | provision — a malformed valve key | `aborts the whole command` | `the other spelling is tried first; aborts only if NEITHER yields a valid MAC` |
@@ -102,7 +103,7 @@ published every 5 seconds, so state may be batched but is never skipped.
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 3600
   },
   "type": "event",
@@ -125,7 +126,7 @@ published every 5 seconds, so state may be batched but is never skipped.
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 3612
   },
   "type": "event",
@@ -187,7 +188,7 @@ The ack means the write was **queued**, not that the valve moved — a full comm
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 3600
   },
   "type": "event",
@@ -233,7 +234,7 @@ Does **not** touch RMLEAK, the incident latch or an active override window.
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 3600
   },
   "type": "event",
@@ -280,7 +281,7 @@ No legacy plain-text form — which is a safety property: a wrong `schema` here 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 3600
   },
   "type": "event",
@@ -332,7 +333,7 @@ With nothing to clear it still acks `ok` and emits nothing. Treat a following `r
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 3600
   },
   "type": "event",
@@ -378,7 +379,7 @@ The sanctioned way to get water during a live leak: clears the incident, blocks 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 8200
   },
   "type": "event",
@@ -428,7 +429,7 @@ With no window running it acks `ok` and changes nothing. The window otherwise en
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 9000
   },
   "type": "event",
@@ -510,7 +511,7 @@ A commissioning window follows: a `commission` snapshot once every device has be
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 95
   },
   "type": "event",
@@ -565,7 +566,7 @@ Removes one commissioned device, or erases everything and reboots. Removing a se
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 12000
   },
   "type": "event",
@@ -633,7 +634,7 @@ Accepted codes: `unknown`, `bathroom`, `kitchen`, `laundry`, `garage`, `garden`,
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 13000
   },
   "type": "event",
@@ -691,7 +692,7 @@ Emits no telemetry EVENT, but from 2.0.2 a snapshot and a twin reported publish 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 14000
   },
   "type": "event",
@@ -744,7 +745,7 @@ Publishes twin reported immediately. The handler ignores the storage result, so 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.0.2",
+    "fw": "2.1.0",
     "uptime_s": 15000
   },
   "type": "event",
@@ -874,13 +875,24 @@ Send `unknown` if you intend to clear it.
 only failures that surface are the two argument checks. Confirm through the twin reported `hub_name` if it
 matters.
 
-**Trap 8 — keep messages under about 1 KB.** The receive buffer is 1024 bytes and the handler does not
-reassemble fragments, so a larger command arrives as a truncated fragment, fails to parse and is dropped with
-no ack. A `provision` with 16 sensors and inline metadata can approach this — split it into a `provision`
-followed by individual `sensor_meta` calls.
+**Trap 8 — message size: fixed in 2.1.0, but know the ceiling.** Up to 2.0.2 the receive buffer was 1024
+bytes and the handler did not reassemble fragments, so anything larger arrived truncated, failed to parse and
+was dropped **with no ack** — indistinguishable, from your side, from a message that never arrived. Because
+the whole 1024 covered the topic as well as the payload, and inline `sensor_meta` costs roughly 135 bytes per
+sensor, a `provision` broke at about the **sixth** sensor.
 
-**Trap 9 — `cmd` and `id` are truncated without warning**, at 31 and 63 characters. An over-long `id` comes
-back truncated, so exact-match correlation fails and the request looks unanswered.
+Since 2.1.0 the buffer is 4096 and oversized messages are reassembled from their fragments, so a `provision`
+carrying all 16 sensors with full-length labels arrives intact. The remaining limit is **8192 bytes**, above
+which the message is rejected — and rejection is now reported: you get a `cmd_ack` with
+`status: "error"` and a `payload too large` detail, correlated against your `id`, which is recovered from the
+first fragment. Splitting a large `provision` into a `provision` followed by individual `sensor_meta` calls is
+still the lightest option, and remains the only one that works against a hub running 2.0.2 or earlier.
+
+**Trap 9 — `cmd` and `id` are truncated without warning**, at 31 and 63 characters. **GUIDs are unaffected**
+— a canonical 36-character GUID, or 38 with braces, fits with room to spare, and the ack echoes whatever was
+stored without truncating it again. The longest command name the firmware defines is 15 characters. This only
+bites a correlation scheme that exceeds 63 characters, where the truncated `id` comes back unmatched and the
+request looks unanswered.
 
 **Trap 10 — one error string can mean several things.** `A leak is still active…` also covers an uninitialised
 rules engine and an internal lock timeout, neither of which involves a leak. Treat these strings as

@@ -3,7 +3,7 @@
 """Build the telemetry message catalogue: every real message, as a concrete example.
 
 Outputs:
-    eFloStop2_Telemetry_Messages_v3.0.docx
+    eFloStop2_Telemetry_Messages_v4.0.docx
     telemetry_messages.md
 
 Earlier .docx revisions are deliberately NOT regenerated — each stays on disk as the
@@ -35,13 +35,22 @@ TITLE = "eFloStop II Wi-Fi Hub — Telemetry Message Catalogue"
 # Document revision, independent of the firmware version below it.
 # v1.0 = firmware 1.8.0, separate valve_flood_* events, sensor_id identity key.
 # v2.0 = firmware 1.9.0, unified leak events, device_id identity key everywhere.
-# v3.0 = firmware 2.0.0, type-named identity keys (valve_id / sensor_id), one
-#        source_type vocabulary on every outbound message.
-DOC_VERSION = "3.0"
+# v3.0 = firmware 2.0.0, type-named identity keys (valve_id / sensor_id) on
+#        device-reported messages, one source_type vocabulary on every outbound
+#        message. Hub-generated events still used device_id.
+# v4.0 = firmware 2.1.0, type-named identity keys EVERYWHERE — device_id is gone
+#        from the telemetry plane entirely.
+DOC_VERSION = "4.0"
 
-# The revision this one supersedes, named in the "What changed" section.
+# Baseline of the "What changed" comparison table in messages_data.CHANGES.
+# NOT simply "the previous revision": the table is cumulative from 1.9.0, so that
+# a reader still holding the v2.0 document sees every change in one place rather
+# than having to chain three side-by-side tables. v3.0 (firmware 2.0.0-2.0.2) is
+# an interim revision between the two — named in INTERIM below so the sequence on
+# disk is not left unexplained. Keep these two in step with the CHANGES rows.
 PREV_VERSION = "2.0"
 PREV_FW = "1.9.0"
+INTERIM = "3.0"
 
 
 def git(*a):
@@ -182,7 +191,11 @@ def build_docx(path):
     rich(doc, f"Document **v{PREV_VERSION}** described firmware **{PREV_FW}**; this is **v"
               f"{DOC_VERSION}**, describing firmware **{FW}**. v{PREV_VERSION} is kept unchanged so the two "
               "can be read side by side. Every row below is a breaking change — there is no "
-              "compatibility shim on the telemetry plane, and every hub runs the new shape.")
+              "compatibility shim on the telemetry plane, and every hub runs the new shape.\n\n"
+              f"The table is cumulative, so a reader holding either earlier revision can use it. "
+              f"Rows are annotated with the firmware release that introduced them; v{INTERIM} is the "
+              f"interim revision between v{PREV_VERSION} and this one, and anything marked 2.1.0 is new "
+              f"since v{INTERIM}.")
     ct = doc.add_table(rows=1, cols=3); ct.style = "Table Grid"
     for i, h in enumerate(["", f"v{PREV_VERSION} — firmware {PREV_FW}", f"v{DOC_VERSION} — firmware {FW}"]):
         cell = ct.rows[0].cells[i]; cell.text = ""
@@ -286,6 +299,9 @@ def build_md(path):
           f"firmware **{FW}**. v{PREV_VERSION} of the `.docx` is kept unchanged so the two can be read side by "
           "side. Every row below is a breaking change — there is no compatibility shim on the "
           "telemetry plane.", "",
+          f"The table is cumulative, so a reader holding either earlier revision can use it. Rows are "
+          f"annotated with the firmware release that introduced them; v{INTERIM} is the interim revision "
+          f"between v{PREV_VERSION} and this one, and anything marked 2.1.0 is new since v{INTERIM}.", "",
           f"| | v{PREV_VERSION} — firmware {PREV_FW} | v{DOC_VERSION} — firmware {FW} |", "|---|---|---|"]
     for what, old, new in M.CHANGES:
         L.append(f"| {what} | `{old}` | `{new}` |")

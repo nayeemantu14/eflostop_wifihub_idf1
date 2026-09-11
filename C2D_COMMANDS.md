@@ -419,11 +419,21 @@ uppercase to match what comes back.
 >    and inbound `sensor_type`. The three values are unchanged.
 > 2. **The identity key is named for the device type.** A valve reports `valve_id`, a leak sensor reports
 >    `sensor_id`, replacing the single `device_id` that 1.9.0 used. It keeps the same position and the same
->    string form, so switch on `source_type` and read the matching key. Two message families keep the
->    generic `device_id` on purpose — **health alerts** and **`auto_close`** — because the hub raises those
->    *about* a device rather than the device reporting itself.
+>    string form, so switch on `source_type` and read the matching key.
+
+> **Changed again in 2.1.0 — `device_id` is gone.** 2.0.0 left the generic `device_id` on three families:
+> **health alerts** (`device_offline`, `device_recovered`), the **`auto_close`** family (including
+> `auto_close_blocked_override`) and the **RMLEAK interlock** events (`rmleak_cleared`,
+> `rmleak_auto_cleared`) — on the grounds that the hub raises those *about* a device rather than the device
+> reporting itself. That distinction described the firmware's internals, not anything you can act on, so it
+> was removed. Those events now use `valve_id` / `sensor_id` like everything else, and `device_id` no longer
+> appears anywhere on the telemetry plane. One rule now covers every message: read `valve_id` when
+> `data.source_type` is `valve`, `sensor_id` otherwise.
 >
-> Full detail, with a worked example of every message: `docs/telemetry/eFloStop2_Telemetry_Messages_v3.0.docx`.
+> Nothing you *send* changes — this is a telemetry-plane rename only. The C2D command payloads and the
+> `cmd_ack` shape are untouched.
+>
+> Full detail, with a worked example of every message: `docs/telemetry/eFloStop2_Telemetry_Messages_v4.0.docx`.
 
 Unchanged, because they already use the canonical stem: the snapshot/provision array key
 `ble_leak_sensors`, and the count field `ble_leak_sensor_count`.

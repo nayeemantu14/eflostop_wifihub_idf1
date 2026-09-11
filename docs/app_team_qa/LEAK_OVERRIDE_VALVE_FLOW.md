@@ -146,4 +146,5 @@ window), `water_access_override_enabled`/`_expired`, `auto_close_reenabled` (ove
 > `valve_flood_detected` / `valve_flood_cleared`. It is now reported as `leak_detected` / `leak_cleared`,
 > the same as any sensor, with `data.source_type: "valve"` telling you where the water was seen. Every
 > row above that says `leak_detected` therefore covers both the sensors and the valve probe. The
-> identity key on these events is `data.device_id` (it was `data.sensor_id`).
+> identity key on these events is `data.valve_id` when `data.source_type` is `"valve"` and `data.sensor_id`
+> otherwise — one rule for every event the hub sends, as of firmware 2.1.0.

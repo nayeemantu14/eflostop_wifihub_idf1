@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ruff: noqa: E501
-"""Validate a captured Azure IoT Hub monitor log against the firmware 2.0.2 wire contract.
+"""Validate a captured Azure IoT Hub monitor log against the firmware 2.1.0 wire contract.
 
 Reads whatever `az iot hub monitor-events` printed (or a UART log containing `Pub event:`
 lines), pulls every JSON message out of it, and checks each one against the rules the
-2.0.2 firmware is supposed to follow. Reports per-message failures and a summary.
+2.1.0 firmware is supposed to follow. Reports per-message failures and a summary.
 
 This encodes the contract as ASSERTIONS, not as prose — so a passing run is evidence the
 firmware and the catalogue agree, rather than an assumption that they do.
@@ -16,29 +16,52 @@ import re
 import sys
 
 # ---------------------------------------------------------------------------
-# Contract — firmware 2.0.2
+# Contract — firmware 2.1.0
 # ---------------------------------------------------------------------------
-EXPECTED_FW = "2.0.2"
+EXPECTED_FW = "2.1.0"
 SCHEMA = "eflostop.v2"
 DEVICE_TYPES = {"valve", "ble_leak_sensor", "lora"}
 RATINGS = {"excellent", "good", "warning", "critical", "unknown"}
 
-# Events the hub raises ABOUT a device (generic device_id), vs events a device
-# reports about ITSELF (type-named identity key).
+# Events the hub raises ABOUT a device, vs events a device reports about ITSELF.
+# Since 2.1.0 BOTH families name the device the same way — valve_id for the valve,
+# sensor_id for a leak sensor — so the distinction below no longer changes the
+# identity key. It is kept because the two families differ in whether the key may
+# legitimately be absent.
 HUB_GENERATED = {"device_offline", "device_recovered", "auto_close",
                  "auto_close_blocked_override"}
 LEAK_EVENTS = {"leak_detected", "leak_cleared"}
 
-# Keys that must never appear anywhere on the wire again.
+# Keys that must never appear anywhere on the wire again. `device_id` joined this
+# set in 2.1.0: it was the last surviving third spelling of an identity, used by
+# health alerts and the auto_close / RMLEAK families while every other message had
+# already moved to valve_id / sensor_id.
 RETIRED_KEYS = {"dev_type", "valve_device_id", "valve_flood_detected",
-                "valve_flood_cleared"}
+                "valve_flood_cleared", "device_id"}
 
 MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
 LORA_RE = re.compile(r"^0x[0-9A-F]{8}$")
 
+# The one identity key a message about a device is allowed to carry.
+IDENTITY_KEYS = ("valve_id", "sensor_id")
+
 
 def is_id(v):
     return isinstance(v, str) and bool(MAC_RE.match(v) or LORA_RE.match(v))
+
+
+def identity_keys_in(d):
+    """Which identity keys this data object carries. Exactly one is expected."""
+    return [k for k in IDENTITY_KEYS if k in d]
+
+
+def expected_identity(source_type):
+    """The key a message must use, given its source_type. None when undecidable."""
+    if source_type == "valve":
+        return "valve_id"
+    if source_type in {"ble_leak_sensor", "lora"}:
+        return "sensor_id"
+    return None
 
 
 def walk_keys(o, path="data"):
@@ -82,7 +105,7 @@ def check(msg):
 
     # ---- identifiers are uppercase ----
     for path, k in walk_keys(d):
-        if k in {"valve_id", "sensor_id", "device_id"}:
+        if k in IDENTITY_KEYS:
             v = _at(d, path)
             if isinstance(v, str) and not is_id(v):
                 f.append(f"{path} = {v!r} is not an UPPERCASE MAC or 0xHEX id")
@@ -92,8 +115,6 @@ def check(msg):
     # ---- snapshot ----
     if mtype == "snapshot":
         valve = d.get("valve", {})
-        if valve and "device_id" in valve:
-            f.append("data.valve.device_id present — must be valve_id")
         if valve.get("connected") and "valve_id" not in valve:
             f.append("data.valve.valve_id missing on a connected valve")
         for arr in ("lora_sensors", "ble_leak_sensors"):
@@ -102,8 +123,6 @@ def check(msg):
             for i, s in enumerate(d.get(arr, [])):
                 if "sensor_id" not in s:
                     f.append(f"data.{arr}[{i}] has no sensor_id (keys: {list(s)})")
-                if "device_id" in s:
-                    f.append(f"data.{arr}[{i}].device_id present — must be sensor_id")
         if "override_active" not in d:
             f.append("data.override_active missing (unconditional on snapshots)")
 
@@ -121,12 +140,10 @@ def check(msg):
             keys = list(d)
             if keys[:2] != ["event", "source_type"]:
                 f.append(f"{ev}: first two keys are {keys[:2]}, expected [event, source_type]")
-            want = "valve_id" if st == "valve" else "sensor_id"
+            want = expected_identity(st) or "sensor_id"
             if len(keys) < 3 or keys[2] != want:
                 f.append(f"{ev} (source_type={st!r}): 3rd key is "
                          f"{keys[2] if len(keys) > 2 else '<none>'!r}, expected {want!r}")
-            if "device_id" in d:
-                f.append(f"{ev}: device_id present — device-reported events use {want}")
 
         if ev in LEAK_EVENTS:
             want_state = ev == "leak_detected"
@@ -140,22 +157,29 @@ def check(msg):
                 f.append(f"{st} leak event has no rssi")
 
         if ev in HUB_GENERATED:
-            # device_id is required EXCEPT on the auto_close family, where it is
-            # legitimately omitted when the source is a valve with no resolvable
-            # MAC (2.0.2 — better no identity than the placeholder "valve").
+            # 2.1.0: hub-generated events name the device the SAME way a device
+            # names itself — valve_id or sensor_id per source_type. The identity is
+            # required EXCEPT on the auto_close family, where it is legitimately
+            # omitted when the source is a valve with no resolvable MAC (better no
+            # identity than the placeholder "valve").
             optional_id = ev in {"auto_close", "auto_close_blocked_override"}
-            if "device_id" not in d and not optional_id:
-                f.append(f"{ev}: device_id missing (hub-generated events use device_id)")
-            for bad in ("valve_id", "sensor_id"):
-                if bad in d:
-                    f.append(f"{ev}: {bad} present — hub-generated events use device_id")
+            have = identity_keys_in(d)
+            if len(have) > 1:
+                f.append(f"{ev}: carries both {have} — a message names its device once")
+            elif not have and not optional_id:
+                f.append(f"{ev}: no identity key (expected valve_id or sensor_id)")
+            want = expected_identity(st)
+            if want and have and have[0] != want:
+                f.append(f"{ev} (source_type={st!r}): identity key is {have[0]!r}, "
+                         f"expected {want!r}")
 
         if ev in {"device_offline", "device_recovered"}:
             if d.get("category") != "health":
                 f.append(f"{ev}: category is {d.get('category')!r}, expected 'health'")
-            if list(d)[:4] != ["category", "event", "source_type", "device_id"]:
+            want = expected_identity(st) or "sensor_id"
+            if list(d)[:4] != ["category", "event", "source_type", want]:
                 f.append(f"{ev}: first four keys are {list(d)[:4]}, "
-                         "expected [category, event, source_type, device_id]")
+                         f"expected [category, event, source_type, {want}]")
             for k in ("rating", "prev_rating"):
                 if d.get(k) not in RATINGS:
                     f.append(f"{ev}.{k} = {d.get(k)!r} not a valid rating")
@@ -167,21 +191,22 @@ def check(msg):
             if "source_type" in d:
                 f.append("reconnect auto_close still carries source_type (should be cause only)")
 
-        # 2.0.2: the RMLEAK interlock events identify the valve by device_id and
-        # carry NO source_type. The incident they close may have been latched by a
-        # sensor, so claiming source_type:"valve" would make that key mean something
-        # different here than everywhere else. device_id is omitted entirely on a
-        # hub with no valve rather than naming a device that does not exist.
+        # The RMLEAK interlock events identify the valve by valve_id and carry NO
+        # source_type. The incident they close may have been latched by a sensor, so
+        # claiming source_type:"valve" would make that key mean something different
+        # here than everywhere else — and since 2.1.0 the key itself names the type,
+        # so nothing is lost. valve_id is omitted entirely on a hub with no valve
+        # rather than naming a device that does not exist.
         if ev in {"rmleak_cleared", "rmleak_auto_cleared"}:
             if "source_type" in d:
                 f.append(f"{ev}: carries source_type={d['source_type']!r} — this event "
-                         "family must not claim a device type (2.0.2)")
-            if d.get("device_id") == "valve":
-                f.append(f"{ev}: device_id is the literal 'valve' — a phantom device; "
-                         "the key should have been omitted")
+                         "family must not claim a device type")
+            if "sensor_id" in d:
+                f.append(f"{ev}: carries sensor_id — the RMLEAK interlock is the "
+                         "valve's, so the key must be valve_id")
 
-        # 2.0.2: no event may carry the placeholder id.
-        for k in ("device_id", "valve_id", "sensor_id"):
+        # No event may carry the placeholder id.
+        for k in IDENTITY_KEYS:
             if d.get(k) == "valve":
                 f.append(f"{ev}: {k} is the literal 'valve', not an identifier")
 
@@ -205,7 +230,7 @@ def check_ordering(msgs):
             if ident:
                 seen_leak[ident] = i
         elif ev == "auto_close" and "active_leak_count" not in d:
-            ident = d.get("device_id")
+            ident = d.get("valve_id") or d.get("sensor_id")
             if ident and ident not in seen_leak:
                 fails.append(
                     f"message {i+1}: auto_close for {ident} has no preceding "
