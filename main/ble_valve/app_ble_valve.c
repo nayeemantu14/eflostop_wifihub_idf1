@@ -728,7 +728,15 @@ static void apply_pending_valve_cmd_if_any(void)
         {
             int rc = ble_gattc_write_flat(valve_conn_handle, h_valve_char, &v, 1, NULL, NULL);
             ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d (position awaits the valve's own report)", rc);
-            // Deliberately does NOT cache `v` — see write_valve_command().
+            // Deliberately does NOT cache `v`, and reads straight back as a
+            // backstop against a session with no VALVESTATE subscription — see
+            // write_valve_command() for the full reasoning.
+            if (rc == 0)
+            {
+                int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_read_cb, NULL);
+                if (rrc != 0)
+                    ESP_LOGW(BLE_TAG, "[CMD] Valve state read-back rc=%d — position unconfirmed", rrc);
+            }
             xSemaphoreGive(gatt_mutex);
         }
         g_pending_valve_cmd = -1;
@@ -1676,6 +1684,27 @@ static void write_valve_command(uint8_t val)
         // "reports what it asked for" to "reports what the valve says it did",
         // which proves delivery and actuation intent. It does not prove the gate
         // physically moved.
+        //
+        // BACKSTOP: read the characteristic straight back, because the notify is
+        // not guaranteed. on_dsc_disc_cb() logs a missing CCCD and then calls
+        // setup_next_step() anyway, so a session can reach DISCOVERY_DONE with no
+        // VALVESTATE subscription at all. Before this commit the optimistic cache
+        // write accidentally masked that; without a backstop it would surface as
+        // a repeating auto_close — rules_engine's idempotence guard
+        // (valve_state == 0 && rmleak_already) could never become true, so every
+        // cooldown would re-issue the close while a sensor stayed wet.
+        //
+        // ATT is sequential on one connection, so this read is serviced after the
+        // write and returns the value the valve's write handler just published.
+        // It lands via on_read_cb() -> on_notify(), i.e. through the SAME delta
+        // gate as an unsolicited notify, so it cannot double-report. One extra
+        // round trip per valve command, and commands are rare.
+        if (rc == 0)
+        {
+            int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_read_cb, NULL);
+            if (rrc != 0)
+                ESP_LOGW(BLE_TAG, "[CMD] Valve state read-back rc=%d — position unconfirmed", rrc);
+        }
         xSemaphoreGive(gatt_mutex);
         cmd_settle_release();
     }
