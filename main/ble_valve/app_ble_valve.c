@@ -749,11 +749,8 @@ static void apply_pending_rmleak_cmd_if_any(void)
         if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
             int rc = ble_gattc_write_flat(valve_conn_handle, h_rmleak_char, &v, 1, NULL, NULL);
-            ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d", rc);
-            if (rc == 0)
-            {
-                g_val_rmleak = (v != 0);
-            }
+            ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d (value awaits the valve's own report)", rc);
+            // Deliberately does NOT cache `v` — see write_rmleak_command().
             xSemaphoreGive(gatt_mutex);
         }
         g_pending_rmleak_cmd = -1;
@@ -1712,11 +1709,22 @@ static void write_rmleak_command(uint8_t val)
         ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d", rc);
         if (rc == 0)
         {
-            g_val_rmleak = (val != 0);
-            // Wake the publisher. Without this a hub-driven RMLEAK change was
-            // invisible until some unrelated event happened to trigger a
-            // snapshot; it also refreshes valve liveness in the health engine.
-            // BLE_UPD_RMLEAK emits no D2C event of its own, so this adds a wake,
+            // Like write_valve_command(), this deliberately does NOT cache the
+            // value it just asked for. rc == 0 is local host acceptance, and the
+            // same false-assurance argument applies verbatim: reporting
+            // rmleak:true for a write that never reached the valve is exactly the
+            // failure P0-7 removed from the position path. The valve pushes
+            // CUSTOM_STM_REMOTE_LEAK back itself, so on_notify() supplies the
+            // real value; setup re-reads it on every reconnect.
+            //
+            // Leaving this asymmetric would have been worse than either choice
+            // consistently: rules_engine_on_valve_connected() disambiguates a
+            // physical override by comparing valve state against rmleak, and
+            // feeding it one optimistic and one honest input is how that
+            // inference goes wrong.
+            //
+            // The wake stays — it refreshes valve liveness in the health engine
+            // and BLE_UPD_RMLEAK emits no D2C event of its own, so it is a wake,
             // not traffic.
             notify_hub_update(BLE_UPD_RMLEAK);
         }

@@ -480,12 +480,6 @@ static void health_engine_task(void *param)
         // data-bearing notify, a dropped DISCONNECTED does not. So the fallback is
         // biased toward applying the disconnect — if it turns out to be stale, the
         // next notify corrects it, which is the safe direction to be wrong in.
-        if (g_health_valve_disc_pending) {
-            g_health_valve_disc_pending = false;
-            ESP_LOGW(HEALTH_TAG, "Recovering dropped valve DISCONNECTED event");
-            handle_valve_event(false);
-        }
-
         switch (evt.type) {
             case HEALTH_EVT_LORA_CHECKIN:
                 handle_lora_checkin(&evt);
@@ -505,6 +499,32 @@ static void health_engine_task(void *param)
             case HEALTH_EVT_TICK:
                 evaluate_timeouts();
                 break;
+        }
+
+        // Recover a valve DISCONNECTED that never made it onto the queue.
+        //
+        // health_post_valve_event() posts non-blocking from the NimBLE host task.
+        // If that send fails the event is gone, and for a DISCONNECTED that is
+        // UNRECOVERABLE by any other path: disconnect_ms is never stamped, and
+        // evaluate_timeouts() gates the valve re-rate on `disconnect_ms > 0`, so
+        // no tick can ever notice. The rating pins at its last healthy value.
+        //
+        // MUST run AFTER the switch, not before. The flag is only ever set when
+        // the 16-deep queue was FULL, so a backlog of strictly OLDER events sits
+        // ahead of it — and notify_hub_update() posts VALVE_CONNECTED for every
+        // data-bearing valve notify, so a stale CONNECTED is the normal queue
+        // content. Draining first let that older event run second and clear
+        // disconnect_ms straight back to 0, making this whole fallback a no-op.
+        // Applying it last is what makes the newest truth win.
+        //
+        // The asymmetry is the point: a dropped CONNECTED self-heals on the next
+        // notify, a dropped DISCONNECTED does not. So the fallback is biased
+        // toward applying the disconnect — if it is stale, the next notify
+        // corrects it, which is the safe direction to be wrong in.
+        if (g_health_valve_disc_pending) {
+            g_health_valve_disc_pending = false;
+            ESP_LOGW(HEALTH_TAG, "Recovering dropped valve DISCONNECTED event");
+            handle_valve_event(false);
         }
 
         recalc_system_rating();
