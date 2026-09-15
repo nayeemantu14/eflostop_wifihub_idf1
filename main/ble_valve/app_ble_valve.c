@@ -758,7 +758,14 @@ static void apply_pending_rmleak_cmd_if_any(void)
         {
             int rc = ble_gattc_write_flat(valve_conn_handle, h_rmleak_char, &v, 1, NULL, NULL);
             ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d (value awaits the valve's own report)", rc);
-            // Deliberately does NOT cache `v` — see write_rmleak_command().
+            // Deliberately does NOT cache `v`, and MUST read back — the valve does
+            // not echo REMOTE_LEAK on the write path. See write_rmleak_command().
+            if (rc == 0)
+            {
+                int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_read_cb, NULL);
+                if (rrc != 0)
+                    ESP_LOGW(BLE_TAG, "[CMD] RMLEAK read-back rc=%d — interlock state unconfirmed", rrc);
+            }
             xSemaphoreGive(gatt_mutex);
         }
         g_pending_rmleak_cmd = -1;
@@ -1755,7 +1762,23 @@ static void write_rmleak_command(uint8_t val)
             // The wake stays — it refreshes valve liveness in the health engine
             // and BLE_UPD_RMLEAK emits no D2C event of its own, so it is a wake,
             // not traffic.
-            notify_hub_update(BLE_UPD_RMLEAK);
+            //
+            // READ-BACK IS MANDATORY HERE, unlike the position path where it is
+            // only a backstop. The valve echoes CUSTOM_STM_VALVESTATE from its own
+            // BLE-write handler, but it does NOT do the same for REMOTE_LEAK — it
+            // pushes that characteristic only on the physical-override path and at
+            // init (DK-Servo_Motor app_main.c:227, :72). So a hub-written RMLEAK
+            // produces NO notify at all, and without this read the cache would
+            // stay stale until the next reconnect re-read it.
+            //
+            // Observed in the field on 2.1.1 before this line existed: nine
+            // auto_close events reporting rmleak_asserted:true, valve connected
+            // throughout, and valve.rmleak false in every snapshot — which also
+            // kept the fleet LED green through an active leak, since its override
+            // reads ble_valve_get_rmleak_state().
+            int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_read_cb, NULL);
+            if (rrc != 0)
+                ESP_LOGW(BLE_TAG, "[CMD] RMLEAK read-back rc=%d — interlock state unconfirmed", rrc);
         }
         xSemaphoreGive(gatt_mutex);
         cmd_settle_release();
