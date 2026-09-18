@@ -12,6 +12,7 @@
 #include "provisioning_manager.h"
 #include "app_ble_valve.h"
 #include "sensor_meta.h"
+#include "health_engine.h"   /* health_set_interlock_held — YELLOW floor while holding the valve shut */
 
 #define RULES_TAG "RULES_ENGINE"
 #define AUTO_CLOSE_COOLDOWN_MS 10000   // 10s cooldown between auto-closes
@@ -56,7 +57,17 @@ typedef enum {
 static bool g_initialized = false;
 static bool g_auto_close_triggered = false;
 static bool g_leak_incident_active = false;  // Latched: stays true until explicit LEAK_RESET
+/* Last value written to / read from NVS for the incident latch. -1 = unknown, so
+ * the first save always writes. Lets incident_save_to_nvs() skip redundant flash
+ * traffic on paths that re-latch an already-latched incident. */
+static int8_t g_incident_persisted = -1;
 static TickType_t g_last_auto_close_tick = 0;
+/* Separate cooldown stamp for the reconnect-reconciliation auto_close event.
+ * Deliberately NOT shared with g_last_auto_close_tick: evaluate_leak() stamps that
+ * one when it first detects the leak, so sharing it would suppress the event on the
+ * FIRST reconnect after a leak found while the valve was offline — the one reconnect
+ * event that actually carries new information. */
+static TickType_t g_last_reconnect_close_tick = 0;
 static TickType_t g_rmleak_assert_tick = 0;  // When RMLEAK was last written — grace period for override check
 static SemaphoreHandle_t g_mutex = NULL;
 
@@ -107,20 +118,54 @@ static void override_save_to_nvs(void)
              g_override_state, (long)g_override_window_expiry);
 }
 
-/* Persist the incident latch. Two callsites (`incident_save_to_nvs` / load)
- * mirror the override pattern. Write rate is bounded: incidents transition
- * at most a few times per leak event, so NVS wear is negligible. */
+/* Persist the incident latch, and mirror it to the health engine.
+ *
+ * This is deliberately the ONE place both of those happen. Every
+ * `g_leak_incident_active = ...` site in this file is immediately followed by a
+ * call to this function (verified 12 assignments / 12 callsites), so routing the
+ * health mirror through here means a future mutation cannot silently skip it the
+ * way it could with a dozen parallel call pairs.
+ *
+ * The health side is the YELLOW floor: while the hub is holding the valve closed,
+ * system health reads WARNING even though every device is individually fine, so the
+ * fleet LED shows amber rather than green while the water is still off. */
 static void incident_save_to_nvs(void)
 {
+    /* Lock-free volatile store on the health side — safe to call with g_mutex
+     * held, and it cannot participate in a lock cycle (health_engine.c never
+     * calls back into the rules engine). */
+    health_set_interlock_held(g_leak_incident_active);
+
+    /* Skip the flash round trip when the stored value already matches. The
+     * previous comment here promised the write rate was bounded because
+     * "incidents transition at most a few times per leak event" — a 2.1.1 field
+     * capture recorded ~40 commits/minute from a reconcile path that re-latched an
+     * already-latched incident on every pass. The invariant needed a guard rather
+     * than a promise; this also removes the nvs_open/commit/close churn, which
+     * costs far more than the cell write it was protecting. */
+    int8_t want = g_leak_incident_active ? 1 : 0;
+    if (g_incident_persisted == want) {
+        return;
+    }
+
     nvs_handle_t h;
     esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(RULES_TAG, "NVS open failed for incident save: %s", esp_err_to_name(err));
+        return;   /* leave g_incident_persisted stale so the next call retries */
+    }
+    esp_err_t serr = nvs_set_u8(h, NVS_KEY_INCIDENT, (uint8_t)want);
+    esp_err_t cerr = nvs_commit(h);
+    nvs_close(h);
+    if (serr != ESP_OK || cerr != ESP_OK) {
+        /* Do NOT advance the cache on a failed write — doing so would convince every
+         * later call that the value was already persisted and permanently stop
+         * retrying, silently losing the incident latch across the next reboot. */
+        ESP_LOGE(RULES_TAG, "NVS: incident save failed (set=%s commit=%s) — will retry",
+                 esp_err_to_name(serr), esp_err_to_name(cerr));
         return;
     }
-    nvs_set_u8(h, NVS_KEY_INCIDENT, g_leak_incident_active ? 1 : 0);
-    nvs_commit(h);
-    nvs_close(h);
+    g_incident_persisted = want;
     ESP_LOGD(RULES_TAG, "NVS: incident=%d saved", g_leak_incident_active);
 }
 
@@ -136,6 +181,12 @@ static void incident_load_from_nvs(void)
     err = nvs_get_u8(h, NVS_KEY_INCIDENT, &v);
     nvs_close(h);
     g_leak_incident_active = (err == ESP_OK && v != 0);
+    /* Seed the write-skip cache so the first save after boot doesn't rewrite the
+     * value we just read. Only when the read actually succeeded — a missing key
+     * leaves it unknown so the first real transition is definitely written. */
+    if (err == ESP_OK) {
+        g_incident_persisted = (v != 0) ? 1 : 0;
+    }
     if (g_leak_incident_active) {
         ESP_LOGW(RULES_TAG, "NVS: restored incident latch — pending reconcile with valve");
     }
@@ -487,6 +538,11 @@ void rules_engine_init(void)
      * valve reconnect in rules_engine_on_valve_connected(). */
     incident_load_from_nvs();
 
+    /* Publish the restored latch to the health engine straight away, so a hub that
+     * rebooted mid-incident shows the YELLOW "holding the valve closed" floor from
+     * the first LED evaluation instead of waiting for the next latch transition. */
+    health_set_interlock_held(g_leak_incident_active);
+
     g_initialized = true;
 }
 
@@ -776,6 +832,10 @@ bool rules_engine_reset_leak_incident(void)
     g_all_clear_since = 0;
     g_active_leak_count = 0;
     g_rmleak_assert_tick = 0;
+    /* Clear the reconnect-event cooldown too: an explicit reset is the "start from a
+     * clean slate" point, and a stale stamp would otherwise swallow the first
+     * reconnect announcement of the NEXT incident. */
+    g_last_reconnect_close_tick = 0;
 
     // Also clear override window — LEAK_RESET is a full reset that restores
     // normal auto-close behavior immediately.
@@ -1051,6 +1111,30 @@ void rules_engine_on_valve_connected(void)
     if (g_active_leak_count > 0) {
         rules_config_t rules;
         if (provisioning_get_rules_config(&rules) && rules.auto_close_enabled) {
+
+            /* IDEMPOTENCE GUARD — mirrors rules_engine_evaluate_leak().
+             *
+             * The interlock is already in its desired end state: the valve is shut
+             * and RMLEAK is confirmed asserted (the cache is fed only by notifies
+             * and read-backs, never by an optimistic write, so this is the valve's
+             * own word). Re-issuing the writes achieves nothing and re-publishing
+             * the event is pure noise.
+             *
+             * This path had neither of evaluate_leak's two guards, which is what
+             * turned a re-announced link into an unbounded storm. */
+            if (valve_state == 0 && valve_rmleak) {
+                ESP_LOGI(RULES_TAG,
+                         "Reconnected with %d active leak(s) — valve already closed + RMLEAK asserted, nothing to do",
+                         g_active_leak_count);
+                g_leak_incident_active = true;
+                incident_save_to_nvs();
+                g_auto_close_triggered = true;
+                g_rmleak_assert_tick = xTaskGetTickCount();
+                g_all_clear_since = 0;
+                xSemaphoreGive(g_mutex);
+                return;
+            }
+
             ESP_LOGW(RULES_TAG, "Valve reconnected with %d active leak(s) — executing auto-close",
                      g_active_leak_count);
 
@@ -1060,8 +1144,35 @@ void rules_engine_on_valve_connected(void)
             g_rmleak_assert_tick = xTaskGetTickCount();
             g_all_clear_since = 0;
 
+            /* RATE LIMIT THE EVENT, NEVER THE ACTION.
+             *
+             * evaluate_leak() lets AUTO_CLOSE_COOLDOWN_MS skip the close as well,
+             * which is safe there because that path only runs on a fresh leak
+             * report. Here it would not be: evaluate_leak() stamps
+             * g_last_auto_close_tick BEFORE it checks connectivity, so a leak
+             * detected while the valve was offline arrives here already inside the
+             * cooldown. Gating the close on that would mean a wet sensor and an
+             * OPEN valve — strictly worse than the storm this is guarding against.
+             *
+             * So the writes below always run (both are idempotent at the valve),
+             * and only the duplicate telemetry is suppressed. The stamp advances
+             * only when an event is actually emitted, so the window is anchored to
+             * the last announcement and expires predictably. */
+            TickType_t now_tick = xTaskGetTickCount();
+            bool emit_event = (g_last_reconnect_close_tick == 0) ||
+                              ((now_tick - g_last_reconnect_close_tick) >= pdMS_TO_TICKS(AUTO_CLOSE_COOLDOWN_MS));
+
+            /* Sample the link ONCE and reuse it for the event and the branch below,
+             * as evaluate_leak() does — reading it twice lets the event claim the
+             * writes were issued while the action sees a dropped link. */
+            bool valve_reachable = ble_valve_is_connected();
+
             // Build telemetry
-            cJSON *root = cJSON_CreateObject();
+            cJSON *root = emit_event ? cJSON_CreateObject() : NULL;
+            if (!emit_event) {
+                ESP_LOGI(RULES_TAG,
+                         "Reconnect auto-close event suppressed (cooldown) — writes still issued");
+            }
             if (root) {
                 cJSON_AddStringToObject(root, "event", "auto_close");
                 char idbuf[WIRE_DEVICE_ID_BUF];
@@ -1090,12 +1201,21 @@ void rules_engine_on_valve_connected(void)
                 // arbitrarily later than the connect itself (the queue is 16 deep
                 // and one item is dequeued per loop iteration). The link can have
                 // dropped again by the time we get here.
-                cJSON_AddBoolToObject(root, "rmleak_asserted",
-                                      ble_valve_is_connected());
+                //
+                // NOTE ON SEMANTICS: this field means "the RMLEAK write was issued",
+                // matching build_auto_close_telemetry(), which is handed the same
+                // once-sampled link state. It deliberately does NOT report
+                // ble_valve_get_rmleak_state(): that is the PRE-write cache at this
+                // point (the write happens after the mutex is released), so it would
+                // read false on exactly the pass that asserts the interlock. Whether
+                // the interlock actually took is carried by valve.rmleak in the next
+                // snapshot, which is fed by the read-back.
+                cJSON_AddBoolToObject(root, "rmleak_asserted", valve_reachable);
                 cJSON_AddNumberToObject(root, "active_leak_count", g_active_leak_count);
                 if (g_pending_telemetry) free(g_pending_telemetry);
                 g_pending_telemetry = cJSON_PrintUnformatted(root);
                 cJSON_Delete(root);
+                g_last_reconnect_close_tick = now_tick;  /* anchor the cooldown to this announcement */
             }
 
             xSemaphoreGive(g_mutex);
@@ -1384,6 +1504,18 @@ void rules_engine_clear_persistent_state(void)
         nvs_erase_key(h, NVS_KEY_INCIDENT);
         nvs_commit(h);
         nvs_close(h);
+        /* The key is gone, so the write-skip cache must forget what it thought was
+         * stored — otherwise a save of the same logical value after a wipe would be
+         * skipped and the key would never come back. */
+        g_incident_persisted = -1;
         ESP_LOGI(RULES_TAG, "NVS: rules-engine persistent state cleared");
     }
+
+    /* Drop the in-RAM latch and the health engine's WARNING floor with it. Erasing the
+     * NVS key alone left g_leak_incident_active true, so a decommissioned hub — zero
+     * devices, nothing to protect — still reported warning with a leak-interlock reason
+     * on its final snapshot, and the fleet LED would have shown amber if anything had
+     * read the rating before the restart. */
+    g_leak_incident_active = false;
+    health_set_interlock_held(false);
 }

@@ -216,7 +216,14 @@ void reset_button_init(void)
     };
     gpio_config(&io_conf);
 
-    // Install ISR service (safe to call multiple times — returns ESP_ERR_INVALID_STATE if already installed)
+    // Install ISR service (safe to call multiple times — returns ESP_ERR_INVALID_STATE
+    // if already installed, which it normally is: lora.cpp installs it first).
+    //
+    // Expect one benign line on every boot:
+    //   E (nnn) gpio: gpio_install_isr_service(526): GPIO isr service already installed
+    // That E level is emitted by the IDF driver itself before it returns the error —
+    // it is not this module's log and cannot be suppressed from here without a
+    // private "is it installed" query the driver does not expose. Handled below.
     esp_err_t err = gpio_install_isr_service(0);
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "gpio_install_isr_service failed: %s", esp_err_to_name(err));

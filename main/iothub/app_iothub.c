@@ -138,6 +138,37 @@ static int64_t g_commission_until_ms = 0;
 static uint8_t g_commission_pub_seen = 0;
 
 // ---------------------------------------------------------------------------
+// Post-provision snapshot PULSE
+//
+// The incremental refresh above fires only on a device's FIRST contact (`seen >
+// g_commission_pub_seen`), and its window is deliberately collapsed the moment every
+// device has been heard. Good enough to assemble one complete snapshot; not good
+// enough for an installer standing next to the hardware, who needs the battery/RSSI
+// numbers to keep refreshing while they move a sensor around. A dry WBA leak sensor
+// beacons about every 100 s, so its 2nd and later packets used to produce nothing at
+// all until the 5-min heartbeat.
+//
+// So: for a bounded window after a `provision`, publish on a 30 s cadence AND every
+// time a sensor is heard. Kept on its own time-based window rather than reusing
+// g_commission_until_ms precisely because that one is zeroed at seen>=total — sharing
+// it would end the pulse early and fight the incremental-refresh design.
+//
+// Deadlines are owned by iothub_task. arm_commission_snapshot() runs on the esp-mqtt
+// event task and therefore only sets the g_prov_pulse_arm FLAG; all arithmetic happens
+// in the loop. Same split as g_cmd_snap_pending.
+// ---------------------------------------------------------------------------
+#define PROV_PULSE_WINDOW_MS   (5 * 60 * 1000)   // elevated cadence lasts 5 min
+#define PROV_PULSE_PERIOD_MS   (30 * 1000)       // periodic pulse inside the window
+#define PROV_PULSE_MAX_SNAPS   40                // safety valve against a pathological
+                                                 // flapping sensor; LOGS when it bites,
+                                                 // never truncates silently
+static volatile bool g_prov_pulse_arm      = false;
+static int64_t       g_prov_pulse_until_ms = 0;   // 0 = window closed
+static int64_t       g_prov_pulse_next_ms  = 0;   // next periodic pulse deadline
+static uint32_t      g_prov_pulse_seq      = 0;   // check-in seq already reflected in a request
+static uint16_t      g_prov_pulse_count    = 0;   // snapshots requested this window
+
+// ---------------------------------------------------------------------------
 // Unified snapshot scheduler (event-coupled snapshots + heartbeat suppression)
 //
 // All state below is owned by iothub_task ONLY (read/written inside the event
@@ -177,6 +208,14 @@ static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
 static int s_valve_pub_state = -2;
+/* Last valve flood state published as a leak event, as the cloud understands it.
+ *
+ * Gates the at-link-up flood announcement from app_ble_valve.c, which now fires on every
+ * link-up for BOTH wet and dry. Initialised to 0 (dry), NOT -1: a routine dry link-up is
+ * the overwhelmingly common case and must publish nothing, while a wet one (1 != 0) is
+ * reported. Deliberately NOT reset on reconnect — that is exactly what stops a valve
+ * flapping while wet from republishing leak_detected each time. */
+static int s_valve_pub_wet = 0;
 
 // Delta-gate for the valve LINK edge, same sentinel convention (-1 = nothing
 // published yet, 1 = linked, 0 = unlinked). Holds the last PUBLISHED link state,
@@ -593,6 +632,11 @@ static void reseed_valve_health_if_connected(void)
         /* A reload wiped last_battery to 0xFF; re-feed it so the valve's rating
          * reflects a low battery immediately, not only at the next BLE notify. */
         health_post_valve_battery(ble_valve_get_battery());
+        /* Same reasoning for the flood probe: the reload zeroed `leaking`, and the
+         * valve only re-notifies the flood characteristic on a CHANGE, so a probe
+         * that is already wet would otherwise be forgotten until it dried and
+         * re-wetted. Re-feed the live cache. */
+        health_post_valve_leak(ble_valve_get_leak());
     }
 }
 
@@ -600,7 +644,11 @@ static void reseed_valve_health_if_connected(void)
 // re-arm the one-shot initial snapshot, reset the published seen-count, and open
 // the incremental-refresh grace window so a device heard after the initial snapshot
 // still gets reported promptly (not only at the next 5-min periodic).
-static void arm_commission_snapshot(void)
+// `pulse` = also run the 30 s post-provision snapshot pulse. TRUE only for `provision`:
+// a per-device decommission is a one-shot edit to the device list, already covered by the
+// refresh below plus the generic on-success command snapshot, and does not warrant ten
+// extra snapshots.
+static void arm_commission_snapshot(bool pulse)
 {
     // NOTE: runs in the esp-mqtt event-task context (C2D path), NOT iothub_task.
     // It therefore writes ONLY these tolerant scalar flags (the same self-healing
@@ -609,6 +657,9 @@ static void arm_commission_snapshot(void)
     g_boot_snapshot_sent  = false;
     g_commission_pub_seen = 0;
     g_commission_until_ms = (esp_timer_get_time() / 1000) + COMMISSION_REFRESH_GRACE_MS;
+    // A flag, not a deadline: the pulse schedule is computed in iothub_task so the two
+    // tasks never both write it. See the consume block at the top of the event loop.
+    if (pulse) g_prov_pulse_arm = true;
 }
 
 // ---- Snapshot scheduler helpers (iothub_task context ONLY) ----------------
@@ -625,6 +676,25 @@ static const char *snap_reason_str(snap_reason_t r)
         case SNAP_HEARTBEAT:
         default:              return "heartbeat";
     }
+}
+
+// Would the boot/commission window gate currently SUPPRESS a snapshot whose reason is
+// neither EVENT nor FAST? SINGLE DEFINITION of that rule, used by both the flush block's
+// gate_ok and snap_request()'s yield check — they were inline duplicates, which is how a
+// suppressed reason came to outrank an EVENT in the scheduler while the flush block
+// believed EVENT always wins.
+//
+// True means: no complete snapshot has been published for this boot/commission cycle AND
+// the sync window has not closed, so HEARTBEAT/BOOT/COMMISSION would emit a
+// value-incomplete snapshot. EVENT and FAST are exempt by design (EVENT carries
+// post-event state already in the cache; FAST is the deliberately-early valve-ready one).
+//
+// NOTE health_is_boot_sync_complete() evaluates the window deadlines on read and may
+// re-roll the rating. That is idempotent and wanted — it is what makes the window close
+// within a caller's poll cadence rather than at the next 30 s tick.
+static inline bool snap_window_suppressing(void)
+{
+    return !g_boot_snapshot_sent && !health_is_boot_sync_complete();
 }
 
 // Re-arm the heartbeat deadline relative to the last CONFIRMED publish. Called at
@@ -681,7 +751,36 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
     bool upgrade = (reason == SNAP_EVENT && s_snap_reason == SNAP_EVENT &&
                     tier == SNAP_TIER_HIGH && s_snap_tier == SNAP_TIER_LOW);
 
-    if (want < s_snap_due_ms || upgrade) {
+    /* A pending reason that the window gate is CURRENTLY SUPPRESSING must not outrank an
+     * EVENT, which that gate always lets through.
+     *
+     * Pull-in-only compares strictly-less, and the flush block's !gate_ok arm re-arms the
+     * deadline to flush_now + 2000 on every pass. That makes a suppressed HEARTBEAT (or
+     * BOOT/COMMISSION) an unbeatable moving baseline: it sits ~2 s ahead forever, so a
+     * SNAP_TIER_LOW request (want = now + SNAP_LOW_WINDOW_MS, also 2000) can never be
+     * strictly less, and even TIER_HIGH loses on the iterations where the deferral has
+     * just fired. Every such request is discarded in silence.
+     *
+     * Reachable whenever the deadline is already PAST-DUE at the moment the window opens
+     * — e.g. a `provision` on a hub that has been unprovisioned or offline for a while,
+     * where the !provisioned branch has been re-arming the heartbeat from a stale
+     * last_pub. The provision's own EVENT request is dropped for the same reason (a
+     * past-due deadline is already "earlier"), so the reason stays HEARTBEAT and the
+     * deferral loop starts.
+     *
+     * This is PRE-EXISTING, not new in 2.1.3: it equally delays a leak_detected snapshot
+     * by up to the whole boot/commission window. Safety is unaffected — the leak EVENT
+     * message is a direct publish, and the valve close runs in Phase 2 — but the snapshot
+     * the app renders could lag the leak by minutes. The 30 s pulse is simply the first
+     * feature to make it visible, because it requests at TIER_LOW on exactly this path.
+     *
+     * Expressed via the same helper the flush block's gate uses, so the two can never
+     * drift apart. */
+    bool yields = (reason == SNAP_EVENT) &&
+                  (s_snap_reason != SNAP_EVENT && s_snap_reason != SNAP_FAST) &&
+                  snap_window_suppressing();
+
+    if (want < s_snap_due_ms || upgrade || yields) {
         s_snap_due_ms = want;
         s_snap_reason = reason;
         s_snap_tier   = tier;
@@ -778,7 +877,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
-                arm_commission_snapshot();   // refresh the snapshot if the hub stays provisioned
+                arm_commission_snapshot(false);   // refresh the snapshot if the hub stays provisioned
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -794,7 +893,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             if (provisioning_remove_lora_sensor(sid)) {
                 health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
                 reseed_valve_health_if_connected();   // valve stays up across a sensor removal
-                arm_commission_snapshot();            // publish a fresh snapshot reflecting the removal
+                arm_commission_snapshot(false);       // publish a fresh snapshot reflecting the removal
                 char lora_id_str[16];
                 snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
                          (unsigned long)sid);
@@ -815,7 +914,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             if (mac && provisioning_remove_ble_sensor(mac)) {
                 health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
                 reseed_valve_health_if_connected();   // valve stays up across a sensor removal
-                arm_commission_snapshot();            // publish a fresh snapshot reflecting the removal
+                arm_commission_snapshot(false);       // publish a fresh snapshot reflecting the removal
                 sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac);
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
@@ -955,7 +1054,10 @@ static void handle_c2d_command(const char *data, size_t data_len)
             // of waiting for the 5-min periodic snapshot. Best-effort: a device not heard within
             // the window is reported offline/null (no hang, no schema change), then a refresh
             // snapshot follows once it is heard.
-            arm_commission_snapshot();
+            // pulse=true: THE provision path. Also starts the 30 s x 5 min snapshot
+            // pulse so an installer watching the app sees battery/RSSI keep refreshing
+            // while they place sensors, instead of one snapshot and then silence.
+            arm_commission_snapshot(true);
             ESP_LOGI(IOTHUB_TAG,
                      "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
                      HEALTH_COMMISSION_SYNC_TIMEOUT_MS / 1000);
@@ -2077,6 +2179,25 @@ void iothub_task(void *param)
             snap_request(SNAP_EVENT, SNAP_TIER_HIGH, label[0] ? label : "c2d_command");
         }
 
+        // A `provision` asked for the post-commission snapshot pulse. Consume the flag
+        // HERE so every deadline is computed on this task; arm_commission_snapshot()
+        // (esp-mqtt event task) only ever sets the bool. A second provision inside an
+        // open window simply re-arms it, extending the pulse — which is correct.
+        if (g_prov_pulse_arm) {
+            g_prov_pulse_arm = false;
+            int64_t pnow = snap_now_ms();
+            g_prov_pulse_until_ms = pnow + PROV_PULSE_WINDOW_MS;
+            g_prov_pulse_next_ms  = pnow + PROV_PULSE_PERIOD_MS;
+            // Seed from the CURRENT counter, not 0: we only want packets that arrive
+            // from now on to trigger a refresh. Seeding 0 would fire a spurious
+            // packet-pulse on the very first loop pass after a provision.
+            g_prov_pulse_seq      = health_get_checkin_seq();
+            g_prov_pulse_count    = 0;
+            ESP_LOGI(IOTHUB_TAG,
+                     "PROV pulse armed: every %d s for %d s, plus on every sensor packet",
+                     PROV_PULSE_PERIOD_MS / 1000, PROV_PULSE_WINDOW_MS / 1000);
+        }
+
         // Latch the (Twin-tunable) heartbeat interval for this iteration.
         //
         // A CHANGE must also re-aim the deadline that is already pending, not just
@@ -2111,9 +2232,14 @@ void iothub_task(void *param)
         // While a boot/commission snapshot is pending OR the post-commission
         // refresh grace is open, poll briefly so the snapshot publishes within ~2 s
         // of the window completing and the incremental refresh fires promptly.
+        // The pulse window is included: its packet arm is POLLED (a check-in counter, not
+        // a queue), so without the 2 s base a sensor advertisement could wait up to 30 s
+        // for its snapshot — and "within a couple of seconds of hearing the sensor" is the
+        // whole user-visible promise of the feature.
         bool commission_pending = provisioned &&
             (!g_boot_snapshot_sent ||
-             (snap_now_ms() < g_commission_until_ms));
+             (snap_now_ms() < g_commission_until_ms) ||
+             (g_prov_pulse_until_ms != 0));
 
         // Flush trigger = derive the select timeout from the snapshot deadline so
         // the loop wakes in time to flush a pending snapshot (defeats the 30 s idle
@@ -2267,7 +2393,29 @@ void iothub_task(void *param)
         // =================================================================
         // Phase 3: PUBLISH (only when connected + provisioned)
         // =================================================================
-        if (!provisioned) {
+        // RE-SAMPLE, do not trust the value latched at the top of the iteration.
+        //
+        // `provisioned` was read BEFORE the blocking xQueueSelectFromSet() above, and a
+        // C2D `provision` lands on the esp-mqtt event task — which sets its flags and THEN
+        // calls telemetry_v2_wake_snapshot(). So the very wake that delivers a provision
+        // resumes this task still holding provisioned==false, and on a factory-fresh hub
+        // that window is up to 30 s wide (nothing else makes the loop spin when
+        // unprovisioned). Falling into this branch then WIPES the flags the provision just
+        // set, one iteration after they were written.
+        //
+        // The pre-existing resets below survived that because they all self-heal — the
+        // SNAP_FAST path re-arms g_boot_snapshot_sent and g_commission_until_ms. The pulse
+        // arm has no second writer: g_prov_pulse_arm is set in exactly one place
+        // (arm_commission_snapshot), so clearing it here silently killed the whole feature
+        // on first commissioning, with no log line to explain the silence. Found by the
+        // 2.1.3 council; it would have passed every bench run that started from an
+        // already-provisioned hub.
+        //
+        // Re-reading is safe: `provisioned` is otherwise used only for commission_pending
+        // and can_pub, both of which feed the select timeout that has already elapsed. On
+        // the re-sampled-true path this iteration simply proceeds into Phase 3 with fresh
+        // state instead of burning an iteration.
+        if (!provisioned && !(provisioned = provisioning_is_provisioned())) {
             if (auto_close_json) free(auto_close_json);
             // Reset the scheduler to a neutral heartbeat so a stranded past-due
             // EVENT deadline (with a now-stale device label) can't fire on the
@@ -2280,6 +2428,14 @@ void iothub_task(void *param)
             g_fast_arm_ms         = snap_now_ms();
             g_commission_pub_seen = 0;
             g_commission_until_ms = 0;
+            // Drop the pulse window too. A decommission that unprovisions the hub
+            // mid-window would otherwise strand it: the firing block is below this
+            // `continue`, so nothing would ever reach the expiry branch that clears it,
+            // and commission_pending would pin the loop to a 2 s poll indefinitely.
+            g_prov_pulse_arm      = false;
+            g_prov_pulse_until_ms = 0;
+            g_prov_pulse_next_ms  = 0;
+            g_prov_pulse_count    = 0;
             continue;
         }
 
@@ -2394,19 +2550,40 @@ void iothub_task(void *param)
                     // rather than a coin-flip on GATT write timing.
                     const char *ev = vlk_wet ? "leak_detected" : "leak_cleared";
 
-                    telemetry_v2_publish_leak_event(&(telem_leak_event_t){
-                        .event         = ev,
-                        .source        = LEAK_SOURCE_VALVE,
-                        .device_id     = connected_mac,
-                        .leak_state    = vlk_wet,
-                        .battery       = vlk_batt,
-                        .has_valve_ext = true,
-                        .valve_state   = vlk_state == 1 ? "open"
-                                       : vlk_state == 0 ? "closed" : "unknown",
-                        .rmleak        = vlk_rmleak,
-                        .fw_version    = vlk_have_fw ? vlk_fw : NULL,
-                    });
-                    snap_request(SNAP_EVENT, SNAP_TIER_HIGH, ev);
+                    /* DELTA-GATE, like BLE_UPD_STATE below.
+                     *
+                     * app_ble_valve.c now announces BLE_UPD_LEAK at link-up when the flood
+                     * probe is ALREADY wet (so a flood that predates the link still gets
+                     * evaluated and closes the valve — it produces no dry->wet edge of its
+                     * own). That announcement repeats on every reconnect, so without a gate
+                     * a valve that keeps dropping while wet would republish leak_detected
+                     * each time, with no intervening leak_cleared: a consumer counting leak
+                     * events would see several incidents where there is one.
+                     *
+                     * The rules engine is NOT gated — rules_engine_evaluate_leak() already
+                     * ran in Phase 2 and is idempotent, which is what makes the valve
+                     * action safe to repeat while the D2C event is suppressed. */
+                    if ((int)vlk_wet != s_valve_pub_wet) {
+                        s_valve_pub_wet = (int)vlk_wet;
+
+                        telemetry_v2_publish_leak_event(&(telem_leak_event_t){
+                            .event         = ev,
+                            .source        = LEAK_SOURCE_VALVE,
+                            .device_id     = connected_mac,
+                            .leak_state    = vlk_wet,
+                            .battery       = vlk_batt,
+                            .has_valve_ext = true,
+                            .valve_state   = vlk_state == 1 ? "open"
+                                           : vlk_state == 0 ? "closed" : "unknown",
+                            .rmleak        = vlk_rmleak,
+                            .fw_version    = vlk_have_fw ? vlk_fw : NULL,
+                        });
+                        snap_request(SNAP_EVENT, SNAP_TIER_HIGH, ev);
+                    } else {
+                        ESP_LOGD(IOTHUB_TAG,
+                                 "valve leak event suppressed — wet=%d already reported",
+                                 (int)vlk_wet);
+                    }
                 } else if (ble_upd_type == BLE_UPD_STATE) {
                     // Delta-gate: only emit on a REAL state change (was emitted on
                     // every BLE_UPD_STATE notify). Caps the event stream and the
@@ -2502,6 +2679,73 @@ void iothub_task(void *param)
             }
         }
 
+        // ---- Post-provision snapshot PULSE (30 s cadence + every sensor packet) ----
+        // Both arms request SNAP_EVENT, and each property of that is load-bearing:
+        //   * EVENT is rate-CLAMPED to SNAP_MIN_INTERVAL_MS (5 s, <=12/min). COMMISSION /
+        //     BOOT / FAST deliberately bypass the clamp, so using one of those here would
+        //     let a multi-sensor burst publish back-to-back.
+        //   * EVENT passes the incomplete-window `gate_ok` below, so pulses publish DURING
+        //     the open sync window. That is the point — progressive refinement — and it is
+        //     the same licence SNAP_FAST already takes.
+        //   * EVENT does NOT set g_boot_snapshot_sent and does NOT touch
+        //     g_commission_until_ms, so the guaranteed COMPLETE boot/commission snapshot
+        //     still fires when the sync window closes. No existing guarantee is weakened.
+        //   * On the wire data.reason stays "event" — no new schema enum value, nothing for
+        //     a cloud consumer to learn. The distinction lives in the UART trace.
+        // TIER_LOW (2 s coalescing) so four sensors bursting together collapse into one
+        // snapshot; TIER_HIGH's 300 ms window would emit up to four.
+        if (g_prov_pulse_until_ms) {
+            int64_t pnow = snap_now_ms();
+            if (pnow < g_prov_pulse_until_ms) {
+                if (g_prov_pulse_count < PROV_PULSE_MAX_SNAPS) {
+                    // Packet arm. The counter is the ONLY way this task can learn that a
+                    // sensor was heard: an unchanged repeat packet is dropped by the
+                    // scanner's telemetry delta gate and never reaches ble_leak_rx_queue,
+                    // while the health engine sees every burst. Compared with != because
+                    // the counter wraps.
+                    uint32_t seq = health_get_checkin_seq();
+                    if (seq != g_prov_pulse_seq) {
+                        g_prov_pulse_seq = seq;
+                        g_prov_pulse_count++;
+                        snap_request(SNAP_EVENT, SNAP_TIER_LOW, "prov_pkt");
+                    }
+                    // Periodic arm. Deadline advances from the deadline, not from `pnow`,
+                    // so the cadence cannot drift late across a busy iteration.
+                    if (pnow >= g_prov_pulse_next_ms) {
+                        g_prov_pulse_next_ms += PROV_PULSE_PERIOD_MS;
+                        // A long stall (offline, or the loop blocked in dps_maintain)
+                        // could leave the deadline several periods in the past; skip
+                        // forward rather than firing a burst of catch-up pulses.
+                        if (g_prov_pulse_next_ms <= pnow)
+                            g_prov_pulse_next_ms = pnow + PROV_PULSE_PERIOD_MS;
+                        g_prov_pulse_count++;
+                        snap_request(SNAP_EVENT, SNAP_TIER_LOW, "prov_pulse");
+                    }
+                } else if (g_prov_pulse_count == PROV_PULSE_MAX_SNAPS ||
+                           g_prov_pulse_count == PROV_PULSE_MAX_SNAPS + 1) {
+                    // Announce the cap once, then stay quiet. Never truncate silently: a
+                    // capped window must not read as a completed one.
+                    //
+                    // BOTH equality values are needed. The two arms above can each
+                    // increment in the SAME iteration, so a count of MAX-1 becomes MAX+1
+                    // in one pass and steps straight over a bare `== MAX` — the warning
+                    // would never fire and the cap would suppress the rest of the window
+                    // in exactly the silence this branch exists to prevent. The sentinel
+                    // below then parks the count above both values so it still logs once.
+                    g_prov_pulse_count = PROV_PULSE_MAX_SNAPS + 2;
+                    ESP_LOGW(IOTHUB_TAG,
+                             "PROV pulse capped at %d snapshots — suppressing the rest of the window",
+                             PROV_PULSE_MAX_SNAPS);
+                }
+            } else {
+                ESP_LOGI(IOTHUB_TAG, "PROV pulse window closed (%u snapshot(s) requested)",
+                         (unsigned)g_prov_pulse_count);
+                g_prov_pulse_until_ms = 0;
+                g_prov_pulse_next_ms  = 0;
+                g_prov_pulse_count    = 0;
+            }
+        }
+
         // =================================================================
         // SINGLE FLUSH BLOCK — the ONLY telemetry_v2_publish_snapshot() site.
         // Runs after all event/cache updates and the boot/commission arming, so
@@ -2517,9 +2761,13 @@ void iothub_task(void *param)
             // EVENT carries post-event state already in the cache; FAST is the
             // deliberately-early valve-ready boot snapshot (incomplete-by-design,
             // refined afterward by incremental refresh).
-            bool window_open = !g_boot_snapshot_sent;
+            // Expressed through snap_window_suppressing() so this gate and the yield
+            // check in snap_request() are literally the same rule. They used to be
+            // separate inline expressions, and the scheduler consequently let a reason
+            // this gate was suppressing keep ownership of the deadline — see the `yields`
+            // comment in snap_request().
             bool gate_ok = (reason == SNAP_EVENT) || (reason == SNAP_FAST)
-                           || !window_open || health_is_boot_sync_complete();
+                           || !snap_window_suppressing();
 
             // Settle gate: a hub-issued valve command (auto-close, C2D
             // valve_open/close, override) is only QUEUED by ble_valve_*; the

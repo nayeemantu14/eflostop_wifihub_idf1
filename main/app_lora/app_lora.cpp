@@ -293,12 +293,15 @@ extern "C" void lora_task(void* param)
                         ESP_LOGW(TAG, "Rx Queue Full! Packet dropped.");
                     }
 
-                    // Health engine: sensor check-in
+                    // Health engine: sensor check-in. The wet/dry bit goes with it —
+                    // a leaking sensor is rated CRITICAL, which is what drives the
+                    // fleet LED red and the snapshot's system_health reason.
                     health_post_lora_checkin(packet.sensorId, packet.batteryPercentage,
-                                            packet.rssi, packet.snr);
+                                            packet.rssi, packet.snr,
+                                            packet.leakStatus != 0);
 
                     // Trigger LED
-                    uint8_t ledCmd = 'G';
+                    uint8_t ledCmd = LED_CMD_LORA_PULSE;
                     if (ledQueue != NULL) xQueueSend(ledQueue, &ledCmd, 0);
                 } else {
                     // Packet failed crypto â€” log raw hex for debugging

@@ -5,7 +5,7 @@
   "idf.openOcdConfigs": [
     "board/esp32s3-bridge.cfg"
   ],
-  "idf.portWin": "COM28",
+  "idf.portWin": "COM30",
   "idf.toolsPathWin": "C:\\Users\\antun\\.espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32s3"
@@ -17,5 +17,7 @@
     "--compile-commands-dir=c:\\Work\\Projects\\EfloStop 2\\Firmware\\Production\\eFloStop_WiFiHub_idf1\\build"
   ],
   "idf.flashType": "UART",
-  "idf.currentSetup": "C:\\Users\\antun\\esp\\v5.5.1\\esp-idf"
+  "idf.currentSetup": "C:\\Users\\antun\\esp\\v5.5.1\\esp-idf",
+  "terminal.integrated.scrollback": 10000,
+  "terminal.integrated.stickyScroll.enabled": false
 }

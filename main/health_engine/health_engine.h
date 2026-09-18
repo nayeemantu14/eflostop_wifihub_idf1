@@ -22,7 +22,33 @@ extern "C" {
 #define HEALTH_RSSI_WARN_DBM         (-90)
 #define HEALTH_RSSI_GOOD_DBM         (-80)
 #define HEALTH_VALVE_DISC_TIMEOUT_MS (3 * 60 * 1000)      // 3-min grace before CRITICAL
-#define HEALTH_BOOT_SYNC_TIMEOUT_MS  (2 * 60 * 1000)     // 2-min boot window for sensor check-ins
+#define HEALTH_BOOT_SYNC_TIMEOUT_MS  (3 * 60 * 1000)     // 3-min boot window for sensor check-ins.
+                                                          // Was 2 min, which was SHORTER than the interval
+                                                          // at which check-ins actually reached this engine
+                                                          // (the BLE scanner gated them behind its own 5-min
+                                                          // telemetry heartbeat), so "Boot sync: timeout" was
+                                                          // guaranteed on every boot and the roll-up latched
+                                                          // CRITICAL on a healthy hub. The gate is now removed
+                                                          // (app_ble_leak.c posts every burst, ~100 s), and
+                                                          // this covers one burst cycle with margin.
+/* How long a device that has NEVER been heard stays EXCLUDED from the system roll-up.
+ *
+ * DELIBERATELY DECOUPLED from HEALTH_BOOT_SYNC_TIMEOUT_MS above. That constant gates
+ * the boot SNAPSHOT and wants to be short (report promptly); this one gates the
+ * roll-up EXCLUSION and wants to be long (don't cry wolf). One constant serving both
+ * is what produced the 2026-09-17 bench capture: sensors first heard at 56 / 90 / 199 /
+ * 265.6 s, so the 180 s window closed early and the hub spent 81 s RED and published
+ * "1 sensor offline" with all four sensors perfectly healthy. Raising the shared
+ * constant to 240 s would not have covered that boot either.
+ *
+ * Aligned with HEALTH_BLE_LEAK_TIMEOUT_MS rather than picked: 600 s is already the
+ * deadline at which this engine is willing to declare a PREVIOUSLY-SEEN sensor
+ * offline, so it is the principled point at which "haven't heard yet" becomes
+ * "offline". A genuinely absent device is still escalated — at the same deadline
+ * steady-state uses, not a shorter guess. Nothing is hidden meanwhile: the snapshot
+ * reports connected:false / last_seen_age_s:null for it from the first boot snapshot
+ * onward, and a LEAKING device is never excluded at all. */
+#define HEALTH_ROLLUP_UNHEARD_MS     HEALTH_BLE_LEAK_TIMEOUT_MS   // 600 s
 #define HEALTH_COMMISSION_SYNC_TIMEOUT_MS (150 * 1000)    // 2.5-min window after a provision/commission.
                                                           // ~1.5x the dry sensor's ~100 s burst cadence:
                                                           // long enough to catch an in-range sensor in a
@@ -56,6 +82,7 @@ typedef enum {
     HEALTH_EVT_VALVE_CONNECTED,
     HEALTH_EVT_VALVE_DISCONNECTED,
     HEALTH_EVT_VALVE_BATTERY,
+    HEALTH_EVT_VALVE_LEAK,          // valve's own flood probe changed state
     HEALTH_EVT_TICK
 } health_event_type_t;
 
@@ -68,14 +95,17 @@ typedef struct {
             uint8_t  battery;
             int8_t   rssi;
             float    snr;
+            bool     leaking;
         } lora;
         struct {
             char    mac_str[18];
             uint8_t battery;
             int8_t  rssi;
+            bool    leaking;
         } ble_leak;
         struct {
             uint8_t battery;
+            bool    leaking;
         } valve;
     };
 } health_event_t;
@@ -99,6 +129,7 @@ typedef struct {
     health_rating_t   rating;
     bool              connected;        // ever_seen AND not timed out / BLE up
     bool              ever_seen;        // true after first check-in this uptime
+    bool              leaking;          // last reported wet/dry for this device
     uint8_t           last_battery;     // 0xFF = unknown
     int8_t            last_rssi;        // 0 = unknown
     uint32_t          last_seen_age_s;  // UINT32_MAX = never seen
@@ -139,8 +170,16 @@ bool health_get_sync_counts(uint8_t *seen, uint8_t *total);
 bool health_post_event(const health_event_t *evt);
 
 /**
- * @brief Get worst health rating across all provisioned devices.
- *        Lock-free (volatile read), safe to call from any task.
+ * @brief Get the system health roll-up. Lock-free (volatile read), safe from any task.
+ *
+ * NOT a plain max() over the per-device ratings any more — two deliberate departures,
+ * so do not expect it to equal the worst `rating` in health_get_device_status_all():
+ *   - devices never heard from this sync cycle are EXCLUDED while the boot/commission
+ *     window is open (unless they are leaking), so a device can read CRITICAL
+ *     individually while the roll-up reads EXCELLENT. "Not heard from yet" is not the
+ *     same claim as "offline";
+ *   - a latched leak interlock raises a WARNING floor, so the roll-up can be worse than
+ *     every device in it (see health_set_interlock_held()).
  */
 health_rating_t health_get_system_rating(void);
 
@@ -176,16 +215,84 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
 /**
  * @brief Check whether boot sync is complete.
  *        Complete when all provisioned devices have checked in once,
- *        or the 2-minute boot window has elapsed.
+ *        or the boot window (HEALTH_BOOT_SYNC_TIMEOUT_MS) has elapsed.
+ *        Fails OPEN (returns true) if the engine is not up or the mutex is busy,
+ *        so a caller can never get stuck in the "syncing" state.
+ *
+ * THIS IS THE SNAPSHOT GATE ONLY. It answers "may we publish a snapshot that claims
+ * to be complete", on the short 180 s clock. It is NOT the right question for the
+ * fleet LED or the reason string — use health_is_rollup_syncing() for those.
  */
 bool health_is_boot_sync_complete(void);
+
+/**
+ * @brief Whether any provisioned device is still excluded from the system roll-up
+ *        purely because it has not been heard from yet.
+ *
+ * The user-facing half of the boot-sync split. True means "the rating you are about to
+ * read does not cover every device yet", which is what the fleet LED renders as WHITE
+ * "syncing" and what the telemetry reason string reports as "syncing N devices".
+ *
+ * Goes false when every device has been heard OR the HEALTH_ROLLUP_UNHEARD_MS grace
+ * expires (at which point the unheard devices start counting and the rating escalates
+ * on its own). A LEAKING device is never counted as syncing — see
+ * HEALTH_ROLLUP_UNHEARD_MS.
+ *
+ * Fails CLOSED (returns false) if the engine is not up or the mutex is busy, so a
+ * transient cannot latch the LED white; the caller falls through to its rating-based
+ * answer, which is the safe direction.
+ */
+bool health_is_rollup_syncing(void);
+
+/**
+ * @brief Monotonic counter of sensor check-ins processed by the engine.
+ *
+ * Bumped once per LoRa packet / BLE-leak advertisement that reaches the engine — and
+ * ONLY for those two; valve events are excluded because they already couple their own
+ * snapshot in iothub_task. Lets a poller detect "a sensor was heard" without a queue
+ * of its own, which matters because a repeat packet from an unchanged sensor is dropped
+ * by the scanner's telemetry delta gate and never reaches iothub_task at all; this
+ * engine is the only module that sees every burst.
+ *
+ * Lock-free: single writer (the health task), 32-bit aligned. Wraps at 2^32 — compare
+ * with != , never with <.
+ */
+uint32_t health_get_checkin_seq(void);
+
+/**
+ * @brief Tell the health engine whether the hub is currently holding the valve
+ *        closed on a latched leak incident.
+ *
+ * Raises a WARNING floor on the system rating for as long as it is true, so the
+ * roll-up (and therefore the fleet LED) reads amber rather than green while the
+ * water is still shut off — even once every sensor reports dry and every device is
+ * individually healthy. Cleared when the incident clears (30 s all-dry auto-clear,
+ * LEAK_RESET, or a physical override).
+ *
+ * Implemented as a lock-free volatile store, so it is safe to call from any task
+ * and with any other lock held; it cannot participate in a lock cycle. Also nudges
+ * the engine to re-roll immediately rather than waiting up to one 30 s tick.
+ */
+void health_set_interlock_held(bool held);
+
+/**
+ * @brief Whether the interlock WARNING floor is currently raised.
+ *        Lock-free (volatile read). Used by the telemetry reason builder so it can
+ *        name the interlock as the cause instead of inferring it from the absence of
+ *        any other explanation.
+ */
+bool health_is_interlock_held(void);
 
 // ---------------------------------------------------------------------------
 // Convenience inline helpers (for hook sites)
 // ---------------------------------------------------------------------------
 
+/* `leaking` rides along on the check-in rather than getting its own event: the
+ * wet/dry bit arrives in the very same LoRa packet / BLE advertisement as the
+ * battery and RSSI, so carrying it here costs nothing and halves the queue traffic
+ * a separate leak event would add. */
 static inline void health_post_lora_checkin(uint32_t sensor_id, uint8_t battery,
-                                             int8_t rssi, float snr)
+                                             int8_t rssi, float snr, bool leaking)
 {
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
@@ -194,11 +301,12 @@ static inline void health_post_lora_checkin(uint32_t sensor_id, uint8_t battery,
     evt.lora.battery   = battery;
     evt.lora.rssi      = rssi;
     evt.lora.snr       = snr;
+    evt.lora.leaking   = leaking;
     health_post_event(&evt);
 }
 
 static inline void health_post_ble_leak_checkin(const char *mac_str, uint8_t battery,
-                                                 int8_t rssi)
+                                                 int8_t rssi, bool leaking)
 {
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
@@ -206,6 +314,7 @@ static inline void health_post_ble_leak_checkin(const char *mac_str, uint8_t bat
     strncpy(evt.ble_leak.mac_str, mac_str, sizeof(evt.ble_leak.mac_str) - 1);
     evt.ble_leak.battery = battery;
     evt.ble_leak.rssi    = rssi;
+    evt.ble_leak.leaking = leaking;
     health_post_event(&evt);
 }
 
@@ -244,6 +353,18 @@ static inline void health_post_valve_battery(uint8_t battery)
     memset(&evt, 0, sizeof(evt));
     evt.type = HEALTH_EVT_VALVE_BATTERY;
     evt.valve.battery = battery;
+    health_post_event(&evt);
+}
+
+/* The valve's own flood probe. Needs its own event (unlike the sensors) because the
+ * flood characteristic notifies independently of battery and of connect/disconnect,
+ * so there is no existing check-in to ride along on. */
+static inline void health_post_valve_leak(bool leaking)
+{
+    health_event_t evt;
+    memset(&evt, 0, sizeof(evt));
+    evt.type = HEALTH_EVT_VALVE_LEAK;
+    evt.valve.leaking = leaking;
     health_post_event(&evt);
 }
 

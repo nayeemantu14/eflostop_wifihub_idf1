@@ -1,16 +1,24 @@
 /****************************************************
  *  MODULE:   Fleet / System-Status LED (GPIO 48)
  *  PURPOSE:  Overall device-health roll-up indicator, independent of the
- *            GPIO 38 network LED. Shows a single SOLID colour:
- *              no devices provisioned -> WHITE  (hub not commissioned / idle)
+ *            GPIO 38 network LED. Shows a single SOLID colour, in this
+ *            precedence order:
+ *              no devices provisioned  -> WHITE  (hub not commissioned / idle)
+ *              CRITICAL                -> RED    (leak anywhere, or device offline)
+ *              WARNING                 -> YELLOW (low battery / weak signal, or the
+ *                                                 hub still holding the valve shut)
+ *              provisioned but not yet heard from -> WHITE (syncing, boot window)
  *              EXCELLENT | GOOD        -> GREEN  (all good)
- *              WARNING                 -> YELLOW (warning)
- *              CRITICAL                -> RED     (critical)
+ *
+ *  A leak incident therefore reads RED while wet -> YELLOW while dry but still
+ *  interlocked -> GREEN once the interlock releases.
  *
  *  SOURCE OF TRUTH: health_get_system_rating() (lock-free volatile worst-of
- *  across all provisioned devices) + health_get_sync_counts() for the
- *  provisioned-device count. This module only READS them — it holds no health
- *  state of its own, so it can never disagree with the health engine.
+ *  across all provisioned devices), health_is_rollup_syncing() for "is that
+ *  rating complete yet", and health_get_sync_counts() for the provisioned count.
+ *  This module only READS them — it holds no health state of its own, so it can
+ *  never disagree with the health engine. Leak is an input to the rating itself,
+ *  so there is no leak special case here.
  ****************************************************/
 
 #include "fleet_led.h"
@@ -20,8 +28,8 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 
-#include "health_engine.h"   /* health_get_system_rating, health_get_sync_counts, health_rating_to_str */
-#include "app_ble_valve.h"   /* ble_valve_get_leak / _get_rmleak_state / _is_connected */
+#include "health_engine.h"   /* health_get_system_rating, health_get_sync_counts,
+                              * health_is_rollup_syncing, health_rating_to_str */
 
 #define FLEET_TAG        "FLEET_LED"
 #define FLEET_LED_GPIO   48
@@ -140,23 +148,65 @@ static void fleet_led_task(void *param)
         fleet_state_t target;
         const char *reason;
 
+        /* seen-count no longer needed: health_is_rollup_syncing() answers the question
+         * this module used to derive from seen<total. Still called for `total` (the
+         * unprovisioned test) and as the health-engine-is-up probe. */
         if (health_get_sync_counts(NULL, &total)) {
             initialized = true;
+            /* Sample the sync flag BEFORE the rating, matching the same ordering in
+             * telemetry_v2_publish_snapshot(). health_is_rollup_syncing() evaluates the
+             * window deadlines on read, and the grace expiring re-rolls the roll-up
+             * (devices never heard from stop being excluded). Reading the rating first
+             * would use the pre-expiry value while branching on the post-expiry flag —
+             * one GREEN frame, and a spurious GREEN transition logged, for a hub that had
+             * just become CRITICAL over a missing device.
+             *
+             * NOT health_is_boot_sync_complete(): that is the SNAPSHOT gate, on the short
+             * 180 s clock. Asking it here is what produced the 2026-09-17 capture's 81 s
+             * of RED on a healthy hub — the gate opened at 180 s while the roll-up still
+             * (correctly) had nothing to say about a sensor that beaconed at 265.6 s. This
+             * predicate tracks the roll-up's ACTUAL exclusion set, so the LED and the
+             * rating can no longer disagree. */
+            bool syncing = health_is_rollup_syncing();
+            health_rating_t r = health_get_system_rating();
+
             if (total == 0) {
                 /* nothing provisioned (fresh/idle hub) -> white */
                 target = FLEET_WHITE;
                 reason = "unprovisioned";
-            } else if (ble_valve_is_connected() &&
-                       (ble_valve_get_leak() || ble_valve_get_rmleak_state())) {
-                /* An active leak at the valve is CRITICAL even when device
-                 * connectivity/battery is otherwise fine — health_get_system_rating()
-                 * does NOT track leak state. RMLEAK (the latched incident) is included
-                 * so the red stays stable across the flood probe toggling on/off. */
-                target = FLEET_RED;
-                reason = "leak";
-            } else {
-                health_rating_t r = health_get_system_rating();
+            } else if (r >= HEALTH_WARNING) {
+                /* Anything the roll-up considers actionable wins outright — RED for
+                 * CRITICAL (a leak anywhere, or a device genuinely offline), YELLOW
+                 * for WARNING (low battery / weak signal, or the hub still holding
+                 * the valve closed after a leak).
+                 *
+                 * Checked BEFORE the syncing branch on purpose: a device that has
+                 * been heard and is wet must not be masked by other devices not
+                 * having reported in yet.
+                 *
+                 * The valve-specific leak override that used to live here is gone.
+                 * Leak is now an input to health_get_system_rating() for every device
+                 * type, so this module is back to being a pure reader of the roll-up
+                 * and cannot disagree with what the snapshot reports. */
                 target = rating_to_color(r);
+                reason = health_rating_to_str(r);
+            } else if (syncing) {
+                /* Provisioned devices we simply have not heard from yet. Not a fault:
+                 * the sensors are event-driven and burst every ~100 s, so at boot
+                 * there is a legitimate window where the honest answer is "don't
+                 * know". White says that; red would be a lie that had installers
+                 * chasing healthy hardware. Once the grace expires, a device still
+                 * unheard counts in the roll-up and this goes red via the branch
+                 * above.
+                 *
+                 * The old `seen < total` half of this test is gone as redundant, not
+                 * dropped: health_is_rollup_syncing() is true only when some in-use
+                 * device has !ever_seen, which is exactly seen < total. One predicate
+                 * instead of two that could drift apart. */
+                target = FLEET_WHITE;
+                reason = "syncing";
+            } else {
+                target = rating_to_color(r);     /* EXCELLENT | GOOD -> GREEN */
                 reason = health_rating_to_str(r);
             }
             held = target;

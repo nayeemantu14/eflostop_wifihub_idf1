@@ -552,6 +552,21 @@ At least one field is required. Each present array does a **full replace** of th
     "auto_close_enabled": true
   }
 }
+
+{
+  "schema": "eflostop.cmd", "ver": 1, "id": "prov-004", "cmd": "provision",
+  "payload": {
+    "valve_id": "00:80:E1:27:F7:BB",
+    "ble_leak_sensors": ["00:80:e1:2a:2b:a5", "00:80:e1:2a:cb:b6","00:80:e1:2a:b6:8e", "00:80:e1:2a:29:fc"],
+    "sensor_meta": [
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:2b:a5", "location_code": "bathroom", "label": "Ensuite" },
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:cb:b6", "location_code": "bathroom", "label": "Main Bathroom" },
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:b6:8e", "location_code": "kitchen", "label": "dishwasher" },
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:29:fc", "location_code": "laundry", "label": "under washer" }
+],
+    "auto_close_enabled": true
+  }
+}
 ```
 
 Confirm the result two ways. Twin reported is republished **immediately** on a successful provision (FW 2.0.2 — before that it only refreshed on the next MQTT reconnect, so the twin could read stale for hours), carrying `auto_close_enabled`, `trigger_mask`, `valve_id` and the device counts. The commission snapshot that follows carries the same rules values under `data.rules`.

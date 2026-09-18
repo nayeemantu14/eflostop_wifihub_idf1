@@ -12,17 +12,24 @@ extern "C" {
  * shows the hub's overall device-health as a single at-a-glance SOLID colour,
  * driven by the existing health source of truth:
  *
- *   no devices provisioned  -> WHITE   (hub not commissioned / idle)
- *   active valve leak        -> RED      (critical — overrides health rating)
- *   EXCELLENT | GOOD         -> GREEN   (all good)
- *   WARNING                  -> ORANGE  (warning)
- *   CRITICAL                 -> RED      (critical)
+ * Evaluated in this precedence order:
  *
- * Colour = health_get_system_rating() collapsed, EXCEPT an active valve leak
- * (ble_valve_get_leak / RMLEAK) forces RED since the health rating does not
- * track leak state. The WHITE state = provisioned device count
- * (health_get_sync_counts) is zero. This module never touches the GPIO 38
- * strip, its task, its queue, or the net_status coordinator.
+ *   no devices provisioned            -> WHITE   (hub not commissioned / idle)
+ *   CRITICAL                          -> RED     (leak anywhere, or device offline)
+ *   WARNING                           -> YELLOW  (low battery / weak signal, or the
+ *                                                 hub still holding the valve shut)
+ *   provisioned but not yet heard from -> WHITE   (syncing — boot window still open)
+ *   EXCELLENT | GOOD                  -> GREEN   (all good)
+ *
+ * So a leak incident reads RED while wet -> YELLOW while dry but still interlocked
+ * -> GREEN once the interlock releases.
+ *
+ * Colour is health_get_system_rating() collapsed, with NO special cases: leak is an
+ * input to that rating for every device type (valve probe, BLE and LoRa sensors), and
+ * a latched interlock raises a WARNING floor on it. The two WHITE states come from
+ * health_get_sync_counts() — total == 0 for unprovisioned, seen < total (with the
+ * boot window still open) for syncing. This module never touches the GPIO 38 strip,
+ * its task, its queue, or the net_status coordinator.
  */
 void setupFleetLEDTask(void);
 

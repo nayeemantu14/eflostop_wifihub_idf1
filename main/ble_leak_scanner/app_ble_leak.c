@@ -34,7 +34,15 @@
 #define MAX_TRACKED_SENSORS     MAX_BLE_LEAK_SENSORS
 #define SCAN_RESTART_DELAY_MS   500
 #define WHITELIST_RELOAD_MS     10000       // Re-check provisioning every 10s
-#define BLE_LEAK_HEARTBEAT_MS   (5 * 60 * 1000)  // 5-min heartbeat for health engine
+#define BLE_LEAK_HEARTBEAT_MS   (5 * 60 * 1000)  // 5-min TELEMETRY heartbeat: how often an
+                                                 // unchanged sensor still produces a D2C event.
+                                                 // This used to gate the health-engine check-in
+                                                 // too — see health_post_ble_leak_checkin() below
+                                                 // for why that was wrong.
+#define HEALTH_CHECKIN_MIN_MS   5000             // Min spacing between health check-ins per
+                                                 // sensor. A burst is several advertisements over
+                                                 // a second or two; the health engine needs one
+                                                 // of them, not all of them.
 
 /* ---------------------------------------------------------
  * Internal types
@@ -46,7 +54,8 @@ typedef struct {
     bool last_leak;
     char last_fw_version[12];
     bool seen;              // true after first advertisement received
-    TickType_t last_event_tick;  // for health engine heartbeat
+    TickType_t last_event_tick;    // last telemetry event (drives BLE_LEAK_HEARTBEAT_MS)
+    TickType_t last_health_tick;   // last health check-in (drives HEALTH_CHECKIN_MIN_MS)
 } sensor_state_t;
 
 /* ---------------------------------------------------------
@@ -184,27 +193,62 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
                  fields.mfg_data[4], fields.mfg_data[5], fields.mfg_data[6]);
     }
 
-    // Delta check: skip if unchanged from last report (unless heartbeat due)
     sensor_state_t *s = &s_sensors[idx];
+
+    char mac_str[18];
+    mac_bytes_to_str(adv_mac, mac_str);
+
+    /* ---- HEALTH CHECK-IN: before the telemetry delta gate, deliberately ----
+     *
+     * Liveness and telemetry are different questions and must not share a gate.
+     * This call used to sit at the very bottom of the function, behind the
+     * `!data_changed && !heartbeat_due` early return below, so the health engine
+     * only learned the sensor was alive when a D2C event was also due — once every
+     * BLE_LEAK_HEARTBEAT_MS (5 min), even though a dry sensor bursts roughly every
+     * 100 s and we hear it every time.
+     *
+     * Against HEALTH_BLE_LEAK_TIMEOUT_MS (10 min) that left barely 2x margin on a
+     * signal we were throttling ourselves: ONE missed 5-minute post and a perfectly
+     * healthy sensor was declared offline, which took the whole roll-up CRITICAL and
+     * the fleet LED red. It also made HEALTH_BOOT_SYNC_TIMEOUT_MS unsatisfiable,
+     * because the boot window was shorter than the gate it was waiting on.
+     *
+     * Posting every burst gives ~6x margin instead, and makes last_seen_age_s mean
+     * "when we last heard it" rather than "when we last talked about it".
+     *
+     * The telemetry gate below is untouched — no change to what goes on the wire.
+     *
+     * THE THROTTLE MUST NEVER GATE THE WET/DRY EDGE. It exists only to decimate
+     * redundant liveness posts within a single burst. Since `leaking` now rides along
+     * on this same helper, a purely time-based gate would drop the dry->wet
+     * transition itself: a sensor that bursts dry at t0 and is wetted at t0+1.5 s
+     * emits its whole wet burst inside the 5 s window, so the health engine would
+     * keep leaking=false and the roll-up would keep reporting excellent/GREEN for up
+     * to a full burst cycle (~100 s) — reintroducing exactly the false-green this
+     * release exists to remove. `s->last_leak` still holds the PREVIOUS value here
+     * (it is committed further down, below the telemetry gate), so it is the correct
+     * edge reference. */
+    TickType_t now_tick = xTaskGetTickCount();
+    bool leak_edge = !s->seen || (leak != s->last_leak);
+    if (leak_edge || (now_tick - s->last_health_tick) >= pdMS_TO_TICKS(HEALTH_CHECKIN_MIN_MS)) {
+        health_post_ble_leak_checkin(mac_str, battery, rssi, leak);
+        s->last_health_tick = now_tick;
+    }
+
+    // Delta check: skip if unchanged from last report (unless heartbeat due)
     bool data_changed = !s->seen || s->last_leak != leak || s->last_battery != battery
                         || strcmp(s->last_fw_version, fw_ver) != 0;
     bool heartbeat_due = s->seen &&
-        ((xTaskGetTickCount() - s->last_event_tick) >= pdMS_TO_TICKS(BLE_LEAK_HEARTBEAT_MS));
+        ((now_tick - s->last_event_tick) >= pdMS_TO_TICKS(BLE_LEAK_HEARTBEAT_MS));
     if (!data_changed && !heartbeat_due) {
-        return;  // No change and heartbeat not due, skip
+        return;  // No change and heartbeat not due, skip the D2C event
     }
-
-    // Update tracked state
-    memcpy(s->mac, adv_mac, 6);
-    s->last_leak = leak;
-    s->last_battery = battery;
-    strncpy(s->last_fw_version, fw_ver, sizeof(s->last_fw_version) - 1);
-    s->seen = true;
 
     // Build event and enqueue
     ble_leak_event_t evt;
     memcpy(evt.sensor_mac, adv_mac, 6);
-    mac_bytes_to_str(adv_mac, evt.sensor_mac_str);
+    strncpy(evt.sensor_mac_str, mac_str, sizeof(evt.sensor_mac_str) - 1);
+    evt.sensor_mac_str[sizeof(evt.sensor_mac_str) - 1] = '\0';
     evt.battery = battery;
     evt.leak_detected = leak;
     evt.rssi = rssi;
@@ -215,11 +259,34 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
              evt.sensor_mac_str, leak, battery, evt.rssi,
              fw_ver[0] ? fw_ver : "n/a");
 
-    xQueueSend(ble_leak_rx_queue, &evt, 0);
-    s->last_event_tick = xTaskGetTickCount();
+    /* COMMIT THE TRACKED STATE ONLY IF THE EVENT WAS ACTUALLY ENQUEUED.
+     *
+     * This used to update s->last_leak/battery/fw/seen BEFORE the send, and ignore the
+     * send's return. A full ble_leak_rx_queue therefore consumed the dry->wet delta and
+     * threw the event away: every later advertisement in the burst compared equal to the
+     * just-committed state, so no retry happened and rules_engine_evaluate_leak() — the
+     * only thing that closes the valve for a SENSOR leak — did not run until the 5-minute
+     * telemetry heartbeat forced an event through. Five minutes of water, while the health
+     * roll-up and the fleet LED (fed by the separate check-in above, which is not queued
+     * behind this) already showed the leak. The indicator would have been right and the
+     * valve still open.
+     *
+     * Leaving the state uncommitted makes the very next advertisement in the same burst
+     * (~300 ms later) look like a fresh delta and retry. */
+    if (xQueueSend(ble_leak_rx_queue, &evt, 0) != pdTRUE) {
+        ESP_LOGW(BLE_LEAK_TAG, "ble_leak_rx_queue FULL — %s event held for retry on next advertisement",
+                 evt.sensor_mac_str);
+        return;   /* deliberately do NOT commit s->* — the delta must survive */
+    }
 
-    // Health engine: sensor check-in
-    health_post_ble_leak_checkin(evt.sensor_mac_str, evt.battery, evt.rssi);
+    // Update tracked state — only now that the event is safely queued
+    memcpy(s->mac, adv_mac, 6);
+    s->last_leak = leak;
+    s->last_battery = battery;
+    strncpy(s->last_fw_version, fw_ver, sizeof(s->last_fw_version) - 1);
+    s->seen = true;
+    s->last_event_tick = now_tick;
+    /* The health check-in already happened above, ahead of the delta gate. */
 }
 
 /* ---------------------------------------------------------

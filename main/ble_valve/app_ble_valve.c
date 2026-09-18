@@ -536,6 +536,11 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
         bool old_leak = g_val_leak;
         g_val_leak = (data[0] != 0);
         ESP_LOGI(BLE_TAG, "[DATA] Leak=%d (%s)", g_val_leak, g_val_leak ? "LEAK" : "OK");
+        /* Posted unconditionally, NOT behind the delta gate below: this feeds the
+         * health roll-up (a wet valve probe is CRITICAL), and the initial setup read
+         * is exactly when the roll-up most needs the value. The health engine keys
+         * off the value, not the edge, so a repeat post is a no-op. */
+        health_post_valve_leak(g_val_leak);
         if (old_leak != g_val_leak && !g_setup_in_progress)
             notify_hub_update(BLE_UPD_LEAK);
     }
@@ -644,16 +649,17 @@ static int on_dsc_disc_cb(uint16_t conn_handle,
     return 0;
 }
 
-static int on_read_cb(uint16_t conn_handle,
-                      const struct ble_gatt_error *error,
-                      struct ble_gatt_attr *attr,
-                      void *arg)
+// Shared body for every GATT read completion: fold the value into the cache via
+// on_notify(), or recover from an auth error. Returns true when the caller may
+// advance the setup state machine, false when the read was consumed by a
+// security re-initiation (which restarts the chain itself).
+static bool handle_read_result(uint16_t conn_handle,
+                               const struct ble_gatt_error *error,
+                               struct ble_gatt_attr *attr)
 {
-    (void)arg;
-
     if (error->status == 0 && attr != NULL)
     {
-        ESP_LOGI(BLE_TAG, "[SETUP] Read success: handle=%u", attr->handle);
+        ESP_LOGI(BLE_TAG, "[READ] Read success: handle=%u", attr->handle);
         if (attr->om != NULL)
         {
             uint8_t data[16] = {0};
@@ -667,22 +673,59 @@ static int on_read_cb(uint16_t conn_handle,
     }
     else
     {
-        ESP_LOGW(BLE_TAG, "[SETUP] Read failed status=0x%04X", error->status);
+        ESP_LOGW(BLE_TAG, "[READ] Read failed status=0x%04X", error->status);
 
         if (error->status == BLE_HS_ATT_ERR(ATT_ERR_INSUFFICIENT_AUTHEN) ||
             error->status == BLE_HS_ATT_ERR(ATT_ERR_INSUFFICIENT_ENC))
         {
             if (!is_link_encrypted() && conn_handle != BLE_HS_CONN_HANDLE_NONE)
             {
-                ESP_LOGI(BLE_TAG, "[SETUP] Auth error on read - triggering security...");
+                ESP_LOGI(BLE_TAG, "[READ] Auth error on read - triggering security...");
                 g_security_retry_count = 0;
                 initiate_security();
-                return 0;
+                return false;
             }
         }
     }
 
-    setup_next_step();
+    return true;
+}
+
+// Read completion for the SETUP CHAIN ONLY (steps 5-8). Advances the state
+// machine, which is what those steps rely on to walk to the next one.
+static int on_read_cb(uint16_t conn_handle,
+                      const struct ble_gatt_error *error,
+                      struct ble_gatt_attr *attr,
+                      void *arg)
+{
+    (void)arg;
+
+    if (handle_read_result(conn_handle, error, attr))
+        setup_next_step();
+    return 0;
+}
+
+// Read completion for POST-WRITE COMMAND READ-BACKS. Updates the cache and
+// stops — it must NEVER touch the setup state machine.
+//
+// This split exists because sharing on_read_cb() with the command read-backs
+// caused an unbounded telemetry/GATT storm in 2.1.1. setup_step is a file-static
+// that only discovery resets; after a completed session it rests at its terminal
+// value. Every command read-back incremented it again (Step 11, 12, 13 ...), each
+// landing in setup_next_step()'s default: arm, which re-ran the "SETUP COMPLETE"
+// block and re-posted BLE_UPD_CONNECTED. iothub_task turned each of those into
+// rules_engine_on_valve_connected(), whose Priority 1 re-issued RMLEAK + close
+// while a sensor was wet — writes that read back and re-entered the same arm.
+// Field capture: 35+ `auto_close {"cause":"reconnect"}` events in 40 s, one NVS
+// incident commit each, with no intervening DISCONNECTED.
+static int on_cmd_read_cb(uint16_t conn_handle,
+                          const struct ble_gatt_error *error,
+                          struct ble_gatt_attr *attr,
+                          void *arg)
+{
+    (void)arg;
+
+    (void)handle_read_result(conn_handle, error, attr);
     return 0;
 }
 
@@ -733,7 +776,7 @@ static void apply_pending_valve_cmd_if_any(void)
             // write_valve_command() for the full reasoning.
             if (rc == 0)
             {
-                int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_read_cb, NULL);
+                int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_cmd_read_cb, NULL);
                 if (rrc != 0)
                     ESP_LOGW(BLE_TAG, "[CMD] Valve state read-back rc=%d — position unconfirmed", rrc);
             }
@@ -762,7 +805,7 @@ static void apply_pending_rmleak_cmd_if_any(void)
             // not echo REMOTE_LEAK on the write path. See write_rmleak_command().
             if (rc == 0)
             {
-                int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_read_cb, NULL);
+                int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_cmd_read_cb, NULL);
                 if (rrc != 0)
                     ESP_LOGW(BLE_TAG, "[CMD] RMLEAK read-back rc=%d — interlock state unconfirmed", rrc);
             }
@@ -885,7 +928,24 @@ static void setup_next_step(void)
         break;
 
     default:
-        // Done with setup
+        // Done with setup.
+        //
+        // IDEMPOTENCE GUARD: this arm announces a NEW link (BLE_UPD_CONNECTED),
+        // which iothub_task turns into rules_engine_on_valve_connected() — a
+        // reconciliation that may close the valve and write NVS. Re-announcing a
+        // link that is already up is therefore never harmless, so refuse to do it.
+        //
+        // setup_step only ever resets in the discovery callbacks, so any stray
+        // increment after a completed session lands here. The command read-backs
+        // used to supply exactly that (see on_cmd_read_cb) and produced an
+        // unbounded auto_close storm. That specific route is now cut at the source;
+        // this is the backstop that keeps any future one from reaching the same arm.
+        if (get_state_bits() & BLE_STATE_BIT_DISCOVERY_DONE)
+        {
+            ESP_LOGD(BLE_TAG, "[SETUP] Step %d ignored — link already set up", setup_step);
+            break;
+        }
+
         g_security_retry_count = 0;
 
         if (discovery_timeout_timer)
@@ -910,6 +970,40 @@ static void setup_next_step(void)
 
         g_setup_in_progress = false;
         notify_hub_update(BLE_UPD_CONNECTED);
+
+        /* ANNOUNCE THE FLOOD PROBE STATE AT LINK-UP, WET OR DRY.
+         *
+         * Setup step 6 reads the flood characteristic, so g_val_leak is populated by
+         * now — but that read arrives while g_setup_in_progress is still true, which
+         * suppresses BLE_UPD_LEAK in on_notify(). And BLE_UPD_LEAK is the ONLY thing
+         * that makes iothub_task call rules_engine_evaluate_leak(LEAK_SOURCE_VALVE,...):
+         * on_valve_connected()'s Priority 1 keys off g_active_leak_count, which this
+         * leak was never entered into, so nothing downstream would ever act on it.
+         *
+         * Without this, a hub that boots (or a valve that reconnects) into a flood AT
+         * THE VALVE reports system_health critical and drives the fleet LED red while
+         * leaving the valve OPEN indefinitely — it only ever closed on a dry->wet EDGE
+         * observed after setup. The setup-time suppression itself is correct (no events
+         * mid-chain); the missing piece was the catch-up once the link is genuinely up.
+         *
+         * Announced for DRY as well as wet, deliberately. Sending it only when wet left
+         * two holes: a valve that reconnects dry after a wet episode never published
+         * leak_cleared (the CONNECT handler zeroes the cache, so on_notify sees no
+         * edge), and it never told the rules engine to drop the valve from its
+         * active-leak table. Reporting both edges makes the consumer's delta gate the
+         * single arbiter — see s_valve_pub_wet in app_iothub.c, initialised to 0 so a
+         * routine dry link-up publishes nothing.
+         *
+         * Posted AFTER BLE_UPD_CONNECTED so reconciliation runs first: iothub dequeues
+         * one update per iteration, so this lands on the next pass and goes through the
+         * normal, already-tested BLE_UPD_LEAK path, which samples the valve state
+         * consistently before calling the rules engine. */
+        if (g_val_leak)
+            ESP_LOGW(BLE_TAG, "[READY] Flood probe already WET at link-up — announcing for evaluation");
+        else
+            ESP_LOGI(BLE_TAG, "[READY] Announcing flood probe state (dry) for reconciliation");
+        notify_hub_update(BLE_UPD_LEAK);
+
         apply_pending_valve_cmd_if_any();
         apply_pending_rmleak_cmd_if_any();
         break;
@@ -1153,6 +1247,20 @@ static void start_discovery_chain(void)
     g_setup_in_progress = true;
     setup_step = 0;
 
+    /* A fresh discovery means the link is no longer "discovered": the handles below
+     * are about to be zeroed, so DISCOVERY_DONE (and therefore is_ready_for_gatt())
+     * must not keep claiming the session is usable.
+     *
+     * This also makes setup_next_step()'s idempotence guard sound. That guard skips
+     * the default: arm when DISCOVERY_DONE is set; without this clear, a re-entered
+     * discovery on an already-set-up link would run the whole chain and then be
+     * silently abandoned at the end — leaving g_setup_in_progress stuck true (which
+     * suppresses every notify_hub_update, so the hub goes deaf to valve state) and
+     * stranding any pending CLOSE/RMLEAK that the default: arm would have replayed.
+     * Reachable because command read-backs share handle_read_result(), so an
+     * auth-error on a post-setup read can re-enter initiate_security(). */
+    clear_state_bit(BLE_STATE_BIT_DISCOVERY_DONE);
+
     h_valve_char = 0;
     h_flood_char = 0;
     h_rmleak_char = 0;
@@ -1358,6 +1466,29 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         g_val_state = -1;
         g_val_rmleak = false;   // reset like the other fields — no stale prior-session RMLEAK across a reconnect
         g_firmware_rev[0] = '\0';
+
+        /* DELIBERATELY does NOT clear the health engine's valve leak state here.
+         *
+         * An earlier revision posted health_post_valve_leak(false) on disconnect, on the
+         * reasoning that the probe's state is unknowable once the link is down. That is
+         * true but it is the wrong conclusion: losing the link does not dry the floor.
+         * Because compute_valve_rating() checks `leaking` first, clearing it demoted a
+         * KNOWN flood at the valve from CRITICAL to the WARNING disconnect grace for a
+         * full 3 minutes — under-reporting the single worst state the system has (water
+         * running, and the hub can no longer reach the thing that stops it).
+         *
+         * The two objections that motivated the clear are both already answered:
+         *  - "masks CRITICAL-because-offline": the reason builder now falls through for a
+         *    valve that is leaking AND disconnected, so it reports BOTH "Leak detected:
+         *    valve" and "Valve offline" (telemetry_v2.c).
+         *  - "unclearable": setup step 6 re-reads the flood characteristic on every
+         *    reconnect and posts the truth, so it clears as soon as the link is back.
+         *
+         * Known cost, accepted: since the rating was already CRITICAL while wet, the
+         * disconnect produces no rating transition and therefore no `device_offline`
+         * alert. The state is still fully on the wire — valve.connected:false plus the
+         * "Valve offline" clause in system_health.reason. Under-reporting an alert is a
+         * far better failure than under-reporting the severity of an active flood. */
 
         clear_all_state_bits();
         memset(g_valve_mac, 0, sizeof(g_valve_mac));
@@ -1708,7 +1839,7 @@ static void write_valve_command(uint8_t val)
         // round trip per valve command, and commands are rare.
         if (rc == 0)
         {
-            int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_read_cb, NULL);
+            int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_cmd_read_cb, NULL);
             if (rrc != 0)
                 ESP_LOGW(BLE_TAG, "[CMD] Valve state read-back rc=%d — position unconfirmed", rrc);
         }
@@ -1776,7 +1907,7 @@ static void write_rmleak_command(uint8_t val)
             // throughout, and valve.rmleak false in every snapshot — which also
             // kept the fleet LED green through an active leak, since its override
             // reads ble_valve_get_rmleak_state().
-            int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_read_cb, NULL);
+            int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_cmd_read_cb, NULL);
             if (rrc != 0)
                 ESP_LOGW(BLE_TAG, "[CMD] RMLEAK read-back rc=%d — interlock state unconfirmed", rrc);
         }
