@@ -1,0 +1,4274 @@
+[IoTHubMonitor] Start monitoring message arrived in built-in endpoint for device [GW-7C4FADAE69C8] ...
+[IoTHubMonitor] Created partition receiver [0] for consumerGroup [$Default]
+[IoTHubMonitor] Created partition receiver [1] for consumerGroup [$Default]
+[IoTHubMonitor] Created partition receiver [2] for consumerGroup [$Default]
+[IoTHubMonitor] Created partition receiver [3] for consumerGroup [$Default]
+[IoTHubMonitor] [10:24:34 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295874,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 110
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 5 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "unknown",
+      "battery": 0,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": null,
+      "rating": "critical",
+      "last_seen_age_s": null
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:24:46 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295885,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 121
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "fast",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 4 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:25:04 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295903,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 139
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 4 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 18
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:25:32 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295932,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 168
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 46
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:26:04 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295964,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 200
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 78
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 32,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:26:28 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295988,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 224
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 102
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 56,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 96,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:26:34 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790295994,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 230
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 108
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 62,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 6,
+        "battery": 96,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:27:05 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296024,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 260
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 139
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 92,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 36,
+        "battery": 96,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:27:35 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296055,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 291
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 169
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 123,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 66,
+        "battery": 96,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:28:05 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296085,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 321
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 199
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 153,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 96,
+        "battery": 96,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:28:10 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296090,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 326
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 204
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 158,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 4,
+        "battery": 96,
+        "rssi": -51,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:28:35 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296114,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 350
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 229
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 182,
+        "battery": 96,
+        "rssi": -31,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 28,
+        "battery": 96,
+        "rssi": -51,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:28:53 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296133,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 369
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 247
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 1,
+        "battery": 98,
+        "rssi": -29,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 2,
+        "battery": 79,
+        "rssi": -53,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:33:53 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296433,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 669
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "heartbeat",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 547
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 69,
+        "battery": 79,
+        "rssi": -45,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 91,
+        "battery": 71,
+        "rssi": -52,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:38:53 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296733,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 969
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "heartbeat",
+    "system_health": {
+      "rating": "critical",
+      "reason": "2 sensors offline"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 847
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 169,
+        "battery": 79,
+        "rssi": -46,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 92,
+        "battery": 71,
+        "rssi": -56,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [10:42:37 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296956,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1192
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-b-002",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [10:42:37 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790296957,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1193
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:45:09 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297108,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1344
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 151
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 45,
+        "battery": 79,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:45:41 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297140,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1376
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 1 device"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 183
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 77,
+        "battery": 79,
+        "rssi": -48,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 71,
+        "rssi": -52,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [10:46:37 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297197,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1433
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-b-002",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [10:46:37 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297197,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1433
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:49:08 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297348,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1584
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 1 device"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 151
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 84,
+        "battery": 79,
+        "rssi": -49,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:50:43 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297442,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1678
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 245
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 79,
+        "battery": 79,
+        "rssi": -49,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 71,
+        "rssi": -62,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [10:52:24 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297543,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1779
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-b-002",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [10:52:24 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297544,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1780
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 1 device"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [10:52:45 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297565,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1801
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-b-002",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [10:52:45 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297565,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1801
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [10:52:50 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297570,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1806
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 5
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [10:53:39 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297618,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1854
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-v-001",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [10:53:39 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790297618,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 1854
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0"
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [11:02:23 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298143,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2379
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "prov-004",
+    "cmd": "provision",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [11:02:23 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298143,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2379
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 5 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "disconnected",
+      "connected": false,
+      "rating": "critical",
+      "last_seen_age_s": null
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:02:41 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298161,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2397
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "fast",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 4 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:02:45 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298165,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2401
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 3
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 79,
+        "rssi": -44,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:02:55 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298175,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2411
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 14
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 10,
+        "battery": 79,
+        "rssi": -44,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:03:26 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298205,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2441
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 44
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 40,
+        "battery": 79,
+        "rssi": -44,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:03:56 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298236,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2472
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 74
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 71,
+        "battery": 79,
+        "rssi": -44,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:04:02 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298241,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2477
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 80
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 76,
+        "battery": 79,
+        "rssi": -44,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 71,
+        "rssi": -70,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:04:26 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298266,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2502
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 104
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 1,
+        "battery": 79,
+        "rssi": -45,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 24,
+        "battery": 71,
+        "rssi": -70,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:04:56 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298296,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2532
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 134
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 31,
+        "battery": 79,
+        "rssi": -45,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 54,
+        "battery": 71,
+        "rssi": -70,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:05:27 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298326,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2562
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 165
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 62,
+        "battery": 79,
+        "rssi": -45,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 84,
+        "battery": 71,
+        "rssi": -70,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:05:45 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298344,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2580
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 183
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 80,
+        "battery": 79,
+        "rssi": -45,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 3,
+        "battery": 71,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:05:57 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298356,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2592
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 195
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 92,
+        "battery": 79,
+        "rssi": -45,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 16,
+        "battery": 71,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:06:09 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298369,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2605
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 64,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 207
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 3,
+        "battery": 79,
+        "rssi": -47,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 28,
+        "battery": 71,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:06:27 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298386,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2622
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 6
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 21,
+        "battery": 79,
+        "rssi": -47,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 45,
+        "battery": 71,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:06:57 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298416,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2652
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 36
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 51,
+        "battery": 79,
+        "rssi": -47,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:B6:8E",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "kitchen",
+          "label": "dishwasher"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 76,
+        "battery": 71,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [11:09:30 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298569,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2805
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-b-002",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [11:09:30 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298570,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2806
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 3 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:12:02 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298721,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2957
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 151
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 56,
+        "battery": 79,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:12:22 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298741,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 2977
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 1 device"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 172
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:2B:A5",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Ensuite"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 76,
+        "battery": 79,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 71,
+        "rssi": -54,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [11:14:11 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298851,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3087
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-b-002",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [11:14:12 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790298851,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3087
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 0
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:16:42 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299002,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3238
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 1 device"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 150
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 37,
+        "battery": 79,
+        "rssi": -55,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:17:20 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299040,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3276
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "valve_id": "00:80:E1:27:F7:BB",
+      "state": "open",
+      "battery": 65,
+      "leak_state": false,
+      "rmleak": false,
+      "connected": true,
+      "fw_version": "2.2.0",
+      "rating": "excellent",
+      "last_seen_age_s": 189
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 75,
+        "battery": 79,
+        "rssi": -55,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 71,
+        "rssi": -58,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[C2DMessage] Sending message to [GW-7C4FADAE69C8] ...
+[C2DMessage] [Success] Message sent to [GW-7C4FADAE69C8]
+[IoTHubMonitor] [11:17:47 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299066,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3302
+  },
+  "type": "event",
+  "data": {
+    "event": "cmd_ack",
+    "id": "decom-v-001",
+    "cmd": "decommission",
+    "status": "ok"
+  }
+}
+[IoTHubMonitor] [11:17:47 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299067,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3303
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "event",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 2 devices"
+    },
+    "valve": {
+      "state": "disconnected",
+      "connected": false
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:20:19 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299218,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3454
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "boot",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "Syncing - waiting for 1 device"
+    },
+    "valve": {
+      "state": "disconnected",
+      "connected": false
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": false,
+        "rating": "critical",
+        "last_seen_age_s": null,
+        "battery": null,
+        "rssi": null,
+        "leak_state": false,
+        "fw_version": null,
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 77,
+        "battery": 71,
+        "rssi": -69,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:21:04 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299264,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3500
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "commission",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "state": "disconnected",
+      "connected": false
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 0,
+        "battery": 79,
+        "rssi": -50,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 22,
+        "battery": 71,
+        "rssi": -49,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}
+[IoTHubMonitor] [11:26:04 AM] Message received from [GW-7C4FADAE69C8]:
+{
+  "schema": "eflostop.v2",
+  "ts": 1790299564,
+  "gateway": {
+    "id": "GW-7C4FADAE69C8",
+    "short_id": "69C8",
+    "fw": "2.1.3",
+    "uptime_s": 3800
+  },
+  "type": "snapshot",
+  "data": {
+    "reason": "heartbeat",
+    "system_health": {
+      "rating": "excellent",
+      "reason": "All devices healthy"
+    },
+    "valve": {
+      "state": "disconnected",
+      "connected": false
+    },
+    "lora_sensors": [],
+    "ble_leak_sensors": [
+      {
+        "sensor_id": "00:80:E1:2A:CB:B6",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 100,
+        "battery": 79,
+        "rssi": -49,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "bathroom",
+          "label": "Main Bathroom"
+        }
+      },
+      {
+        "sensor_id": "00:80:E1:2A:29:FC",
+        "connected": true,
+        "rating": "excellent",
+        "last_seen_age_s": 24,
+        "battery": 71,
+        "rssi": -53,
+        "leak_state": false,
+        "fw_version": "1.1.0",
+        "location": {
+          "code": "laundry",
+          "label": "under washer"
+        }
+      }
+    ],
+    "rules": {
+      "auto_close_enabled": true,
+      "trigger_mask": 7
+    },
+    "override_active": false
+  }
+}

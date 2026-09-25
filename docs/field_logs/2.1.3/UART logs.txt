@@ -1,0 +1,1574 @@
+PS C:\Work\Projects\EfloStop 2\Firmware\Production\eFloStop_WiFiHub_idf1> $env:IDF_PATH = 'C:\Users\antun\esp\v5.5.1\esp-idf';
+PS C:\Work\Projects\EfloStop 2\Firmware\Production\eFloStop_WiFiHub_idf1>  & 'C:\Users\antun\.espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe' 'C:\Users\antun\esp\v5.5.1\esp-idf\tools\idf_monitor.py' -p COM30 -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --make '''C:\Users\antun\.espressif\python_env\idf5.5_py3.11_env\Scripts\python.exe'' ''C:\Users\antun\esp\v5.5.1\esp-idf\tools\idf.py''' --target esp32s3 'c:\Work\Projects\EfloStop 2\Firmware\Production\eFloStop_WiFiHub_idf1\build\eFloStop_WiFiHub_idf1.elf'
+--- Warning: GDB cannot open serial ports accessed as COMx
+--- Using \\.\COM30 instead...
+--- esp-idf-monitor 1.8.0 on \\.\COM30 115200
+--- Quit: Ctrl+] | Menu: Ctrl+T | Help: Ctrl+T followed by Ctrl+H
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x158c
+load:0x403c8700,len:0xd24
+load:0x403cb700,len:0x2f8c
+entry 0x403c8924
+I (24) boot: ESP-IDF v5.5.1 2nd stage bootloader
+I (25) boot: compile time Jun 26 2026 14:31:51
+I (25) boot: Multicore bootloader
+I (25) boot: chip revision: v0.2
+I (28) boot: efuse block revision: v1.4
+I (31) boot.esp32s3: Boot SPI Speed : 80MHz
+I (35) boot.esp32s3: SPI Mode       : DIO
+I (39) boot.esp32s3: SPI Flash Size : 8MB
+I (43) boot: Enabling RNG early entropy source...
+I (47) boot: Partition Table:
+I (50) boot: ## Label            Usage          Type ST Offset   Length
+I (56) boot:  0 nvs              WiFi data        01 02 00009000 00004000
+I (63) boot:  1 nvs_prov         WiFi data        01 02 0000d000 00004000
+I (69) boot:  2 otadata          OTA data         01 00 00011000 00002000
+I (76) boot:  3 phy_init         RF data          01 01 00013000 00001000
+I (82) boot:  4 factory          factory app      00 00 00020000 00200000
+I (89) boot:  5 ota_0            OTA app          00 10 00220000 00200000
+I (95) boot:  6 ota_1            OTA app          00 11 00420000 00200000
+I (102) boot: End of partition table
+I (105) boot: Defaulting to factory image
+I (109) esp_image: segment 0: paddr=00020020 vaddr=3c100020 size=55a3ch (350780) map
+I (178) esp_image: segment 1: paddr=00075a64 vaddr=3fca3b00 size=05434h ( 21556) load
+I (183) esp_image: segment 2: paddr=0007aea0 vaddr=40374000 size=05178h ( 20856) load
+I (188) esp_image: segment 3: paddr=00080020 vaddr=42000020 size=f4238h (999992) map
+I (366) esp_image: segment 4: paddr=00174260 vaddr=40379178 size=1a974h (108916) load
+I (389) esp_image: segment 5: paddr=0018ebdc vaddr=50000000 size=00020h (    32) load
+I (402) boot: Loaded app from partition at offset 0x20000
+I (402) boot: Disabling RNG early entropy source...
+I (412) cpu_start: Multicore app
+I (421) cpu_start: Pro cpu start user code
+I (421) cpu_start: cpu freq: 160000000 Hz
+I (421) app_init: Application information:
+I (421) app_init: Project name:     eFloStop_WiFiHub_idf1
+I (427) app_init: App version:      2.1.3
+I (430) app_init: Compile time:     Sep 18 2026 12:37:25
+I (435) app_init: ELF file SHA256:  6ef13b4d2...
+I (440) app_init: ESP-IDF:          v5.5.1
+I (443) efuse_init: Min chip rev:     v0.0
+I (447) efuse_init: Max chip rev:     v0.99
+I (451) efuse_init: Chip rev:         v0.2
+I (455) heap_init: Initializing. RAM available for dynamic allocation:
+I (461) heap_init: At 3FCB1C50 len 00037AC0 (222 KiB): RAM
+I (467) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM
+I (472) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM
+I (477) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM
+I (483) spi_flash: detected chip: generic
+I (486) spi_flash: flash io: dio
+I (489) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (495) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (502) coexist: coex firmware version: b0bcc39
+I (532) coexist: coexist rom version e7ae62f
+I (533) main_task: Started on CPU0
+I (543) main_task: Calling app_main()
+I (553) NVS_STORE: commissioning NVS partition 'nvs_prov' ready
+I (553) HUB_IDENT: Firmware version: v2.1.3
+I (553) HUB_IDENT: Gateway ID : GW-7C4FADAE69C8
+I (553) HUB_IDENT: Short ID   : 69C8
+I (563) HUB_IDENT: WiFi STA MAC: 7C:4F:AD:AE:69:C8
+I (563) HUB_IDENT: Hub name   : (not set)
+I (573) APP_UART: Configured UART
+I (573) FLEET_LED: rating=startup color=OFF effect=SOLID
+I (573) uart: queue free spaces: 20
+I (583) APP_WIFI: AP SSID: WiFi-Hub-69C8
+I (583) wifi_manager: Set STA IP String to: 0.0.0.0
+I (593) pp: pp rom version: e7ae62f
+I (593) net80211: net80211 rom version: e7ae62f
+I (593) APP_LORA: Initializing LoRa Driver...
+Bus Init: 0
+Add device: 0
+I (603) IOTHUB: Waiting for Wi-Fi...
+I (603) wifi_init: rx ba win: 6
+I (613) wifi_init: accept mbox: 6
+I (613) wifi_init: tcpip mbox: 32
+I (613) wifi_init: udp mbox: 6
+I (613) wifi_init: tcp mbox: 6
+I (623) wifi_init: tcp tx win: 5760
+I (623) wifi_init: tcp rx win: 5760
+I (623) wifi_init: tcp mss: 1440
+I (633) wifi_init: WiFi IRAM OP enabled
+I (633) wifi_init: WiFi RX IRAM OP enabled
+I (643) phy_init: phy_version 701,f4f1da3a,Mar  3 2025,15:50:10
+I (603) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (683) wifi_manager:
+I (683) http_server: Registering URI handlers
+Version: [255]
+I (703) wifi_manager: MESSAGE: ORDER_LOAD_AND_RESTORE_STA
+I (703) wifi_manager: No  Յ       MESSAGE: ORDER_START_AP
+I (723) APP_LORA: LoRa Task Started. Listening (encrypted mode)...
+I (693) BLE_VALVE: ║            BLE VALVE MODULE INIT                             ║
+I (723) esp_netif_lwip: DHCP server started on interface WIFI_AP_DEF with IP: 10.10.0.1
+I (733) wifi_manager: WIFI_EVENT_AP_START
+I (733) BLE_VALVE: ║            Event-Driven Security Model                       ║
+I (743) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (763) BLE_LEAK: Initializing BLE leak scanner module
+I (763) BLE_LEAK: Task started, waiting for NimBLE...
+I (773) RESET_BTN: Initializing WiFi reset button on GPIO 40
+E (773) gpio: gpio_install_isr_service(526): GPIO isr service already installed
+I (783) RESET_BTN: Task started, monitoring GPIO 40
+I (793) RESET_BTN: WiFi reset button ready (hold 10 s to reset)
+I (793) MONITOR: System monitoring started (interval=10s)
+I (793) MONITOR: heap: free=131612 min_ever=131612 largest_blk=90112 uptime=0s
+I (803) main_task: Returned from app_main()
+I (823) http_server: Registering URI handlers
+I (823) dns_server: DNS Server listening on 53/udp
+I (10803) MONITOR: heap: free=126476 min_ever=126136 largest_blk=86016 uptime=10s
+W (10803) MONITOR: Heap dropped 5136 bytes since last check
+I (20803) MONITOR: heap: free=126476 min_ever=126120 largest_blk=86016 uptime=20s
+I (26663) wifi_manager: WIFI_EVENT_AP_STACONNECTED
+I (27833) esp_netif_lwip: DHCP server assigned IP to a client, IP is: 10.10.0.2
+I (29963) dns_server: Replying to DNS request for captive.apple.com from 10.10.0.2
+I (29963) dns_server: Replying to DNS request for captive.apple.com from 10.10.0.2
+I (29963) dns_server: Replying to DNS request for _dns.resolver.arpa from 10.10.0.2
+I (30803) MONITOR: heap: free=125104 min_ever=109356 largest_blk=81920 uptime=30s
+I (32003) dns_server: Replying to DNS request for lcdn-locator.apple.com from 10.10.0.2
+I (32003) dns_server: Replying to DNS request for lcdn-locator.apple.com from 10.10.0.2
+I (32853) dns_server: Replying to DNS request for wps.apple.com from 10.10.0.2
+I (32853) dns_server: Replying to DNS request for wps.apple.com from 10.10.0.2
+I (36143) dns_server: Replying to DNS request for 18-courier2.push.apple.com from 10.10.0.2
+I (36143) dns_server: Replying to DNS request for 18-courier2.push.apple.com from 10.10.0.2      
+I (40803) MONITOR: heap: free=122072 min_ever=102940 largest_blk=77824 uptime=40s
+I (47363) http_server: POST /connect.json
+I (47363) http_server: ssid: WWT-Local, password: C#nnect815
+I (47363) wifi_manager: MESSAGE: ORDER_CONNECT_STA
+I (48633) wifi_manager: WIFI_EVENT_STA_CONNECTED
+I (50803) MONITOR: heap: free=122276 min_ever=102940 largest_blk=77824 uptime=50s
+I (52113) esp_netif_handlers: sta ip: 10.131.211.132, mask: 255.255.255.0, gw: 10.131.211.1
+I (52113) wifi_manager: IP_EVENT_STA_GOT_IP
+I (52113) wifi_manager: WM_EVENT_STA_GOT_IP
+I (52113) wifi_manager: Set STA IP String to: 10.131.211.132
+I (52123) wifi_manager: About to save config to flash!!
+I (52123) wifi_manager: wifi_manager_wrote wifi_sta_config: ssid:WWT-Local
+I (52133) wifi_manager: wifi_manager_wrote wifi_sta_config: password:C#nnect815
+I (52143) APP_WIFI: Connected! IP: 10.131.211.132
+I (52143) APP_WIFI: Waking up Azure IoT Task...
+I (52143) IOTHUB: Starting IOT Hub Task...
+I (52143) NET_STATUS: wifi=1 mqtt=0
+I (52153) PROVISIONING: Initializing provisioning manager...
+I (52163) PROVISIONING: No existing config found, starting UNPROVISIONED
+I (52163) SENSOR_META: Sensor metadata initialized (0 entries)
+I (52173) RULES_ENGINE: Initialized: auto_close=enabled triggers=0x07
+I (52173) HEALTH_ENGINE: Device table loaded: 0 device(s)
+I (52183) HEALTH_ENGINE: Initialized (tick=30s, sensor_timeout=600s)
+I (52193) IOTHUB: Hub is UNPROVISIONED - waiting for provisioning JSON from Azure
+I (52183) HEALTH_ENGINE: Task started
+I (52193) IOTHUB: Initializing SNTP...
+I (52203) IOTHUB: Waiting for time... (1)
+I (52323) HEALTH_ENGINE: Boot sync: all devices seen
+I (52323) FLEET_LED: rating=unprovisioned color=WHITE effect=SOLID
+I (54203) IOTHUB: Waiting for time... (2)
+I (56203) IOTHUB: Waiting for time... (3)
+I (58203) IOTHUB: Time synced: Fri Sep 25 00:23:41 2026
+
+I (58203) OFFLINE_BUF: Init: buffer empty
+I (58203) TELEMETRY_V2: No stored telemetry settings — snapshot interval 300s (default)
+I (58203) TELEMETRY_V2: Init: schema=eflostop.v2 interval=300s
+I (58213) DPS: No cached assignment, performing DPS registration...
+I (58213) DPS: Derived device key for 'GW-7C4FADAE69C8'
+I (58223) DPS: Connecting to global.azure-devices-provisioning.net...
+I (58413) esp-x509-crt-bundle: Certificate validated
+I (59423) DPS: Connected to DPS endpoint
+I (59553) DPS: Submitting registration for 'GW-7C4FADAE69C8'...
+I (59703) DPS: DPS response status=202
+I (59713) DPS: Registration in progress, polling (opId=5.54f751caf9b99dea.063c7b92-5fb6-4867-b040-dab3e2434493)...
+I (60803) MONITOR: heap: free=97376 min_ever=85148 largest_blk=49152 uptime=60s
+W (60803) MONITOR: Heap dropped 24900 bytes since last check
+W (60883) httpd_txrx: httpd_sock_err: error in recv : 104
+I (62883) DPS: DPS response status=200
+I (62883) DPS: Assigned hub=resi-apex-iot-dev.azure-devices.net device=GW-7C4FADAE69C8
+I (62923) DPS: Cached assignment in NVS (provisioning epoch 2)
+I (62923) IOTHUB: DPS: hub=resi-apex-iot-dev.azure-devices.net device=GW-7C4FADAE69C8
+I (62923) TELEMETRY_V2: Client attached: device=GW-7C4FADAE69C8
+I (62933) BLE_LEAK: Sensor tracking reset
+I (62933) TELEMETRY_V2: Snapshot timer started (300s)
+I (62933) IOTHUB: QueueSet Initialized. Event loop starting...
+I (63233) esp-x509-crt-bundle: Certificate validated
+I (63673) IOTHUB: Connected to Azure IoT Hub!
+I (63673) TELEMETRY_V2: MQTT connected = true
+I (63673) NET_STATUS: wifi=1 mqtt=1
+I (63813) IOTHUB: Twin GET requested (rid=1)
+I (63823) IOTHUB: Twin response: $iothub/twin/res/200/?$rid=1 (335 bytes)
+I (63823) IOTHUB: Twin GET: applying desired properties from full document
+I (63823) IOTHUB: Twin reported (2): {"fw_version":"2.1.3","gateway_id":"GW-7C4FADAE69C8","short_id":"69C8","hub_name":"","provisioned":false,"valve_mac":null,"valve_device_id":null,"valve_id":null,"lora_sensor_count":0,"ble_leak_sensor_count":0,"auto_close_enabled":true,"trigger_mask":7,"uptime_s":63,"snapshot_interval_s":300,"free_heap":91616}
+I (64103) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=2&$version=72 (0 bytes)   
+I (70803) MONITOR: heap: free=95012 min_ever=82244 largest_blk=45056 uptime=70s
+I (77663) IOTHUB: Received C2D Message! (818 bytes)
+I (77673) C2D_CMD: Envelope cmd='provision' ver=1 id='prov-004' payload={"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:2b:a5","00:80:e1:2a:cb:b6","00:80:e1:2a:b6:8e","00:80:e1:2a:29:fc"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:2b:a5","location_code":"bathroom","label":"Ensuite"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:cb:b6","location_code":"bathroom","label":"Main Bathroom"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:b6:8e","location_code":"kitchen","label":"dishwasher"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:29:fc","location_code":"laundry","label":"under washer"}],"auto_close_enabled":true}
+I (77723) IOTHUB: C2D cmd='provision' ver=1 id='prov-004'
+I (77723) IOTHUB: Provisioning JSON detected
+I (77733) PROVISIONING: Handling provisioning JSON (631 bytes)
+I (77733) PROVISIONING: Provisioning JSON: {"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:2b:a5","00:80:e1:2a:cb:b6","00:80:e1:2a:b6:8e","00:80:e1:2a:29:fc"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:2b:a5","location_code":"bathroom","label":"Ensuite"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:cb:b6","location_code":"bathroom","label":"Main Bathroom"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:b6:8e","location_code":"kitchen","label":"dishwasher"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:29:fc","location_code":"laundry","label":"under washer"}],"auto_close_enabled":true}
+I (77793) PROVISIONING: Valve MAC: 00:80:E1:27:F7:BB
+I (77803) PROVISIONING: BLE Leak Sensor[0]: 00:80:e1:2a:2b:a5
+I (77803) PROVISIONING: BLE Leak Sensor[1]: 00:80:e1:2a:cb:b6
+I (77813) PROVISIONING: BLE Leak Sensor[2]: 00:80:e1:2a:b6:8e
+I (77813) PROVISIONING: BLE Leak Sensor[3]: 00:80:e1:2a:29:fc
+I (77823) PROVISIONING: Auto-close opt-in: ENABLED (triggers=0x07)
+I (77833) PROVISIONING: Config saved to NVS successfully
+I (77833) PROVISIONING: Provisioning completed successfully!
+I (77843) PROVISIONING: State: PROVISIONED
+I (77843) PROVISIONING: Valve MAC: 00:80:E1:27:F7:BB
+I (77843) PROVISIONING: LoRa sensors: 0
+I (77853) PROVISIONING: BLE leak sensors: 4
+I (77853) PROVISIONING: Auto-close: enabled triggers=0x07
+I (77863) HEALTH_ENGINE: Device table loaded: 5 device(s)
+I (77863) IOTHUB: Applying provisioned valve MAC: 00:80:E1:27:F7:BB
+I (77873) BLE_VALVE: [API] Target MAC set to: 00:80:E1:27:F7:BB
+I (77873) IOTHUB: Starting BLE with provisioned MAC...
+I (77883) IOTHUB: Not connected, triggering connection to: 00:80:E1:27:F7:BB
+I (77883) BLE_VALVE: [INIT] Signal received. Starting BLE stack...
+I (77893) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:2b:a5 loc=bathroom label="Ensuite"
+I (77893) BLE_INIT: BT controller compile version [2edb0b0]
+I (77903) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:cb:b6 loc=bathroom label="Main Bathroom"
+I (77903) BLE_INIT: Using main XTAL as clock source
+I (77923) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:b6:8e loc=kitchen label="dishwasher"
+I (77923) BLE_INIT: Feature Config, ADV:1, BLE_50:1, DTM:1, SCAN:1, CCA:0, SMP:1, CONNECT:1
+I (77933) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:29:fc loc=laundry label="under washer"
+I (77933) BLE_INIT: Bluetooth MAC: 7c:4f:ad:ae:69:ca
+I (77943) IOTHUB: Provision: applied 4 inline sensor_meta entry(ies)
+I (77953) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (77953) IOTHUB: Commission: fast snapshot armed (all-devices-seen, else <=150s; refreshes on late devices)
+I (77983) BLE_VALVE: ║            SECURITY MANAGER CONFIGURATION                    ║ 
+I (77983) IOTHUB: Twin reported (3): {"fw_version":"2.1.3","gateway_id":"GW-7C4FADAE69C8","short_id":"69C8","hub_name":"","provisioned":true,"valve_mac":null,"valve_device_id":null,"valve_id":"00:80:E1:27:F7:BB","lora_sensor_count":0,"ble_leak_sensor_count":4,"auto_close_enabled":true,"trigger_mask":7,"uptime_s":77,"snapshot_interval_s":300,"free_heap":25072}
+I (77993) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (78033) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790295841,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":77},"type":"event","data":{"event":"cmd_ack","id":"prov-004","cmd":"provision","status":"ok"}}
+I (78053) BLE_VALVE: [SM] Store config initialized
+I (78073) BLE_VALVE: [SM] IO Capability: KEYBOARD_ONLY
+I (78073) TELEMETRY_V2: Pub lifecycle: {"schema":"eflostop.v2","ts":1790295841,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":77},"type":"lifecycle","data":{"event":"online","reset_reason":"power_on","provisioned":true,"valve_id":"00:80:E1:27:F7:BB","lora_sensor_count":0,"ble_leak_sensor_count":4,"rules":{"auto_close_enabled":true,"trigger_mask":7}}}
+I (78073) BLE_VALVE: [SM] Bonding: ENABLED
+I (78113) BLE_VALVE: [SM] MITM: REQUIRED
+I (78113) BLE_VALVE: [SM] Secure Connections: ENABLED
+I (78113) IOTHUB: Twin reported (4): {"fw_version":"2.1.3","gateway_id":"GW-7C4FADAE69C8","short_id":"69C8","hub_name":"","provisioned":true,"valve_mac":null,"valve_device_id":null,"valve_id":"00:80:E1:27:F7:BB","lora_sensor_count":0,"ble_leak_sensor_count":4,"auto_close_enabled":true,"trigger_mask":7,"uptime_s":77,"snapshot_interval_s":300,"free_heap":20420}
+I (78123) BLE_VALVE: [SM] Fixed Passkey: 222900
+I (78153) IOTHUB: PROV pulse armed: every 30 s for 300 s, plus on every sensor packet 
+I (78153) BLE_VALVE: [HOST] NimBLE host task started
+I (78153) BLE_VALVE: [TASK] BLE command task started
+I (78173) BLE_VALVE: [TASK] CMD: CONNECT
+I (78173) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+W (78173) BLE_VALVE: [SCAN] Not synced
+I (78193) BLE_VALVE: ║            NIMBLE STACK SYNCED                               ║
+I (78193) BLE_VALVE: [TASK] CMD: CONNECT
+I (78203) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+W (78213) BLE_VALVE: [SCAN] Not synced
+I (78223) BLE_VALVE: [HOST] Own address: 7C:4F:AD:AE:69:CA (type=0)
+I (78153) BLE_LEAK: NimBLE ready, initializing scanner
+I (78233) BLE_VALVE: [HOST] Security Manager ready
+I (78243) BLE_LEAK: Whitelist reloaded: 4 sensor(s)
+I (78243) BLE_VALVE: [HOST] SM Config: io_cap=2, bonding=1, mitm=1, sc=1
+I (78253) BLE_VALVE: [SCAN] Starting scan for 'eFloStopV2'...
+I (78263) NimBLE: GAP procedure initiated: extended discovery; 
+
+I (78463) IOTHUB: SNAP trigger=event:provision
+I (78463) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295841,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":77},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 5 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"disconnected","connected":false,"rating":"critical","last_seen_age_s":null},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}       
+I (78573) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (80423) BLE_VALVE: [SCAN] Target MAC matched: 00:80:E1:27:F7:BB
+I (80423) BLE_VALVE: [SCAN] Connecting to provisioned valve: 00:80:E1:27:F7:BB        
+I (80423) NimBLE: GAP procedure initiated: extended connect;
+
+W (80753) BLE_LEAK: Failed to start ext scan: 15, will retry
+I (80803) MONITOR: heap: free=16296 min_ever=5544 largest_blk=7680 uptime=80s
+W (80803) MONITOR: Heap dropped 78716 bytes since last check
+I (81753) NimBLE: GAP procedure initiated: extended discovery; 
+
+I (81753) BLE_LEAK: Extended passive scan started (1M + Coded PHY)
+I (81773) BLE_VALVE: [GAP] L2CAP update request
+I (81773) NimBLE: GAP procedure initiated: 
+I (81773) NimBLE: connection parameter update; conn_handle=1 itvl_min=200 itvl_max=200 latency=0 supervision_timeout=500 min_ce_len=0 max_ce_len=0
+I (81783) NimBLE: 
+
+I (81823) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (81833) BLE_VALVE: ║            GAP CONNECT EVENT                                 ║ 
+I (81843) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (81853) BLE_VALVE: [CONNECT] status=0
+I (81863) BLE_VALVE: [STATE] All bits cleared
+I (81863) BLE_VALVE: [CONNECT] MAC=00:80:E1:27:F7:BB, handle=1
+I (81873) BLE_VALVE: [STATE] Set bit 0x01 -> CONN=1 PAIR=0 ENC=0 AUTH=0 BOND=0 DISC=0 
+I (81883) BLE_VALVE: [CONNECT] Starting 1000ms delay before security...
+W (81883) BLE_VALVE: [GAP] Unhandled event: 38 (0x26)
+I (82323) BLE_VALVE: [GAP] Connection params updated: status=0
+I (82393) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=3&$version=73 (0 bytes)
+I (82403) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=4&$version=74 (0 bytes)   
+I (82573) BLE_VALVE: [GAP] Data length changed: tx=251 rx=27
+I (82883) BLE_VALVE: [TIMER] Post-connect delay complete.
+I (82883) BLE_VALVE: [TIMER] Initiating security...
+I (82883) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (82893) BLE_VALVE: ║            SECURITY INITIATION (attempt 1/3)                ║
+I (82903) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (82923) BLE_VALVE: [SECURITY] Connection handle: 1
+I (82923) BLE_VALVE: [SECURITY] Role: MASTER/CENTRAL
+I (82933) BLE_VALVE: [SECURITY] Peer addr: 00:80:E1:27:F7:BB
+I (82933) BLE_VALVE: [SECURITY] Current state: encrypted=0, authenticated=0, bonded=0, key_size=0
+I (82943) BLE_VALVE: [SECURITY] Link not encrypted. Initiating pairing...
+I (82953) BLE_VALVE: [STATE] Set bit 0x02 -> CONN=1 PAIR=1 ENC=0 AUTH=0 BOND=0 DISC=0 
+I (82963) BLE_VALVE: [SECURITY] SM Config: io_cap=2, bonding=1, mitm=1, sc=1
+I (82963) BLE_VALVE: [SECURITY] Calling ble_gap_security_initiate(handle=1)...
+I (82973) BLE_VALVE: [SECURITY] ble_gap_security_initiate() SUCCESS - pairing started 
+I (83413) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=3&$version=75 (0 bytes)
+I (83413) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=3&$version=76 (0 bytes)   
+I (83423) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=3&$version=77 (0 bytes)
+I (83433) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=3&$version=78 (0 bytes)   
+I (84233) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (84243) BLE_VALVE: ║            PASSKEY ACTION EVENT                              ║ 
+I (84243) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (84263) BLE_VALVE: [PASSKEY] action=2
+I (84273) BLE_VALVE: [PASSKEY] INPUT required. Responding with fixed passkey: 222900
+I (84273) BLE_VALVE: [PASSKEY] Passkey injected successfully
+I (90803) MONITOR: heap: free=26936 min_ever=2972 largest_blk=7680 uptime=90s
+I (100803) MONITOR: heap: free=26900 min_ever=2972 largest_blk=7680 uptime=100s
+W (109323) BLE_VALVE: [GAP] Unhandled event: 27 (0x1B)
+W (109333) BLE_LEAK: Scan complete (reason=29) — will restart
+I (109333) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (109343) BLE_VALVE: ║            ENCRYPTION CHANGE EVENT                           ║
+I (109353) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (109373) BLE_VALVE: [ENC_CHANGE] status=0
+I (109373) BLE_VALVE: [ENC_CHANGE] encrypted=1, authenticated=1, bonded=1, key_size=16
+I (109383) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (109403) BLE_VALVE: ║            LINK ENCRYPTED SUCCESSFULLY                       ║
+I (109413) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (109423) BLE_VALVE: [STATE] Clear bit 0x02 -> CONN=1 PAIR=0 ENC=0 AUTH=0 BOND=0 DISC=0
+I (109433) BLE_VALVE: [STATE] Set bit 0x04 -> CONN=1 PAIR=0 ENC=1 AUTH=0 BOND=0 DISC=0
+I (109443) BLE_VALVE: [ENC_CHANGE] MITM authentication achieved
+I (109453) BLE_VALVE: [STATE] Set bit 0x08 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=0 DISC=0
+I (109453) BLE_VALVE: [ENC_CHANGE] Device is bonded (keys stored)
+I (109463) BLE_VALVE: [STATE] Set bit 0x10 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=0
+I (109473) BLE_VALVE: [ENC_CHANGE] Link secured. Starting discovery...
+I (109473) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (109493) BLE_VALVE: ║            STARTING SERVICE DISCOVERY                        ║
+I (109503) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (109523) BLE_VALVE: [STATE] Clear bit 0x20 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=0
+I (109533) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (109533) NimBLE: 00000002-cc7a-482a-984a-7f2ed5b3e58f
+I (109543) NimBLE:
+
+I (109823) BLE_VALVE: [DISC] Found VALVE svc: start=23, end=26
+I (109823) NimBLE: GATT procedure initiated: discover characteristics by uuid;        
+I (109823) NimBLE: start_handle=23 end_handle=26 uuid=
+I (109833) NimBLE: 00000002-8e22-4541-9d4c-21edae82ed19
+I (109833) NimBLE:
+
+I (110253) NimBLE: GAP procedure initiated: extended discovery; 
+
+I (110253) BLE_LEAK: Extended passive scan started (1M + Coded PHY)
+I (110323) BLE_VALVE: [DISC] Found VALVE char: val_handle=25, props=0x1A
+I (110323) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (110323) NimBLE: 00000001-cc7a-482a-984a-7f2ed5b3e58f
+I (110333) NimBLE:
+
+I (110733) IOTHUB: SNAP trigger=event:prov_pulse
+I (110733) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295874,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":110},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 5 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"unknown","battery":0,"leak_state":false,"rmleak":false,"connected":true,"fw_version":null,"rating":"critical","last_seen_age_s":null},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (110853) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (110803) MONITOR: heap: free=25504 min_ever=2972 largest_blk=7680 uptime=110s       
+I (111323) BLE_VALVE: [DISC] Found FLOOD svc: start=12, end=18
+I (111323) NimBLE: GATT procedure initiated: discover characteristics by uuid;        
+I (111323) NimBLE: start_handle=12 end_handle=18 uuid=
+I (111333) NimBLE: 00000001-8e22-4541-9d4c-21edae82ed19
+I (111333) NimBLE: 
+
+I (111823) BLE_VALVE: [DISC] Found FLOOD char: val_handle=14, props=0x12
+I (111823) NimBLE: GATT procedure initiated: discover characteristics by uuid;        
+I (111823) NimBLE: start_handle=15 end_handle=18 uuid=
+I (111833) NimBLE: 00000000-8e22-4541-9d4c-21edae82ed19
+I (111833) NimBLE:
+
+I (112143) wifi_manager: MESSAGE: ORDER_STOP_AP
+I (112143) wifi_manager: WIFI_EVENT_AP_STADISCONNECTED
+W (112143) httpd_txrx: httpd_sock_err: error in recv : 113
+I (112143) wifi_manager: WIFI_EVENT_AP_STOP
+I (112243) http_server: Registering URI handlers
+I (112323) BLE_VALVE: [DISC] Found RMLEAK char: val_handle=17, props=0x1A
+I (112323) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (112323) NimBLE: 0000180f-0000-1000-8000-00805f9b34fb
+I (112333) NimBLE:
+
+I (113573) BLE_VALVE: [DISC] Found BATT svc: start=19, end=22
+I (113573) NimBLE: GATT procedure initiated: discover characteristics by uuid;        
+I (113573) NimBLE: start_handle=19 end_handle=22 uuid=
+I (113583) NimBLE: 00002a19-0000-1000-8000-00805f9b34fb
+I (113583) NimBLE:
+
+I (114073) BLE_VALVE: [DISC] Found BATT char: val_handle=21, props=0x12
+I (114073) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (114073) NimBLE: 0000180a-0000-1000-8000-00805f9b34fb
+I (114083) NimBLE:
+
+I (114573) BLE_VALVE: [DISC] Found DIS svc: start=27, end=29
+I (114573) NimBLE: GATT procedure initiated: discover characteristics by uuid; 
+I (114573) NimBLE: start_handle=27 end_handle=29 uuid=
+I (114583) NimBLE: 00002a26-0000-1000-8000-00805f9b34fb
+I (114583) NimBLE:
+
+I (115073) BLE_VALVE: [DISC] Found DIS Firmware Rev char: val_handle=29
+I (115073) BLE_VALVE: [SETUP] Step 1
+I (115073) BLE_VALVE: [SETUP] Subscribe VALVE (chr=25, end=26)
+I (115083) NimBLE: GATT procedure initiated: discover all descriptors; 
+I (115083) NimBLE: chr_val_handle=25 end_handle=26
+
+I (115823) BLE_VALVE: [SETUP] Descriptor: handle=26, uuid16=0x2902
+I (115823) BLE_VALVE: [SETUP] CCCD found at handle=26, enabling notifications
+I (115823) NimBLE: GATT procedure initiated: write;
+I (115833) NimBLE: att_handle=26 len=2
+
+I (116323) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=25
+I (116323) BLE_VALVE: [SETUP] Step 2
+I (116323) BLE_VALVE: [SETUP] Subscribe FLOOD (chr=14, end=18)
+I (116323) NimBLE: GATT procedure initiated: discover all descriptors; 
+I (116333) NimBLE: chr_val_handle=14 end_handle=18
+
+I (116823) BLE_VALVE: [SETUP] Descriptor: handle=15, uuid16=0x2902
+I (116823) BLE_VALVE: [SETUP] CCCD found at handle=15, enabling notifications
+I (116823) NimBLE: GATT procedure initiated: write;
+I (116833) NimBLE: att_handle=15 len=2
+
+I (117323) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=14
+I (117323) BLE_VALVE: [SETUP] Step 3
+I (117323) BLE_VALVE: [SETUP] Subscribe RMLEAK (chr=17, end=18)
+I (117323) NimBLE: GATT procedure initiated: discover all descriptors;
+I (117333) NimBLE: chr_val_handle=17 end_handle=18
+
+I (117823) BLE_VALVE: [SETUP] Descriptor: handle=18, uuid16=0x2902
+I (117823) BLE_VALVE: [SETUP] CCCD found at handle=18, enabling notifications
+I (117823) NimBLE: GATT procedure initiated: write;
+I (117833) NimBLE: att_handle=18 len=2
+
+I (118323) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=17
+I (118323) BLE_VALVE: [SETUP] Step 4
+I (118323) BLE_VALVE: [SETUP] Subscribe BATT (chr=21, end=22)
+I (118323) NimBLE: GATT procedure initiated: discover all descriptors; 
+I (118333) NimBLE: chr_val_handle=21 end_handle=22
+
+I (118823) BLE_VALVE: [SETUP] Descriptor: handle=22, uuid16=0x2902
+I (118823) BLE_VALVE: [SETUP] CCCD found at handle=22, enabling notifications
+I (118823) NimBLE: GATT procedure initiated: write; 
+I (118833) NimBLE: att_handle=22 len=2
+
+I (119323) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=21
+I (119323) BLE_VALVE: [SETUP] Step 5
+I (119323) BLE_VALVE: [SETUP] Read VALVE
+I (119323) NimBLE: GATT procedure initiated: read;
+I (119333) NimBLE: att_handle=25
+
+I (119823) BLE_VALVE: [READ] Read success: handle=25
+I (119823) BLE_VALVE: Read data [1 bytes]: 01
+I (119823) BLE_VALVE: [NOTIFY] attr_handle=25, len=1
+I (119823) BLE_VALVE: Notify data [1 bytes]: 01
+I (119833) BLE_VALVE: [DATA] Valve State=1 (OPEN)
+I (119833) BLE_VALVE: [SETUP] Step 6
+I (119833) BLE_VALVE: [SETUP] Read FLOOD
+I (119843) NimBLE: GATT procedure initiated: read;
+I (119843) NimBLE: att_handle=14
+
+I (120323) BLE_VALVE: [READ] Read success: handle=14
+I (120323) BLE_VALVE: Read data [1 bytes]: 00
+I (120323) BLE_VALVE: [NOTIFY] attr_handle=14, len=1
+I (120323) BLE_VALVE: Notify data [1 bytes]: 00 
+I (120333) BLE_VALVE: [DATA] Leak=0 (OK)
+I (120333) BLE_VALVE: [SETUP] Step 7
+I (120333) BLE_VALVE: [SETUP] Read RMLEAK
+I (120343) NimBLE: GATT procedure initiated: read;
+I (120343) NimBLE: att_handle=17
+
+I (120823) BLE_VALVE: [READ] Read success: handle=17
+I (120823) BLE_VALVE: Read data [1 bytes]: 00
+I (120823) BLE_VALVE: [NOTIFY] attr_handle=17, len=1
+I (120823) BLE_VALVE: Notify data [1 bytes]: 00
+I (120833) BLE_VALVE: [DATA] RMLEAK=0 (CLEAR)
+I (120833) BLE_VALVE: [SETUP] Step 8
+I (120833) BLE_VALVE: [SETUP] Read BATT
+I (120843) NimBLE: GATT procedure initiated: read;
+I (120843) NimBLE: att_handle=21
+
+I (120863) MONITOR: heap: free=33220 min_ever=2972 largest_blk=7680 uptime=120s       
+I (121323) BLE_VALVE: [READ] Read success: handle=21
+I (121323) BLE_VALVE: Read data [1 bytes]: 41
+I (121323) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (121323) BLE_VALVE: Notify data [1 bytes]: 41 
+I (121333) BLE_VALVE: [DATA] Battery=65%
+I (121333) BLE_VALVE: [SETUP] Step 9
+I (121333) BLE_VALVE: [SETUP] Read DIS Firmware Rev
+I (121343) NimBLE: GATT procedure initiated: read; 
+I (121343) NimBLE: att_handle=29
+
+I (122073) BLE_VALVE: [SETUP] Valve Firmware Rev: "2.2.0"
+I (122073) BLE_VALVE: [SETUP] Step 10
+I (122073) BLE_VALVE: [STATE] Set bit 0x20 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=1
+I (122083) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (122093) BLE_VALVE: ║            SETUP COMPLETE - READY FOR GATT                   ║
+I (122103) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (122123) BLE_VALVE: [READY] Valve=25, Flood=14, RMLEAK=17, Batt=21, DIS=29
+I (122133) BLE_VALVE: [READY] FW Rev: "2.2.0"
+I (122133) BLE_VALVE: [READY] Battery=65%, Leak=OK, Valve=OPEN, RMLEAK=CLEAR
+I (122143) BLE_VALVE: [READY] State: CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=1
+I (122153) BLE_VALVE: [READY] Announcing flood probe state (dry) for reconciliation   
+I (122153) RULES_ENGINE: ╔══ VALVE RECONNECT RECONCILIATION ══╗
+I (122163) RULES_ENGINE: ║ Valve: state=OPEN rmleak=CLEAR flood=OK
+I (122173) RULES_ENGINE: ║ Hub:   incident=0 leaks=0 override=INACTIVE
+I (122173) RULES_ENGINE: ╚════════════════════════════════════╝
+I (122183) RULES_ENGINE: Reconnected: no active incident, valve clear
+I (122193) IOTHUB: Event: BLE Update type=5
+I (122193) IOTHUB: SNAP trigger=fast
+I (122203) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295885,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":121},"type":"snapshot","data":{"reason":"fast","system_health":{"rating":"excellent","reason":"Syncing - waiting for 4 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (122333) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (122333) IOTHUB: Event: BLE Update type=2
+I (130863) MONITOR: heap: free=33224 min_ever=2972 largest_blk=7680 uptime=130s
+I (140253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (140423) IOTHUB: SNAP trigger=event:prov_pulse
+I (140423) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295903,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":139},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 4 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":18},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (140543) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (140863) MONITOR: heap: free=33244 min_ever=2972 largest_blk=7680 uptime=140s
+I (150863) MONITOR: heap: free=33244 min_ever=2972 largest_blk=7680 uptime=150s
+I (160863) MONITOR: heap: free=33244 min_ever=2972 largest_blk=7680 uptime=160s
+I (168643) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=96% rssi=-31 fw=1.1.0
+I (168643) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=96
+I (168643) IOTHUB: SNAP trigger=commission
+I (168653) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295932,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":168},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":46},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"lea_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (168783) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (170863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=170s
+I (180863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=180s
+I (190863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=190s
+I (200253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (200863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=200s
+I (200943) IOTHUB: SNAP trigger=event:prov_pulse
+I (200943) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295964,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":200},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":78},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":32,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (201063) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (210863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=210s
+I (216323) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (216323) BLE_VALVE: Notify data [1 bytes]: 41        
+I (216323) BLE_VALVE: [DATA] Battery=65%
+I (220863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=220s
+I (224963) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=96% rssi=-48 fw=1.1.0
+I (224963) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=96
+I (224963) IOTHUB: SNAP trigger=commission
+I (224973) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295988,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":224},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":102},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":56,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":96,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (225103) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+W (228073) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (230863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=230s
+I (231133) IOTHUB: SNAP trigger=event:prov_pulse
+I (231133) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790295994,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":230},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":108},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":62,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":6,"battery":96,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}     
+I (231253) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (240863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=240s
+I (250863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=250s
+I (260253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (260863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=260s
+I (261403) IOTHUB: SNAP trigger=event:prov_pulse
+I (261403) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296024,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":260},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":139},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":92,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":36,"battery":96,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}    
+I (261523) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (270863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=270s
+I (280863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=280s
+I (290863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=290s
+I (291673) IOTHUB: SNAP trigger=event:prov_pulse
+I (291673) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296055,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":291},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":169},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":123,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":66,"battery":96,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (291793) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (300863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=300s
+I (310863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=310s
+I (320253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (320863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=320s
+I (321943) IOTHUB: SNAP trigger=event:prov_pulse
+I (321943) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296085,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":321},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":199},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":153,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":96,"battery":96,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (322063) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (324073) IOTHUB: SNAP clamped by min-interval: +870 ms
+I (326953) IOTHUB: SNAP trigger=event:prov_pkt
+I (326953) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296090,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":326},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":204},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":158,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":4,"battery":96,"rssi":-51,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}    
+I (327073) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (330863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=330s
+I (340863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=340s
+I (350863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=350s
+I (351193) IOTHUB: SNAP trigger=event:prov_pulse
+I (351193) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296114,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":350},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":229},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":182,"battery":96,"rssi":-31,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":28,"battery":96,"rssi":-51,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (351313) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (360863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=360s
+I (367943) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=79% rssi=-53 fw=1.1.0
+I (367943) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=79
+I (368653) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=98% rssi=-29 fw=1.1.0
+I (368653) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=98
+I (369953) IOTHUB: SNAP trigger=event:prov_pkt
+I (369953) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296133,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":369},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":247},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":1,"battery":98,"rssi":-29,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":2,"battery":79,"rssi":-53,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}      
+I (370073) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (370863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=370s
+I (380123) IOTHUB: PROV pulse window closed (14 snapshot(s) requested)
+I (380253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (380863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=380s
+I (390863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=390s
+I (400863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=400s
+I (410863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=410s
+I (420863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=420s
+I (430863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=430s
+I (440253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (440863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=440s
+I (450863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=450s
+I (460863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=460s
+I (470863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=470s
+I (480863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=480s
+I (490863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=490s
+I (500253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (500863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=500s
+I (501363) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-62 fw=1.1.0
+I (501363) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (510863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=510s
+I (520863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=520s
+I (530863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=530s
+I (540863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=540s
+I (550863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=550s
+I (560253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (560863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=560s
+I (570863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=570s
+I (578653) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-52 fw=1.1.0
+I (578653) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (580863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=580s
+I (590863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=590s
+I (600863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=600s
+I (610863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=610s
+I (620253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (620863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=620s
+I (630863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=630s
+I (640863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=640s
+I (650863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=650s
+I (660863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=660s
+I (669953) IOTHUB: SNAP trigger=heartbeat
+I (669953) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296433,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":669},"type":"snapshot","data":{"reason":"heartbeat","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":547},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":69,"battery":79,"rssi":-45,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":91,"battery":71,"rssi":-52,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (670073) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (670863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=670s
+W (678073) HEALTH_ENGINE: Roll-up grace expired (600 s) — 2 unheard device(s) now count
+I (678073) FLEET_LED: rating=critical color=RED effect=SOLID
+I (680253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (680863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=680s
+I (690863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=690s
+I (700863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=700s
+I (710863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=710s
+I (720863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=720s
+I (730863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=730s
+I (740253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (740863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=740s
+I (750863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=750s
+I (760863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=760s
+I (770863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=770s
+I (780863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=780s
+I (790863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=790s
+I (800253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (800863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=800s
+I (810863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=810s
+I (816573) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (816573) BLE_VALVE: Notify data [1 bytes]: 41        
+I (816573) BLE_VALVE: [DATA] Battery=65%
+I (820863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=820s
+I (830863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=830s
+I (840863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=840s
+I (850863) MONITOR: heap: free=33140 min_ever=2972 largest_blk=7680 uptime=850s
+I (860253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (860863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=860s
+I (870863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=870s
+I (880863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=880s
+I (890863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=890s
+I (900863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=900s
+I (910863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=910s
+I (920253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (920863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=920s
+I (930863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=930s
+I (940863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=940s
+I (950863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=950s
+I (960863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=960s
+I (969953) IOTHUB: SNAP trigger=heartbeat
+I (969953) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296733,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":969},"type":"snapshot","data":{"reason":"heartbeat","system_health":{"rating":"critical","reason":"2 sensors offline"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":847},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":169,"battery":79,"rssi":-46,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":92,"battery":71,"rssi":-56,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (970073) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (970863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=970s
+I (980253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (980863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=980s
+I (990863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=990s
+I (1000863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1000s
+I (1000953) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-51 fw=1.1.0
+I (1000953) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (1010863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1010s
+I (1020863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1020s
+I (1030863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1030s
+I (1040253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (1040863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1040s
+I (1050863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1050s
+I (1060863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1060s
+I (1070863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1070s
+I (1077353) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-56 fw=1.1.0
+I (1077353) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (1080863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1080s
+I (1090863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1090s
+I (1100253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (1100863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1100s
+I (1110863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1110s
+I (1120863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1120s
+I (1130863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1130s
+I (1140863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1140s
+I (1150863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1150s
+I (1160253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (1160863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1160s
+I (1170863) MONITOR: heap: free=33204 min_ever=2972 largest_blk=7680 uptime=1170s
+I (1180863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1180s
+I (1190863) MONITOR: heap: free=33268 min_ever=2972 largest_blk=7680 uptime=1190s
+I (1193333) IOTHUB: Received C2D Message! (159 bytes)
+I (1193333) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-b-002' payload={"target":"ble_leak_sensor","sensor_id":"00:80:e1:2a:2b:a5"}
+I (1193343) IOTHUB: C2D cmd='decommission' ver=1 id='decom-b-002'
+W (1193343) IOTHUB: !!! DECOMMISSION_BLE: 00:80:e1:2a:2b:a5 !!!
+W (1193353) PROVISIONING: === REMOVING BLE LEAK SENSOR 00:80:e1:2a:2b:a5 ===
+I (1193373) PROVISIONING: Config saved to NVS successfully
+I (1193373) PROVISIONING: BLE leak sensor 00:80:e1:2a:2b:a5 removed successfully
+I (1193373) PROVISIONING: Remaining BLE sensors: 3     
+I (1193383) PROVISIONING: State: PROVISIONED
+I (1193383) HEALTH_ENGINE: Device table loaded: 4 device(s)
+I (1193403) SENSOR_META: Removed metadata for 00:80:e1:2a:2b:a5 (type=0), 3 entries remain
+I (1193403) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790296956,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1192},"type":"event","data":{"event":"cmd_ack","id":"decom-b-002","cmd":"decommission","status":"ok"}}
+I (1193573) FLEET_LED: rating=syncing color=WHITE effect=SOLID
+I (1193733) IOTHUB: SNAP trigger=event:decommission
+I (1193733) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790296957,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1193},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1193833) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1200253) BLE_LEAK: Whitelist reloaded: 3 sensor(s)
+I (1200863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1200s
+I (1200953) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-49 fw=1.1.0
+I (1200963) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (1210863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1210s
+I (1220253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (1220863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1220s
+I (1230863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1230s
+I (1240863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1240s
+I (1250863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1250s
+I (1260863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1260s
+I (1270863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1270s
+I (1280253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (1280863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1280s
+I (1290863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1290s
+I (1300863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1300s
+I (1310863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1310s
+I (1320863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1320s
+I (1330863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1330s
+I (1340253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (1340863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1340s
+W (1343573) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (1345343) IOTHUB: SNAP trigger=boot
+I (1345343) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297108,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1344},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":151},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":45,"battery":79,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1345443) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1350863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1350s
+I (1360863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1360s
+I (1370863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1370s
+I (1377363) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-52 fw=1.1.0
+I (1377363) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (1377373) IOTHUB: SNAP trigger=commission
+I (1377373) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297140,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1376},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"Syncing - waiting for 1 device"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":183},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":77,"battery":79,"rssi":-48,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":71,"rssi":-52,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1377483) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1380863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1380s
+I (1390863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1390s
+I (1400253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (1400863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1400s
+I (1410863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1410s
+I (1416823) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (1416823) BLE_VALVE: Notify data [1 bytes]: 41       
+I (1416823) BLE_VALVE: [DATA] Battery=65%
+I (1420863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1420s
+I (1430863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1430s
+I (1433733) IOTHUB: Received C2D Message! (159 bytes)
+I (1433733) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-b-002' payload={"target":"ble_leak_sensor","sensor_id":"00:80:e1:2a:b6:8e"}
+I (1433733) IOTHUB: C2D cmd='decommission' ver=1 id='decom-b-002'
+W (1433743) IOTHUB: !!! DECOMMISSION_BLE: 00:80:e1:2a:b6:8e !!!
+W (1433743) PROVISIONING: === REMOVING BLE LEAK SENSOR 00:80:e1:2a:b6:8e ===
+I (1433763) PROVISIONING: Config saved to NVS successfully
+I (1433763) PROVISIONING: BLE leak sensor 00:80:e1:2a:b6:8e removed successfully
+I (1433763) PROVISIONING: Remaining BLE sensors: 2     
+I (1433773) PROVISIONING: State: PROVISIONED
+I (1433773) HEALTH_ENGINE: Device table loaded: 3 device(s)
+I (1433793) SENSOR_META: Removed metadata for 00:80:e1:2a:b6:8e (type=0), 2 entries remain
+I (1433793) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790297197,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1433},"type":"event","data":{"event":"cmd_ack","id":"decom-b-002","cmd":"decommission","status":"ok"}}
+I (1434123) IOTHUB: SNAP trigger=event:decommission
+I (1434123) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297197,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1433},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1434203) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1440253) BLE_LEAK: Whitelist reloaded: 2 sensor(s)
+I (1440863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1440s
+I (1450863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1450s
+I (1460253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (1460863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1460s
+I (1470863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1470s
+I (1480863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1480s
+I (1490863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1490s
+I (1500863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1500s
+I (1500963) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-49 fw=1.1.0
+I (1500963) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (1510863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1510s
+I (1520253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (1520863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1520s
+I (1530863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1530s
+I (1540863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1540s
+I (1550863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1550s
+I (1560863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1560s
+I (1570863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1570s
+I (1580253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (1580863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1580s
+W (1583823) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (1585043) IOTHUB: SNAP trigger=boot
+I (1585043) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297348,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1584},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"Syncing - waiting for 1 device"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":151},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":84,"battery":79,"rssi":-49,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1585123) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1590863) MONITOR: heap: free=33008 min_ever=2972 largest_blk=7680 uptime=1590s
+I (1600863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1600s
+I (1610863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1610s
+I (1620863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1620s
+I (1630863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1630s
+I (1640253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (1640863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1640s
+I (1650863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1650s
+I (1660863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1660s
+I (1670863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1670s
+I (1679153) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-62 fw=1.1.0
+I (1679153) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (1679153) IOTHUB: SNAP trigger=commission
+I (1679163) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297442,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1678},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":245},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":79,"battery":79,"rssi":-49,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":71,"rssi":-62,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1679243) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1679323) FLEET_LED: rating=excellent color=GREEN effect=SOLID
+I (1680863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1680s
+I (1690863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1690s
+I (1700253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (1700863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1700s
+I (1710863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1710s
+I (1720863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1720s
+I (1730863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1730s
+I (1740863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1740s
+I (1750863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1750s
+I (1760253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (1760863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1760s
+I (1770863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1770s
+I (1780353) IOTHUB: Received C2D Message! (159 bytes)
+I (1780353) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-b-002' payload={"target":"ble_leak_sensor","sensor_id":"00:80:e1:2a:29:fc"}
+I (1780363) IOTHUB: C2D cmd='decommission' ver=1 id='decom-b-002'
+W (1780363) IOTHUB: !!! DECOMMISSION_BLE: 00:80:e1:2a:29:fc !!!
+W (1780373) PROVISIONING: === REMOVING BLE LEAK SENSOR 00:80:e1:2a:29:fc ===
+I (1780393) PROVISIONING: Config saved to NVS successfully
+I (1780393) PROVISIONING: BLE leak sensor 00:80:e1:2a:29:fc removed successfully
+I (1780393) PROVISIONING: Remaining BLE sensors: 1
+I (1780403) PROVISIONING: State: PROVISIONED
+I (1780403) HEALTH_ENGINE: Device table loaded: 2 device(s)
+I (1780423) SENSOR_META: Removed metadata for 00:80:e1:2a:29:fc (type=0), 1 entries remain
+I (1780423) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790297543,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1779},"type":"event","data":{"event":"cmd_ack","id":"decom-b-002","cmd":"decommission","status":"ok"}}
+I (1780573) FLEET_LED: rating=syncing color=WHITE effect=SOLID
+I (1780753) IOTHUB: SNAP trigger=event:decommission
+I (1780753) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297544,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1780},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 1 device"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1780813) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1780863) MONITOR: heap: free=30692 min_ever=2972 largest_blk=7680 uptime=1780s
+I (1790253) BLE_LEAK: Whitelist reloaded: 1 sensor(s)
+I (1790863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1790s
+I (1800863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1800s
+I (1801753) IOTHUB: Received C2D Message! (159 bytes)
+I (1801753) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-b-002' payload={"target":"ble_leak_sensor","sensor_id":"00:80:e1:2a:cb:b6"}
+I (1801763) IOTHUB: C2D cmd='decommission' ver=1 id='decom-b-002'
+W (1801773) IOTHUB: !!! DECOMMISSION_BLE: 00:80:e1:2a:cb:b6 !!!
+W (1801773) PROVISIONING: === REMOVING BLE LEAK SENSOR 00:80:e1:2a:cb:b6 ===
+I (1801793) PROVISIONING: Config saved to NVS successfully
+I (1801793) PROVISIONING: BLE leak sensor 00:80:e1:2a:cb:b6 removed successfully
+I (1801793) PROVISIONING: Remaining BLE sensors: 0     
+I (1801793) PROVISIONING: State: PROVISIONED
+I (1801803) HEALTH_ENGINE: Device table loaded: 1 device(s)
+I (1801803) HEALTH_ENGINE: Boot sync: all devices seen 
+I (1801823) FLEET_LED: rating=excellent color=GREEN effect=SOLID
+I (1801823) SENSOR_META: Removed metadata for 00:80:e1:2a:cb:b6 (type=0), 0 entries remain
+I (1801823) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790297565,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1801},"type":"event","data":{"event":"cmd_ack","id":"decom-b-002","cmd":"decommission","status":"ok"}}
+I (1801853) IOTHUB: SNAP trigger=boot
+I (1801853) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297565,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1801},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1801903) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1801903) IOTHUB: SNAP clamped by min-interval: +4645 ms
+I (1806863) IOTHUB: SNAP trigger=event:decommission
+I (1806863) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297570,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1806},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":5},"lora_sensors":[],"ble_leak_sensors":[],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (1806903) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1810863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1810s
+I (1820253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (1820863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1820s
+I (1830863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1830s
+I (1840863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1840s
+I (1850863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1850s
+I (1855233) IOTHUB: Received C2D Message! (116 bytes)
+I (1855233) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-v-001' payload={"target":"valve"}
+I (1855243) IOTHUB: C2D cmd='decommission' ver=1 id='decom-v-001'
+W (1855243) IOTHUB: !!! DECOMMISSION_VALVE !!!
+W (1855253) PROVISIONING: === REMOVING VALVE ===       
+I (1855253) PROVISIONING: No devices remain - state changed to UNPROVISIONED
+I (1855273) PROVISIONING: Config saved to NVS successfully
+I (1855273) PROVISIONING: Valve removed successfully   
+I (1855273) PROVISIONING: State: UNPROVISIONED
+I (1855273) HEALTH_ENGINE: Device table loaded: 0 device(s)
+I (1855283) BLE_VALVE: [API] Target MAC cleared
+I (1855283) BLE_VALVE: [TASK] CMD: DISCONNECT
+I (1855283) IOTHUB: Device is now UNPROVISIONED        
+I (1855283) NimBLE: GAP procedure initiated: terminate connection; conn_handle=1 hci_reason=19
+
+I (1855293) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790297618,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1854},"type":"event","data":{"event":"cmd_ack","id":"decom-v-001","cmd":"decommission","status":"ok"}}
+I (1855323) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (1855323) HEALTH_ENGINE: Boot sync: all devices seen
+I (1855343) BLE_VALVE: ║            GAP DISCONNECT EVENT                              ║
+I (1855343) IOTHUB: SNAP trigger=boot
+I (1855353) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (1855363) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790297618,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":1854},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0"},"lora_sensors":[],"ble_leak_sensors":[],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+W (1855373) BLE_VALVE: [DISCONNECT] reason=0x216       
+I (1855433) BLE_VALVE: [STATE] All bits cleared        
+I (1855423) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (1855343) FLEET_LED: rating=unprovisioned color=WHITE effect=SOLID
+I (1855433) IOTHUB: SNAP clamped by min-interval: +4609 ms
+W (1855453) IOTHUB: Valve identity unavailable (live=0 provisioned=0) — valve events suppressed this iteration
+I (1860863) MONITOR: heap: free=33128 min_ever=2972 largest_blk=7680 uptime=1860s
+I (1870863) MONITOR: heap: free=33128 min_ever=2972 largest_blk=7680 uptime=1870s
+I (1880253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (1880863) MONITOR: heap: free=33128 min_ever=2972 largest_blk=7680 uptime=1880s
+I (1890863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1890s
+I (1900863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1900s
+I (1910863) MONITOR: heap: free=33112 min_ever=2972 largest_blk=7680 uptime=1910s
+I (1920863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1920s
+I (1930863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1930s
+I (1940253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (1940863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1940s
+I (1950863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1950s
+I (1960863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1960s
+I (1970863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1970s
+I (1980863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1980s
+I (1990863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=1990s
+I (2000253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2000863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2000s
+I (2010863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2010s
+I (2020863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2020s
+I (2030863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2030s
+I (2040863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2040s
+I (2050863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2050s
+I (2060253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2060863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2060s
+I (2070863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2070s
+I (2080863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2080s
+I (2090863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2090s
+I (2100863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2100s
+I (2110863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2110s
+I (2120253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2120863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2120s
+I (2130863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2130s
+I (2140863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2140s
+I (2150863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2150s
+I (2160863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2160s
+I (2170863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2170s
+I (2180253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2180863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2180s
+I (2190863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2190s
+I (2200863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2200s
+I (2210863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2210s
+I (2220863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2220s
+I (2230863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2230s
+I (2240253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2240863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2240s
+I (2250863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2250s
+I (2260863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2260s
+I (2270863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2270s
+I (2280863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2280s
+I (2290863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2290s
+I (2300253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2300863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2300s
+I (2310863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2310s
+I (2320863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2320s
+I (2330863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2330s
+I (2340863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2340s
+I (2350863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2350s
+I (2360253) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=0 sensors
+I (2360863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2360s
+I (2370863) MONITOR: heap: free=33136 min_ever=2972 largest_blk=7680 uptime=2370s
+I (2379523) IOTHUB: Received C2D Message! (818 bytes)
+I (2379533) C2D_CMD: Envelope cmd='provision' ver=1 id='prov-004' payload={"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:2b:a5","00:80:e1:2a:cb:b6","00:80:e1:2a:b6:8e","00:80:e1:2a:29:fc"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:2b:a5","location_code":"bathroom","label":"Ensuite"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:cb:b6","location_code":"bathroom","label":"Main Bathroom"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:b6:8e","location_code":"kitchen","label":"dishwasher"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:29:fc","location_code":"laundry","label":"under washer"}],"auto_close_enabled":true}
+I (2379583) IOTHUB: C2D cmd='provision' ver=1 id='prov-004'
+I (2379583) IOTHUB: Provisioning JSON detected
+I (2379593) PROVISIONING: Handling provisioning JSON (631 bytes)
+I (2379593) PROVISIONING: Provisioning JSON: {"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:e1:2a:2b:a5","00:80:e1:2a:cb:b6","00:80:e1:2a:b6:8e","00:80:e1:2a:29:fc"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:2b:a5","location_code":"bathroom","label":"Ensuite"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:cb:b6","location_code":"bathroom","label":"Main Bathroom"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:b6:8e","location_code":"kitchen","label":"dishwasher"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:e1:2a:29:fc","location_code":"laundry","label":"under washer"}],"auto_close_enabled":true}
+I (2379653) PROVISIONING: Valve MAC: 00:80:E1:27:F7:BB 
+I (2379663) PROVISIONING: BLE Leak Sensor[0]: 00:80:e1:2a:2b:a5
+I (2379663) PROVISIONING: BLE Leak Sensor[1]: 00:80:e1:2a:cb:b6
+I (2379673) PROVISIONING: BLE Leak Sensor[2]: 00:80:e1:2a:b6:8e
+I (2379683) PROVISIONING: BLE Leak Sensor[3]: 00:80:e1:2a:29:fc
+I (2379683) PROVISIONING: Auto-close opt-in: ENABLED (triggers=0x07)
+I (2379703) PROVISIONING: Config saved to NVS successfully
+I (2379703) PROVISIONING: Provisioning completed successfully!
+I (2379703) PROVISIONING: State: PROVISIONED
+I (2379713) PROVISIONING: Valve MAC: 00:80:E1:27:F7:BB
+I (2379713) PROVISIONING: LoRa sensors: 0
+I (2379723) PROVISIONING: BLE leak sensors: 4
+I (2379723) PROVISIONING: Auto-close: enabled triggers=0x07
+I (2379733) HEALTH_ENGINE: Device table loaded: 5 device(s)
+I (2379733) IOTHUB: Applying provisioned valve MAC: 00:80:E1:27:F7:BB
+I (2379743) BLE_VALVE: [API] Target MAC set to: 00:80:E1:27:F7:BB
+I (2379743) IOTHUB: Starting BLE with provisioned MAC...
+I (2379753) IOTHUB: Not connected, triggering connection to: 00:80:E1:27:F7:BB
+I (2379753) BLE_VALVE: [TASK] CMD: CONNECT
+I (2379763) BLE_VALVE: [SCAN] Starting scan for 'eFloStopV2'...
+I (2379763) NimBLE: GAP procedure initiated: extended discovery;
+
+I (2379773) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:2b:a5 loc=bathroom label="Ensuite"
+I (2379783) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:cb:b6 loc=bathroom label="Main Bathroom"
+I (2379803) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:b6:8e loc=kitchen label="dishwasher"
+I (2379813) SENSOR_META: Set metadata: type=0 id=00:80:e1:2a:29:fc loc=laundry label="under washer"
+I (2379813) IOTHUB: Provision: applied 4 inline sensor_meta entry(ies)
+I (2379813) IOTHUB: Commission: fast snapshot armed (all-devices-seen, else <=150s; refreshes on late devices)
+I (2379823) IOTHUB: Twin reported (5): {"fw_version":"2.1.3","gateway_id":"GW-7C4FADAE69C8","short_id":"69C8","hub_name":"","provisioned":true,"valve_mac":null,"valve_device_id":null,"valve_id":"00:80:E1:27:F7:BB","lora_sensor_count":0,"ble_leak_sensor_count":4,"auto_close_enabled":true,"trigger_mask":7,"uptime_s":2379,"snapshot_interval_s":300,"free_heap":31424}
+I (2379863) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790298143,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2379},"type":"event","data":{"event":"cmd_ack","id":"prov-004","cmd":"provision","status":"ok"}}
+I (2379883) IOTHUB: PROV pulse armed: every 30 s for 300 s, plus on every sensor packet
+I (2380023) IOTHUB: Twin response: $iothub/twin/res/204/?$rid=5&$version=79 (0 bytes)
+I (2380193) IOTHUB: SNAP trigger=event:provision
+I (2380193) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298143,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2379},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 5 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"disconnected","connected":false,"rating":"critical","last_seen_age_s":null},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}  
+I (2380253) BLE_LEAK: Whitelist reloaded: 4 sensor(s)  
+I (2380303) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2380863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2380s
+I (2382153) BLE_VALVE: [SCAN] Target MAC matched: 00:80:E1:27:F7:BB
+I (2382153) BLE_VALVE: [SCAN] Connecting to provisioned valve: 00:80:E1:27:F7:BB
+I (2382153) NimBLE: GAP procedure initiated: extended connect;
+
+W (2382303) BLE_LEAK: Scan not active (external cancel?), restarting
+W (2382303) BLE_LEAK: Failed to start ext scan: 15, will retry
+I (2382973) BLE_VALVE: [GAP] L2CAP update request
+I (2382973) NimBLE: GAP procedure initiated:
+I (2382973) NimBLE: connection parameter update; conn_handle=1 itvl_min=200 itvl_max=200 latency=0 supervision_timeout=500 min_ce_len=0 max_ce_len=0
+I (2382983) NimBLE:
+
+I (2383023) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (2383033) BLE_VALVE: ║            GAP CONNECT EVENT                                 ║
+I (2383043) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (2383063) BLE_VALVE: [CONNECT] status=0
+I (2383063) BLE_VALVE: [STATE] All bits cleared        
+I (2383063) BLE_VALVE: [CONNECT] MAC=00:80:E1:27:F7:BB, handle=1
+I (2383073) BLE_VALVE: [STATE] Set bit 0x01 -> CONN=1 PAIR=0 ENC=0 AUTH=0 BOND=0 DISC=0
+I (2383083) BLE_VALVE: [CONNECT] Starting 1000ms delay before security...
+W (2383083) BLE_VALVE: [GAP] Unhandled event: 38 (0x26)
+I (2383303) NimBLE: GAP procedure initiated: extended discovery;
+
+I (2383303) BLE_LEAK: Extended passive scan started (1M + Coded PHY)
+I (2383673) BLE_VALVE: [GAP] Connection params updated: status=0
+I (2383923) BLE_VALVE: [GAP] Data length changed: tx=251 rx=27
+I (2384083) BLE_VALVE: [TIMER] Post-connect delay complete.
+I (2384083) BLE_VALVE: [TIMER] Initiating security...  
+I (2384083) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (2384093) BLE_VALVE: ║            SECURITY INITIATION (attempt 1/3)                ║
+I (2384103) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (2384123) BLE_VALVE: [SECURITY] Connection handle: 1 
+I (2384133) BLE_VALVE: [SECURITY] Role: MASTER/CENTRAL 
+I (2384133) BLE_VALVE: [SECURITY] Peer addr: 00:80:E1:27:F7:BB
+I (2384143) BLE_VALVE: [SECURITY] Current state: encrypted=0, authenticated=0, bonded=0, key_size=0
+I (2384143) BLE_VALVE: [SECURITY] Link not encrypted. Initiating pairing...
+I (2384153) BLE_VALVE: [STATE] Set bit 0x02 -> CONN=1 PAIR=1 ENC=0 AUTH=0 BOND=0 DISC=0
+I (2384163) BLE_VALVE: [SECURITY] SM Config: io_cap=2, bonding=1, mitm=1, sc=1
+I (2384173) BLE_VALVE: [SECURITY] Calling ble_gap_security_initiate(handle=1)...
+I (2384173) BLE_VALVE: [SECURITY] ble_gap_security_initiate() SUCCESS - pairing started
+W (2385673) BLE_VALVE: [GAP] Unhandled event: 27 (0x1B)
+I (2385673) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (2385683) BLE_VALVE: ║            ENCRYPTION CHANGE EVENT                           ║
+I (2385693) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (2385713) BLE_VALVE: [ENC_CHANGE] status=0
+I (2385713) BLE_VALVE: [ENC_CHANGE] encrypted=1, authenticated=1, bonded=1, key_size=16
+I (2385723) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (2385743) BLE_VALVE: ║            LINK ENCRYPTED SUCCESSFULLY                       ║
+I (2385753) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (2385773) BLE_VALVE: [STATE] Clear bit 0x02 -> CONN=1 PAIR=0 ENC=0 AUTH=0 BOND=0 DISC=0
+I (2385783) BLE_VALVE: [STATE] Set bit 0x04 -> CONN=1 PAIR=0 ENC=1 AUTH=0 BOND=0 DISC=0
+I (2385783) BLE_VALVE: [ENC_CHANGE] MITM authentication achieved
+I (2385793) BLE_VALVE: [STATE] Set bit 0x08 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=0 DISC=0
+I (2385803) BLE_VALVE: [ENC_CHANGE] Device is bonded (keys stored)
+I (2385803) BLE_VALVE: [STATE] Set bit 0x10 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=0
+I (2385813) BLE_VALVE: [ENC_CHANGE] Link secured. Starting discovery...
+I (2385823) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (2385843) BLE_VALVE: ║            STARTING SERVICE DISCOVERY                        ║
+I (2385843) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (2385863) BLE_VALVE: [STATE] Clear bit 0x20 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=0
+I (2385873) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (2385883) NimBLE: 00000002-cc7a-482a-984a-7f2ed5b3e58f
+I (2385883) NimBLE:
+
+I (2386173) BLE_VALVE: [DISC] Found VALVE svc: start=23, end=26
+I (2386173) NimBLE: GATT procedure initiated: discover characteristics by uuid;
+I (2386173) NimBLE: start_handle=23 end_handle=26 uuid=
+I (2386183) NimBLE: 00000002-8e22-4541-9d4c-21edae82ed19
+I (2386183) NimBLE:
+
+I (2386673) BLE_VALVE: [DISC] Found VALVE char: val_handle=25, props=0x1A
+I (2386673) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (2386673) NimBLE: 00000001-cc7a-482a-984a-7f2ed5b3e58f
+I (2386683) NimBLE:
+
+I (2387423) BLE_VALVE: [DISC] Found FLOOD svc: start=12, end=18
+I (2387423) NimBLE: GATT procedure initiated: discover characteristics by uuid;
+I (2387423) NimBLE: start_handle=12 end_handle=18 uuid=
+I (2387433) NimBLE: 00000001-8e22-4541-9d4c-21edae82ed19
+I (2387433) NimBLE:
+
+I (2387923) BLE_VALVE: [DISC] Found FLOOD char: val_handle=14, props=0x12
+I (2387923) NimBLE: GATT procedure initiated: discover characteristics by uuid;
+I (2387923) NimBLE: start_handle=15 end_handle=18 uuid=
+I (2387933) NimBLE: 00000000-8e22-4541-9d4c-21edae82ed19
+I (2387933) NimBLE:
+
+I (2388423) BLE_VALVE: [DISC] Found RMLEAK char: val_handle=17, props=0x1A
+I (2388423) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (2388423) NimBLE: 0000180f-0000-1000-8000-00805f9b34fb
+I (2388433) NimBLE:
+
+I (2389423) BLE_VALVE: [DISC] Found BATT svc: start=19, end=22
+I (2389423) NimBLE: GATT procedure initiated: discover characteristics by uuid;
+I (2389423) NimBLE: start_handle=19 end_handle=22 uuid=
+I (2389433) NimBLE: 00002a19-0000-1000-8000-00805f9b34fb
+I (2389433) NimBLE:
+
+I (2389923) BLE_VALVE: [DISC] Found BATT char: val_handle=21, props=0x12
+I (2389923) NimBLE: GATT procedure initiated: discover service by uuid; uuid=
+I (2389923) NimBLE: 0000180a-0000-1000-8000-00805f9b34fb
+I (2389933) NimBLE:
+
+I (2390423) BLE_VALVE: [DISC] Found DIS svc: start=27, end=29
+I (2390423) NimBLE: GATT procedure initiated: discover characteristics by uuid;
+I (2390423) NimBLE: start_handle=27 end_handle=29 uuid=
+I (2390433) NimBLE: 00002a26-0000-1000-8000-00805f9b34fb
+I (2390433) NimBLE:
+
+I (2390863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2390s
+I (2390923) BLE_VALVE: [DISC] Found DIS Firmware Rev char: val_handle=29
+I (2390923) BLE_VALVE: [SETUP] Step 1
+I (2390923) BLE_VALVE: [SETUP] Subscribe VALVE (chr=25, end=26)
+I (2390923) NimBLE: GATT procedure initiated: discover all descriptors;
+I (2390933) NimBLE: chr_val_handle=25 end_handle=26
+
+I (2391423) BLE_VALVE: [SETUP] Descriptor: handle=26, uuid16=0x2902
+I (2391423) BLE_VALVE: [SETUP] CCCD found at handle=26, enabling notifications
+I (2391423) NimBLE: GATT procedure initiated: write; 
+I (2391433) NimBLE: att_handle=26 len=2
+
+I (2391923) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=25
+I (2391923) BLE_VALVE: [SETUP] Step 2
+I (2391923) BLE_VALVE: [SETUP] Subscribe FLOOD (chr=14, end=18)
+I (2391923) NimBLE: GATT procedure initiated: discover all descriptors;
+I (2391933) NimBLE: chr_val_handle=14 end_handle=18    
+
+I (2392423) BLE_VALVE: [SETUP] Descriptor: handle=15, uuid16=0x2902
+I (2392423) BLE_VALVE: [SETUP] CCCD found at handle=15, enabling notifications
+I (2392423) NimBLE: GATT procedure initiated: write;   
+I (2392433) NimBLE: att_handle=15 len=2
+
+I (2392923) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=14
+I (2392923) BLE_VALVE: [SETUP] Step 3
+I (2392923) BLE_VALVE: [SETUP] Subscribe RMLEAK (chr=17, end=18)
+I (2392923) NimBLE: GATT procedure initiated: discover all descriptors;
+I (2392933) NimBLE: chr_val_handle=17 end_handle=18    
+
+I (2393673) BLE_VALVE: [SETUP] Descriptor: handle=18, uuid16=0x2902
+I (2393673) BLE_VALVE: [SETUP] CCCD found at handle=18, enabling notifications
+I (2393673) NimBLE: GATT procedure initiated: write;   
+I (2393683) NimBLE: att_handle=18 len=2
+
+I (2394173) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=17
+I (2394173) BLE_VALVE: [SETUP] Step 4
+I (2394173) BLE_VALVE: [SETUP] Subscribe BATT (chr=21, end=22)
+I (2394173) NimBLE: GATT procedure initiated: discover all descriptors;
+I (2394183) NimBLE: chr_val_handle=21 end_handle=22    
+
+I (2394673) BLE_VALVE: [SETUP] Descriptor: handle=22, uuid16=0x2902
+I (2394673) BLE_VALVE: [SETUP] CCCD found at handle=22, enabling notifications
+I (2394673) NimBLE: GATT procedure initiated: write; 
+I (2394683) NimBLE: att_handle=22 len=2
+
+I (2395173) BLE_VALVE: [SETUP] CCCD enabled for chr val handle=21
+I (2395173) BLE_VALVE: [SETUP] Step 5
+I (2395173) BLE_VALVE: [SETUP] Read VALVE
+I (2395173) NimBLE: GATT procedure initiated: read; 
+I (2395183) NimBLE: att_handle=25
+
+I (2395923) BLE_VALVE: [READ] Read success: handle=25
+I (2395923) BLE_VALVE: Read data [1 bytes]: 01
+I (2395923) BLE_VALVE: [NOTIFY] attr_handle=25, len=1  
+I (2395923) BLE_VALVE: Notify data [1 bytes]: 01       
+I (2395933) BLE_VALVE: [DATA] Valve State=1 (OPEN)
+I (2395933) BLE_VALVE: [SETUP] Step 6
+I (2395943) BLE_VALVE: [SETUP] Read FLOOD
+I (2395943) NimBLE: GATT procedure initiated: read;    
+I (2395943) NimBLE: att_handle=14
+
+I (2396423) BLE_VALVE: [READ] Read success: handle=14
+I (2396423) BLE_VALVE: Read data [1 bytes]: 00
+I (2396423) BLE_VALVE: [NOTIFY] attr_handle=14, len=1
+I (2396423) BLE_VALVE: Notify data [1 bytes]: 00       
+I (2396433) BLE_VALVE: [DATA] Leak=0 (OK)
+I (2396433) BLE_VALVE: [SETUP] Step 7
+I (2396433) BLE_VALVE: [SETUP] Read RMLEAK
+I (2396443) NimBLE: GATT procedure initiated: read;    
+I (2396443) NimBLE: att_handle=17
+
+I (2396923) BLE_VALVE: [READ] Read success: handle=17
+I (2396923) BLE_VALVE: Read data [1 bytes]: 00
+I (2396923) BLE_VALVE: [NOTIFY] attr_handle=17, len=1
+I (2396923) BLE_VALVE: Notify data [1 bytes]: 00       
+I (2396933) BLE_VALVE: [DATA] RMLEAK=0 (CLEAR)
+I (2396933) BLE_VALVE: [SETUP] Step 8
+I (2396933) BLE_VALVE: [SETUP] Read BATT
+I (2396943) NimBLE: GATT procedure initiated: read; 
+I (2396943) NimBLE: att_handle=21
+
+I (2397423) BLE_VALVE: [READ] Read success: handle=21
+I (2397423) BLE_VALVE: Read data [1 bytes]: 40
+I (2397423) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (2397423) BLE_VALVE: Notify data [1 bytes]: 40       
+I (2397433) BLE_VALVE: [DATA] Battery=64%
+I (2397433) BLE_VALVE: [SETUP] Step 9
+I (2397433) BLE_VALVE: [SETUP] Read DIS Firmware Rev
+I (2397443) NimBLE: GATT procedure initiated: read;    
+I (2397443) NimBLE: att_handle=29
+
+I (2397923) BLE_VALVE: [SETUP] Valve Firmware Rev: "2.2.0"
+I (2397923) BLE_VALVE: [SETUP] Step 10
+I (2397923) BLE_VALVE: [STATE] Set bit 0x20 -> CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=1
+I (2397933) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (2397943) BLE_VALVE: ║            SETUP COMPLETE - READY FOR GATT                   ║
+I (2397953) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+I (2397973) BLE_VALVE: [READY] Valve=25, Flood=14, RMLEAK=17, Batt=21, DIS=29
+I (2397983) BLE_VALVE: [READY] FW Rev: "2.2.0"
+I (2397983) BLE_VALVE: [READY] Battery=64%, Leak=OK, Valve=OPEN, RMLEAK=CLEAR
+I (2397993) BLE_VALVE: [READY] State: CONN=1 PAIR=0 ENC=1 AUTH=1 BOND=1 DISC=1
+I (2398003) BLE_VALVE: [READY] Announcing flood probe state (dry) for reconciliation
+I (2398003) RULES_ENGINE: ╔══ VALVE RECONNECT RECONCILIATION ══╗
+I (2398013) RULES_ENGINE: ║ Valve: state=OPEN rmleak=CLEAR flood=OK
+I (2398023) RULES_ENGINE: ║ Hub:   incident=0 leaks=0 override=INACTIVE
+I (2398023) RULES_ENGINE: ╚════════════════════════════════════╝
+I (2398043) RULES_ENGINE: Reconnected: no active incident, valve clear
+I (2398043) IOTHUB: Event: BLE Update type=5
+I (2398053) IOTHUB: SNAP trigger=fast
+I (2398053) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298161,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2397},"type":"snapshot","data":{"reason":"fast","system_health":{"rating":"excellent","reason":"Syncing - waiting for 4 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}} 
+I (2398183) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2398183) IOTHUB: Event: BLE Update type=2
+I (2400863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2400s
+I (2401883) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-44 fw=1.1.0
+I (2401883) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (2401893) IOTHUB: SNAP trigger=commission
+I (2401893) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298165,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2401},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":3},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":79,"rssi":-44,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (2402023) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2410863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2410s
+I (2412073) IOTHUB: SNAP trigger=event:prov_pulse
+I (2412073) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298175,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2411},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":14},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":10,"battery":79,"rssi":-44,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}} 
+I (2412193) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2420303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2420863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2420s
+I (2430863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2430s
+I (2440863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2440s
+I (2442343) IOTHUB: SNAP trigger=event:prov_pulse
+I (2442343) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298205,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2441},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":44},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":40,"battery":79,"rssi":-44,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}} 
+I (2442463) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2450863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2450s
+I (2460863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2460s
+I (2470863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2470s
+I (2472983) IOTHUB: SNAP trigger=event:prov_pulse
+I (2472983) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298236,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2472},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":74},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":71,"battery":79,"rssi":-44,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}} 
+I (2473103) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2478293) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-70 fw=1.1.0
+I (2478293) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (2478293) IOTHUB: SNAP trigger=commission
+I (2478303) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298241,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2477},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":80},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":76,"battery":79,"rssi":-44,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":71,"rssi":-70,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (2478433) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2480303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2480863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2480s
+I (2490863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2490s
+I (2500863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2500s
+I (2502553) IOTHUB: SNAP trigger=event:prov_pulse
+I (2502553) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298266,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2502},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":104},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":1,"battery":79,"rssi":-45,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":24,"battery":71,"rssi":-70,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (2502673) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2510863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2510s
+I (2520863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2520s
+W (2529943) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (2530863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2530s
+I (2532823) IOTHUB: SNAP trigger=event:prov_pulse
+I (2532823) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298296,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2532},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":134},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":31,"battery":79,"rssi":-45,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":54,"battery":71,"rssi":-70,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}  
+I (2532943) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2540303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2540863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2540s
+I (2550863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2550s
+I (2560863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2560s
+I (2563093) IOTHUB: SNAP trigger=event:prov_pulse
+I (2563093) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298326,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2562},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":165},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":62,"battery":79,"rssi":-45,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":84,"battery":71,"rssi":-70,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}  
+I (2563213) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2570863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2570s
+I (2580863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2580s
+I (2581303) IOTHUB: SNAP trigger=event:prov_pkt
+I (2581303) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298344,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2580},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":183},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":80,"battery":79,"rssi":-45,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":3,"battery":71,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (2581423) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2590863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2590s
+I (2593483) IOTHUB: SNAP trigger=event:prov_pulse
+I (2593483) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298356,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2592},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":195},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":92,"battery":79,"rssi":-45,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":16,"battery":71,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}  
+I (2593603) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2600303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2600863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2600s
+I (2605663) IOTHUB: SNAP trigger=event:prov_pkt
+I (2605663) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298369,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2605},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":64,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":207},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":3,"battery":79,"rssi":-47,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":28,"battery":71,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (2605783) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2610863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2610s
+I (2617173) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (2617173) BLE_VALVE: Notify data [1 bytes]: 41       
+I (2617173) BLE_VALVE: [DATA] Battery=65%
+I (2617173) IOTHUB: Event: BLE Update type=1
+I (2620863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2620s
+I (2623213) IOTHUB: SNAP trigger=event:prov_pulse
+I (2623213) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298386,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2622},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":6},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":21,"battery":79,"rssi":-47,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":45,"battery":71,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}    
+I (2623333) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2630863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2630s
+I (2640863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2640s
+I (2650863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2650s
+I (2653483) IOTHUB: SNAP trigger=event:prov_pulse
+I (2653483) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298416,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2652},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":36},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":51,"battery":79,"rssi":-47,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:B6:8E","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"kitchen","label":"dishwasher"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":76,"battery":71,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}   
+I (2653603) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2660303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2660863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2660s
+I (2670863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2670s
+I (2680863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2680s
+I (2681743) IOTHUB: PROV pulse window closed (14 snapshot(s) requested)
+I (2690863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2690s
+I (2700863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2700s
+I (2710863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2710s
+I (2720303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2720863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2720s
+I (2730863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2730s
+I (2740863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2740s
+I (2750863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2750s
+I (2760863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2760s
+I (2770863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2770s
+I (2778303) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-51 fw=1.1.0
+I (2778303) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (2780303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=4 sensors
+I (2780863) MONITOR: heap: free=33004 min_ever=2972 largest_blk=7680 uptime=2780s
+I (2790863) MONITOR: heap: free=32804 min_ever=2972 largest_blk=7680 uptime=2790s
+I (2800863) MONITOR: heap: free=32804 min_ever=2972 largest_blk=7680 uptime=2800s
+I (2806143) IOTHUB: Received C2D Message! (159 bytes)
+I (2806143) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-b-002' payload={"target":"ble_leak_sensor","sensor_id":"00:80:e1:2a:b6:8e"}
+I (2806153) IOTHUB: C2D cmd='decommission' ver=1 id='decom-b-002'
+W (2806153) IOTHUB: !!! DECOMMISSION_BLE: 00:80:e1:2a:b6:8e !!!
+W (2806163) PROVISIONING: === REMOVING BLE LEAK SENSOR 00:80:e1:2a:b6:8e ===
+I (2806183) PROVISIONING: Config saved to NVS successfully
+I (2806183) PROVISIONING: BLE leak sensor 00:80:e1:2a:b6:8e removed successfully
+I (2806183) PROVISIONING: Remaining BLE sensors: 3     
+I (2806193) PROVISIONING: State: PROVISIONED
+I (2806193) HEALTH_ENGINE: Device table loaded: 4 device(s)
+I (2806213) SENSOR_META: Removed metadata for 00:80:e1:2a:b6:8e (type=0), 3 entries remain
+I (2806213) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790298569,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2805},"type":"event","data":{"event":"cmd_ack","id":"decom-b-002","cmd":"decommission","status":"ok"}}
+I (2806543) IOTHUB: SNAP trigger=event:decommission
+I (2806543) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298570,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2806},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 3 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (2806643) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2810303) BLE_LEAK: Whitelist reloaded: 3 sensor(s)
+I (2810863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2810s
+I (2820863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2820s
+I (2830863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2830s
+I (2840303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (2840863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2840s
+I (2850863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2850s
+I (2860863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2860s
+I (2870863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2870s
+I (2880863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2880s
+I (2890863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2890s
+I (2900303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (2900863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2900s
+I (2901913) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-50 fw=1.1.0
+I (2901913) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (2910863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2910s
+I (2920863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2920s
+I (2930863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2930s
+I (2940863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2940s
+I (2950863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2950s
+W (2956443) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (2958193) IOTHUB: SNAP trigger=boot
+I (2958193) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298721,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2957},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":151},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":56,"battery":79,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (2958293) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2960303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (2960863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2960s
+I (2970863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2970s
+I (2978313) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-54 fw=1.1.0
+I (2978313) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (2978323) IOTHUB: SNAP trigger=commission
+I (2978323) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298741,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":2977},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"Syncing - waiting for 1 device"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":172},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:2B:A5","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Ensuite"}},{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":76,"battery":79,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":71,"rssi":-54,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (2978433) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (2980863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2980s
+I (2990863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=2990s
+I (3000863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3000s
+I (3010863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3010s
+I (3020303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (3020863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3020s
+I (3030863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3030s
+I (3040863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3040s
+I (3050863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3050s
+I (3060863) MONITOR: heap: free=32664 min_ever=2972 largest_blk=7680 uptime=3060s
+I (3070863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3070s
+I (3080303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=3 sensors
+I (3080863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3080s
+I (3087903) IOTHUB: Received C2D Message! (159 bytes)
+I (3087903) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-b-002' payload={"target":"ble_leak_sensor","sensor_id":"00:80:e1:2a:2b:a5"}
+I (3087903) IOTHUB: C2D cmd='decommission' ver=1 id='decom-b-002'
+W (3087913) IOTHUB: !!! DECOMMISSION_BLE: 00:80:e1:2a:2b:a5 !!!
+W (3087923) PROVISIONING: === REMOVING BLE LEAK SENSOR 00:80:e1:2a:2b:a5 ===
+I (3087933) PROVISIONING: Config saved to NVS successfully
+I (3087933) PROVISIONING: BLE leak sensor 00:80:e1:2a:2b:a5 removed successfully
+I (3087943) PROVISIONING: Remaining BLE sensors: 2
+I (3087943) PROVISIONING: State: PROVISIONED
+I (3087943) HEALTH_ENGINE: Device table loaded: 3 device(s)
+I (3087963) SENSOR_META: Removed metadata for 00:80:e1:2a:2b:a5 (type=0), 2 entries remain
+I (3087963) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790298851,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3087},"type":"event","data":{"event":"cmd_ack","id":"decom-b-002","cmd":"decommission","status":"ok"}}
+I (3088293) IOTHUB: SNAP trigger=event:decommission
+I (3088293) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790298851,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3087},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":0},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (3088373) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3090303) BLE_LEAK: Whitelist reloaded: 2 sensor(s)
+I (3090863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3090s
+I (3100863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3100s
+I (3120863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3120s
+I (3130863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3130s
+I (3140303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3140863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3140s
+I (3150863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3150s
+I (3160863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3160s
+I (3170863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3170s
+I (3180863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3180s
+I (3190863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3190s
+I (3200303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3200863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3200s
+I (3210863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3210s
+I (3217423) BLE_VALVE: [NOTIFY] attr_handle=21, len=1
+I (3217423) BLE_VALVE: Notify data [1 bytes]: 41 
+I (3217423) BLE_VALVE: [DATA] Battery=65%
+I (3220863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3220s
+I (3230863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3230s
+W (3238193) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (3238593) IOTHUB: SNAP trigger=boot
+I (3238593) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790299002,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3238},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"Syncing - waiting for 1 device"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":150},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":37,"battery":79,"rssi":-55,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}  
+I (3238673) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3240863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3240s
+I (3250863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3250s
+I (3260303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3260863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3260s
+I (3270863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3270s
+I (3277003) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-58 fw=1.1.0
+I (3277003) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (3277003) IOTHUB: SNAP trigger=commission
+I (3277013) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790299040,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3276},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"valve_id":"00:80:E1:27:F7:BB","state":"open","battery":65,"leak_state":false,"rmleak":false,"connected":true,"fw_version":"2.2.0","rating":"excellent","last_seen_age_s":189},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":75,"battery":79,"rssi":-55,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":71,"rssi":-58,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (3277093) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3277193) FLEET_LED: rating=excellent color=GREEN effect=SOLID
+I (3280863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3280s
+I (3290863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3290s
+I (3300863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3300s
+I (3303353) IOTHUB: Received C2D Message! (116 bytes)
+I (3303353) C2D_CMD: Envelope cmd='decommission' ver=1 id='decom-v-001' payload={"target":"valve"}
+I (3303353) IOTHUB: C2D cmd='decommission' ver=1 id='decom-v-001'
+W (3303363) IOTHUB: !!! DECOMMISSION_VALVE !!!
+W (3303363) PROVISIONING: === REMOVING VALVE ===
+I (3303383) PROVISIONING: Config saved to NVS successfully
+I (3303383) PROVISIONING: Valve removed successfully
+I (3303383) PROVISIONING: State: PROVISIONED
+I (3303383) HEALTH_ENGINE: Device table loaded: 2 device(s)
+I (3303393) BLE_VALVE: [API] Target MAC cleared
+I (3303393) BLE_VALVE: [TASK] CMD: DISCONNECT
+I (3303393) TELEMETRY_V2: Pub event: {"schema":"eflostop.v2","ts":1790299066,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3302},"type":"event","data":{"event":"cmd_ack","id":"decom-v-001","cmd":"decommission","status":"ok"}}
+I (3303393) NimBLE: GAP procedure initiated: terminate connection; conn_handle=1 hci_reason=19
+
+I (3303443) FLEET_LED: rating=syncing color=WHITE effect=SOLID
+I (3303673) BLE_VALVE: ╔══════════════════════════════════════════════════════════════╗
+I (3303683) BLE_VALVE: ║            GAP DISCONNECT EVENT                              ║     
+I (3303693) BLE_VALVE: ╚══════════════════════════════════════════════════════════════╝
+W (3303713) BLE_VALVE: [DISCONNECT] reason=0x216
+I (3303713) BLE_VALVE: [STATE] All bits cleared
+W (3303713) IOTHUB: Valve identity unavailable (live=0 provisioned=0) — valve events suppressed this iteration
+I (3303723) IOTHUB: Event: BLE Update type=6
+I (3303733) IOTHUB: SNAP trigger=event:decommission
+I (3303733) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790299067,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3303},"type":"snapshot","data":{"reason":"event","system_health":{"rating":"excellent","reason":"Syncing - waiting for 2 devices"},"valve":{"state":"disconnected","connected":false},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (3303813) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3310863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3310s
+I (3320303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3320863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3320s
+I (3330863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3330s
+I (3340863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3340s
+I (3350863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3350s
+I (3360863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3360s
+I (3370863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3370s
+I (3380303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3380863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3380s
+I (3390863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3390s
+I (3400863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3400s
+I (3410863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3410s
+I (3420863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3420s
+I (3430863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3430s
+I (3440303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3440863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3440s
+I (3450863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3450s
+W (3453443) HEALTH_ENGINE: Boot sync: timeout (150 s) — snapshot gate open; unheard devices still excused for a further 449 s
+I (3455393) IOTHUB: SNAP trigger=boot
+I (3455393) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790299218,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3454},"type":"snapshot","data":{"reason":"boot","system_health":{"rating":"excellent","reason":"Syncing - waiting for 1 device"},"valve":{"state":"disconnected","connected":false},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":false,"rating":"critical","last_seen_age_s":null,"battery":null,"rssi":null,"leak_state":false,"fw_version":null,"location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":77,"battery":71,"rssi":-69,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (3455463) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3460863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3460s
+I (3470863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3470s
+I (3480863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3480s
+I (3490863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3490s
+I (3500303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3500863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3500s
+I (3501043) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-50 fw=1.1.0
+I (3501043) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (3501053) IOTHUB: SNAP trigger=commission
+I (3501053) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790299264,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3500},"type":"snapshot","data":{"reason":"commission","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"state":"disconnected","connected":false},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":0,"battery":79,"rssi":-50,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":22,"battery":71,"rssi":-49,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (3501133) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3501193) FLEET_LED: rating=excellent color=GREEN effect=SOLID
+I (3510863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3510s
+I (3520863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3520s
+I (3530863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3530s
+I (3540863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3540s
+I (3550863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3550s
+I (3560303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3560863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3560s
+I (3570863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3570s
+I (3577453) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-51 fw=1.1.0
+I (3577453) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (3580863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3580s
+I (3590863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3590s
+I (3600863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3600s
+I (3610863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3610s
+I (3620303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3620863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3620s
+I (3630863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3630s
+I (3640863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3640s
+I (3650863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3650s
+I (3660863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3660s
+I (3670863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3670s
+I (3680303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3680863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3680s
+I (3690863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3690s
+I (3700863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3700s
+I (3710863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3710s
+I (3720863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3720s
+I (3730863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3730s
+I (3740303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3740863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3740s
+I (3750863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3750s
+I (3760863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3760s
+I (3770863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3770s
+I (3780863) MONITOR: heap: free=32768 min_ever=2972 largest_blk=7680 uptime=3780s
+I (3790863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3790s
+I (3800303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3800863) MONITOR: heap: free=32664 min_ever=2972 largest_blk=7680 uptime=3800s
+I (3801063) IOTHUB: SNAP trigger=heartbeat
+I (3801063) TELEMETRY_V2: Pub snapshot: {"schema":"eflostop.v2","ts":1790299564,"gateway":{"id":"GW-7C4FADAE69C8","short_id":"69C8","fw":"2.1.3","uptime_s":3800},"type":"snapshot","data":{"reason":"heartbeat","system_health":{"rating":"excellent","reason":"All devices healthy"},"valve":{"state":"disconnected","connected":false},"lora_sensors":[],"ble_leak_sensors":[{"sensor_id":"00:80:E1:2A:CB:B6","connected":true,"rating":"excellent","last_seen_age_s":100,"battery":79,"rssi":-49,"leak_state":false,"fw_version":"1.1.0","location":{"code":"bathroom","label":"Main Bathroom"}},{"sensor_id":"00:80:E1:2A:29:FC","connected":true,"rating":"excellent","last_seen_age_s":24,"battery":71,"rssi":-53,"leak_state":false,"fw_version":"1.1.0","location":{"code":"laundry","label":"under washer"}}],"rules":{"auto_close_enabled":true,"trigger_mask":7},"override_active":false}}
+I (3801133) IOTHUB: SNAP heartbeat=reset interval_ms=300000
+I (3810863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3810s
+I (3820863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3820s
+I (3830863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3830s
+I (3840863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3840s
+I (3850863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3850s
+I (3860303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3860863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3860s
+I (3870863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3870s
+I (3880863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3880s
+I (3890863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3890s
+I (3900613) BLE_LEAK: eleak 00:80:E1:2A:CB:B6 — leak=0 batt=79% rssi=-46 fw=1.1.0
+I (3900613) IOTHUB: Event: BLE Leak 00:80:E1:2A:CB:B6 leak=0 batt=79
+I (3900863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3900s
+I (3910863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3910s
+I (3920303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3920863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3920s
+I (3930863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3930s
+I (3940863) MONITOR: heap: free=32804 min_ever=2972 largest_blk=7680 uptime=3940s
+I (3950863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3950s
+I (3960863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3960s
+I (3970863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3970s
+I (3977033) BLE_LEAK: eleak 00:80:E1:2A:29:FC — leak=0 batt=71% rssi=-54 fw=1.1.0
+I (3977033) IOTHUB: Event: BLE Leak 00:80:E1:2A:29:FC leak=0 batt=71
+I (3980303) BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=2 sensors
+I (3980863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3980s
+I (3990863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=3990s
+I (4000863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=4000s
+I (4010863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=4010s
+I (4020863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=4020s
+I (4030863) MONITOR: heap: free=32792 min_ever=2972 largest_blk=7680 uptime=4030s
