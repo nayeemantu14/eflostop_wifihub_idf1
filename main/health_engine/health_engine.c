@@ -305,9 +305,11 @@ static bool rollup_unheard_locked(const health_device_t *dev)
 static void recalc_system_rating(void)
 {
     health_rating_t worst = HEALTH_EXCELLENT;
+    bool any_device = false;
 
     for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
         if (!s_devices[i].in_use) continue;
+        any_device = true;
 
         if (rollup_unheard_locked(&s_devices[i])) continue;
 
@@ -320,8 +322,12 @@ static void recalc_system_rating(void)
      * Once the water dries, every device reads healthy again and the roll-up would
      * otherwise go straight back to EXCELLENT/green — while the valve is still
      * closed and the taps are still dry. Amber is the honest middle state: nothing
-     * is leaking, but the system has not returned to normal either. */
-    if (s_interlock_held && worst < HEALTH_WARNING) {
+     * is leaking, but the system has not returned to normal either.
+     *
+     * Only with at least one device in the table. An empty hub has nothing to hold
+     * closed, and the floor there published "warning / Leak interlock latched" while
+     * the fleet LED (which tests total==0 first) showed WHITE (F4). */
+    if (s_interlock_held && any_device && worst < HEALTH_WARNING) {
         worst = HEALTH_WARNING;
     }
 

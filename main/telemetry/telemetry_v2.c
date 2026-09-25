@@ -150,16 +150,19 @@ static const char *reset_reason_str(void)
     }
 }
 
-static void add_location_obj(cJSON *parent, sensor_type_t type,
+// false = the location object could not be allocated. The snapshot fails its whole build
+// on that (L14); the event path ignores it and ships without location, as before.
+static bool add_location_obj(cJSON *parent, sensor_type_t type,
                              const char *sensor_id)
 {
     const sensor_meta_entry_t *meta = sensor_meta_find(type, sensor_id);
-    cJSON *loc = cJSON_CreateObject();
+    cJSON *loc = cJSON_AddObjectToObject(parent, "location");   // created + attached, or NULL
+    if (!loc) return false;
     cJSON_AddStringToObject(loc, "code",
         sensor_meta_location_code_to_str(
             meta ? meta->location_code : LOC_UNKNOWN));
     cJSON_AddStringToObject(loc, "label", meta ? meta->label : "");
-    cJSON_AddItemToObject(parent, "location", loc);
+    return true;
 }
 
 // location for a water-detection source. `location` is part of the required core
@@ -639,7 +642,12 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     cJSON *root = build_envelope("snapshot");
     if (!root) return false;   // pre-SNTP / alloc fail — treated as "not published"
 
-    cJSON *data = cJSON_CreateObject();
+    // Every container below is attached to its parent the moment it is created (data is
+    // the last root key anyway), so a single cJSON_Delete(root) frees everything on any
+    // allocation failure: no partial snapshot reaches the wire and nothing leaks (L14).
+    // The wire key order is unchanged — keys are still added in the same sequence.
+    cJSON *data = cJSON_AddObjectToObject(root, "data");   // created + attached, or NULL
+    if (!data) goto fail;
 
     // Trigger reason (heartbeat | event | commission | boot) — lets the app
     // attribute each snapshot in its event-log-vs-UI-refresh model. (Named
@@ -659,13 +667,18 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     // earlier, become critical over a missing sensor. Now they cannot disagree (L15).
     health_rating_t sys_rating = HEALTH_EXCELLENT;
     bool rollup_syncing = false;
-    bool have_health = health_get_device_status_all(health, &health_count,
-                                                    &sys_rating, &rollup_syncing);
-    // Copy failed (mutex timeout): never let the EXCELLENT default reach the wire — fall
-    // back to the lock-free roll-up, which is what this path published before.
-    if (!have_health) sys_rating = health_get_system_rating();
+    if (!health_get_device_status_all(health, &health_count, &sys_rating, &rollup_syncing)) {
+        // Copy failed (mutex timeout). Do NOT publish: the fallback used to ship empty
+        // device arrays for a provisioned hub and report success, so the heartbeat was
+        // re-armed on a snapshot that lied (N17). false = not published; the flush
+        // block's retry floor re-attempts in 5 s.
+        ESP_LOGW(TELEM_TAG, "Snapshot deferred - health table busy");
+        cJSON_Delete(root);
+        return false;
+    }
 
-    cJSON *sys_health = cJSON_CreateObject();
+    cJSON *sys_health = cJSON_AddObjectToObject(data, "system_health");
+    if (!sys_health) goto fail;
     cJSON_AddStringToObject(sys_health, "rating",
         health_rating_to_str(sys_rating));
     // 192, not 128: the builder can now emit up to 8 comma-joined parts (leak, the
@@ -673,63 +686,75 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     // carries a user-supplied label. At 128 the last cause truncated mid-word once six
     // parts were present. strncat is bounded either way, so this only buys fidelity.
     char reason[192];
-    if (have_health) {
-        build_system_health_reason(health, sys_rating, rollup_syncing, reason, sizeof(reason));
+    if (health_count == 0) {
+        // Empty hub (nothing provisioned, or a rules-only provision). "All devices
+        // healthy" would claim devices that do not exist.
+        snprintf(reason, sizeof(reason), "No devices provisioned");
     } else {
-        snprintf(reason, sizeof(reason), "Health data unavailable");
+        build_system_health_reason(health, sys_rating, rollup_syncing, reason, sizeof(reason));
     }
     cJSON_AddStringToObject(sys_health, "reason", reason);
-    cJSON_AddItemToObject(data, "system_health", sys_health);
 
     // ---- valve ----
-    cJSON *valve = cJSON_CreateObject();
-    char vmac[18];
-    bool vconn = ble_valve_get_mac(vmac);
+    cJSON *valve = cJSON_AddObjectToObject(data, "valve");
+    if (!valve) goto fail;
 
-    // Find valve health entry for MAC / rating / last_seen
+    // The PROVISIONED valve is the health table's valve entry: iothub_task reconciles the
+    // table against provisioning before any flush, on this same task. The block used to be
+    // keyed on the LIVE GAP link instead, so a valve still linked while its removal was
+    // being torn down was published — as open, battery 65, connected — on a hub with no
+    // valve at all (BUG-3), and a hub with no valve got {"state":"disconnected"} (BUG-5).
     const health_device_status_t *valve_hs = NULL;
-    if (have_health) {
-        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-            if (health[i].in_use && health[i].dev_type == HEALTH_DEV_VALVE) {
-                valve_hs = &health[i];
-                break;
-            }
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        if (health[i].in_use && health[i].dev_type == HEALTH_DEV_VALVE) {
+            valve_hs = &health[i];
+            break;
         }
     }
 
-    // Identity: prefer live BLE, fall back to health (provisioned) entry.
-    // Key is valve_id — the identity key names the device type (valve_id /
-    // sensor_id) on every outbound message, whether the device is reporting
-    // itself or the hub is reporting about it. Literal rather than
-    // leak_identity_key() only because the enclosing object is statically the
-    // valve; the dynamic sites all delegate.
-    if (vconn) {
-        cJSON_AddStringToObject(valve, "valve_id", vmac);
-    } else if (valve_hs) {
-        cJSON_AddStringToObject(valve, "valve_id", valve_hs->dev_id);
-    }
-
-    if (vconn) {
-        int st = ble_valve_get_state();
-        cJSON_AddStringToObject(valve, "state",
-            st == 1 ? "open" : st == 0 ? "closed" : "unknown");
-        cJSON_AddNumberToObject(valve, "battery", ble_valve_get_battery());
-        cJSON_AddBoolToObject(valve, "leak_state", ble_valve_get_leak());
-        cJSON_AddBoolToObject(valve, "rmleak", ble_valve_get_rmleak_state());
-        cJSON_AddBoolToObject(valve, "connected", true);
-
-        char valve_fw[32];
-        if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
-            cJSON_AddStringToObject(valve, "fw_version", valve_fw);
-        else
-            cJSON_AddNullToObject(valve, "fw_version");
-    } else {
-        cJSON_AddStringToObject(valve, "state", "disconnected");
-        cJSON_AddBoolToObject(valve, "connected", false);
-    }
-
-    // Health metadata
+    // No provisioned valve: the object stays EMPTY ("valve":{}).
     if (valve_hs) {
+        // Key is valve_id — the identity key names the device type (valve_id /
+        // sensor_id) on every outbound message, whether the device is reporting
+        // itself or the hub is reporting about it. Literal rather than
+        // leak_identity_key() only because the enclosing object is statically the
+        // valve; the dynamic sites all delegate. Always the provisioned MAC.
+        cJSON_AddStringToObject(valve, "valve_id", valve_hs->dev_id);
+
+        // Live data only from a link to THIS valve. A live MAC that differs from the
+        // provisioned one is never trusted: it would publish another valve's state
+        // under this valve's identity.
+        char vmac[18];
+        bool live = ble_valve_get_mac(vmac) && strcasecmp(vmac, valve_hs->dev_id) == 0;
+
+        if (live) {
+            // Sampled once: GAP-up is not GATT-ready, and until the valve's
+            // characteristics have been read its state and battery are defaults, not
+            // readings. Report them as unknown/null rather than as "closed"/0 %.
+            bool ready = ble_valve_is_ready();
+            int st = ble_valve_get_state();
+            cJSON_AddStringToObject(valve, "state",
+                !ready ? "unknown" : st == 1 ? "open" : st == 0 ? "closed" : "unknown");
+            uint8_t batt = ble_valve_get_battery();
+            if (ready && batt != 0xFF)
+                cJSON_AddNumberToObject(valve, "battery", batt);
+            else
+                cJSON_AddNullToObject(valve, "battery");
+            cJSON_AddBoolToObject(valve, "leak_state", ble_valve_get_leak());
+            cJSON_AddBoolToObject(valve, "rmleak", ble_valve_get_rmleak_state());
+            cJSON_AddBoolToObject(valve, "connected", true);
+
+            char valve_fw[32];
+            if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
+                cJSON_AddStringToObject(valve, "fw_version", valve_fw);
+            else
+                cJSON_AddNullToObject(valve, "fw_version");
+        } else {
+            cJSON_AddStringToObject(valve, "state", "disconnected");
+            cJSON_AddBoolToObject(valve, "connected", false);
+        }
+
+        // Health metadata
         cJSON_AddStringToObject(valve, "rating",
             health_rating_to_str(valve_hs->rating));
         if (valve_hs->last_seen_age_s != UINT32_MAX) {
@@ -740,167 +765,163 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         }
     }
 
-    cJSON_AddItemToObject(data, "valve", valve);
-
     // ---- LoRa sensors (iterate health entries, merge cache data) ----
-    cJSON *lora_arr = cJSON_CreateArray();
-    if (have_health) {
-        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-            if (!health[i].in_use || health[i].dev_type != HEALTH_DEV_LORA)
-                continue;
+    cJSON *lora_arr = cJSON_AddArrayToObject(data, "lora_sensors");
+    if (!lora_arr) goto fail;
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        if (!health[i].in_use || health[i].dev_type != HEALTH_DEV_LORA)
+            continue;
 
-            cJSON *s = cJSON_CreateObject();
-            cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
-            cJSON_AddBoolToObject(s, "connected", health[i].connected);
-            cJSON_AddStringToObject(s, "rating",
-                health_rating_to_str(health[i].rating));
+        cJSON *s = cJSON_CreateObject();
+        if (!s) goto fail;
+        cJSON_AddItemToArray(lora_arr, s);   // attached first: freed with root on failure
+        cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
+        cJSON_AddBoolToObject(s, "connected", health[i].connected);
+        cJSON_AddStringToObject(s, "rating",
+            health_rating_to_str(health[i].rating));
 
-            if (health[i].last_seen_age_s != UINT32_MAX) {
-                cJSON_AddNumberToObject(s, "last_seen_age_s",
-                    health[i].last_seen_age_s);
-            } else {
-                cJSON_AddNullToObject(s, "last_seen_age_s");
-            }
+        if (health[i].last_seen_age_s != UINT32_MAX) {
+            cJSON_AddNumberToObject(s, "last_seen_age_s",
+                health[i].last_seen_age_s);
+        } else {
+            cJSON_AddNullToObject(s, "last_seen_age_s");
+        }
 
-            // Merge telemetry data from cache — only when the device is currently
-            // connected. A reload (provision/decommission) wipes health seen-state
-            // but not this cache, so without the connected gate a just-reloaded
-            // sensor would emit connected:false yet carry stale battery/rssi/fw.
-            const telem_lora_cache_t *cached = NULL;
-            if (health[i].connected && s_lora_cache) {
-                for (int j = 0; j < TELEM_MAX_LORA_CACHE; j++) {
-                    if (!s_lora_cache[j].valid) continue;
-                    char cid[16];
-                    snprintf(cid, sizeof(cid), "0x%08lX",
-                             (unsigned long)s_lora_cache[j].sensor_id);
-                    if (strcasecmp(cid, health[i].dev_id) == 0) {
-                        cached = &s_lora_cache[j];
-                        break;
-                    }
+        // Merge telemetry data from cache — only when the device is currently
+        // connected. A reload (provision/decommission) wipes health seen-state
+        // but not this cache, so without the connected gate a just-reloaded
+        // sensor would emit connected:false yet carry stale battery/rssi/fw.
+        const telem_lora_cache_t *cached = NULL;
+        if (health[i].connected && s_lora_cache) {
+            for (int j = 0; j < TELEM_MAX_LORA_CACHE; j++) {
+                if (!s_lora_cache[j].valid) continue;
+                char cid[16];
+                snprintf(cid, sizeof(cid), "0x%08lX",
+                         (unsigned long)s_lora_cache[j].sensor_id);
+                if (strcasecmp(cid, health[i].dev_id) == 0) {
+                    cached = &s_lora_cache[j];
+                    break;
                 }
             }
-
-            /* battery / rssi / leak_state from the HEALTH table, for the same reason as the
-             * BLE branch below: the cache is delta-gated per packet, the health engine is
-             * fed on every packet. Kept symmetrical deliberately — a LoRa install must get
-             * the same live placement figures during the post-provision pulse that a BLE
-             * one does, and the pulse's packet arm already covers both sources.
-             *
-             * snr is the one exception: the health engine does not carry it, so it stays
-             * cache-sourced (and therefore as stale as the last D2C event). Flagged rather
-             * than plumbed — adding snr to the health event is a wider change than this
-             * fix warrants, and rssi is the figure used for placement. */
-            if (health[i].last_battery != 0xFF)
-                cJSON_AddNumberToObject(s, "battery", health[i].last_battery);
-            else
-                cJSON_AddNullToObject(s, "battery");
-
-            if (health[i].last_rssi != 0)
-                cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi);
-            else
-                cJSON_AddNullToObject(s, "rssi");
-
-            /* health[i].leaking, never a literal false and never the cache's copy. An
-             * offline-but-WET sensor used to publish leak_state:false in the same snapshot
-             * whose system_health.reason said "Leak detected: <its label>" — a document
-             * that contradicted itself, with the safer of the two values being the one a
-             * consumer reading the array would take. Field stays boolean; schema unchanged. */
-            cJSON_AddBoolToObject(s, "leak_state", health[i].leaking);
-
-            if (cached)
-                cJSON_AddNumberToObject(s, "snr", cached->snr);
-            else
-                cJSON_AddNullToObject(s, "snr");
-
-            add_location_obj(s, SENSOR_TYPE_LORA, health[i].dev_id);
-            cJSON_AddItemToArray(lora_arr, s);
         }
+
+        /* battery / rssi / leak_state from the HEALTH table, for the same reason as the
+         * BLE branch below: the cache is delta-gated per packet, the health engine is
+         * fed on every packet. Kept symmetrical deliberately — a LoRa install must get
+         * the same live placement figures during the post-provision pulse that a BLE
+         * one does, and the pulse's packet arm already covers both sources.
+         *
+         * snr is the one exception: the health engine does not carry it, so it stays
+         * cache-sourced (and therefore as stale as the last D2C event). Flagged rather
+         * than plumbed — adding snr to the health event is a wider change than this
+         * fix warrants, and rssi is the figure used for placement. */
+        if (health[i].last_battery != 0xFF)
+            cJSON_AddNumberToObject(s, "battery", health[i].last_battery);
+        else
+            cJSON_AddNullToObject(s, "battery");
+
+        if (health[i].last_rssi != 0)
+            cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi);
+        else
+            cJSON_AddNullToObject(s, "rssi");
+
+        /* health[i].leaking, never a literal false and never the cache's copy. An
+         * offline-but-WET sensor used to publish leak_state:false in the same snapshot
+         * whose system_health.reason said "Leak detected: <its label>" — a document
+         * that contradicted itself, with the safer of the two values being the one a
+         * consumer reading the array would take. Field stays boolean; schema unchanged. */
+        cJSON_AddBoolToObject(s, "leak_state", health[i].leaking);
+
+        if (cached)
+            cJSON_AddNumberToObject(s, "snr", cached->snr);
+        else
+            cJSON_AddNullToObject(s, "snr");
+
+        if (!add_location_obj(s, SENSOR_TYPE_LORA, health[i].dev_id)) goto fail;
     }
-    cJSON_AddItemToObject(data, "lora_sensors", lora_arr);
 
     // ---- BLE leak sensors (iterate health entries, merge cache data) ----
-    cJSON *ble_arr = cJSON_CreateArray();
-    if (have_health) {
-        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-            if (!health[i].in_use || health[i].dev_type != HEALTH_DEV_BLE_LEAK)
-                continue;
+    cJSON *ble_arr = cJSON_AddArrayToObject(data, "ble_leak_sensors");
+    if (!ble_arr) goto fail;
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        if (!health[i].in_use || health[i].dev_type != HEALTH_DEV_BLE_LEAK)
+            continue;
 
-            cJSON *s = cJSON_CreateObject();
-            cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
-            cJSON_AddBoolToObject(s, "connected", health[i].connected);
-            cJSON_AddStringToObject(s, "rating",
-                health_rating_to_str(health[i].rating));
+        cJSON *s = cJSON_CreateObject();
+        if (!s) goto fail;
+        cJSON_AddItemToArray(ble_arr, s);    // attached first: freed with root on failure
+        cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
+        cJSON_AddBoolToObject(s, "connected", health[i].connected);
+        cJSON_AddStringToObject(s, "rating",
+            health_rating_to_str(health[i].rating));
 
-            if (health[i].last_seen_age_s != UINT32_MAX) {
-                cJSON_AddNumberToObject(s, "last_seen_age_s",
-                    health[i].last_seen_age_s);
-            } else {
-                cJSON_AddNullToObject(s, "last_seen_age_s");
-            }
+        if (health[i].last_seen_age_s != UINT32_MAX) {
+            cJSON_AddNumberToObject(s, "last_seen_age_s",
+                health[i].last_seen_age_s);
+        } else {
+            cJSON_AddNullToObject(s, "last_seen_age_s");
+        }
 
-            // Merge telemetry data from cache — only when the device is currently
-            // connected (see LoRa note): prevents emitting connected:false with
-            // stale battery/rssi/fw after a reload wipes health seen-state.
-            const telem_ble_leak_cache_t *cached = NULL;
-            if (health[i].connected && s_ble_cache) {
-                for (int j = 0; j < TELEM_MAX_BLE_LEAK_CACHE; j++) {
-                    if (!s_ble_cache[j].valid) continue;
-                    if (strcasecmp(s_ble_cache[j].mac_str,
-                                   health[i].dev_id) == 0) {
-                        cached = &s_ble_cache[j];
-                        break;
-                    }
+        // Merge telemetry data from cache — only when the device is currently
+        // connected (see LoRa note): prevents emitting connected:false with
+        // stale battery/rssi/fw after a reload wipes health seen-state.
+        const telem_ble_leak_cache_t *cached = NULL;
+        if (health[i].connected && s_ble_cache) {
+            for (int j = 0; j < TELEM_MAX_BLE_LEAK_CACHE; j++) {
+                if (!s_ble_cache[j].valid) continue;
+                if (strcasecmp(s_ble_cache[j].mac_str,
+                               health[i].dev_id) == 0) {
+                    cached = &s_ble_cache[j];
+                    break;
                 }
             }
-
-            /* battery / rssi / leak_state come from the HEALTH table, NOT the cache.
-             *
-             * The cache is fed only through ble_leak_rx_queue, which the scanner's
-             * telemetry delta gate throttles — and that gate does not even test rssi
-             * (app_ble_leak.c tests leak | battery | fw_version only), so an RSSI-only
-             * change reaches the cache ONLY when the 5-minute telemetry heartbeat forces
-             * an event through. The health engine is fed on EVERY advertisement burst
-             * (~100 s), because its check-in sits above that gate.
-             *
-             * Sourcing the live numbers from the cache defeated the entire point of the
-             * post-provision pulse: publishing a snapshot per packet is worthless if the
-             * placement figures inside it are up to five minutes old. Observed on the
-             * Run A bench capture — a sensor moved mid-window reported rssi:-53 across
-             * five consecutive pulse snapshots and only revealed its true -70 at the
-             * following heartbeat, 300 s later.
-             *
-             * The staleness concern the `connected` gate was protecting against is handled
-             * for free here: health_engine_reconcile_devices() seeds a newly added device
-             * with last_battery 0xFF and last_rssi 0, so it emits null rather than stale
-             * values — and no cache fallback can resurrect them.
-             *
-             * fw_version still comes from the cache: the health table does not carry it and
-             * it cannot change at runtime, so staleness is not a concern for that one. */
-            if (health[i].last_battery != 0xFF)
-                cJSON_AddNumberToObject(s, "battery", health[i].last_battery);
-            else
-                cJSON_AddNullToObject(s, "battery");
-
-            if (health[i].last_rssi != 0)
-                cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi);
-            else
-                cJSON_AddNullToObject(s, "rssi");
-
-            /* Always the health engine's wet/dry, connected or not — it is both the
-             * freshest source and the one that cannot contradict system_health.reason for
-             * an offline-but-wet sensor. */
-            cJSON_AddBoolToObject(s, "leak_state", health[i].leaking);
-
-            if (cached && cached->fw_version[0])
-                cJSON_AddStringToObject(s, "fw_version", cached->fw_version);
-            else
-                cJSON_AddNullToObject(s, "fw_version");
-
-            add_location_obj(s, SENSOR_TYPE_BLE_LEAK, health[i].dev_id);
-            cJSON_AddItemToArray(ble_arr, s);
         }
+
+        /* battery / rssi / leak_state come from the HEALTH table, NOT the cache.
+         *
+         * The cache is fed only through ble_leak_rx_queue, which the scanner's
+         * telemetry delta gate throttles — and that gate does not even test rssi
+         * (app_ble_leak.c tests leak | battery | fw_version only), so an RSSI-only
+         * change reaches the cache ONLY when the 5-minute telemetry heartbeat forces
+         * an event through. The health engine is fed on EVERY advertisement burst
+         * (~100 s), because its check-in sits above that gate.
+         *
+         * Sourcing the live numbers from the cache defeated the entire point of the
+         * post-provision pulse: publishing a snapshot per packet is worthless if the
+         * placement figures inside it are up to five minutes old. Observed on the
+         * Run A bench capture — a sensor moved mid-window reported rssi:-53 across
+         * five consecutive pulse snapshots and only revealed its true -70 at the
+         * following heartbeat, 300 s later.
+         *
+         * The staleness concern the `connected` gate was protecting against is handled
+         * for free here: health_engine_reconcile_devices() seeds a newly added device
+         * with last_battery 0xFF and last_rssi 0, so it emits null rather than stale
+         * values — and no cache fallback can resurrect them.
+         *
+         * fw_version still comes from the cache: the health table does not carry it and
+         * it cannot change at runtime, so staleness is not a concern for that one. */
+        if (health[i].last_battery != 0xFF)
+            cJSON_AddNumberToObject(s, "battery", health[i].last_battery);
+        else
+            cJSON_AddNullToObject(s, "battery");
+
+        if (health[i].last_rssi != 0)
+            cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi);
+        else
+            cJSON_AddNullToObject(s, "rssi");
+
+        /* Always the health engine's wet/dry, connected or not — it is both the
+         * freshest source and the one that cannot contradict system_health.reason for
+         * an offline-but-wet sensor. */
+        cJSON_AddBoolToObject(s, "leak_state", health[i].leaking);
+
+        if (cached && cached->fw_version[0])
+            cJSON_AddStringToObject(s, "fw_version", cached->fw_version);
+        else
+            cJSON_AddNullToObject(s, "fw_version");
+
+        if (!add_location_obj(s, SENSOR_TYPE_BLE_LEAK, health[i].dev_id)) goto fail;
     }
-    cJSON_AddItemToObject(data, "ble_leak_sensors", ble_arr);
 
     // ---- Rules config (master auto-close enable + trigger mask) ----
     // Mirrors the lifecycle "rules" object EXACTLY (same shape + guard) so the
@@ -908,10 +929,10 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     // per-sensor auto_close flag, so per-sensor shutoff stays purely additive.
     rules_config_t rules;
     if (provisioning_get_rules_config(&rules)) {
-        cJSON *r = cJSON_CreateObject();
+        cJSON *r = cJSON_AddObjectToObject(data, "rules");
+        if (!r) goto fail;
         cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled);
         cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask);
-        cJSON_AddItemToObject(data, "rules", r);
     }
 
     // ---- Override window status ----
@@ -931,8 +952,12 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
             cJSON_AddNumberToObject(data, "expires_ts", (double)ovr_expires);
     }
 
-    cJSON_AddItemToObject(root, "data", data);
     return publish_json(root, "snapshot");
+
+fail:
+    ESP_LOGE(TELEM_TAG, "Snapshot not built - out of memory");
+    cJSON_Delete(root);
+    return false;
 }
 
 // ---- Events ---------------------------------------------------------------

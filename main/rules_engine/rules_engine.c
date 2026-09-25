@@ -1492,11 +1492,35 @@ void rules_engine_get_override_status(bool *active, int32_t *remaining_s,
     if (expires_ts)  *expires_ts = exp;   // 0 => omit the snapshot field
 }
 
-void rules_engine_clear_persistent_state(void)
+void rules_engine_reset_all(void)
 {
-    /* No mutex needed — used at decommission_all just before esp_restart.
-     * Wipes both incident latch and override window NVS entries so the next
-     * provisioning cycle starts from a known-clean slate. */
+    /* Under the mutex, unlike the NVS-only clear this replaces. That one ran unlocked on
+     * the esp-mqtt task and could interleave with an incident_save_to_nvs() running under
+     * the mutex on iothub_task, re-persisting the incident right after the erase (N22).
+     * It also reset only the latch, so the in-RAM override window survived and the final
+     * decommission snapshot could still report override_active:true (L12). */
+    bool locked = g_initialized &&
+                  xSemaphoreTake(g_mutex, pdMS_TO_TICKS(5000)) == pdTRUE;
+    if (locked) {
+        g_leak_incident_active      = false;
+        g_auto_close_triggered      = false;
+        g_all_clear_since           = 0;
+        g_rmleak_assert_tick        = 0;
+        g_last_reconnect_close_tick = 0;
+        g_last_auto_close_tick      = 0;
+        g_valve_was_ready           = false;
+        g_active_leak_count         = 0;
+        g_override_state            = OVERRIDE_STATE_INACTIVE;
+        g_override_window_expiry    = 0;
+        g_last_blocked_event_tick   = 0;
+        // g_pending_telemetry is kept: an already-built event describes something that
+        // really happened, and iothub_task still publishes it.
+    } else {
+        // Decommission must not be blocked by a stuck mutex: the NVS erase and the
+        // interlock release below still run, only the RAM state is left alone.
+        ESP_LOGE(RULES_TAG, "Rules reset: mutex unavailable — erasing NVS state only");
+    }
+
     nvs_handle_t h;
     if (nvs_open_from_partition(NVS_PROV_PARTITION, NVS_OVERRIDE_NAMESPACE, NVS_READWRITE, &h) == ESP_OK) {
         nvs_erase_key(h, NVS_KEY_OVR_STATE);
@@ -1504,20 +1528,24 @@ void rules_engine_clear_persistent_state(void)
         nvs_erase_key(h, NVS_KEY_INCIDENT);
         nvs_commit(h);
         nvs_close(h);
-        /* The key is gone, so the write-skip cache must forget what it thought was
-         * stored — otherwise a save of the same logical value after a wipe would be
-         * skipped and the key would never come back. */
-        g_incident_persisted = -1;
         ESP_LOGI(RULES_TAG, "NVS: rules-engine persistent state cleared");
     }
+    /* The key is gone, so the write-skip cache must forget what it thought was stored —
+     * otherwise a save of the same logical value after a wipe would be skipped and the
+     * key would never come back. Written on the unlocked path too: -1 only ever forces
+     * one extra write, so it cannot corrupt anything a stuck holder is doing. */
+    g_incident_persisted = -1;
 
-    /* Drop the in-RAM latch and the health engine's WARNING floor with it. Erasing the
-     * NVS key alone left g_leak_incident_active true, so a decommissioned hub — zero
-     * devices, nothing to protect — still reported warning with a leak-interlock reason
-     * on its final snapshot, and the fleet LED would have shown amber if anything had
-     * read the rating before the restart. */
-    g_leak_incident_active = false;
+    if (locked) xSemaphoreGive(g_mutex);
+
+    /* After the give, and on the unlocked path too: both are non-blocking, and the floor
+     * must drop even when the latch could not be reset. Zero devices means nothing to
+     * protect, yet a decommissioned hub's final snapshot used to report warning with a
+     * leak-interlock reason. */
     health_set_interlock_held(false);
+    ble_valve_cancel_pending_close();
+
+    ESP_LOGW(RULES_TAG, "Rules engine reset to defaults (no devices remain / decommission)");
 }
 
 bool rules_engine_forget_unprovisioned(void)

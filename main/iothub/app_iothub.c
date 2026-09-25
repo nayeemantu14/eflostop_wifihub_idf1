@@ -113,6 +113,12 @@ static volatile bool g_decommission_reboot = false;
 // written from two tasks. 2.1.3 did all of that on the esp-mqtt task.
 static volatile bool g_devset_changed = false;
 
+// True while the health table holds no device (nothing provisioned, or a rules-only
+// provision). iothub_task ONLY: seeded after health_engine_init() and updated by
+// apply_device_set_change(), whose false->true EDGE runs on_hub_emptied(). Also keeps
+// the 2 s commission poll off on an empty hub, which has nothing to sync.
+static bool s_hub_empty = false;
+
 // Sensor-meta rename: set by handle_c2d_command (esp-mqtt event task) on a
 // successful standalone `sensor_meta` command; consumed by iothub_task, which
 // converts it into an event snapshot so the app reflects the new label/location
@@ -200,7 +206,7 @@ typedef enum { SNAP_TIER_LOW = 0, SNAP_TIER_HIGH = 1 } snap_tier_t;
 #define SNAP_HIGH_WINDOW_MS    300     // safety-critical burst coalescing window
 #define SNAP_LOW_WINDOW_MS     2000    // low-priority coalescing window
 #define SNAP_MIN_INTERVAL_MS   5000    // min spacing between EVENT/HEARTBEAT snapshots (<=12/min)
-#define SNAP_OFFLINE_FLOOR_MS  30000   // loop idle cap while offline/unprovisioned with a due deadline
+#define SNAP_OFFLINE_FLOOR_MS  30000   // loop idle cap while offline with a due deadline
 #define SNAP_RETRY_FLOOR_MS    5000    // retry spacing when connected but a publish failed (no tight-spin)
 #define SNAP_FAST_CEILING_MS   150000  // fire the fast boot snapshot by 150 s even if the valve never connects
 
@@ -240,11 +246,14 @@ static int s_valve_pub_wet = 0;
 // ~245 s later, or the next heartbeat. The link edge is therefore published from
 // OUTSIDE that gate.
 //
-// Note the live MAC is deliberately NOT needed here: the snapshot builder falls
-// back to the health table's dev_id when the valve is disconnected
-// (telemetry_v2.c, the `else if (valve_hs)` arm), so the identity on the wire is
-// correct without it.
+// Note the live MAC is deliberately NOT needed here: the snapshot builder always
+// takes valve_id from the health table's (provisioned) dev_id (telemetry_v2.c, the
+// valve block), so the identity on the wire is correct without it.
 static int s_valve_pub_linked = -1;
+
+// The provisioned valve MAC the three detectors above currently describe ("" = no
+// valve). iothub_task only; see sync_valve_detectors().
+static char s_det_valve_mac[18] = {0};
 
 // Device Twin: request ID counter for twin GET/PATCH operations
 static int g_twin_rid = 0;
@@ -689,6 +698,63 @@ static void purge_telemetry_caches(void)
     }
 }
 
+// The hub just became EMPTY (the last device was removed). iothub_task only.
+//
+// This is an EDGE, run once per transition — not the per-pass reset the old unprovisioned
+// branch did, which cleared g_boot_snapshot_sent on every wake and so re-fired BOOT each
+// time the loop ran. Marking boot/fast as sent here is what stops a BOOT/FAST storm on a
+// hub with nothing to sync: the command-ack EVENT is the single owner of the transition
+// snapshot. After a reboot or an MQTT (re)connect the lifecycle block clears
+// g_boot_snapshot_sent again and, because an empty table is sync-complete, exactly one
+// "boot" snapshot is published; heartbeats follow at the interval.
+static void on_hub_emptied(void)
+{
+    ESP_LOGW(IOTHUB_TAG, "Hub is now EMPTY - no devices provisioned; heartbeat-only snapshots");
+
+    // Nothing left to protect: drop the latch, the override, the active leaks and any
+    // pending close, and put the rules back to the provisioning defaults, so the next
+    // deployment starts clean (Q6; L12). Same keys as a normal rules_config write.
+    rules_engine_reset_all();
+    rules_config_t def = { .auto_close_enabled = true, .trigger_mask = RULES_TRIGGER_ALL };
+    if (!provisioning_set_rules_config(&def)) {
+        ESP_LOGW(IOTHUB_TAG, "Hub empty: rules config reset to defaults failed");
+    }
+
+    g_boot_snapshot_sent  = true;   // nothing to sync — see above
+    g_fast_snapshot_sent  = true;
+    g_commission_pub_seen = 0;
+    g_commission_until_ms = 0;
+    // An open post-provision pulse has nothing left to refresh.
+    g_prov_pulse_arm      = false;
+    g_prov_pulse_until_ms = 0;
+    g_prov_pulse_next_ms  = 0;
+    g_prov_pulse_count    = 0;
+}
+
+// Re-point the valve change detectors (s_valve_pub_linked / _wet / _state) when the
+// provisioned valve changes or is removed (L10). iothub_task only.
+//
+// They hold the last value PUBLISHED for one particular valve, and nothing reset them:
+//   - a removed valve's teardown DISCONNECTED then produced a second "valve_unlinked"
+//     snapshot after the removal snapshot — presetting linked to 0 (no valve) absorbs it;
+//   - a NEW valve inherited the old one's edges, so a new wet valve's leak_detected was
+//     suppressed and a new dry one produced a phantom leak_cleared — presetting -1/0/-2
+//     makes it publish its own first link, leak and state edges.
+static void sync_valve_detectors(void)
+{
+    char mac[18];
+    bool have = provisioning_get_valve_mac(mac);
+    if (!have) mac[0] = '\0';
+
+    if (strcasecmp(mac, s_det_valve_mac) == 0) return;   // same valve (or still none)
+
+    s_valve_pub_linked = have ? -1 : 0;
+    s_valve_pub_wet    = 0;
+    s_valve_pub_state  = -2;
+    snprintf(s_det_valve_mac, sizeof(s_det_valve_mac), "%s", mac);
+    ESP_LOGI(IOTHUB_TAG, "Valve detectors reset for %s", have ? mac : "no valve");
+}
+
 // The single owner of a device-set change (D0). iothub_task only, consumed at the top of
 // the loop so everything below — including the command-ack snapshot — sees the new set.
 static void apply_device_set_change(void)
@@ -708,8 +774,17 @@ static void apply_device_set_change(void)
         g_devset_changed = true;
     }
 
-    // ONLY additions arm the commission snapshot + pulse; removals never do (BUG-2/3).
-    if (r.added > 0) arm_commission_snapshot(true);
+    // Emptied -> reset once (edge). Otherwise ONLY additions arm the commission snapshot +
+    // pulse; removals never do (BUG-2/3).
+    bool now_empty = (r.total == 0);
+    if (now_empty && !s_hub_empty) {
+        on_hub_emptied();
+    } else if (r.added > 0) {
+        arm_commission_snapshot(true);
+    }
+    s_hub_empty = now_empty;
+
+    sync_valve_detectors();
 
     // Every device-set change refreshes the twin (Q7; L11: decommission used to leave the
     // twin claiming the removed device until the next reconnect).
@@ -752,8 +827,8 @@ static inline bool snap_window_suppressing(void)
 }
 
 // Re-arm the heartbeat deadline relative to the last CONFIRMED publish. Called at
-// task start, after every successful snapshot publish, and on the unprovisioned
-// branch (to clear a stranded EVENT deadline + stale device label).
+// task start, after every successful snapshot publish, and when a Twin change re-aims
+// a pending heartbeat.
 static void snap_rearm_heartbeat(void)
 {
     s_snap_due_ms = s_snap_last_pub_ms + s_hb_interval_ms;
@@ -816,11 +891,11 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
      * just fired. Every such request is discarded in silence.
      *
      * Reachable whenever the deadline is already PAST-DUE at the moment the window opens
-     * — e.g. a `provision` on a hub that has been unprovisioned or offline for a while,
-     * where the !provisioned branch has been re-arming the heartbeat from a stale
-     * last_pub. The provision's own EVENT request is dropped for the same reason (a
-     * past-due deadline is already "earlier"), so the reason stays HEARTBEAT and the
-     * deferral loop starts.
+     * — e.g. a `provision` on a hub that has been offline for a while (in 2.1.3 also an
+     * unprovisioned one, whose since-removed !provisioned branch re-armed the heartbeat
+     * from a stale last_pub). The provision's own EVENT request is dropped for the same
+     * reason (a past-due deadline is already "earlier"), so the reason stays HEARTBEAT
+     * and the deferral loop starts.
      *
      * This is PRE-EXISTING, not new in 2.1.3: it equally delays a leak_detected snapshot
      * by up to the whole boot/commission window. Safety is unaffected — the leak EVENT
@@ -981,7 +1056,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 sensor_meta_clear_all();
                 hub_identity_clear();
                 dps_clear_cache();
-                rules_engine_clear_persistent_state();
+                rules_engine_reset_all();        // RAM + NVS, incl. the override window
                 telemetry_v2_clear_settings();   // heartbeat cadence back to default
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
@@ -2067,10 +2142,24 @@ void iothub_task(void *param)
         ESP_LOGE(IOTHUB_TAG, "Failed to initialize provisioning manager");
     }
 
+    // The valve detectors start out describing the valve provisioned at boot (their
+    // initial values are already the "nothing published yet" sentinels).
+    if (!provisioning_get_valve_mac(s_det_valve_mac)) s_det_valve_mac[0] = '\0';
+
     // Initialize sensor metadata and rules engine
     sensor_meta_init();
     rules_engine_init();
     health_engine_init();
+
+    // Seed the empty-hub state from the table health_engine_init() just built. NOT an
+    // edge: a hub that boots empty was already reset when it emptied. A failed read
+    // leaves it false, which costs only the 2 s commission poll until the first boot
+    // snapshot, and at worst a redundant on_hub_emptied() at the next device-set change.
+    {
+        uint8_t total = 0;
+        bool ok = health_get_sync_counts(NULL, &total);
+        s_hub_empty = ok && (total == 0);
+    }
 
     // Check provisioning state
     if (provisioning_is_provisioned()) {
@@ -2205,6 +2294,10 @@ void iothub_task(void *param)
             // from an empty table (and the caches, the rules sources and the twin agree).
             apply_device_set_change();
             telemetry_v2_publish_snapshot("decommission");
+            // Events buffered while offline belong to the deployment that just ended;
+            // replaying them after the reboot would report its leaks under the next one
+            // (L17).
+            offline_buffer_clear();
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
             esp_restart();
@@ -2279,7 +2372,7 @@ void iothub_task(void *param)
             }
         }
 
-        bool provisioned = provisioning_is_provisioned();
+        bool mqtt_up = telemetry_v2_is_connected();
 
         // While a boot/commission snapshot is pending OR the post-commission
         // refresh grace is open, poll briefly so the snapshot publishes within ~2 s
@@ -2288,20 +2381,22 @@ void iothub_task(void *param)
         // a queue), so without the 2 s base a sensor advertisement could wait up to 30 s
         // for its snapshot — and "within a couple of seconds of hearing the sensor" is the
         // whole user-visible promise of the feature.
-        bool commission_pending = provisioned &&
+        // Not while offline (nothing could be published; reconnect wakes us) and not on an
+        // empty hub (nothing to sync; its one boot snapshot is due immediately anyway).
+        bool commission_pending = !s_hub_empty && mqtt_up &&
             (!g_boot_snapshot_sent ||
              (snap_now_ms() < g_commission_until_ms) ||
              (g_prov_pulse_until_ms != 0));
 
         // Flush trigger = derive the select timeout from the snapshot deadline so
         // the loop wakes in time to flush a pending snapshot (defeats the 30 s idle
-        // block). If a snapshot is due but we can't publish (offline/unprovisioned),
-        // idle at the offline floor instead of tight-spinning; reconnect wakes us
-        // immediately via telemetry_v2_wake_snapshot().
+        // block). If a snapshot is due but we can't publish (offline), idle at the
+        // offline floor instead of tight-spinning; reconnect wakes us immediately via
+        // telemetry_v2_wake_snapshot(). An empty hub publishes like any other.
         int64_t now_ms = snap_now_ms();
         int64_t delta  = s_snap_due_ms - now_ms;
         if (delta < 0) delta = 0;
-        bool can_pub = provisioned && telemetry_v2_is_connected();
+        bool can_pub = mqtt_up;
         if (delta <= 0 && !can_pub) delta = SNAP_OFFLINE_FLOOR_MS;
         int64_t base = commission_pending ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
@@ -2450,53 +2545,18 @@ void iothub_task(void *param)
         sas_maintain();   // mint on first valid clock, then renew before expiry
 
         // =================================================================
-        // Phase 3: PUBLISH (only when connected + provisioned)
+        // Phase 3: PUBLISH (every pass; the flush below needs a connection)
         // =================================================================
-        // RE-SAMPLE, do not trust the value latched at the top of the iteration.
-        //
-        // `provisioned` was read BEFORE the blocking xQueueSelectFromSet() above, and a
-        // C2D `provision` lands on the esp-mqtt event task — which sets its flags and THEN
-        // calls telemetry_v2_wake_snapshot(). So the very wake that delivers a provision
-        // resumes this task still holding provisioned==false, and on a factory-fresh hub
-        // that window is up to 30 s wide (nothing else makes the loop spin when
-        // unprovisioned). Falling into this branch then WIPES the flags the provision just
-        // set, one iteration after they were written.
-        //
-        // The pre-existing resets below survived that because they all self-heal — the
-        // SNAP_FAST path re-arms g_boot_snapshot_sent and g_commission_until_ms. The pulse
-        // arm has no second writer: g_prov_pulse_arm is set in exactly one place
-        // (arm_commission_snapshot), so clearing it here silently killed the whole feature
-        // on first commissioning, with no log line to explain the silence. Found by the
-        // 2.1.3 council; it would have passed every bench run that started from an
-        // already-provisioned hub.
-        //
-        // Re-reading is safe: `provisioned` is otherwise used only for commission_pending
-        // and can_pub, both of which feed the select timeout that has already elapsed. On
-        // the re-sampled-true path this iteration simply proceeds into Phase 3 with fresh
-        // state instead of burning an iteration.
-        if (!provisioned && !(provisioned = provisioning_is_provisioned())) {
-            if (auto_close_json) free(auto_close_json);
-            // Reset the scheduler to a neutral heartbeat so a stranded past-due
-            // EVENT deadline (with a now-stale device label) can't fire on the
-            // next provision; offline-floor in evt_wait prevents any spin. Also
-            // clear the commission bookkeeping so a re-provision can't run against
-            // stale state if it arrives via a path that skips arm_commission_snapshot.
-            snap_rearm_heartbeat();
-            g_boot_snapshot_sent  = false;
-            g_fast_snapshot_sent  = false;
-            g_fast_arm_ms         = snap_now_ms();
-            g_commission_pub_seen = 0;
-            g_commission_until_ms = 0;
-            // Drop the pulse window too. A decommission that unprovisions the hub
-            // mid-window would otherwise strand it: the firing block is below this
-            // `continue`, so nothing would ever reach the expiry branch that clears it,
-            // and commission_pending would pin the loop to a 2 s poll indefinitely.
-            g_prov_pulse_arm      = false;
-            g_prov_pulse_until_ms = 0;
-            g_prov_pulse_next_ms  = 0;
-            g_prov_pulse_count    = 0;
-            continue;
-        }
+        // There is deliberately NO "provisioned" gate here any more. 2.1.3 `continue`d
+        // past this whole phase while unprovisioned, which skipped the lifecycle, the
+        // twin, the offline drain, alert popping, the rules events and the ONLY snapshot
+        // flush — an emptied hub went silent for ~9 min (BUG-6), and its one stale
+        // snapshot came from a `provisioned` value sampled before the wait (BUG-3).
+        // Every publisher below gates itself on its own device instead: LoRa via
+        // provisioning_is_lora_sensor_provisioned(), BLE via
+        // provisioning_is_ble_sensor_provisioned(), the valve events via vlk_mac_ok (its
+        // link edge via the detectors sync_valve_detectors() re-points). The empty-hub
+        // scheduler state is set once, on the transition, by on_hub_emptied().
 
         // ---- Lifecycle on first connect / reconnect ----
         if (g_needs_lifecycle) {
