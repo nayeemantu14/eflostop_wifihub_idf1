@@ -239,7 +239,8 @@ bool health_request_valve_resync(void);
  *     individually while the roll-up reads EXCELLENT. "Not heard from yet" is not the
  *     same claim as "offline";
  *   - a latched leak interlock raises a WARNING floor, so the roll-up can be worse than
- *     every device in it (see health_set_interlock_held()).
+ *     every device in it (see health_set_interlock_held()) — but only while at least
+ *     one device is in the table: an empty hub reads EXCELLENT whatever the latch says.
  */
 health_rating_t health_get_system_rating(void);
 
@@ -362,7 +363,8 @@ bool health_is_valve_battery_critical(void);
  * roll-up (and therefore the fleet LED) reads amber rather than green while the
  * water is still shut off — even once every sensor reports dry and every device is
  * individually healthy. Cleared when the incident clears (30 s all-dry auto-clear,
- * LEAK_RESET, or a physical override).
+ * LEAK_RESET, or a physical override). The floor applies only while at least one
+ * device is in the table: an empty hub has nothing to hold closed (F4).
  *
  * Implemented as a lock-free volatile store, so it is safe to call from any task
  * and with any other lock held; it cannot participate in a lock cycle. Also nudges

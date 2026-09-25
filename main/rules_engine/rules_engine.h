@@ -210,8 +210,8 @@ override_enable_result_t rules_engine_enable_override_remote(void);
  *        timers, the 24h override window, and the NVS keys that persist them. Also
  *        releases the health WARNING floor and cancels a pending auto-close.
  *
- * Call when no device remains (the hub was emptied by removals) and from
- * decommission_all, so a re-provisioned hub doesn't inherit a stale incident or
+ * Call when no device remains (the hub was emptied by removals, or boots empty) and
+ * from decommission_all, so a re-provisioned hub doesn't inherit a stale incident or
  * override from the previous deployment. Replaces the NVS-only
  * rules_engine_clear_persistent_state(), which left the in-RAM override running (so
  * the final decommission snapshot could still claim override_active) and erased
@@ -220,9 +220,14 @@ override_enable_result_t rules_engine_enable_override_remote(void);
  * Takes the rules mutex (5 s). If it cannot, the NVS keys are still erased and the
  * interlock floor still released, but RAM state is left alone: a stuck mutex must
  * never block a decommission. A pending auto_close/rules event already built is kept
- * — it describes something that really happened.
+ * — it describes something that really happened. Resets STATE only; the rules config
+ * (auto_close_enabled / trigger_mask) is provisioning's and is left untouched.
+ *
+ * @return true if the RAM state was reset under the mutex; false if the mutex was
+ *         unavailable or the engine is not initialised (NVS keys still erased, RAM
+ *         state left as it was — the caller may retry).
  */
-void rules_engine_reset_all(void);
+bool rules_engine_reset_all(void);
 
 /**
  * @brief Drop active-leak sources that are no longer provisioned (a device

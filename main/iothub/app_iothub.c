@@ -119,6 +119,11 @@ static volatile bool g_devset_changed = false;
 // the 2 s commission poll off on an empty hub, which has nothing to sync.
 static bool s_hub_empty = false;
 
+// An empty-hub rules-engine reset (boot or on_hub_emptied()) could not take the rules
+// mutex, so the RAM latch/override may be stale. Retried on the next empty -> non-empty
+// edge in apply_device_set_change(). iothub_task ONLY.
+static bool s_rules_reset_owed = false;
+
 // Sensor-meta rename: set by handle_c2d_command (esp-mqtt event task) on a
 // successful standalone `sensor_meta` command; consumed by iothub_task, which
 // converts it into an event snapshot so the app reflects the new label/location
@@ -721,10 +726,25 @@ static void on_hub_emptied(void)
     // Nothing left to protect: drop the latch, the override, the active leaks and any
     // pending close, and put the rules back to the provisioning defaults, so the next
     // deployment starts clean (Q6; L12). Same keys as a normal rules_config write.
-    rules_engine_reset_all();
+    if (!rules_engine_reset_all()) {
+        s_rules_reset_owed = true;   // retried when the hub next gains a device
+        ESP_LOGE(IOTHUB_TAG, "Hub empty: rules-engine RAM reset failed - retry owed");
+    }
     rules_config_t def = { .auto_close_enabled = true, .trigger_mask = RULES_TRIGGER_ALL };
     if (!provisioning_set_rules_config(&def)) {
         ESP_LOGW(IOTHUB_TAG, "Hub empty: rules config reset to defaults failed");
+    }
+
+    // The transition to empty is an EVENT snapshot (Phase B). An urgent reason still pending
+    // here (held by the retry floor or the settle gate) would otherwise publish it as
+    // boot/commission/fast: marking boot/fast sent below does not touch s_snap_reason, and
+    // the command-ack EVENT cannot displace it because snap_request() is pull-in-only. The
+    // deadline is kept, so this changes the label, not the timing.
+    if (s_snap_reason == SNAP_BOOT || s_snap_reason == SNAP_COMMISSION ||
+        s_snap_reason == SNAP_FAST) {
+        s_snap_reason = SNAP_EVENT;
+        s_snap_tier   = SNAP_TIER_HIGH;
+        snprintf(s_snap_evt, sizeof(s_snap_evt), "%s", "hub_emptied");
     }
 
     g_boot_snapshot_sent  = true;   // nothing to sync — see above
@@ -794,6 +814,19 @@ static void apply_device_set_change(void)
     if (now_empty && !s_hub_empty) {
         on_hub_emptied();
     } else if (r.added > 0) {
+        /* Empty -> non-empty edge (s_hub_empty still holds the OLD value): retry an
+         * empty-hub rules reset that is known to have FAILED, so a stale latch/override
+         * cannot turn the new valve's first open-with-RMLEAK-clear link into an inferred
+         * physical override that blocks auto-close for 24 h.
+         *
+         * Deliberately NOT unconditional on every such edge: between the esp-mqtt
+         * provisioning write and this loop-top reconcile, a newly provisioned sensor's
+         * first leak can already have latched the incident in Phase 2, and a blanket reset
+         * would drop a real leak. Only for an owed reset is that narrow race the lesser
+         * risk. (The boot reset is race-free: the event loop has not started.) */
+        if (s_hub_empty && s_rules_reset_owed) {
+            s_rules_reset_owed = !rules_engine_reset_all();
+        }
         arm_commission_snapshot(true);
         ESP_LOGI(IOTHUB_TAG,
                  "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
@@ -1085,7 +1118,9 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 sensor_meta_clear_all();
                 hub_identity_clear();
                 dps_clear_cache();
-                rules_engine_reset_all();        // RAM + NVS, incl. the override window
+                // RAM + NVS, incl. the override window. The result is ignored: the hub
+                // reboots, and the boot-time empty-hub reset runs again on a clean mutex.
+                (void)rules_engine_reset_all();
                 telemetry_v2_clear_settings();   // heartbeat cadence back to default
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
@@ -2177,14 +2212,49 @@ void iothub_task(void *param)
     rules_engine_init();
     health_engine_init();
 
-    // Seed the empty-hub state from the table health_engine_init() just built. NOT an
-    // edge: a hub that boots empty was already reset when it emptied. A failed read
-    // leaves it false, which costs only the 2 s commission poll until the first boot
-    // snapshot, and at worst a redundant on_hub_emptied() at the next device-set change.
+    /* Seed the empty-hub state from a DEFINITE provisioning read (false = unknown, never
+     * "empty"), and clear persisted rules-engine STATE on a hub that boots empty.
+     *
+     * rules_engine_init() above always restores the incident latch and the override window
+     * from NVS, and a hub emptied by per-device removals under 2.1.3 or earlier still has
+     * both keys (only decommission-all cleared them there); on_hub_emptied() runs only on a
+     * runtime non-empty -> empty EDGE, which such a hub never takes. Left alone, the next
+     * valve provisioned and linked open with RMLEAK clear would be read as a physical
+     * override and block auto-close for 24 h on the new installation. Race-free here: the
+     * event loop has not started, so no leak can have latched since the load.
+     *
+     * The rules CONFIG is not touched: a rules_config set on an empty hub must survive a
+     * reboot.
+     *
+     * If provisioning cannot be read, s_hub_empty stays false: that costs the 2 s
+     * commission poll until the first boot snapshot, and an on_hub_emptied() (which does
+     * reset) if the next device-set change finds the table empty. */
     {
-        uint8_t total = 0;
-        bool ok = health_get_sync_counts(NULL, &total);
-        s_hub_empty = ok && (total == 0);
+        prov_device_set_t set;
+        if (provisioning_get_device_set(&set)) {
+            int n = (set.has_valve ? 1 : 0) + set.lora_count + set.ble_count;
+            s_hub_empty = (n == 0);
+            if (s_hub_empty) {
+                ESP_LOGI(IOTHUB_TAG, "Boot: hub is empty - clearing any persisted rules-engine state");
+                if (!rules_engine_reset_all()) s_rules_reset_owed = true;
+            } else {
+                /* The boot reconcile inside health_engine_init() failed (provisioning or
+                 * the health mutex busy) and nothing else would retry it: the table would
+                 * stay empty until the next C2D change. Hand it to the loop's device-set
+                 * path. That reconciles with the commission window and arms the
+                 * post-provision pulse — more snapshots than a normal boot, acceptable on a
+                 * failure-only path. */
+                uint8_t total = 0;
+                if (health_get_sync_counts(NULL, &total) && total == 0) {
+                    ESP_LOGW(IOTHUB_TAG,
+                             "Boot: %d device(s) provisioned but the health table is empty - retrying the reconcile",
+                             n);
+                    g_devset_changed = true;
+                }
+            }
+        } else {
+            ESP_LOGW(IOTHUB_TAG, "Boot: provisioning unavailable - empty-hub state unknown");
+        }
     }
 
     // Check provisioning state
@@ -2582,9 +2652,11 @@ void iothub_task(void *param)
         // snapshot came from a `provisioned` value sampled before the wait (BUG-3).
         // Every publisher below gates itself on its own device instead: LoRa via
         // provisioning_is_lora_sensor_provisioned(), BLE via
-        // provisioning_is_ble_sensor_provisioned(), the valve events via vlk_mac_ok (its
-        // link edge via the detectors sync_valve_detectors() re-points). The empty-hub
-        // scheduler state is set once, on the transition, by on_hub_emptied().
+        // provisioning_is_ble_sensor_provisioned(), the valve events via vlk_mac_ok, and
+        // the valve link edge via s_det_valve_mac (a provisioned valve exists; the
+        // detectors sync_valve_detectors() re-points only absorb the first teardown
+        // DISCONNECTED after a removal). The empty-hub scheduler state is set once, on the
+        // transition, by on_hub_emptied().
 
         // ---- Lifecycle on first connect / reconnect ----
         if (g_needs_lifecycle) {
@@ -2682,10 +2754,16 @@ void iothub_task(void *param)
             // MAC. Delta-gated so a flapping link produces one snapshot per real
             // transition, and the tier only sets the coalescing window — the 5 s
             // SNAP_MIN_INTERVAL_MS rate cap still applies.
+            //
+            // Only with a PROVISIONED valve (s_det_valve_mac). An empty or valve-less hub
+            // has no valve to report, yet the valve module can still link one (it can
+            // relink an unprovisioned valve by name). sync_valve_detectors()'s preset of 0
+            // absorbs only the first teardown DISCONNECTED after a removal; this gate is
+            // what stops every later edge.
             int linked = (ble_upd_type == BLE_UPD_CONNECTED)    ? 1
                        : (ble_upd_type == BLE_UPD_DISCONNECTED) ? 0
                        : -1;
-            if (linked >= 0 && linked != s_valve_pub_linked) {
+            if (linked >= 0 && s_det_valve_mac[0] != '\0' && linked != s_valve_pub_linked) {
                 s_valve_pub_linked = linked;
                 snap_request(SNAP_EVENT, SNAP_TIER_HIGH,
                              linked ? "valve_linked" : "valve_unlinked");

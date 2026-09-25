@@ -121,7 +121,9 @@ void telemetry_v2_publish_lifecycle(void);
  * @param trigger Trigger reason string emitted as data.reason
  *                ("heartbeat" | "event" | "commission" | "boot"); may be NULL.
  * @return true ONLY if the snapshot actually reached esp-mqtt (online, msg_id>=0);
- *         false if dropped offline or suppressed pre-SNTP. The caller re-arms the
+ *         false if dropped offline, suppressed pre-SNTP, deferred because the health
+ *         table was busy (its copy timed out: nothing is published rather than empty
+ *         device arrays), or not built for lack of memory. The caller re-arms the
  *         heartbeat only on true.
  */
 bool telemetry_v2_publish_snapshot(const char *trigger);

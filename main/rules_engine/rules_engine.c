@@ -120,11 +120,16 @@ static void override_save_to_nvs(void)
 
 /* Persist the incident latch, and mirror it to the health engine.
  *
- * This is deliberately the ONE place both of those happen. Every
- * `g_leak_incident_active = ...` site in this file is immediately followed by a
- * call to this function (verified 12 assignments / 12 callsites), so routing the
+ * This is deliberately the ONE place both of those happen. Every runtime
+ * `g_leak_incident_active = ...` site in this file but one is immediately followed by
+ * a call to this function (13 assignments / 13 callsites at 2.1.4), so routing the
  * health mirror through here means a future mutation cannot silently skip it the
  * way it could with a dozen parallel call pairs.
+ *
+ * The one deliberate exception is rules_engine_reset_all(): it ERASES the key instead
+ * of writing 0, and releases the health floor itself. (incident_load_from_nvs() also
+ * assigns the latch, but it is the read side; rules_engine_init() mirrors the restored
+ * value to health.)
  *
  * The health side is the YELLOW floor: while the hub is holding the valve closed,
  * system health reads WARNING even though every device is individually fine, so the
@@ -1492,7 +1497,7 @@ void rules_engine_get_override_status(bool *active, int32_t *remaining_s,
     if (expires_ts)  *expires_ts = exp;   // 0 => omit the snapshot field
 }
 
-void rules_engine_reset_all(void)
+bool rules_engine_reset_all(void)
 {
     /* Under the mutex, unlike the NVS-only clear this replaces. That one ran unlocked on
      * the esp-mqtt task and could interleave with an incident_save_to_nvs() running under
@@ -1536,16 +1541,22 @@ void rules_engine_reset_all(void)
      * one extra write, so it cannot corrupt anything a stuck holder is doing. */
     g_incident_persisted = -1;
 
-    if (locked) xSemaphoreGive(g_mutex);
-
-    /* After the give, and on the unlocked path too: both are non-blocking, and the floor
-     * must drop even when the latch could not be reset. Zero devices means nothing to
-     * protect, yet a decommissioned hub's final snapshot used to report warning with a
-     * leak-interlock reason. */
+    /* Release the floor and cancel a pending close on BOTH paths: both are non-blocking,
+     * and the floor must drop even when the latch could not be reset. Zero devices means
+     * nothing to protect, yet a decommissioned hub's final snapshot used to report warning
+     * with a leak-interlock reason.
+     *
+     * On the locked path they run BEFORE the give (both are already called under g_mutex
+     * elsewhere, e.g. track_leak_source()). After it, a concurrent evaluate_leak() could
+     * latch a NEW incident in the gap and then have its floor and its pending close undone
+     * by this reset of the old state. */
     health_set_interlock_held(false);
     ble_valve_cancel_pending_close();
 
+    if (locked) xSemaphoreGive(g_mutex);
+
     ESP_LOGW(RULES_TAG, "Rules engine reset to defaults (no devices remain / decommission)");
+    return locked;
 }
 
 bool rules_engine_forget_unprovisioned(void)
