@@ -505,13 +505,12 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
 
     // Add location if available
     if (source_id && source != LEAK_SOURCE_VALVE) {
-        const sensor_meta_entry_t *meta = sensor_meta_find(
-            source_to_sensor_type(source), source_id);
-        if (meta) {
+        sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
+        if (sensor_meta_get(source_to_sensor_type(source), source_id, &meta)) {
             cJSON *loc = cJSON_CreateObject();
             cJSON_AddStringToObject(loc, "code",
-                sensor_meta_location_code_to_str(meta->location_code));
-            cJSON_AddStringToObject(loc, "label", meta->label);
+                sensor_meta_location_code_to_str(meta.location_code));
+            cJSON_AddStringToObject(loc, "label", meta.label);
             cJSON_AddItemToObject(root, "location", loc);
         }
     }

@@ -71,10 +71,18 @@ typedef struct {
 bool sensor_meta_init(void);
 
 /**
- * @brief Find metadata for a sensor (RAM-only, hot-path safe).
- * @return pointer to entry or NULL if not found
+ * @brief Copy the metadata for a sensor into *out (RAM-only, hot-path safe; id matched
+ *        case-insensitively).
+ *
+ * The entry is copied while the module's mutex is held. A pointer into the table (the
+ * old sensor_meta_find) was dereferenced after the unlock, when a concurrent remove
+ * could already have shifted another sensor's entry into that slot (L16).
+ *
+ * @param out Zeroed first, so a miss reads as LOC_UNKNOWN with an empty label.
+ * @return true if found; false if absent, not initialised, or the mutex (1000 ms)
+ *         timed out
  */
-const sensor_meta_entry_t *sensor_meta_find(sensor_type_t type, const char *sensor_id);
+bool sensor_meta_get(sensor_type_t type, const char *id, sensor_meta_entry_t *out);
 
 /**
  * @brief Set metadata for a sensor (find-or-create). Persists to NVS.

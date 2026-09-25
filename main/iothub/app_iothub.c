@@ -285,8 +285,16 @@ static int s_valve_pub_linked = -1;
 // valve). iothub_task only; see sync_valve_detectors().
 static char s_det_valve_mac[18] = {0};
 
-// Device Twin: request ID counter for twin GET/PATCH operations
+// Device Twin: request ID counter for twin GET/PATCH operations. Only ever advanced
+// through next_twin_rid(): the esp-mqtt task (twin GET, reported echoes of C2D and
+// desired patches) and iothub_task (connect, device-set reconcile) both take ids, and a
+// plain ++ from the two could hand out the same $rid twice.
 static int g_twin_rid = 0;
+
+static int next_twin_rid(void)
+{
+    return __atomic_add_fetch(&g_twin_rid, 1, __ATOMIC_RELAXED);
+}
 
 // msg_id of the in-flight "$iothub/twin/res/#" SUBSCRIBE, or -1 when there is
 // none. The twin GET is deferred until the matching SUBACK so the response cannot
@@ -591,11 +599,12 @@ static char *build_lora_delta_json(const lora_packet_t *pkt)
 
     char lora_id[16];
     snprintf(lora_id, sizeof(lora_id), "0x%08lX", pkt->sensorId);
-    const sensor_meta_entry_t *meta = sensor_meta_find(SENSOR_TYPE_LORA, lora_id);
+    sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
+    bool have_meta = sensor_meta_get(SENSOR_TYPE_LORA, lora_id, &meta);
     cJSON *locObj = cJSON_CreateObject();
     cJSON_AddStringToObject(locObj, "code",
-        sensor_meta_location_code_to_str(meta ? meta->location_code : LOC_UNKNOWN));
-    cJSON_AddStringToObject(locObj, "label", meta ? meta->label : "");
+        sensor_meta_location_code_to_str(have_meta ? meta.location_code : LOC_UNKNOWN));
+    cJSON_AddStringToObject(locObj, "label", have_meta ? meta.label : "");
     cJSON_AddItemToObject(thisSensor, "location", locObj);
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -631,11 +640,12 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
     cJSON_AddBoolToObject(thisSensor, "leak_state", evt->leak_detected);
     cJSON_AddNumberToObject(thisSensor, "rssi", evt->rssi);
 
-    const sensor_meta_entry_t *meta = sensor_meta_find(SENSOR_TYPE_BLE_LEAK, evt->sensor_mac_str);
+    sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
+    bool have_meta = sensor_meta_get(SENSOR_TYPE_BLE_LEAK, evt->sensor_mac_str, &meta);
     cJSON *locObj = cJSON_CreateObject();
     cJSON_AddStringToObject(locObj, "code",
-        sensor_meta_location_code_to_str(meta ? meta->location_code : LOC_UNKNOWN));
-    cJSON_AddStringToObject(locObj, "label", meta ? meta->label : "");
+        sensor_meta_location_code_to_str(have_meta ? meta.location_code : LOC_UNKNOWN));
+    cJSON_AddStringToObject(locObj, "label", have_meta ? meta.label : "");
     cJSON_AddItemToObject(thisSensor, "location", locObj);
 
     char *json_str = cJSON_PrintUnformatted(root);
@@ -1447,7 +1457,7 @@ static void publish_twin_reported(void)
     if (!json) return;
 
     char topic[128];
-    int rid = ++g_twin_rid;
+    int rid = next_twin_rid();
     snprintf(topic, sizeof(topic),
              "$iothub/twin/PATCH/properties/reported/?$rid=%d", rid);
 
@@ -1931,9 +1941,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         if (g_twin_res_sub_id > 0 && event->msg_id == g_twin_res_sub_id) {
             g_twin_res_sub_id = -1;             // one GET per connection
             char topic[64];
-            snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", ++g_twin_rid);
+            int rid = next_twin_rid();
+            snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", rid);
             esp_mqtt_client_publish(mqtt_client, topic, "", 0, 1, 0);
-            ESP_LOGI(IOTHUB_TAG, "Twin GET requested (rid=%d)", g_twin_rid);
+            ESP_LOGI(IOTHUB_TAG, "Twin GET requested (rid=%d)", rid);
         }
         break;
 

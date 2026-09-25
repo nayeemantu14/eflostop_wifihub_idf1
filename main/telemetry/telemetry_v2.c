@@ -155,13 +155,14 @@ static const char *reset_reason_str(void)
 static bool add_location_obj(cJSON *parent, sensor_type_t type,
                              const char *sensor_id)
 {
-    const sensor_meta_entry_t *meta = sensor_meta_find(type, sensor_id);
+    sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
+    bool have_meta = sensor_meta_get(type, sensor_id, &meta);
     cJSON *loc = cJSON_AddObjectToObject(parent, "location");   // created + attached, or NULL
     if (!loc) return false;
     cJSON_AddStringToObject(loc, "code",
         sensor_meta_location_code_to_str(
-            meta ? meta->location_code : LOC_UNKNOWN));
-    cJSON_AddStringToObject(loc, "label", meta ? meta->label : "");
+            have_meta ? meta.location_code : LOC_UNKNOWN));
+    cJSON_AddStringToObject(loc, "label", have_meta ? meta.label : "");
     return true;
 }
 
@@ -221,18 +222,19 @@ static const char *identity_key_for_source(leak_source_t source)
 // label is user/cloud-supplied via provisioning. A label of "kitchen, Valve offline"
 // would otherwise forge an extra cause that a consumer splitting on ", " reads as a
 // real one. Commas become semicolons; other characters are left alone (cJSON handles
-// JSON escaping). Copying also removes the lifetime question of dereferencing a
-// sensor_meta table pointer after the lookup returned.
+// JSON escaping). The metadata itself arrives as a copy (sensor_meta_get), so `src`
+// never points into the sensor_meta table after its lock is released (L16).
 static void leak_label_for(const health_device_status_t *d, char *out, size_t out_len)
 {
+    sensor_meta_entry_t meta;   // function scope: `src` may point at meta.label below
     const char *src;
     if (d->dev_type == HEALTH_DEV_VALVE) {
         src = "valve";
     } else {
         sensor_type_t type = (d->dev_type == HEALTH_DEV_LORA) ? SENSOR_TYPE_LORA
                                                               : SENSOR_TYPE_BLE_LEAK;
-        const sensor_meta_entry_t *meta = sensor_meta_find(type, d->dev_id);
-        src = (meta && meta->label[0]) ? meta->label : d->dev_id;
+        bool have_meta = sensor_meta_get(type, d->dev_id, &meta);
+        src = (have_meta && meta.label[0]) ? meta.label : d->dev_id;
     }
 
     size_t i = 0;

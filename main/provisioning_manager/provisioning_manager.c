@@ -317,6 +317,18 @@ cleanup:
     return success;
 }
 
+// A failed save or erase can stop part-way, after some keys were already written or
+// erased (NVS writes land at nvs_set_*, not at commit). Call with g_prov_mutex held and
+// g_config back at the last good state: it is written out again so the next boot loads
+// what RAM holds, not a mix of old and new keys (L13).
+static void resave_after_failed_write(void)
+{
+    if (!provisioning_save_to_nvs(&g_config)) {
+        ESP_LOGE(PROV_TAG, "Rewriting the previous config to NVS also failed - "
+                           "NVS may not match RAM until the next successful save");
+    }
+}
+
 static bool validate_mac_string(const char *mac_str)
 {
     if (!mac_str) return false;
@@ -473,6 +485,21 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
             if (cJSON_IsString(sensor)) {
                 uint32_t sensor_id;
                 if (parse_hex_id(sensor->valuestring, &sensor_id)) {
+                    // A repeated id would take two health slots, and the one that never
+                    // hears a packet holds the hub RED for good (N13). Compared as parsed
+                    // values, so "0x0000abcd" and "0xABCD" are the same sensor.
+                    bool dup = false;
+                    for (int k = 0; k < new_config.lora_sensor_count; k++) {
+                        if (new_config.lora_sensor_ids[k] == sensor_id) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (dup) {
+                        ESP_LOGW(PROV_TAG, "LoRa sensor 0x%08lX duplicate in payload - ignored",
+                                 (unsigned long)sensor_id);
+                        continue;
+                    }
                     new_config.lora_sensor_ids[new_config.lora_sensor_count++] = sensor_id;
                     ESP_LOGI(PROV_TAG, "LoRa Sensor[%d]: 0x%08lX", 
                              new_config.lora_sensor_count - 1, sensor_id);
@@ -501,6 +528,19 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
             if (cJSON_IsString(sensor)) {
                 const char *mac_str = sensor->valuestring;
                 if (validate_mac_string(mac_str)) {
+                    // Same MAC twice, in any case mix, is one sensor (N13; see LoRa above).
+                    bool dup = false;
+                    for (int k = 0; k < new_config.ble_leak_sensor_count; k++) {
+                        if (strcasecmp(new_config.ble_leak_sensors[k], mac_str) == 0) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (dup) {
+                        ESP_LOGW(PROV_TAG, "BLE leak sensor %s duplicate in payload - ignored",
+                                 mac_str);
+                        continue;
+                    }
                     strncpy(new_config.ble_leak_sensors[new_config.ble_leak_sensor_count], 
                            mac_str, 18);
                     new_config.ble_leak_sensors[new_config.ble_leak_sensor_count][17] = '\0';
@@ -593,7 +633,8 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
 
     // Save to NVS (NVS operations are already thread-safe)
     if (!provisioning_save_to_nvs(&new_config)) {
-        ESP_LOGE(PROV_TAG, "Failed to save provisioning data to NVS");
+        ESP_LOGE(PROV_TAG, "Failed to save provisioning data to NVS - previous config kept");
+        resave_after_failed_write();   // g_config is still the previous config
         xSemaphoreGive(g_prov_mutex);
         return false;
     }
@@ -603,14 +644,15 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
 
     xSemaphoreGive(g_prov_mutex);
 
+    // Logged from the local copy: g_config may already be changing under another task.
     ESP_LOGI(PROV_TAG, "Provisioning completed successfully!");
     ESP_LOGI(PROV_TAG, "State: PROVISIONED");
-    ESP_LOGI(PROV_TAG, "Valve MAC: %s", g_config.valve_mac);
-    ESP_LOGI(PROV_TAG, "LoRa sensors: %d", g_config.lora_sensor_count);
-    ESP_LOGI(PROV_TAG, "BLE leak sensors: %d", g_config.ble_leak_sensor_count);
+    ESP_LOGI(PROV_TAG, "Valve MAC: %s", new_config.valve_mac);
+    ESP_LOGI(PROV_TAG, "LoRa sensors: %d", new_config.lora_sensor_count);
+    ESP_LOGI(PROV_TAG, "BLE leak sensors: %d", new_config.ble_leak_sensor_count);
     ESP_LOGI(PROV_TAG, "Auto-close: %s triggers=0x%02X",
-             g_config.rules.auto_close_enabled ? "enabled" : "disabled",
-             g_config.rules.trigger_mask);
+             new_config.rules.auto_close_enabled ? "enabled" : "disabled",
+             new_config.rules.trigger_mask);
 
     return true;
 }
@@ -624,9 +666,41 @@ bool provisioning_decommission(void)
 
     ESP_LOGW(PROV_TAG, "=== DECOMMISSIONING DEVICE ===");
 
-    // Acquire mutex for thread-safe access
+    // Acquire mutex for thread-safe access. Held across the NVS erase + commit, and RAM is
+    // cleared only once both succeeded: clearing RAM first and then failing the erase left
+    // a hub running as empty that came back provisioned on the next boot (L13).
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
         ESP_LOGE(PROV_TAG, "Failed to acquire mutex for decommissioning");
+        return false;
+    }
+
+    // Erase from NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to open NVS for erase: %s - still provisioned",
+                 esp_err_to_name(err));
+        xSemaphoreGive(g_prov_mutex);
+        return false;
+    }
+
+    // Erase all keys in the namespace
+    err = nvs_erase_all(nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(PROV_TAG, "Failed to erase NVS: %s - still provisioned", esp_err_to_name(err));
+    } else {
+        // Commit the erase
+        err = nvs_commit(nvs_handle);
+        if (err != ESP_OK) {
+            ESP_LOGE(PROV_TAG, "Failed to commit NVS erase: %s - still provisioned",
+                     esp_err_to_name(err));
+        }
+    }
+    nvs_close(nvs_handle);
+
+    if (err != ESP_OK) {
+        resave_after_failed_write();   // the erase may have removed some keys; RAM is intact
+        xSemaphoreGive(g_prov_mutex);
         return false;
     }
 
@@ -638,31 +712,6 @@ bool provisioning_decommission(void)
     g_config.rules.trigger_mask = RULES_TRIGGER_ALL;
 
     xSemaphoreGive(g_prov_mutex);
-
-    // Erase from NVS
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(PROV_TAG, "Failed to open NVS for erase: %s", esp_err_to_name(err));
-        return false;
-    }
-
-    // Erase all keys in the namespace
-    err = nvs_erase_all(nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(PROV_TAG, "Failed to erase NVS: %s", esp_err_to_name(err));
-        nvs_close(nvs_handle);
-        return false;
-    }
-
-    // Commit the erase
-    err = nvs_commit(nvs_handle);
-    nvs_close(nvs_handle);
-
-    if (err != ESP_OK) {
-        ESP_LOGE(PROV_TAG, "Failed to commit NVS erase: %s", esp_err_to_name(err));
-        return false;
-    }
 
     ESP_LOGI(PROV_TAG, "Decommissioning successful!");
     ESP_LOGI(PROV_TAG, "Device state: UNPROVISIONED");
@@ -683,7 +732,7 @@ bool provisioning_decommission(void)
 //
 // Normalising on READ rather than on store also repairs hubs already commissioned with
 // a lower-case MAC, with no NVS migration. Safe: every lookup against these strings is
-// strcasecmp (health_engine find_device, sensor_meta_find, the connected-MAC gate in
+// strcasecmp (health_engine find_device, sensor_meta_get, the connected-MAC gate in
 // app_iothub) or an sscanf "%02X" parse (the BLE whitelist), which accept either case.
 // The rules engine's three case-sensitive strcmp calls compare tracking ids that never
 // originate here.
@@ -916,6 +965,20 @@ bool provisioning_remove_valve(void)
         return false;
     }
 
+    // Same test as provisioning_get_valve_mac(). Removing a valve that is not there used
+    // to rewrite NVS and ack "ok" (F23).
+    if (g_config.state != PROV_STATE_PROVISIONED || g_config.valve_mac[0] == '\0') {
+        xSemaphoreGive(g_prov_mutex);
+        ESP_LOGW(PROV_TAG, "No valve provisioned - nothing to remove");
+        return false;
+    }
+
+    // Only these two fields change. Kept (not the whole ~384 B config) so a failed save
+    // can put RAM back (L13).
+    char old_valve_mac[sizeof(g_config.valve_mac)];
+    memcpy(old_valve_mac, g_config.valve_mac, sizeof(old_valve_mac));
+    provisioning_state_t old_state = g_config.state;
+
     // Clear valve MAC
     memset(g_config.valve_mac, 0, sizeof(g_config.valve_mac));
     
@@ -927,15 +990,20 @@ bool provisioning_remove_valve(void)
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
-    
+    if (!save_result) {
+        memcpy(g_config.valve_mac, old_valve_mac, sizeof(g_config.valve_mac));
+        g_config.state = old_state;
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - valve removal rolled back");
+        resave_after_failed_write();
+    }
+    provisioning_state_t state_now = g_config.state;
+
     xSemaphoreGive(g_prov_mutex);
 
     if (save_result) {
         ESP_LOGI(PROV_TAG, "Valve removed successfully");
         ESP_LOGI(PROV_TAG, "State: %s", 
-                 g_config.state == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
-    } else {
-        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+                 state_now == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
     }
 
     return save_result;
@@ -957,24 +1025,29 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id)
     }
 
     // Find and remove the sensor
-    bool found = false;
+    int idx = -1;
     for (int i = 0; i < g_config.lora_sensor_count; i++) {
         if (g_config.lora_sensor_ids[i] == sensor_id) {
-            // Shift remaining sensors down
-            for (int j = i; j < g_config.lora_sensor_count - 1; j++) {
-                g_config.lora_sensor_ids[j] = g_config.lora_sensor_ids[j + 1];
-            }
-            g_config.lora_sensor_count--;
-            found = true;
+            idx = i;
             break;
         }
     }
 
-    if (!found) {
+    if (idx < 0) {
         ESP_LOGW(PROV_TAG, "Sensor 0x%08lX not found in provisioned list", sensor_id);
         xSemaphoreGive(g_prov_mutex);
         return false;
     }
+
+    // Undo record for a failed save (L13): the slot index and the state. The id itself
+    // is sensor_id, and the shift below keeps every other entry.
+    provisioning_state_t old_state = g_config.state;
+
+    // Shift remaining sensors down
+    for (int j = idx; j < g_config.lora_sensor_count - 1; j++) {
+        g_config.lora_sensor_ids[j] = g_config.lora_sensor_ids[j + 1];
+    }
+    g_config.lora_sensor_count--;
 
     // Check if device should stay provisioned
     if (!should_remain_provisioned(&g_config)) {
@@ -984,16 +1057,27 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id)
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
-    
+    if (!save_result) {
+        // Shift back up and put the id back in its old slot.
+        for (int j = g_config.lora_sensor_count; j > idx; j--) {
+            g_config.lora_sensor_ids[j] = g_config.lora_sensor_ids[j - 1];
+        }
+        g_config.lora_sensor_ids[idx] = sensor_id;
+        g_config.lora_sensor_count++;
+        g_config.state = old_state;
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - LoRa removal rolled back");
+        resave_after_failed_write();
+    }
+    int remaining = g_config.lora_sensor_count;
+    provisioning_state_t state_now = g_config.state;
+
     xSemaphoreGive(g_prov_mutex);
 
     if (save_result) {
         ESP_LOGI(PROV_TAG, "LoRa sensor 0x%08lX removed successfully", sensor_id);
-        ESP_LOGI(PROV_TAG, "Remaining LoRa sensors: %d", g_config.lora_sensor_count);
+        ESP_LOGI(PROV_TAG, "Remaining LoRa sensors: %d", remaining);
         ESP_LOGI(PROV_TAG, "State: %s", 
-                 g_config.state == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
-    } else {
-        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+                 state_now == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
     }
 
     return save_result;
@@ -1020,24 +1104,31 @@ bool provisioning_remove_ble_sensor(const char *mac)
     }
 
     // Find and remove the sensor
-    bool found = false;
+    int idx = -1;
     for (int i = 0; i < g_config.ble_leak_sensor_count; i++) {
         if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
-            // Shift remaining sensors down
-            for (int j = i; j < g_config.ble_leak_sensor_count - 1; j++) {
-                strncpy(g_config.ble_leak_sensors[j], g_config.ble_leak_sensors[j + 1], 18);
-            }
-            g_config.ble_leak_sensor_count--;
-            found = true;
+            idx = i;
             break;
         }
     }
 
-    if (!found) {
+    if (idx < 0) {
         ESP_LOGW(PROV_TAG, "BLE sensor %s not found in provisioned list", mac);
         xSemaphoreGive(g_prov_mutex);
         return false;
     }
+
+    // Undo record for a failed save (L13): the slot, the stored string (its case may
+    // differ from `mac`) and the state - 18 B, not a copy of the 288 B MAC table.
+    char removed_mac[sizeof(g_config.ble_leak_sensors[0])];
+    memcpy(removed_mac, g_config.ble_leak_sensors[idx], sizeof(removed_mac));
+    provisioning_state_t old_state = g_config.state;
+
+    // Shift remaining sensors down
+    for (int j = idx; j < g_config.ble_leak_sensor_count - 1; j++) {
+        strncpy(g_config.ble_leak_sensors[j], g_config.ble_leak_sensors[j + 1], 18);
+    }
+    g_config.ble_leak_sensor_count--;
 
     // Check if device should stay provisioned
     if (!should_remain_provisioned(&g_config)) {
@@ -1047,16 +1138,28 @@ bool provisioning_remove_ble_sensor(const char *mac)
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
-    
+    if (!save_result) {
+        // Shift back up and put the MAC back in its old slot.
+        for (int j = g_config.ble_leak_sensor_count; j > idx; j--) {
+            memcpy(g_config.ble_leak_sensors[j], g_config.ble_leak_sensors[j - 1],
+                   sizeof(g_config.ble_leak_sensors[j]));
+        }
+        memcpy(g_config.ble_leak_sensors[idx], removed_mac, sizeof(removed_mac));
+        g_config.ble_leak_sensor_count++;
+        g_config.state = old_state;
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - BLE removal rolled back");
+        resave_after_failed_write();
+    }
+    int remaining = g_config.ble_leak_sensor_count;
+    provisioning_state_t state_now = g_config.state;
+
     xSemaphoreGive(g_prov_mutex);
 
     if (save_result) {
         ESP_LOGI(PROV_TAG, "BLE leak sensor %s removed successfully", mac);
-        ESP_LOGI(PROV_TAG, "Remaining BLE sensors: %d", g_config.ble_leak_sensor_count);
+        ESP_LOGI(PROV_TAG, "Remaining BLE sensors: %d", remaining);
         ESP_LOGI(PROV_TAG, "State: %s", 
-                 g_config.state == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
-    } else {
-        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+                 state_now == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
     }
 
     return save_result;
@@ -1093,6 +1196,10 @@ bool provisioning_add_lora_sensor(uint32_t sensor_id)
         return false;
     }
 
+    // Undo record for a failed save (L13)
+    provisioning_state_t old_state = g_config.state;
+    uint8_t old_version = g_config.config_version;
+
     // Add sensor
     g_config.lora_sensor_ids[g_config.lora_sensor_count++] = sensor_id;
     
@@ -1105,14 +1212,20 @@ bool provisioning_add_lora_sensor(uint32_t sensor_id)
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
-    
+    if (!save_result) {
+        g_config.lora_sensor_count--;
+        g_config.state = old_state;
+        g_config.config_version = old_version;
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - LoRa add rolled back");
+        resave_after_failed_write();
+    }
+    int total = g_config.lora_sensor_count;
+
     xSemaphoreGive(g_prov_mutex);
 
     if (save_result) {
         ESP_LOGI(PROV_TAG, "LoRa sensor 0x%08lX added successfully", sensor_id);
-        ESP_LOGI(PROV_TAG, "Total LoRa sensors: %d", g_config.lora_sensor_count);
-    } else {
-        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+        ESP_LOGI(PROV_TAG, "Total LoRa sensors: %d", total);
     }
 
     return save_result;
@@ -1154,6 +1267,10 @@ bool provisioning_add_ble_sensor(const char *mac)
         return false;
     }
 
+    // Undo record for a failed save (L13)
+    provisioning_state_t old_state = g_config.state;
+    uint8_t old_version = g_config.config_version;
+
     // Add sensor
     strncpy(g_config.ble_leak_sensors[g_config.ble_leak_sensor_count], mac, 18);
     g_config.ble_leak_sensors[g_config.ble_leak_sensor_count][17] = '\0';
@@ -1168,14 +1285,20 @@ bool provisioning_add_ble_sensor(const char *mac)
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
-    
+    if (!save_result) {
+        g_config.ble_leak_sensor_count--;
+        g_config.state = old_state;
+        g_config.config_version = old_version;
+        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - BLE add rolled back");
+        resave_after_failed_write();
+    }
+    int total = g_config.ble_leak_sensor_count;
+
     xSemaphoreGive(g_prov_mutex);
 
     if (save_result) {
         ESP_LOGI(PROV_TAG, "BLE leak sensor %s added successfully", mac);
-        ESP_LOGI(PROV_TAG, "Total BLE sensors: %d", g_config.ble_leak_sensor_count);
-    } else {
-        ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS");
+        ESP_LOGI(PROV_TAG, "Total BLE sensors: %d", total);
     }
 
     return save_result;
@@ -1197,29 +1320,13 @@ bool provisioning_get_rules_config(rules_config_t *rules_out)
     return false;
 }
 
-bool provisioning_set_rules_config(const rules_config_t *rules)
+// Persist just the rules keys to NVS. A false can leave the first key already written.
+static bool write_rules_keys(const rules_config_t *rules)
 {
-    if (!rules || !g_initialized || g_prov_mutex == NULL) {
-        return false;
-    }
-
-    ESP_LOGI(PROV_TAG, "Setting rules config: auto_close=%s triggers=0x%02X",
-             rules->auto_close_enabled ? "enabled" : "disabled",
-             rules->trigger_mask);
-
-    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
-        ESP_LOGE(PROV_TAG, "Failed to acquire mutex for set_rules_config");
-        return false;
-    }
-
-    g_config.rules = *rules;
-
-    // Persist just the rules keys to NVS
     nvs_handle_t nvs_handle;
     esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
     if (err != ESP_OK) {
         ESP_LOGE(PROV_TAG, "Failed to open NVS: %s", esp_err_to_name(err));
-        xSemaphoreGive(g_prov_mutex);
         return false;
     }
 
@@ -1235,12 +1342,42 @@ bool provisioning_set_rules_config(const rules_config_t *rules)
     }
 
     nvs_close(nvs_handle);
+    return ok;
+}
+
+bool provisioning_set_rules_config(const rules_config_t *rules)
+{
+    if (!rules || !g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    ESP_LOGI(PROV_TAG, "Setting rules config: auto_close=%s triggers=0x%02X",
+             rules->auto_close_enabled ? "enabled" : "disabled",
+             rules->trigger_mask);
+
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(PROV_TAG, "Failed to acquire mutex for set_rules_config");
+        return false;
+    }
+
+    // RAM takes the new rules only once NVS holds them, so a failed write can never leave
+    // the engine running rules the next boot will not load (L13). On a failure the old
+    // keys are written back, since the first of the two may already have landed.
+    bool ok = write_rules_keys(rules);
+    if (ok) {
+        g_config.rules = *rules;
+    } else {
+        ESP_LOGE(PROV_TAG, "Failed to save rules config to NVS - previous rules kept");
+        if (!write_rules_keys(&g_config.rules)) {
+            ESP_LOGE(PROV_TAG, "Rewriting the previous rules to NVS also failed - "
+                               "NVS may not match RAM until the next successful save");
+        }
+    }
+
     xSemaphoreGive(g_prov_mutex);
 
     if (ok) {
         ESP_LOGI(PROV_TAG, "Rules config saved to NVS");
-    } else {
-        ESP_LOGE(PROV_TAG, "Failed to save rules config to NVS");
     }
 
     return ok;

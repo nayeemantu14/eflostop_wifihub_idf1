@@ -1,5 +1,7 @@
 #include "offline_buffer.h"
 #include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
@@ -10,10 +12,34 @@
 #define OB_KEY_TAIL  "tail"
 #define OB_KEY_COUNT "count"
 
+#define OB_LOCK_TIMEOUT_MS 1000
+
 static uint8_t s_head  = 0;   // Next write index
 static uint8_t s_tail  = 0;   // Next read index
 static uint8_t s_count = 0;   // Number of valid entries
 static bool    s_ready = false;
+
+// store() runs on whichever task publishes an event while offline (iothub_task, or the
+// esp-mqtt task for a cmd_ack); drain and clear run on iothub_task. head/tail/count and
+// the NVS slots are one ring, so every entry point holds this lock (N18). Static storage:
+// no heap. On a timeout each call fails safe (nothing stored, nothing drained, count 0)
+// rather than touching the ring unlocked.
+static StaticSemaphore_t s_lock_buf;
+static SemaphoreHandle_t s_lock = NULL;
+
+static bool ob_lock(const char *what)
+{
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(OB_LOCK_TIMEOUT_MS)) == pdTRUE) {
+        return true;
+    }
+    ESP_LOGW(OB_TAG, "%s: buffer busy for %d ms - skipped", what, OB_LOCK_TIMEOUT_MS);
+    return false;
+}
+
+static void ob_unlock(void)
+{
+    xSemaphoreGive(s_lock);
+}
 
 // ---------------------------------------------------------------------------
 // NVS helpers
@@ -41,6 +67,14 @@ static void make_key(uint8_t index, char *buf, size_t buf_len)
 
 void offline_buffer_init(void)
 {
+    if (s_lock == NULL) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);   // static storage: cannot fail
+    }
+    // Loaded under the lock so a task that sees s_ready also sees the loaded ring. Nothing
+    // else takes the lock before s_ready is set, so this cannot time out in practice; if
+    // it did, the buffer simply stays disabled.
+    if (!ob_lock("init")) return;
+
     nvs_handle_t h;
     esp_err_t err = nvs_open(OB_NAMESPACE, NVS_READONLY, &h);
     if (err == ESP_OK) {
@@ -68,18 +102,13 @@ void offline_buffer_init(void)
     } else {
         ESP_LOGI(OB_TAG, "Init: buffer empty");
     }
+
+    ob_unlock();
 }
 
-bool offline_buffer_store(const char *json, size_t len)
+// Call with s_lock held.
+static bool store_locked(const char *json, size_t len)
 {
-    if (!s_ready || !json || len == 0) return false;
-
-    if (len > OFFLINE_BUF_MAX_JSON_LEN) {
-        ESP_LOGW(OB_TAG, "Event too large (%u bytes, max %d), truncating",
-                 (unsigned)len, OFFLINE_BUF_MAX_JSON_LEN);
-        len = OFFLINE_BUF_MAX_JSON_LEN;
-    }
-
     nvs_handle_t h;
     if (nvs_open(OB_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
         ESP_LOGE(OB_TAG, "NVS open failed");
@@ -119,10 +148,27 @@ bool offline_buffer_store(const char *json, size_t len)
     return true;
 }
 
-int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic)
+bool offline_buffer_store(const char *json, size_t len)
 {
-    if (!s_ready || s_count == 0 || !client || !topic) return 0;
+    if (!s_ready || !json || len == 0) return false;
 
+    // Refused whole: cutting an event at the slot size stored invalid JSON, which the
+    // replay then published as a message nothing downstream could parse (L17/N18).
+    if (len > OFFLINE_BUF_MAX_JSON_LEN) {
+        ESP_LOGW(OB_TAG, "Event too large (%u bytes, max %d) - not buffered",
+                 (unsigned)len, OFFLINE_BUF_MAX_JSON_LEN);
+        return false;
+    }
+
+    if (!ob_lock("store")) return false;
+    bool ok = store_locked(json, len);
+    ob_unlock();
+    return ok;
+}
+
+// Call with s_lock held and s_count > 0.
+static int drain_locked(esp_mqtt_client_handle_t client, const char *topic)
+{
     ESP_LOGI(OB_TAG, "Draining %d buffered event(s)...", s_count);
 
     nvs_handle_t h;
@@ -173,15 +219,30 @@ int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic)
     return published;
 }
 
-int offline_buffer_count(void)
+int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic)
 {
-    return s_count;
+    if (!s_ready || !client || !topic) return 0;
+
+    // The lock is held across the replay publishes. A store() that arrives meanwhile
+    // waits up to OB_LOCK_TIMEOUT_MS and is then dropped (logged), never interleaved.
+    if (!ob_lock("drain")) return 0;
+    int published = (s_count > 0) ? drain_locked(client, topic) : 0;
+    ob_unlock();
+    return published;
 }
 
-void offline_buffer_clear(void)
+int offline_buffer_count(void)
 {
-    if (!s_ready) return;
+    if (!s_ready) return 0;
+    if (!ob_lock("count")) return 0;
+    int n = s_count;
+    ob_unlock();
+    return n;
+}
 
+// Call with s_lock held.
+static void clear_locked(void)
+{
     nvs_handle_t h;
     if (nvs_open(OB_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
 
@@ -200,4 +261,12 @@ void offline_buffer_clear(void)
     nvs_close(h);
 
     ESP_LOGI(OB_TAG, "Buffer cleared");
+}
+
+void offline_buffer_clear(void)
+{
+    if (!s_ready) return;
+    if (!ob_lock("clear")) return;
+    clear_locked();
+    ob_unlock();
 }

@@ -154,26 +154,36 @@ bool sensor_meta_init(void)
     return true;
 }
 
-const sensor_meta_entry_t *sensor_meta_find(sensor_type_t type, const char *sensor_id)
+bool sensor_meta_get(sensor_type_t type, const char *id, sensor_meta_entry_t *out)
 {
-    if (!sensor_id || !s_initialized) {
-        return NULL;
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!id || !s_initialized) {
+        return false;
     }
 
-    const sensor_meta_entry_t *result = NULL;
+    bool found = false;
 
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         for (int i = 0; i < s_count; i++) {
             if (s_table[i].sensor_type == (uint8_t)type &&
-                strcasecmp(s_table[i].sensor_id, sensor_id) == 0) {
-                result = &s_table[i];
+                strcasecmp(s_table[i].sensor_id, id) == 0) {
+                *out = s_table[i];   // copied under the lock: see the header (L16)
+                found = true;
                 break;
             }
         }
         xSemaphoreGive(s_mutex);
     }
 
-    return result;
+    if (found) {
+        // The table can come from an NVS blob; never hand a caller an unterminated string.
+        out->sensor_id[SENSOR_META_ID_MAX - 1] = '\0';
+        out->label[SENSOR_META_LABEL_MAX - 1] = '\0';
+    }
+    return found;
 }
 
 bool sensor_meta_set(sensor_type_t type, const char *sensor_id,
@@ -224,12 +234,14 @@ bool sensor_meta_set(sensor_type_t type, const char *sensor_id,
 
     bool ok = save_table_to_nvs();
 
-    xSemaphoreGive(s_mutex);
-
+    // Logged before the unlock: `entry` points into the table, which a concurrent remove
+    // may shift as soon as the mutex is released (L16).
     ESP_LOGI(META_TAG, "Set metadata: type=%d id=%s loc=%s label=\"%s\"",
              type, sensor_id,
              sensor_meta_location_code_to_str(entry->location_code),
              entry->label);
+
+    xSemaphoreGive(s_mutex);
 
     return ok;
 }

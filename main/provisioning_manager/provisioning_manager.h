@@ -99,6 +99,9 @@ bool provisioning_save_to_nvs(const provisioning_config_t *config);
 /**
  * @brief Handle provisioning JSON payload from Azure
  * 
+ * A LoRa id or BLE MAC (case-insensitive) listed twice in the payload is kept once;
+ * the repeat is logged and ignored.
+ * 
  * @param json JSON string (may not be null-terminated)
  * @param len Length of JSON string
  * @return true if provisioning successful
@@ -109,10 +112,12 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len);
  * @brief Decommission device - erase all provisioning data and return to UNPROVISIONED state
  * 
  * This function:
- * - Clears all provisioning data from memory
  * - Erases provisioning data from NVS
- * - Returns device to UNPROVISIONED state
- * - Thread-safe (uses mutex)
+ * - Then clears all provisioning data from memory and returns to UNPROVISIONED
+ * - Thread-safe (the mutex is held across the erase and the RAM clear)
+ * 
+ * On failure RAM is left untouched (still provisioned), and if the erase got as far as
+ * removing keys the config is written back to NVS (best effort, logged if that fails).
  * 
  * @return true if decommissioning successful
  */
@@ -121,9 +126,11 @@ bool provisioning_decommission(void);
 /**
  * @brief Remove valve from provisioning (selective decommission)
  * 
- * Removes valve MAC and updates state to UNPROVISIONED if no other devices remain
+ * Removes valve MAC and updates state to UNPROVISIONED if no other devices remain.
+ * The remove/add/set functions below change RAM only when the NVS save succeeds.
  * 
- * @return true if removal successful
+ * @return true if removal successful; false if no valve is provisioned, the mutex
+ *         timed out, or the NVS save failed (RAM then unchanged)
  */
 bool provisioning_remove_valve(void);
 
@@ -242,7 +249,8 @@ prov_member_t provisioning_ble_sensor_membership(const char *mac);
 bool provisioning_get_rules_config(rules_config_t *rules_out);
 
 /**
- * @brief Set rules engine configuration and persist to NVS
+ * @brief Set rules engine configuration and persist to NVS. RAM takes the new rules
+ *        only if the NVS write succeeded; false leaves the previous rules in force.
  */
 bool provisioning_set_rules_config(const rules_config_t *rules);
 
