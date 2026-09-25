@@ -27,19 +27,22 @@ typedef struct {
     uint32_t          added_s;          // monotonic seconds when this device entered the table
     uint16_t          excuse_s;         // length of this device's roll-up excuse window (s)
     bool              excuse_done;      // excuse window elapsed (latched)
+    bool              offline_alerted;  // the last alert SENT for this device was
+                                        // device_offline (so a recovery is owed)
     int64_t           last_seen_ms;     // Monotonic: esp_timer_get_time()/1000
     uint8_t           last_battery;     // 0xFF = unknown
     int8_t            last_rssi;        // 0 = unknown
     int64_t           last_alert_ms;    // Last alert timestamp (debounce)
     bool              ever_seen;        // false until first check-in this uptime
     bool              leaking;          // last reported wet/dry — forces CRITICAL
-    bool              crit_is_leak;     // the CRITICAL we are sitting at is leak-driven,
-                                        // so the matching recovery must stay silent too
+    uint8_t           cause;            // health_cause_t: why `rating` is what it is
+    bool              alert_retry;      // an alert was debounced; the tick owes the
+                                        // trailing edge (see evaluate_timeouts())
     int64_t           disconnect_ms;    // Valve only: disconnect timestamp, 0 = connected
 } health_device_t;
 
-/* The per-device excuse fields live in the padding the old (dead) prev_rating field and
- * the int64 alignment left behind, so the table does not grow. */
+/* The per-device excuse and alert fields live in the padding the old (dead) prev_rating
+ * field and the int64 alignment left behind, so the table does not grow. */
 _Static_assert(sizeof(health_device_t) <= 80,
                "health_device_t grew: s_devices[] is .bss, every byte is heap on this board");
 
@@ -68,6 +71,10 @@ static uint32_t s_boot_sync_timeout_ms = HEALTH_BOOT_SYNC_TIMEOUT_MS;  // window
  * health_engine_task (single writer), read lock-free by iothub_task via
  * health_get_checkin_seq(). See that declaration for why this exists. */
 static volatile uint32_t s_checkin_seq = 0;
+/* Bumped on a system roll-up change and on a valve rating change to/from a battery-driven
+ * state. Every write happens under s_mutex; read lock-free by iothub_task via
+ * health_get_rating_seq(). See that declaration for why this exists. */
+static volatile uint32_t s_rating_seq = 0;
 // True while the hub is holding the valve shut on a latched leak incident. Written
 // lock-free by health_set_interlock_held() from the rules engine; read by
 // recalc_system_rating() (where it raises a WARNING floor) and by
@@ -169,9 +176,11 @@ static void check_boot_sync_locked(void);
  * Nothing here consults the water-access override window, and that is deliberate:
  * an override means the USER accepted the risk of water staying on, not that the
  * leak stopped being a leak. Health must still read critical. */
-static health_rating_t compute_sensor_rating(const health_device_t *dev, int64_t now)
+static health_rating_t compute_sensor_rating(const health_device_t *dev, int64_t now,
+                                             health_cause_t *cause)
 {
     if (dev->leaking) {
+        *cause = HEALTH_CAUSE_LEAK;
         return HEALTH_CRITICAL;
     }
 
@@ -181,55 +190,89 @@ static health_rating_t compute_sensor_rating(const health_device_t *dev, int64_t
                           : HEALTH_BLE_LEAK_TIMEOUT_MS;
 
     if (dev->last_seen_ms == 0 || (now - dev->last_seen_ms) > timeout_ms) {
+        *cause = HEALTH_CAUSE_LINK;
         return HEALTH_CRITICAL;
     }
 
     // Online — evaluate battery and signal
     if (dev->last_battery != 0xFF && dev->last_battery <= HEALTH_BATTERY_WARN_PCT) {
+        *cause = HEALTH_CAUSE_BATTERY;
         return HEALTH_WARNING;
     }
     if (dev->last_rssi != 0 && dev->last_rssi <= HEALTH_RSSI_WARN_DBM) {
+        *cause = HEALTH_CAUSE_SIGNAL;
         return HEALTH_WARNING;
     }
     if (dev->last_battery != 0xFF && dev->last_battery <= HEALTH_BATTERY_GOOD_PCT) {
+        *cause = HEALTH_CAUSE_BATTERY;
         return HEALTH_GOOD;
     }
     if (dev->last_rssi != 0 &&
         dev->last_rssi > HEALTH_RSSI_WARN_DBM &&
         dev->last_rssi <= HEALTH_RSSI_GOOD_DBM) {
+        *cause = HEALTH_CAUSE_SIGNAL;
         return HEALTH_GOOD;
     }
 
+    *cause = HEALTH_CAUSE_NONE;
     return HEALTH_EXCELLENT;
 }
 
-static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t now)
+/* Valve bands are the valve's OWN (HEALTH_VALVE_BATTERY_*), not the sensors': at <=10 %
+ * the valve auto-closes and refuses to open, which is CRITICAL by any reading. 2.1.3 had
+ * no battery->CRITICAL branch at all and rated a dying valve WARNING (BUG-1). There is no
+ * GOOD band for the valve, and an UNKNOWN battery (0xFF) is never rated — it used to be
+ * stored as 0 and rated as an empty battery.
+ *
+ * Cause precedence at CRITICAL is LEAK > LINK (past the grace) > BATTERY. Inside the
+ * disconnect grace a known <=10 % reading still wins over the WARNING grace: the last real
+ * reading is still <=10 %, and letting the grace demote it would dip the rating
+ * CRITICAL -> WARNING -> CRITICAL (a spurious device_recovered under the 2.1.3 alert rule)
+ * for a valve that never got better. */
+static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t now,
+                                            health_cause_t *cause)
 {
     // The valve's own flood probe — same precedence as a sensor leak.
     if (dev->leaking) {
+        *cause = HEALTH_CAUSE_LEAK;
         return HEALTH_CRITICAL;
     }
 
-    // Disconnected: check grace period
+    bool batt_known = (dev->last_battery != 0xFF);
+
+    // Offline past the grace outranks the battery at CRITICAL: unreachable is the
+    // actionable fact, and it is what the reachability alert reports.
+    if (dev->disconnect_ms > 0 &&
+        (now - dev->disconnect_ms) >= HEALTH_VALVE_DISC_TIMEOUT_MS) {
+        *cause = HEALTH_CAUSE_LINK;
+        return HEALTH_CRITICAL;
+    }
+
+    // Battery critical — also while disconnected inside the grace (see above).
+    if (batt_known && dev->last_battery <= HEALTH_VALVE_BATTERY_CRIT_PCT) {
+        *cause = HEALTH_CAUSE_BATTERY;
+        return HEALTH_CRITICAL;
+    }
+
+    // Disconnected: grace period — not yet CRITICAL
     if (dev->disconnect_ms > 0) {
-        if ((now - dev->disconnect_ms) >= HEALTH_VALVE_DISC_TIMEOUT_MS)
-            return HEALTH_CRITICAL;
-        return HEALTH_WARNING;  // Grace period — not yet CRITICAL
+        *cause = HEALTH_CAUSE_LINK;
+        return HEALTH_WARNING;
     }
 
     // Never connected this uptime
     if (dev->last_seen_ms == 0) {
+        *cause = HEALTH_CAUSE_LINK;
         return HEALTH_CRITICAL;
     }
 
-    // Connected — evaluate battery
-    if (dev->last_battery != 0xFF && dev->last_battery <= HEALTH_BATTERY_WARN_PCT) {
+    // Connected — the valve's Low band
+    if (batt_known && dev->last_battery <= HEALTH_VALVE_BATTERY_WARN_PCT) {
+        *cause = HEALTH_CAUSE_BATTERY;
         return HEALTH_WARNING;
     }
-    if (dev->last_battery != 0xFF && dev->last_battery <= HEALTH_BATTERY_GOOD_PCT) {
-        return HEALTH_GOOD;
-    }
 
+    *cause = HEALTH_CAUSE_NONE;
     return HEALTH_EXCELLENT;
 }
 
@@ -331,127 +374,125 @@ static void recalc_system_rating(void)
         worst = HEALTH_WARNING;
     }
 
-    s_system_rating = worst;
+    /* A roll-up change is itself news: a grace expiry, for one, changes it with no device
+     * edge and no alert, and the 2.1.3 field log sat RED from 678 s with nothing published
+     * until the 969 s heartbeat (N10). Every caller holds s_mutex. */
+    if (worst != s_system_rating) {
+        s_system_rating = worst;
+        s_rating_seq++;
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Alert generation
 // ---------------------------------------------------------------------------
 
-// Returns true when it is SAFE for the caller to commit the new rating: either no
-// alert was warranted, the alert was deliberately suppressed (debounce / boot), or
-// the alert was successfully enqueued.
-//
-// Returns FALSE only when an alert was genuinely required and the queue rejected
-// it. That distinction matters: the alert fires on a TRANSITION, so if the caller
-// commits the rating anyway the transition is consumed and the alert can never be
-// re-detected — it is lost permanently, not merely delayed. See apply_rating().
-static bool maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating, int64_t now)
+/* HEALTH ALERTS REPORT REACHABILITY ONLY: device_offline on ENTERING the offline state
+ * (CRITICAL because of the link, having been heard), device_recovered on LEAVING it — and
+ * only if that device_offline was actually sent (offline_alerted).
+ *
+ * A leak- or battery-driven CRITICAL raises no alert (Phase B: suppressed like a leak).
+ * Both event names are reachability claims: device_offline for a device that is
+ * demonstrably online — in a payload carrying its healthy RSSI — is false, and the
+ * recovery that follows would be a second false claim. The leak has its own
+ * leak_detected / leak_cleared events; the battery state is carried by the snapshot's
+ * rating and reason, which a rating-seq snapshot publishes within seconds
+ * (health_get_rating_seq()). Inventing a new event name would also add a value to a
+ * vocabulary the cloud validates against.
+ *
+ * Keyed on the STATE (rating + cause), not on rating edges: 2.1.3 alerted on every
+ * CRITICAL edge and named it from the rating alone, so a battery-critical valve that
+ * disconnected would have published a device_recovered on entering the WARNING grace. */
+static bool is_offline_state(health_rating_t r, uint8_t cause)
 {
-    health_rating_t old_rating = dev->rating;
+    return r == HEALTH_CRITICAL && cause == HEALTH_CAUSE_LINK;
+}
 
-    // Only alert on Critical transitions (into or out of)
-    bool into_critical  = (new_rating == HEALTH_CRITICAL && old_rating != HEALTH_CRITICAL);
-    bool out_of_critical = (new_rating != HEALTH_CRITICAL && old_rating == HEALTH_CRITICAL);
-
-    if (!into_critical && !out_of_critical) {
-        return true;                 // nothing to raise — commit freely
-    }
-
-    // LEAK-DRIVEN CRITICAL RAISES NO HEALTH ALERT.
-    //
-    // health_alert_to_json() names the event purely from the rating: CRITICAL means
-    // "device_offline". That was sound while CRITICAL could only mean staleness or a
-    // valve disconnect. Now that a leak forces CRITICAL ahead of the staleness test,
-    // the same code would publish `device_offline` for a device that is demonstrably
-    // online — in a payload carrying its healthy battery and strong RSSI — and then
-    // `device_recovered` when it dried, for a device that never went away.
-    //
-    // The health channel is about reachability. A leak already has its own D2C event
-    // (leak_detected / leak_cleared), its own coupled snapshot, and now the rating and
-    // reason string too, so there is nothing left for an alert to add. Suppressing is
-    // also the wire-compatible choice: inventing a `device_leak` event would add a
-    // value to a vocabulary the cloud validates against.
-    //
-    // Returning true still commits the rating (see apply_rating) — only the alert is
-    // withheld. crit_is_leak remembers WHY we went critical so the matching
-    // out-of-critical edge stays silent as well; without it the dry-out would publish
-    // a bare `device_recovered` for an offline event that was never sent.
-    // crit_is_leak is READ here and MAINTAINED in apply_rating() — deliberately, because
-    // it must describe the STATE we are sitting at, not the edge that got us there. Set
-    // on the into-critical edge only, it was never set when a leak arrived at a device
-    // that was ALREADY critical (seeded CRITICAL when added, or genuinely offline),
-    // so the eventual dry-out took the out_of_critical branch with the flag false and
-    // published a bare `device_recovered` for an offline event that was never sent.
-    if (into_critical && dev->leaking)      return true;   // leak: no alert
-    if (out_of_critical && dev->crit_is_leak) return true; // its recovery: also silent
-
-    // Suppress boot-time "recovered" alerts — first check-in is not a real recovery
-    if (out_of_critical && !dev->ever_seen) {
-        return true;                 // deliberately suppressed, not dropped
-    }
-
-    // Debounce check
-    if (dev->last_alert_ms != 0 &&
-        (now - dev->last_alert_ms) < HEALTH_ALERT_DEBOUNCE_MS) {
-        return true;                 // deliberately suppressed, not dropped
-    }
-
-    // Build alert
+// Build and queue one alert. Returns false ONLY when the queue rejected it.
+static bool enqueue_alert(health_device_t *dev, bool offline, health_rating_t new_rating,
+                          int64_t now)
+{
     health_alert_t alert;
     memset(&alert, 0, sizeof(alert));
     alert.dev_type    = dev->dev_type;
     strncpy(alert.dev_id, dev->dev_id, sizeof(alert.dev_id) - 1);
     alert.new_rating  = new_rating;
-    alert.old_rating  = old_rating;
+    alert.old_rating  = dev->rating;
     alert.battery     = dev->last_battery;
     alert.rssi        = dev->last_rssi;
+    alert.offline     = offline;
 
-    if (into_critical && dev->last_seen_ms > 0) {
+    if (offline && dev->last_seen_ms > 0) {
         alert.offline_duration_s = (uint32_t)((now - dev->last_seen_ms) / 1000);
     }
 
+    const char *kind = offline ? "device_offline" : "device_recovered";
+
     if (xQueueSend(s_alert_queue, &alert, 0) != pdTRUE) {
-        ESP_LOGE(HEALTH_TAG, "ALERT QUEUE FULL — %s %s %s -> %s held for retry",
+        ESP_LOGE(HEALTH_TAG, "ALERT QUEUE FULL — %s %s %s -> %s (%s) held for retry",
                  dev_type_to_source_type(dev->dev_type), dev->dev_id,
-                 health_rating_to_str(old_rating),
-                 health_rating_to_str(new_rating));
-        return false;                // caller must NOT advance dev->rating
+                 health_rating_to_str(dev->rating),
+                 health_rating_to_str(new_rating), kind);
+        return false;
     }
 
-    dev->last_alert_ms = now;
-    ESP_LOGW(HEALTH_TAG, "ALERT: %s %s %s -> %s",
+    ESP_LOGW(HEALTH_TAG, "ALERT: %s %s %s -> %s (%s)",
              dev_type_to_source_type(dev->dev_type), dev->dev_id,
-             health_rating_to_str(old_rating),
-             health_rating_to_str(new_rating));
+             health_rating_to_str(dev->rating),
+             health_rating_to_str(new_rating), kind);
 
     // Wake the publisher. The alert queue is NOT a member of iothub_task's
     // QueueSet, so without this the alert waits for whatever wakes that loop next
-    // — up to the 30 s idle cap.
-    //
-    // Adding the queue to the set instead would be wrong: iothub_task drains
-    // alerts in its PUBLISH phase, which sits behind `if (!provisioned) continue;`
-    // and behind dps_maintain()/sas_maintain(). On an unprovisioned hub the set
-    // would signal on a queue nothing ever reads, and xQueueSelectFromSet would
-    // return it immediately every iteration — a busy loop. This wake reuses the
-    // snapshot trigger queue, which IS in the set and IS always consumed.
+    // — up to the 30 s idle cap. The wake reuses the snapshot trigger queue, which
+    // IS in the set and IS always consumed; iothub_task drains alerts in its PUBLISH
+    // phase, behind dps_maintain()/sas_maintain(), either way.
     telemetry_v2_wake_snapshot();
     return true;
 }
 
-// Raise whatever alert the transition warrants, then commit the rating — but only
-// if the alert survived. Holding the old rating on failure is what allows the next
-// evaluation to re-detect the same transition and retry; committing would consume
-// it forever.
-static void apply_rating(health_device_t *dev, health_rating_t new_rating, int64_t now)
+// Commit a new rating + cause, raising the reachability alert the change warrants (see
+// is_offline_state()). Call with s_mutex held.
+static void apply_rating(health_device_t *dev, health_rating_t new_rating,
+                         health_cause_t new_cause, int64_t now)
 {
-    if (!maybe_enqueue_alert(dev, new_rating, now)) return;
-    dev->rating      = new_rating;
-    /* Maintained from the STATE, every commit — so it is correct however we arrived at
-     * CRITICAL, including CRITICAL -> CRITICAL where there is no edge for
-     * maybe_enqueue_alert() to observe. Reads "the critical I am currently at is
-     * leak-driven, so its eventual recovery must stay silent too". */
-    dev->crit_is_leak = (new_rating == HEALTH_CRITICAL) ? dev->leaking : false;
+    bool old_off = is_offline_state(dev->rating, dev->cause);
+    bool new_off = is_offline_state(new_rating, (uint8_t)new_cause);
+
+    // !offline_alerted: never a second device_offline without the recovery between them
+    // (reachable only if a debounced recovery's trailing edge kept failing to enqueue).
+    bool want_offline   = new_off && !old_off && dev->ever_seen && !dev->offline_alerted;
+    bool want_recovered = !new_off && old_off && dev->offline_alerted;
+
+    if (want_offline || want_recovered) {
+        if (dev->last_alert_ms != 0 &&
+            (now - dev->last_alert_ms) < HEALTH_ALERT_DEBOUNCE_MS) {
+            // Debounced, not dropped: the state is committed below and the tick emits the
+            // trailing edge once the debounce has passed (evaluate_timeouts()). 2.1.3
+            // dropped it outright, so a recovery inside the debounce left the cloud
+            // believing the device was still offline.
+            dev->alert_retry = true;
+        } else if (!enqueue_alert(dev, want_offline, new_rating, now)) {
+            // Queue full: hold the old rating so the next evaluation re-detects the same
+            // transition and retries. Committing would consume the transition, and the
+            // alert would be lost permanently, not merely delayed.
+            return;
+        } else {
+            dev->offline_alerted = want_offline;
+            dev->last_alert_ms   = now;
+            dev->alert_retry     = false;
+        }
+    }
+
+    // A valve rating change to or from a battery-driven state raises no alert, so it asks
+    // for a snapshot instead (health_get_rating_seq()).
+    bool valve_batt_edge = dev->dev_type == HEALTH_DEV_VALVE &&
+                           (dev->rating != new_rating || dev->cause != (uint8_t)new_cause) &&
+                           (dev->cause == HEALTH_CAUSE_BATTERY ||
+                            new_cause == HEALTH_CAUSE_BATTERY);
+
+    dev->rating = new_rating;
+    dev->cause  = (uint8_t)new_cause;
+    if (valve_batt_edge) s_rating_seq++;
 }
 
 // ---------------------------------------------------------------------------
@@ -472,8 +513,9 @@ static void handle_lora_checkin(const health_event_t *evt)
     dev->last_rssi     = evt->lora.rssi;
     dev->leaking       = evt->lora.leaking;
 
-    health_rating_t new_rating = compute_sensor_rating(dev, now);
-    apply_rating(dev, new_rating, now);
+    health_cause_t cause;
+    health_rating_t new_rating = compute_sensor_rating(dev, now, &cause);
+    apply_rating(dev, new_rating, cause, now);
     dev->ever_seen = true;
     check_boot_sync_locked();
 }
@@ -489,8 +531,9 @@ static void handle_ble_leak_checkin(const health_event_t *evt)
     dev->last_rssi     = evt->ble_leak.rssi;
     dev->leaking       = evt->ble_leak.leaking;
 
-    health_rating_t new_rating = compute_sensor_rating(dev, now);
-    apply_rating(dev, new_rating, now);
+    health_cause_t cause;
+    health_rating_t new_rating = compute_sensor_rating(dev, now, &cause);
+    apply_rating(dev, new_rating, cause, now);
     dev->ever_seen = true;
     check_boot_sync_locked();
 }
@@ -515,40 +558,45 @@ static void handle_valve_event(bool connected)
         //
         // It also fixes a second bug. Once the valve was CRITICAL, a repeat
         // DISCONNECTED re-stamped, compute_valve_rating() returned WARNING again,
-        // and maybe_enqueue_alert() took the out_of_critical branch with ever_seen
+        // and the alert path took the out-of-critical branch with ever_seen
         // already true — publishing `device_recovered` for a valve that never came
-        // back. With the latch, a repeat recomputes CRITICAL and falls out of
-        // maybe_enqueue_alert() silently.
+        // back. With the latch, a repeat recomputes the same CRITICAL and
+        // apply_rating() has no transition to alert on.
         //
         // The grace now means "time since the link was last usable", which is what
         // the rating already claimed it meant.
         dev->disconnect_ms = now;  // Start grace period (keep last_seen_ms)
     }
 
-    health_rating_t new_rating = compute_valve_rating(dev, now);
-    apply_rating(dev, new_rating, now);
+    health_cause_t cause;
+    health_rating_t new_rating = compute_valve_rating(dev, now, &cause);
+    apply_rating(dev, new_rating, cause, now);
     if (connected) {
         dev->ever_seen = true;
         check_boot_sync_locked();
     }
 }
 
-// Valve battery update (from a BLE battery NOTIFY / connect). Refreshes the
-// stored battery and re-rates the valve so a low battery is reflected. Owns
-// ONLY the battery — connectivity (last_seen_ms/disconnect_ms) stays with the
-// connect/disconnect events. Without this the valve path never fed a battery,
-// so compute_valve_rating saw last_battery==0xFF and always returned EXCELLENT.
+// Valve battery update (every BLE battery read/notify, plus a resync at link-up).
+// Refreshes the stored battery and re-rates the valve so a low battery is
+// reflected. Owns ONLY the battery — connectivity (last_seen_ms/disconnect_ms)
+// stays with the connect/disconnect events. Without this the valve path never fed
+// a battery, so compute_valve_rating saw last_battery==0xFF and always returned
+// EXCELLENT.
 static void handle_valve_battery(uint8_t battery)
 {
     health_device_t *dev = find_valve();
     if (!dev) return;
-    if (battery == 0xFF) return;   // unknown — ignore
+    // Unknown (no characteristic, failed read, setup not done) — ignore, so
+    // last_battery keeps the last REAL reading across a reconnect.
+    if (battery == 0xFF) return;
 
     dev->last_battery = battery;
 
     int64_t now = now_ms();
-    health_rating_t new_rating = compute_valve_rating(dev, now);
-    apply_rating(dev, new_rating, now);
+    health_cause_t cause;
+    health_rating_t new_rating = compute_valve_rating(dev, now, &cause);
+    apply_rating(dev, new_rating, cause, now);
 }
 
 // Valve flood-probe state change. Owns ONLY `leaking`; connectivity and battery
@@ -561,8 +609,9 @@ static void handle_valve_leak(bool leaking)
     dev->leaking = leaking;
 
     int64_t now = now_ms();
-    health_rating_t new_rating = compute_valve_rating(dev, now);
-    apply_rating(dev, new_rating, now);
+    health_cause_t cause;
+    health_rating_t new_rating = compute_valve_rating(dev, now, &cause);
+    apply_rating(dev, new_rating, cause, now);
 }
 
 static void evaluate_timeouts(void)
@@ -584,10 +633,15 @@ static void evaluate_timeouts(void)
         // because nothing else re-rated a connected valve — so a WET flood probe could
         // stay invisible to the roll-up for the whole episode. Re-rating here is the
         // self-healing path every other device already had.
+        //
+        // A CAUSE change alone counts too: a battery-critical valve whose disconnect
+        // grace expires stays CRITICAL but becomes offline (BATTERY -> LINK), and that
+        // is exactly the edge that owes a device_offline.
+        health_cause_t cause;
         if (dev->dev_type == HEALTH_DEV_VALVE) {
-            health_rating_t new_rating = compute_valve_rating(dev, now);
-            if (new_rating != dev->rating) {
-                apply_rating(dev, new_rating, now);
+            health_rating_t new_rating = compute_valve_rating(dev, now, &cause);
+            if (new_rating != dev->rating || (uint8_t)cause != dev->cause) {
+                apply_rating(dev, new_rating, cause, now);
             }
             continue;
         }
@@ -595,10 +649,33 @@ static void evaluate_timeouts(void)
         // Sensors: skip devices never seen (already CRITICAL from init)
         if (dev->last_seen_ms == 0) continue;
 
-        health_rating_t new_rating = compute_sensor_rating(dev, now);
+        health_rating_t new_rating = compute_sensor_rating(dev, now, &cause);
 
-        if (new_rating != dev->rating) {
-            apply_rating(dev, new_rating, now);
+        if (new_rating != dev->rating || (uint8_t)cause != dev->cause) {
+            apply_rating(dev, new_rating, cause, now);
+        }
+    }
+
+    /* Trailing edge of a debounced alert. apply_rating() commits the state even when the
+     * alert is debounced; this emits the one alert that makes the cloud's view match the
+     * state once the debounce has passed, so the event stream converges within one
+     * debounce + one tick (<= 90 s). Nothing is sent if the device has since returned to
+     * the state last reported. */
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        health_device_t *dev = &s_devices[i];
+        if (!dev->in_use || !dev->alert_retry) continue;
+        if ((now - dev->last_alert_ms) < HEALTH_ALERT_DEBOUNCE_MS) continue;
+
+        bool desired = is_offline_state(dev->rating, dev->cause);
+        if (desired != dev->offline_alerted && (desired ? dev->ever_seen : true)) {
+            if (enqueue_alert(dev, desired, dev->rating, now)) {
+                dev->offline_alerted = desired;
+                dev->last_alert_ms   = now;
+                dev->alert_retry     = false;
+            }
+            // Queue full: alert_retry stays set and the next tick retries.
+        } else {
+            dev->alert_retry = false;
         }
     }
 
@@ -857,13 +934,17 @@ static int append_device_locked(health_dev_type_t type, const char *id,
         if (dev->in_use) continue;
 
         // memset seeds every "unknown" field: last_seen_ms/last_alert_ms/disconnect_ms 0,
-        // last_rssi 0, ever_seen/leaking/crit_is_leak/excuse_done false.
+        // last_rssi 0, ever_seen/leaking/excuse_done false, and no alert owed
+        // (offline_alerted/alert_retry false: its first contact is not a recovery).
         memset(dev, 0, sizeof(*dev));
         dev->in_use       = true;
         dev->dev_type     = type;
         strncpy(dev->dev_id, id, sizeof(dev->dev_id) - 1);
         dev->dev_id[sizeof(dev->dev_id) - 1] = '\0';
         dev->rating       = HEALTH_CRITICAL;   // until first contact
+        dev->cause        = HEALTH_CAUSE_LINK; // ...because it has not been heard
+        dev->offline_alerted = false;
+        dev->alert_retry     = false;
         dev->last_battery = 0xFF;              // unknown
         dev->added_s      = added_s;
         dev->excuse_s     = excuse_s;
@@ -1085,9 +1166,11 @@ char *health_alert_to_json(const health_alert_t *alert)
 
     cJSON_AddStringToObject(root, "category", "health");
 
-    bool is_offline = (alert->new_rating == HEALTH_CRITICAL);
+    // The kind is carried explicitly. It used to be inferred from new_rating, which
+    // stopped being possible once a device can recover INTO a leak- or battery-driven
+    // CRITICAL (see is_offline_state()).
     cJSON_AddStringToObject(root, "event",
-                            is_offline ? "device_offline" : "device_recovered");
+                            alert->offline ? "device_offline" : "device_recovered");
 
     cJSON_AddStringToObject(root, "source_type", dev_type_to_source_type(alert->dev_type));
     // valve_id / sensor_id, per the device type — the same key, in the same
@@ -1145,6 +1228,7 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
         dst->dev_type     = src->dev_type;
         memcpy(dst->dev_id, src->dev_id, sizeof(dst->dev_id));
         dst->rating       = src->rating;
+        dst->cause        = src->cause;
         dst->ever_seen    = src->ever_seen;
         dst->leaking      = src->leaking;
         dst->last_battery = src->last_battery;
@@ -1232,6 +1316,23 @@ bool health_is_rollup_syncing(void)
 uint32_t health_get_checkin_seq(void)
 {
     return s_checkin_seq;   /* lock-free: single writer, 32-bit aligned */
+}
+
+uint32_t health_get_rating_seq(void)
+{
+    return s_rating_seq;    /* lock-free read: written only under s_mutex, 32-bit aligned */
+}
+
+bool health_is_valve_battery_critical(void)
+{
+    if (!s_mutex) return false;
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+
+    const health_device_t *v = find_valve();
+    bool crit = v && v->last_battery != 0xFF &&
+                v->last_battery <= HEALTH_VALVE_BATTERY_CRIT_PCT;
+    xSemaphoreGive(s_mutex);
+    return crit;
 }
 
 bool health_get_sync_counts(uint8_t *seen, uint8_t *total)

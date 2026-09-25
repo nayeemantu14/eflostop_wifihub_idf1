@@ -282,9 +282,10 @@ static void build_system_health_reason(const health_device_status_t *health,
     int offline_count = 0;
     int batt_count    = 0;
     int signal_count  = 0;
-    bool valve_offline = false;
-    bool valve_grace   = false;
-    bool valve_batt    = false;
+    bool valve_offline   = false;
+    bool valve_grace     = false;
+    bool valve_batt_crit = false;
+    bool valve_batt      = false;
     const health_device_status_t *sole_leaker = NULL;
 
     for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
@@ -320,30 +321,30 @@ static void build_system_health_reason(const health_device_status_t *health,
             // the fact that makes it urgent.
             //
             // Everything else skips: for a sensor, "offline" adds nothing once we know
-            // it is wet and would contradict itself; and for a CONNECTED valve the
-            // branch below would classify it as "Valve battery low", which is simply
-            // the wrong cause.
+            // it is wet and would contradict itself; and a CONNECTED valve has no lost
+            // link to report (its battery, if also low, is outranked by the leak).
             if (!(d->dev_type == HEALTH_DEV_VALVE && !d->connected)) continue;
         }
 
+        // The cause is the health engine's own (health_device_status_t.cause), set with the
+        // rating. It used to be inferred here — "connected valve at a degraded rating means
+        // battery low" — which could not name a critical battery at all (BUG-1).
         if (d->dev_type == HEALTH_DEV_VALVE) {
-            if (!d->connected) {
+            // A leaking valve reaches this point only when it is ALSO disconnected (see
+            // above). Its cause is LEAK, because the leak outranks the link in
+            // compute_valve_rating(), so it is bucketed by the link it has lost.
+            if (d->cause == HEALTH_CAUSE_LINK || d->leaking) {
                 if (sys_rating == HEALTH_CRITICAL) valve_offline = true;
                 else                               valve_grace   = true;
-            } else {
-                // Connected valve at degraded rating → battery issue
-                valve_batt = true;
+            } else if (d->cause == HEALTH_CAUSE_BATTERY) {
+                if (d->rating == HEALTH_CRITICAL) valve_batt_crit = true;
+                else                              valve_batt      = true;
             }
         } else {
-            // Sensor: determine root cause of this rating
-            if (!d->connected) {
-                offline_count++;
-            } else if (d->last_battery != 0xFF &&
-                       d->last_battery <= HEALTH_BATTERY_GOOD_PCT) {
-                batt_count++;
-            } else {
-                signal_count++;
-            }
+            // Sensor: root cause of this rating
+            if (d->cause == HEALTH_CAUSE_LINK)         offline_count++;
+            else if (d->cause == HEALTH_CAUSE_BATTERY) batt_count++;
+            else if (d->cause == HEALTH_CAUSE_SIGNAL)  signal_count++;
         }
     }
 
@@ -375,6 +376,8 @@ static void build_system_health_reason(const health_device_status_t *health,
         snprintf(parts[n++], HEALTH_REASON_PART_LEN, "Valve offline");
     if (valve_grace && n < HEALTH_REASON_MAX_PARTS)
         snprintf(parts[n++], HEALTH_REASON_PART_LEN, "Valve disconnected");
+    if (valve_batt_crit && n < HEALTH_REASON_MAX_PARTS)
+        snprintf(parts[n++], HEALTH_REASON_PART_LEN, "Valve battery critical");
     if (valve_batt && n < HEALTH_REASON_MAX_PARTS)
         snprintf(parts[n++], HEALTH_REASON_PART_LEN, "Valve battery low");
     if (offline_count > 0 && n < HEALTH_REASON_MAX_PARTS)
@@ -988,7 +991,13 @@ void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_
     int st = ble_valve_get_state();
     cJSON_AddStringToObject(data, "valve_state",
         st == 1 ? "open" : st == 0 ? "closed" : "unknown");
-    cJSON_AddNumberToObject(data, "battery", ble_valve_get_battery());
+    // 0xFF = no real reading on this link (no characteristic, failed read, setup not
+    // done): null, never 0 — a 0 here read as an empty battery (BUG-1).
+    uint8_t batt = ble_valve_get_battery();
+    if (batt != 0xFF)
+        cJSON_AddNumberToObject(data, "battery", batt);
+    else
+        cJSON_AddNullToObject(data, "battery");
     cJSON_AddBoolToObject(data, "leak_state", ble_valve_get_leak());
     cJSON_AddBoolToObject(data, "rmleak", ble_valve_get_rmleak_state());
 
@@ -1015,7 +1024,10 @@ void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev)
     cJSON_AddStringToObject(data, "source_type", leak_source_to_str(ev->source));
     cJSON_AddStringToObject(data, identity_key_for_source(ev->source), ev->device_id);
     cJSON_AddBoolToObject(data, "leak_state", ev->leak_state);
-    cJSON_AddNumberToObject(data, "battery", ev->battery);
+    if (ev->battery != 0xFF)                       // 0xFF = unknown, any source: null, not 0
+        cJSON_AddNumberToObject(data, "battery", ev->battery);
+    else
+        cJSON_AddNullToObject(data, "battery");
     add_location_for_source(data, ev->source, ev->device_id);
 
     // ---- source-specific extras ----

@@ -86,6 +86,11 @@ extern "C"
 
     // Getters
     bool ble_valve_get_mac(char *mac_buffer);
+    /**
+     * @brief Battery percent from the current link's last read/notify.
+     * @return 0-100, or 0xFF when unknown (no link, characteristic missing, read
+     *         failed, setup not done). 0 is a REAL 0 %: publish 0xFF as null.
+     */
     uint8_t ble_valve_get_battery(void);
     bool ble_valve_get_leak(void);
     int ble_valve_get_state(void);

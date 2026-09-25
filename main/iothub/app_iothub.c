@@ -219,6 +219,7 @@ static char          s_snap_evt[32]      = {0};                 // event name (l
 static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from Twin each iteration
 static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only on lifecycle)
 static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms when the fast snapshot was (re)armed; ceiling is relative to THIS
+static uint32_t      s_rating_seq_seen    = 0;                  // health_get_rating_seq() already requested/published (see Phase 3)
 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
@@ -633,6 +634,12 @@ static const char *valve_open_reject_reason(void)
         return "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, "
                "or use override to open the valve during a leak.";
     }
+    // The valve (FW 2.2.0) refuses to open at <=10 % and GATT writes have no completion
+    // callback, so forwarding the open got an `ok` ack for a valve that stayed shut. The
+    // last REAL reading (kept across reconnects) comes from the health table.
+    if (health_is_valve_battery_critical()) {
+        return "Valve battery critical (≤10 %): the valve will not open. Replace the batteries.";
+    }
     return NULL;
 }
 
@@ -936,7 +943,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
         error_msg = valve_open_reject_reason();
         if (error_msg) {
             success = false;
-            ESP_LOGW(IOTHUB_TAG, "VALVE_OPEN refused — valve RMLEAK is asserted");
+            ESP_LOGW(IOTHUB_TAG, "VALVE_OPEN refused — %s", error_msg);
         } else {
             ble_valve_connect();
             ble_valve_open();
@@ -959,7 +966,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             error_msg = valve_open_reject_reason();
             if (error_msg) {
                 success = false;
-                ESP_LOGW(IOTHUB_TAG, "VALVE_SET_STATE open refused — valve RMLEAK is asserted");
+                ESP_LOGW(IOTHUB_TAG, "VALVE_SET_STATE open refused — %s", error_msg);
             } else {
                 ble_valve_connect();
                 ble_valve_open();
@@ -2268,6 +2275,8 @@ void iothub_task(void *param)
     s_snap_last_pub_ms = snap_now_ms();
     g_fast_arm_ms      = snap_now_ms();   // fast-snapshot ceiling is measured from here (boot)
     snap_rearm_heartbeat();
+    // Boot-time rating changes (the initial reconcile) are the boot snapshot's to report.
+    s_rating_seq_seen  = health_get_rating_seq();
 
     lora_packet_t pkt;
     ble_update_type_t ble_upd_type;
@@ -2417,7 +2426,7 @@ void iothub_task(void *param)
         bool  vlk_wet     = false;
         int   vlk_state   = -1;
         bool  vlk_rmleak  = false;
-        int   vlk_batt    = 0;
+        int   vlk_batt    = 0xFF;   // 0xFF = unknown (published as null), never 0
         char  vlk_fw[32]  = {0};
         bool  vlk_have_fw = false;
         bool  vlk_mac_ok  = false;
@@ -2576,7 +2585,7 @@ void iothub_task(void *param)
         // auto_close ~40 ms ahead of the leak_detected that triggered it, and a
         // cloud consumer reading in order saw an unexplained auto-close.
 
-        // ---- Health alerts (Critical transitions) ----
+        // ---- Health alerts (offline / recovered) and rating changes ----
         {
             health_alert_t alert;
             bool any_alert = false;
@@ -2594,6 +2603,17 @@ void iothub_task(void *param)
             // heartbeat. Health alerts are already debounced, so this stays low-volume.
             if (any_alert)
                 snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "health");
+
+            // A rating change nobody alerts on. Valve battery-critical raises no alert
+            // (Phase B: suppressed like a leak), and a roll-up grace expiry has no device
+            // edge at all; without this the cloud learned both only at the next heartbeat
+            // (field log: RED at 678 s, published at 969 s). EVENT is 5 s-clamped and
+            // coalesced, so a flapping reading costs at most one snapshot per clamp.
+            uint32_t rs = health_get_rating_seq();
+            if (rs != s_rating_seq_seen) {
+                s_rating_seq_seen = rs;
+                snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "health");
+            }
         }
 
         // ---- LoRa sensor events ----
@@ -2924,9 +2944,14 @@ void iothub_task(void *param)
                 else
                     ESP_LOGI(IOTHUB_TAG, "SNAP trigger=%s", rstr);
 
+                // Sampled BEFORE the build, so the snapshot reflects at least this much;
+                // a change after the sample is re-requested on the next pass.
+                uint32_t rs_pub = health_get_rating_seq();
                 bool ok = telemetry_v2_publish_snapshot(rstr);
                 if (ok) {
                     s_snap_last_pub_ms = flush_now;
+                    // This snapshot already carries those rating changes: no duplicate.
+                    s_rating_seq_seen  = rs_pub;
                     if (reason == SNAP_BOOT || reason == SNAP_COMMISSION) {
                         g_boot_snapshot_sent = true;
                         g_fast_snapshot_sent = true;   // flag hygiene: a boot/commission snapshot also satisfies the fast one-shot

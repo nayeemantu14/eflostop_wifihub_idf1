@@ -139,7 +139,10 @@ static uint16_t h_dis_char = 0;
 static uint16_t h_dis_svc_end = 0;
 static char g_firmware_rev[32] = {0};
 
-static uint8_t g_val_battery = 0;
+/* 0xFF = no real reading on this link: characteristic missing, read failed, or setup not
+ * done yet. 0 is a REAL 0 %. It used to start (and reset) at 0, so an unknown battery was
+ * published as battery:0 and rated as an empty one (BUG-1). */
+static uint8_t g_val_battery = 0xFF;
 static bool g_val_leak = false;
 static int g_val_state = -1;
 static bool g_val_rmleak = false;
@@ -461,6 +464,14 @@ static void discovery_timeout_cb(TimerHandle_t xTimer)
     }
 }
 
+// Battery for the logs: "unknown" for 0xFF (see g_val_battery), else "NN%".
+static const char *batt_to_str(uint8_t batt, char *buf, size_t len)
+{
+    if (batt == 0xFF) return "unknown";
+    snprintf(buf, len, "%u%%", (unsigned)batt);
+    return buf;
+}
+
 // -----------------------------------------------------------------------------
 // UPDATE NOTIFY
 // -----------------------------------------------------------------------------
@@ -500,11 +511,12 @@ static void notify_hub_update(ble_update_type_t update_type)
         health_post_valve_event(false);
     else if (update_type != BLE_UPD_NONE) {
         health_post_valve_event(true);
-        /* Feed the current battery so a low valve battery actually rates WARNING.
-         * The valve path otherwise never fed battery to the health engine, so it
-         * always rated EXCELLENT (green) regardless of charge. g_val_battery is
-         * the value already read at setup / refreshed on each BATTERY notify. */
-        health_post_valve_battery(g_val_battery);
+        /* Battery resync at LINK-UP only. The battery itself reaches the health engine
+         * from on_notify() on every read/notify; re-posting it on every STATE/LEAK/RMLEAK
+         * update as well doubled the health-queue traffic (L19). This one covers a
+         * setup-time post the 16-deep queue dropped. 0xFF (unknown) is ignored there. */
+        if (update_type == BLE_UPD_CONNECTED)
+            health_post_valve_battery(g_val_battery);
     }
 }
 
@@ -554,9 +566,23 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
     }
     else if (attr_handle == h_batt_char)
     {
+        // An empty payload is not a reading. data[] is zero-filled, so storing data[0]
+        // here would invent a 0 % battery (BUG-1).
+        if (len == 0)
+        {
+            ESP_LOGW(BLE_TAG, "[DATA] Battery notify/read with no payload - ignored");
+            return 0;
+        }
         uint8_t old_batt = g_val_battery;
         g_val_battery = data[0];
-        ESP_LOGI(BLE_TAG, "[DATA] Battery=%u%%", g_val_battery);
+        char bstr[8];
+        ESP_LOGI(BLE_TAG, "[DATA] Battery=%s", batt_to_str(g_val_battery, bstr, sizeof(bstr)));
+        /* Posted unconditionally, NOT behind the delta or setup gates below — like the
+         * flood probe above. The valve re-notifies every 20 s at <=10 %, and a steady
+         * critical reading never passes the delta gate, so an earlier post the queue
+         * dropped would otherwise never be corrected and the valve would never be rated
+         * CRITICAL. The health engine keys off the value, so a repeat is a no-op. */
+        health_post_valve_battery(g_val_battery);
         if (old_batt != g_val_battery && !g_setup_in_progress)
             notify_hub_update(BLE_UPD_BATTERY);
     }
@@ -961,8 +987,9 @@ static void setup_next_step(void)
         ESP_LOGI(BLE_TAG, "[READY] Valve=%u, Flood=%u, RMLEAK=%u, Batt=%u, DIS=%u",
                  h_valve_char, h_flood_char, h_rmleak_char, h_batt_char, h_dis_char);
         ESP_LOGI(BLE_TAG, "[READY] FW Rev: \"%s\"", g_firmware_rev[0] ? g_firmware_rev : "(not available)");
-        ESP_LOGI(BLE_TAG, "[READY] Battery=%u%%, Leak=%s, Valve=%s, RMLEAK=%s",
-                 g_val_battery,
+        char bstr[8];
+        ESP_LOGI(BLE_TAG, "[READY] Battery=%s, Leak=%s, Valve=%s, RMLEAK=%s",
+                 batt_to_str(g_val_battery, bstr, sizeof(bstr)),
                  g_val_leak ? "LEAK" : "OK",
                  g_val_state == 1 ? "OPEN" : (g_val_state == 0 ? "CLOSED" : "UNKNOWN"),
                  g_val_rmleak ? "ACTIVE" : "CLEAR");
@@ -1406,7 +1433,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             h_flood_svc_end = 0;
             h_batt_svc_end = 0;
             h_dis_svc_end = 0;
-            g_val_battery = 0;
+            g_val_battery = 0xFF;   // unknown until this link reads it (not 0 %)
             g_val_leak = false;
             g_val_state = -1;
             g_val_rmleak = false;   // reset like the other fields — a missing/failed RMLEAK read must not leak the prior session's value
@@ -1461,7 +1488,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         h_flood_svc_end = 0;
         h_batt_svc_end = 0;
         h_dis_svc_end = 0;
-        g_val_battery = 0;
+        g_val_battery = 0xFF;   // unknown with no link (not 0 %)
         g_val_leak = false;
         g_val_state = -1;
         g_val_rmleak = false;   // reset like the other fields — no stale prior-session RMLEAK across a reconnect

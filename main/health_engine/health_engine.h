@@ -19,6 +19,13 @@ extern "C" {
 #define HEALTH_ALERT_DEBOUNCE_MS     (60 * 1000)         // 60s min between alerts per device
 #define HEALTH_BATTERY_WARN_PCT      20
 #define HEALTH_BATTERY_GOOD_PCT      35
+/* The VALVE's battery bands: its own FW 2.2.0 thresholds. At <=10 % the valve auto-closes
+ * and refuses to open, so the hub rates it CRITICAL ("Valve battery critical"); 11-20 % is
+ * the valve's Low band (WARNING). VALVE ONLY - the sensor bands above are unchanged by
+ * product decision: a low sensor battery never closes the valve, so it never reads
+ * CRITICAL. */
+#define HEALTH_VALVE_BATTERY_CRIT_PCT 10
+#define HEALTH_VALVE_BATTERY_WARN_PCT 20
 #define HEALTH_RSSI_WARN_DBM         (-90)
 #define HEALTH_RSSI_GOOD_DBM         (-80)
 #define HEALTH_VALVE_DISC_TIMEOUT_MS (3 * 60 * 1000)      // 3-min grace before CRITICAL
@@ -76,6 +83,18 @@ typedef enum {
     HEALTH_DEV_BLE_LEAK
 } health_dev_type_t;
 
+/* WHY a device sits at its current rating. Set together with the rating by the engine, so
+ * consumers (the snapshot reason string, the alert model) read the cause instead of
+ * re-deriving it from connected/battery - a re-derivation that could not tell a
+ * battery-critical valve from an offline one. NONE only accompanies EXCELLENT. */
+typedef enum {
+    HEALTH_CAUSE_NONE = 0,
+    HEALTH_CAUSE_LEAK,
+    HEALTH_CAUSE_LINK,       // offline / never heard / valve disconnect grace
+    HEALTH_CAUSE_BATTERY,
+    HEALTH_CAUSE_SIGNAL
+} health_cause_t;
+
 typedef enum {
     HEALTH_EVT_LORA_CHECKIN = 0,
     HEALTH_EVT_BLE_LEAK_CHECKIN,
@@ -118,6 +137,10 @@ typedef struct {
     health_rating_t   old_rating;
     uint8_t           battery;
     int8_t            rssi;
+    bool              offline;          // true = device_offline, false = device_recovered.
+                                        // Explicit: never inferred from new_rating, since a
+                                        // recovered device can still be CRITICAL (leak or
+                                        // battery). Sits in padding: no size change.
     uint32_t          offline_duration_s;
 } health_alert_t;
 
@@ -135,6 +158,8 @@ typedef struct {
     bool              excused;          // not yet heard AND still inside its own roll-up
                                         // excuse window (the "Syncing" set). Sits in the
                                         // padding before last_seen_age_s: no size change.
+    uint8_t           cause;            // health_cause_t: why `rating` is what it is. Also
+                                        // in that padding: no size change.
     uint32_t          last_seen_age_s;  // UINT32_MAX = never seen
 } health_device_status_t;
 
@@ -293,6 +318,31 @@ bool health_is_rollup_syncing(void);
  * with != , never with <.
  */
 uint32_t health_get_checkin_seq(void);
+
+/**
+ * @brief Monotonic counter of rating changes the cloud must see promptly.
+ *
+ * Bumped when the system roll-up rating changes, and when the valve's rating changes to
+ * or from a battery-driven state. iothub_task polls it and requests an EVENT snapshot, so
+ * a rating change that raises no alert (valve battery-critical is deliberately silent,
+ * and a roll-up grace expiry has no device edge at all) reaches the cloud within seconds
+ * instead of at the next heartbeat.
+ *
+ * Lock-free read; every write happens under the engine's mutex. Wraps at 2^32 — compare
+ * with != , never with <.
+ */
+uint32_t health_get_rating_seq(void);
+
+/**
+ * @brief Whether the provisioned valve's last REAL battery reading is at or below
+ *        HEALTH_VALVE_BATTERY_CRIT_PCT (the level at which the valve refuses to open).
+ *
+ * The reading is kept across reconnects: a valve that dropped at 8 % is still at 8 %.
+ * Returns false when no valve is provisioned, the battery is unknown, or the engine's
+ * mutex is busy (100 ms) — the valve itself still refuses the open, so failing open here
+ * costs only the explanatory error ack.
+ */
+bool health_is_valve_battery_critical(void);
 
 /**
  * @brief Tell the health engine whether the hub is currently holding the valve
