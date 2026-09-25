@@ -2,12 +2,13 @@
 
 Written for the user and for the next Claude Code session. It records where the 2.1.4 fix job stands and how to pick it up again.
 
-> **Resume here.** Read §1 and §3 first.
+> **Resume here.** Read §1 and §7 first.
 >
-> **Update, 17:15.** At the user's request, workflow 2 was **stopped cleanly right after G4a committed** (`2b16bdf`).
-> - G4b had not started; the working tree under `main/` is clean.
-> - **G4a has not been reviewed yet.**
-> - The next step when the user says "resume" is in §3: review G4a, then G4b → G4c → G4d → G5.
+> **Update, Friday evening (after the 20:42 resume).** **Phase D is complete.** G4a was reviewed, and G4b, G4c, G4d and G5 are implemented and reviewed. A review-fix round is committed (`6e496f5` … `00beb81`, see §2). The working tree is clean apart from the user's own paths.
+> - **Next: 🔨 Build checkpoint 2** (§7). Nothing on the branch has been compiled since `84a5d6a`.
+> - Still open with the user: the product question in §6 (the `auto_close` event on a sensors-only hub).
+>
+> *(Earlier, 17:15: workflow 2 was stopped after G4a at the user's request; §3 records how it was resumed.)*
 
 ---
 
@@ -25,8 +26,9 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
   - G4d: robustness;
   - G5: release docs.
 
-  At the user's request the workflow was **stopped right after G4a committed** (`2b16bdf`, 17:15). G4a is **not reviewed yet**, and G4b–G5 have not started.
-- **Still to do:** triage the workflow-2 reviews, 🔨 Build checkpoint 2, Phase E (adversarial review), Phase F (council), and Phase G (test plan and summary). Nothing is pushed, and no PR has been opened.
+  At the user's request the workflow was stopped right after G4a committed (`2b16bdf`, 17:15). It was resumed at 20:42 as a new workflow. That workflow reviewed G4a and implemented and reviewed G4b → G5 (all committed by 21:58).
+- **Review-fix round (committed):** every confirmed finding from the G4b, G4c+G4d and G5 reviews was fixed in four code groups plus docs. Each group was adversarially reviewed, and fixed again where needed, before it was committed (§2).
+- **Still to do:** 🔨 Build checkpoint 2, Phase E (adversarial review), Phase F (council), and Phase G (test plan and summary). Nothing is pushed, and no PR has been opened.
 
 | Phase | State |
 |---|---|
@@ -34,9 +36,10 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | B: questions | done (decisions in ROOT_CAUSE.md and the plan) |
 | C: plan | approved → `C:\Users\antun\.claude\plans\happy-floating-boole.md` |
 | D: G1–G3 + reviews + fixes | done; 🔨 Build checkpoint 1 passed |
-| D: G4a | committed `2b16bdf`, **not yet reviewed** |
-| D: G4b–G4d + G5 | **not started**; workflow 2 stopped after G4a at the user's request (§3) |
-| 🔨 Build checkpoint 2 | not started (§7) |
+| D: G4a | committed `2b16bdf`; reviewed OK (nits, fixed in G4b/G4c or carried into the test plan) |
+| D: G4b–G4d + G5 | committed and reviewed (`2c012b7`, `e823c09`, `d76241d`, `0e7cd44`) |
+| D: review-fix round | committed (`6e496f5`, `7ae131d`, `abd7d9d`, `24782b5`, `00beb81`) |
+| 🔨 Build checkpoint 2 | **next**, waiting for the user (§7) |
 | E: adversarial review | not started |
 | F: 5-specialist council | not started |
 | G: MANUAL_TEST_PLAN.md + summary | not started |
@@ -57,18 +60,25 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | `273f8d5` | G3 review fixes: wake iothub on a rating change; lock-free battery-critical check |
 | `84a5d6a` | Review round 2: the resync also restores the valve flood/battery readings; a busy provisioning read is never taken as "no valve"; checked add of the snapshot wake queue to the QueueSet |
 | `15128e6` | Found at Build checkpoint 1: the whitelist device set moved off `.bss` (it was +376 B of static RAM) |
-| `2b16bdf` | **G4a / P0-a/b/c.** The hub never connects to, commands, or pairs with a valve that isn't provisioned: MAC-only match, a peer check at connect, no passkey or bonding on a foreign link, pending commands flushed on a target change, API calls refused with no target. BLE starts for a sensors-only hub. Membership is three-state (YES/NO/UNKNOWN; UNKNOWN counts as provisioned). C2D valve commands with no valve return an error ack. **Not reviewed yet.** The implementer's report is in §3a |
-
-Workflow 2 still has four commits to make:
-- `fix(valve): retry and re-apply failed valve writes instead of dropping them`
-- `fix(prov,meta,buffer): transactional provisioning, copy-out metadata, locked offline buffer, no Wi-Fi password in the log`
-- `chore(release): 2.1.4`
+| `2b16bdf` | **G4a / P0-a/b/c.** The hub never connects to, commands, or pairs with a valve that isn't provisioned: MAC-only match, a peer check at connect, no passkey or bonding on a foreign link, pending commands flushed on a target change, API calls refused with no target. BLE starts for a sensors-only hub. Membership is three-state (YES/NO/UNKNOWN; UNKNOWN counts as provisioned). C2D valve commands with no valve return an error ack. Reviewed OK. The implementer's report is in §3a |
+| `a628356` | docs: this handoff (paused after G4a) |
+| `2c012b7` | **G4b / N1–N3.** Leak protection starts before Wi-Fi: provisioning, rules, health and BLE start at boot, and SNTP/DPS run as non-blocking steps in the loop. The QueueSet is built, with checked adds and no boot-time loss, before BLE starts. The BLE apply is retried when provisioning is busy |
+| `e823c09` | **G4c.** Valve writes are retried 3× and pended; a failed replay is re-applied; a command generation drops commands meant for a previous valve; RMLEAK is replayed before CLOSE; the flush WARN appears only when something was flushed; `nimble_port_init` is retried |
+| `d76241d` | **G4d.** Transactional provisioning (rollback plus NVS rewrite on a failed save), `sensor_meta_get` copy-out, a locked offline buffer that refuses events over 512 B, atomic twin `$rid`, and the Wi-Fi password lines hidden (`wifi_manager`/`http_server` logs set to WARN) |
+| `0e7cd44` | **G5.** `PROJECT_VER` 2.1.4, new `CHANGELOG.md`, all 11 schemas rebuilt for 2.1.x, validator, message catalogue v5.0, `C2D_COMMANDS.md` valve error acks, `handle_valve_resync` comment |
+| `6e496f5` | Review fix (**major**, found by both the G4b and the G5 review): events raised before the first clock sync were dropped. They are now held in the offline buffer and stamped with their real time (from the uptime) as soon as the clock syncs |
+| `7ae131d` | Review fix: an override window started before the clock synced is timed on uptime, then re-based. Before, it ended the instant SNTP landed and never ended without internet |
+| `abd7d9d` | Review fix: the BLE target is read and set in one provisioning lock hold (the owed retry could briefly re-target a removed valve); decommission-all clears the target first; the 2 s poll with NTP blocked is bounded; NVS counts are clamped |
+| `24782b5` | Review fix: a failed replay is re-applied ahead of newer commands (it could undo them); `s_link_dropping` ordering (it could block every CLOSE for a whole link); forced reconnects capped at 3; TERM_FAILURE handled; the passkey is no longer logged |
+| `00beb81` | Docs for the round: CHANGELOG, schemas, validator, catalogues; C2D command catalogue v3.0 |
 
 ---
 
 ## 3. Workflow 2 (G4a → G4d, G5): state and how to resume
 
-**Current state (17:15).** The workflow was stopped by `TaskStop` right after the G4a commit `2b16bdf`. G4b, G4c, G4d and G5 have not started, and the tree is clean.
+**DONE.** This was resumed at 20:42 (run `wf_d89150cf-931`). The review-fix round then ran as `wf_b48c0e5e-f12`, and both are committed (§2). The steps below are kept as a record.
+
+**State at 17:15.** The workflow was stopped by `TaskStop` right after the G4a commit `2b16bdf`. G4b, G4c, G4d and G5 had not started, and the tree was clean.
 
 **On "resume", do this:**
 1. Copy the workflow-2 script (path below). Keep the `RULES`, `INVARIANTS`, `G4B`, `G4C`, `G4D` and `G5` texts unchanged, and drop G4a from `GROUPS`.
@@ -211,6 +221,20 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 - The QueueSet adds are checked for every member.
 - The health engine's valve MAC check is covered by G4a's target-only link.
 
+**Accepted in the review-fix round (Claude's call; tell the user):**
+- **RMLEAK before CLOSE has one exception.** RMLEAK is always attempted first. If that write itself fails on a live link and no reconnect follows (the reconnect cap has been reached, or the terminate was refused), the CLOSE is still written, because holding back a close during a leak is worse. An OPEN never overtakes a pended RMLEAK.
+- **All three log lines that printed the fixed BLE passkey were changed**, not just the INPUT line: `[SM] Fixed Passkey: configured (not logged)` also printed the passkey at every boot. None of these lines is in the production-tool contract.
+- **C2D decommission of `valve` on a hub with no valve now acks `error`** ("valve decommission failed"), per S12 in the plan. A cloud retry after a lost ack sees an error instead of an idempotent `ok`.
+
+**Open with the user:**
+- **Product question:** on a sensors-only hub, a leak still publishes an `auto_close` event with `rmleak_asserted:false`. Keep it, or suppress it? For now `CHANGELOG.md` lists it as unchanged in 2.1.4.
+
+**Follow-ups noted (not fixed):**
+- The superseded banner in `docs/telemetry/telemetry_catalogue.md` was added by hand to a generated file. `build_catalogue.py` must emit it before the next regeneration.
+- A live DPS registration still blocks `iothub_task` for up to 60 s per attempt (first boot, after decommission-all, or after an epoch change). Moving DPS to its own task is future work.
+- For a few ms between a valve target change and the old link's DISCONNECT, the valve getters return the old valve's cached state.
+- The NVS count clamp does not also clamp to the blob length, so a corrupt count above the real entries gives phantom zero ids. This needs a firmware bug to write such a count.
+
 **Deferred to 2.1.5:**
 - the legacy keyword scan of C2D payloads;
 - `MAX_ACTIVE_LEAK_SOURCES` is 16, below the 33-device table;
@@ -227,8 +251,8 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 
 ## 7. Remaining steps
 
-1. **Finish or resume workflow 2** (§3). Triage its reviews and commit the fixes.
-2. **🔨 Build checkpoint 2 (user).** Full clean build of the branch at its final commit:
+1. ~~Finish or resume workflow 2 (§3). Triage its reviews and commit the fixes.~~ Done: `2c012b7` … `00beb81`.
+2. **🔨 Build checkpoint 2 (user).** Full clean build of the branch at its final commit. That is the last commit **before** this handoff update; the handoff commit is docs only.
 
    ```powershell
    git log --oneline -1
@@ -241,9 +265,24 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
    The user pastes back all four outputs. The VS Code extension's incremental build + flash is also fine, **as long as it runs after the last commit**. Check the `.bin` timestamp against `git log -1 --format=%ci`.
    Compare against §4:
    - no new warnings;
-   - `.bss` about +40 B plus G4's small statics (the offline-buffer static mutex ≈ 80 B is expected);
-   - IRAM unchanged.
-   The version must read 2.1.4 after G5.
+   - IRAM unchanged;
+   - the version reads 2.1.4.
+
+   Expected `.bss`: about 36,300 B, against 36,120 B for 2.1.3 and 36,536 B at CP1 (376 B of which was removed in `15128e6`).
+   - G1–G3: about +40 B.
+   - G4 and the review round: about +130 B in all. The largest item is the offline-buffer `StaticSemaphore_t` and its handle (about 88 B). The rest is small flags and counters (G4b about 20, G4c 5, R1 2, R2 8, R3 −4, R4 5).
+   - Anything above about 36,400 B needs a look.
+
+   Heap: `esp_log_level_set` adds about 60 B once at boot.
+
+   **Bench after flashing CP2.** Look for these first; the full list goes into the Phase G test plan.
+   - **Boot order:** "Starting BLE (valve=…, BLE sensors=N)" and "QueueSet Initialized" appear **before** "Connected! IP". There is no "QueueSet: … could not be added". At boot with a valve, you should see "[CMD] No valve commands to flush (valve target set)" as INFO, not a WARN.
+   - **Router off, then power-cycle, then wet a sensor:** the valve closes with no Wi-Fi. When the router comes back you should see "Time synced", then "Stamped pre-sync event [ob_NN] at clock sync: ts=…". After the MQTT connect, `leak_detected` and `auto_close` arrive with `ts` close to the real leak time. Check this in the **IoT Hub monitor** capture: replayed events never print `Pub event:` on UART.
+   - **NTP blocked:** "SNTP initial sync failed" at about 120 s, then the loop idles at 30 s, not 2 s.
+   - **Valve churn** (decommission the valve, provision a different one, repeat quickly): every "[SCAN] Target MAC matched - connecting to provisioned valve: X" names the most recent "[API] Target MAC set to: X".
+   - **Captive portal:** press the Wi-Fi reset button on a hub with a valve and 4 sensors, then set up Wi-Fi from a phone. The portal must load with no reboot. Record the heap `min_ever`; CP1 was 19,524 B.
+   - **Serial log:** no "password" line anywhere, and the `[SM] Fixed Passkey` line prints "configured (not logged)".
+   - **Validator:** `python docs/telemetry/validate_capture.py "<IoT Hub monitor capture>"` shows 0 FAIL.
 3. **Phase E (adversarial review).** Areas:
    - decommission races;
    - the empty hub;
@@ -293,6 +332,9 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 | Workflow 1 script (G1–G3) | `…\ee520eed-…\workflows\scripts\hub-2-1-4-phase-d-g1-g3-wf_8bac971b-5a7.js` |
 | Review-fix workflow script | `…\workflows\scripts\hub-2-1-4-g1-g3-review-fixes-wf_b49c8777-09b.js` |
 | Workflow 2 script (G4a–G5 specs) | `…\workflows\scripts\hub-2-1-4-phase-d-g4-g5-wf_ebb92f56-0ee.js` |
+| Workflow 2 resume script (G4a review, G4b–G5) | `…\workflows\scripts\hub-2-1-4-phase-d-g4-g5-resume-wf_d89150cf-931.js` |
+| Review-fix round script (R1–R4 + docs specs) | `…\workflows\scripts\hub-2-1-4-review-fix-round-wf_b48c0e5e-f12.js` |
+| Per-agent results (reviews, reports, bench checks) | `…\subagents\workflows\wf_d89150cf-931\journal.jsonl`, `…\subagents\workflows\wf_b48c0e5e-f12\journal.jsonl` |
 | Session transcript | `C:\Users\antun\.claude\projects\c--Work-Projects-EfloStop-2-Firmware-Production-eFloStop-WiFiHub-idf1\ee520eed-0dc0-45ef-bdfe-91bf0b44762d.jsonl` |
 | Bench logs of Build checkpoint 1 | `C:\Users\antun\Desktop\UART logs.txt`, `C:\Users\antun\Desktop\IoT hub monitor.txt` |
 
