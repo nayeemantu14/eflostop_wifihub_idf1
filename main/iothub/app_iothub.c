@@ -104,6 +104,15 @@ static bool g_needs_lifecycle = false;
 // iothub_task (the single snapshot-flush context) so it doesn't race the caches.
 static volatile bool g_decommission_reboot = false;
 
+// Device-set change (D0): set by the C2D provision/decommission handlers on the esp-mqtt
+// event task, AFTER the provisioning change succeeded; consumed at the top of the
+// iothub_task loop by apply_device_set_change(). One task then runs the health reconcile,
+// the cache and rules purges, the commission-snapshot arming and the twin in a defined
+// order, ahead of the command-ack snapshot — so the removal snapshot can never show the
+// removed device, and no scheduler flag (incl. the int64 g_commission_until_ms) is
+// written from two tasks. 2.1.3 did all of that on the esp-mqtt task.
+static volatile bool g_devset_changed = false;
+
 // Sensor-meta rename: set by handle_c2d_command (esp-mqtt event task) on a
 // successful standalone `sensor_meta` command; consumed by iothub_task, which
 // converts it into an event snapshot so the app reflects the new label/location
@@ -153,9 +162,9 @@ static uint8_t g_commission_pub_seen = 0;
 // g_commission_until_ms precisely because that one is zeroed at seen>=total — sharing
 // it would end the pulse early and fight the incremental-refresh design.
 //
-// Deadlines are owned by iothub_task. arm_commission_snapshot() runs on the esp-mqtt
-// event task and therefore only sets the g_prov_pulse_arm FLAG; all arithmetic happens
-// in the loop. Same split as g_cmd_snap_pending.
+// Deadlines are owned by iothub_task. arm_commission_snapshot() (iothub_task, via
+// apply_device_set_change) only sets the g_prov_pulse_arm FLAG; the arithmetic happens in
+// the consume block later in the same loop iteration.
 // ---------------------------------------------------------------------------
 #define PROV_PULSE_WINDOW_MS   (5 * 60 * 1000)   // elevated cadence lasts 5 min
 #define PROV_PULSE_PERIOD_MS   (30 * 1000)       // periodic pulse inside the window
@@ -618,48 +627,93 @@ static const char *valve_open_reject_reason(void)
     return NULL;
 }
 
-// After a device-table reload that keeps the valve provisioned, re-seed the
-// valve's health record if its BLE link is currently up. health_engine_reload_devices()
-// wipes every device's seen-state (ever_seen=false, rating=CRITICAL), but a valve
-// whose connection is already established emits no fresh CONNECTED event (its GATT
-// NOTIFYs are delta-gated on value change), so without this it would be reported
-// offline in the next snapshot and the boot-sync all-devices-seen path could never
-// complete (forcing the full 120 s timeout). No-op when the valve is disconnected.
-static void reseed_valve_health_if_connected(void)
-{
-    if (ble_valve_is_connected()) {
-        health_post_valve_event(true);
-        /* A reload wiped last_battery to 0xFF; re-feed it so the valve's rating
-         * reflects a low battery immediately, not only at the next BLE notify. */
-        health_post_valve_battery(ble_valve_get_battery());
-        /* Same reasoning for the flood probe: the reload zeroed `leaking`, and the
-         * valve only re-notifies the flood characteristic on a CHANGE, so a probe
-         * that is already wet would otherwise be forgotten until it dried and
-         * re-wetted. Re-feed the live cache. */
-        health_post_valve_leak(ble_valve_get_leak());
-    }
-}
-
-// Arm the commission snapshot after a device-list change (provision/decommission):
-// re-arm the one-shot initial snapshot, reset the published seen-count, and open
-// the incremental-refresh grace window so a device heard after the initial snapshot
-// still gets reported promptly (not only at the next 5-min periodic).
-// `pulse` = also run the 30 s post-provision snapshot pulse. TRUE only for `provision`:
-// a per-device decommission is a one-shot edit to the device list, already covered by the
-// refresh below plus the generic on-success command snapshot, and does not warrant ten
-// extra snapshots.
+// Arm the commission snapshot after devices were ADDED: re-arm the one-shot initial
+// snapshot, reset the published seen-count, and open the incremental-refresh grace window
+// so a device heard after the initial snapshot still gets reported promptly (not only at
+// the next 5-min periodic).
+// `pulse` = also run the 30 s post-provision snapshot pulse.
+// Removals never arm anything: the generic on-success command snapshot is their single
+// owner, and an already-open window keeps running unchanged (BUG-2/3).
 static void arm_commission_snapshot(bool pulse)
 {
-    // NOTE: runs in the esp-mqtt event-task context (C2D path), NOT iothub_task.
-    // It therefore writes ONLY these tolerant scalar flags (the same self-healing
-    // cross-task pattern already in use) and MUST NOT call snap_request() — the
-    // scheduler deadline is derived inside iothub_task from these flags.
+    // NOTE: runs on iothub_task ONLY (apply_device_set_change). It used to run on the
+    // esp-mqtt event task and race this task on g_boot_snapshot_sent and the 64-bit
+    // g_commission_until_ms; that cross-task write is gone. It still MUST NOT call
+    // snap_request(): the BOOT/COMMISSION arming further down the loop derives the
+    // deadline from these flags, and g_prov_pulse_arm is consumed by the pulse block
+    // later in this same iteration.
     g_boot_snapshot_sent  = false;
     g_commission_pub_seen = 0;
     g_commission_until_ms = (esp_timer_get_time() / 1000) + COMMISSION_REFRESH_GRACE_MS;
-    // A flag, not a deadline: the pulse schedule is computed in iothub_task so the two
-    // tasks never both write it. See the consume block at the top of the event loop.
     if (pulse) g_prov_pulse_arm = true;
+}
+
+// Invalidate every telemetry-cache entry whose device is no longer provisioned (L9).
+// The leak-event delta gate lives in these caches, so a sensor removed while wet and
+// re-added while still wet compared "wet == wet" against its stale entry and never
+// emitted leak_detected again. iothub_task only (the caches' single writer).
+static void purge_telemetry_caches(void)
+{
+    prov_device_set_t set;
+    if (!provisioning_get_device_set(&set)) return;   // unknown != "nothing provisioned"
+
+    int lora_purged = 0, ble_purged = 0;
+
+    for (int i = 0; i < TELEM_MAX_LORA_CACHE; i++) {
+        if (!g_telem_lora_cache[i].valid) continue;
+        bool keep = false;
+        for (int k = 0; k < set.lora_count; k++) {
+            if (set.lora_ids[k] == g_telem_lora_cache[i].sensor_id) { keep = true; break; }
+        }
+        if (!keep) {
+            memset(&g_telem_lora_cache[i], 0, sizeof(g_telem_lora_cache[i]));
+            lora_purged++;
+        }
+    }
+
+    for (int i = 0; i < TELEM_MAX_BLE_LEAK_CACHE; i++) {
+        if (!g_telem_ble_cache[i].valid) continue;
+        bool keep = false;
+        for (int k = 0; k < set.ble_count; k++) {
+            if (strcasecmp(set.ble_macs[k], g_telem_ble_cache[i].mac_str) == 0) { keep = true; break; }
+        }
+        if (!keep) {
+            memset(&g_telem_ble_cache[i], 0, sizeof(g_telem_ble_cache[i]));
+            ble_purged++;
+        }
+    }
+
+    if (lora_purged > 0 || ble_purged > 0) {
+        ESP_LOGI(IOTHUB_TAG, "Telemetry caches purged: %d LoRa, %d BLE (no longer provisioned)",
+                 lora_purged, ble_purged);
+    }
+}
+
+// The single owner of a device-set change (D0). iothub_task only, consumed at the top of
+// the loop so everything below — including the command-ack snapshot — sees the new set.
+static void apply_device_set_change(void)
+{
+    health_reconcile_result_t r;
+    if (!health_engine_reconcile_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS, &r)) {
+        g_devset_changed = true;   // provisioning or health busy: retry next pass
+        ESP_LOGW(IOTHUB_TAG, "Device-set change: reconcile deferred, retrying");
+        return;
+    }
+
+    purge_telemetry_caches();
+
+    if (!rules_engine_forget_unprovisioned()) {
+        // The reconcile is idempotent, so re-running the whole change is harmless.
+        ESP_LOGW(IOTHUB_TAG, "Device-set change: rules purge deferred, retrying");
+        g_devset_changed = true;
+    }
+
+    // ONLY additions arm the commission snapshot + pulse; removals never do (BUG-2/3).
+    if (r.added > 0) arm_commission_snapshot(true);
+
+    // Every device-set change refreshes the twin (Q7; L11: decommission used to leave the
+    // twin claiming the removed device until the next reconnect).
+    publish_twin_reported();
 }
 
 // ---- Snapshot scheduler helpers (iothub_task context ONLY) ----------------
@@ -874,10 +928,12 @@ static void handle_c2d_command(const char *data, size_t data_len)
         else if (strcasecmp(target, "valve") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE !!!");
             if (provisioning_remove_valve()) {
-                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
+                // The BLE target change stays here, synchronous: it is the safety half.
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
-                arm_commission_snapshot(false);   // refresh the snapshot if the hub stays provisioned
+                // Health reconcile, purges and twin run on iothub_task (D0). No snapshot
+                // arming: the on-success command snapshot below is the removal's only one.
+                g_devset_changed = true;
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -891,13 +947,11 @@ static void handle_c2d_command(const char *data, size_t data_len)
             uint32_t sid = sid_str ? (uint32_t)strtoul(sid_str, NULL, 16) : 0;
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_LORA: 0x%08lX !!!", (unsigned long)sid);
             if (provisioning_remove_lora_sensor(sid)) {
-                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
-                reseed_valve_health_if_connected();   // valve stays up across a sensor removal
-                arm_commission_snapshot(false);       // publish a fresh snapshot reflecting the removal
                 char lora_id_str[16];
                 snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
                          (unsigned long)sid);
                 sensor_meta_remove(SENSOR_TYPE_LORA, lora_id_str);
+                g_devset_changed = true;   // reconcile on iothub_task (D0); survivors keep their state
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -912,10 +966,8 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 cJSON_GetObjectItem(pl, "sensor_id"));
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_BLE: %s !!!", mac ? mac : "?");
             if (mac && provisioning_remove_ble_sensor(mac)) {
-                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
-                reseed_valve_health_if_connected();   // valve stays up across a sensor removal
-                arm_commission_snapshot(false);       // publish a fresh snapshot reflecting the removal
                 sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac);
+                g_devset_changed = true;   // reconcile on iothub_task (D0); survivors keep their state
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -934,9 +986,9 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
 
-                // Empty the health table so the final snapshot renders the cleared
-                // (no-device) state instead of the pre-decommission device list.
-                health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
+                // The health table is emptied by iothub_task (apply_device_set_change in
+                // the g_decommission_reboot block) before the final snapshot, so that
+                // snapshot renders the cleared (no-device) state.
 
                 // Ack now, then hand off to iothub_task: it publishes one last
                 // "decommissioned" snapshot and reboots to re-register with DPS. The
@@ -1035,41 +1087,29 @@ static void handle_c2d_command(const char *data, size_t data_len)
         if (cmd.payload_json &&
             provisioning_handle_azure_payload_json(
                 cmd.payload_json, strlen(cmd.payload_json))) {
-            health_engine_reload_devices(HEALTH_COMMISSION_SYNC_TIMEOUT_MS);
-            reseed_valve_health_if_connected();   // re-provision keeps the valve connected (see helper)
             iothub_apply_provisioned_mac();
             // WI-3: apply any inline per-sensor metadata carried in the SAME
             // provision payload (optional "sensor_meta":[{sensor_type,sensor_id,
             // location_code,label},...]). Shares the standalone-command apply path;
             // a bare provision (no array) is a no-op. The commission snapshot armed
-            // below reflects the location/label (add_location_obj reads it live).
+            // on iothub_task reflects the location/label (add_location_obj reads it live).
             int meta_n = sensor_meta_apply_array_from_payload(cmd.payload_json);
             if (meta_n > 0)
                 ESP_LOGI(IOTHUB_TAG, "Provision: applied %d inline sensor_meta entry(ies)", meta_n);
-            // Fast-track the first post-commission snapshot. health_engine_reload_devices()
-            // already re-armed the sync window (all-devices-seen, else the commission timeout,
-            // with the window clock reset); arm the snapshot trigger + incremental-refresh grace
-            // too so the event loop publishes as soon as every commissioned device has been heard
-            // (or at the deadline), and then refreshes as any late device is first heard — instead
-            // of waiting for the 5-min periodic snapshot. Best-effort: a device not heard within
-            // the window is reported offline/null (no hang, no schema change), then a refresh
-            // snapshot follows once it is heard.
-            // pulse=true: THE provision path. Also starts the 30 s x 5 min snapshot
-            // pulse so an installer watching the app sees battery/RSSI keep refreshing
-            // while they place sensors, instead of one snapshot and then silence.
-            arm_commission_snapshot(true);
+            // Hand the device-set change to iothub_task (D0). apply_device_set_change()
+            // reconciles the health table (survivors keep their state; new devices get the
+            // commission sync window) and, if anything was ADDED, fast-tracks the first
+            // post-commission snapshot and starts the 30 s x 5 min pulse: the event loop
+            // publishes as soon as every commissioned device has been heard (or at the
+            // deadline), then refreshes as any late device is first heard, and keeps
+            // battery/RSSI refreshing while an installer places sensors. It also pushes the
+            // new commissioning state (auto_close_enabled / trigger_mask, device lists,
+            // valve_id) into twin reported, so an app confirming setup via the twin does
+            // not have to wait for a reconnect.
+            g_devset_changed = true;
             ESP_LOGI(IOTHUB_TAG,
                      "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
                      HEALTH_COMMISSION_SYNC_TIMEOUT_MS / 1000);
-            // Push the new commissioning state into twin reported NOW, same as
-            // set_hub_name does below. Without this the twin only refreshes on the
-            // next MQTT (re)connect, so reported.auto_close_enabled / trigger_mask —
-            // the setup-flow answer this command just collected — would read stale
-            // for as long as the connection happens to stay up. The device lists and
-            // valve_id are equally affected. The commission snapshot carries the same
-            // values, but an app that reads the twin to confirm setup must not have
-            // to wait for a reconnect to see the answer it just sent.
-            publish_twin_reported();
         } else {
             success = false;
             error_msg = "provisioning failed";
@@ -1119,7 +1159,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
     // applied" by inference; the snapshot states the resulting truth either way.
     //
     // NOTE this runs on the esp-mqtt event task, so it MUST NOT call snap_request()
-    // — the deadline scheduler is iothub_task-only (see arm_commission_snapshot).
+    // — the deadline scheduler is iothub_task-only (see g_devset_changed).
     // Flag + wake, the pattern already used for sensor_meta. Requests coalesce:
     // snap_request() is pull-in-only and clamped to SNAP_MIN_INTERVAL_MS, so a burst
     // of commands still yields one snapshot, and provision's urgent COMMISSION
@@ -2161,10 +2201,22 @@ void iothub_task(void *param)
             for (int i = 0; i < 20 && ble_valve_is_connected(); i++) {
                 vTaskDelay(pdMS_TO_TICKS(50));
             }
+            // Reconcile against the now-empty set FIRST, so the final snapshot is built
+            // from an empty table (and the caches, the rules sources and the twin agree).
+            apply_device_set_change();
             telemetry_v2_publish_snapshot("decommission");
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
             esp_restart();
+        }
+
+        // A provision/decommission changed the device set (D0). Consumed BEFORE the
+        // command-ack snapshot below, so that snapshot is built from the reconciled table
+        // and never shows a removed device. Clear-then-apply: a change landing while this
+        // runs sets the flag again and is re-applied next pass (the reconcile is idempotent).
+        if (g_devset_changed) {
+            g_devset_changed = false;
+            apply_device_set_change();
         }
 
         // A standalone sensor_meta rename (from the C2D task) asked for a prompt
@@ -2179,10 +2231,10 @@ void iothub_task(void *param)
             snap_request(SNAP_EVENT, SNAP_TIER_HIGH, label[0] ? label : "c2d_command");
         }
 
-        // A `provision` asked for the post-commission snapshot pulse. Consume the flag
-        // HERE so every deadline is computed on this task; arm_commission_snapshot()
-        // (esp-mqtt event task) only ever sets the bool. A second provision inside an
-        // open window simply re-arms it, extending the pulse — which is correct.
+        // A `provision` that added devices asked for the post-commission snapshot pulse.
+        // arm_commission_snapshot() (apply_device_set_change, above) only ever sets the
+        // bool; the deadlines are computed here. A second adding provision inside an open
+        // window simply re-arms it, extending the pulse — which is correct.
         if (g_prov_pulse_arm) {
             g_prov_pulse_arm = false;
             int64_t pnow = snap_now_ms();
@@ -2299,7 +2351,14 @@ void iothub_task(void *param)
             rules_engine_evaluate_leak(LEAK_SOURCE_LORA,
                                        (pkt.leakStatus != 0), lora_id_str);
         }
-        if (has_ble_leak) {
+        // BLE leak events are dropped (rules here AND publish in Phase 3) unless the MAC is
+        // still provisioned: the scanner re-reads its whitelist only every 10 s, so an
+        // advertisement from a just-removed sensor can still arrive — and would re-add a
+        // ghost to the rules engine's active-leak set right after the removal purged it.
+        // Sampled ONCE so the rules decision and the publish decision cannot disagree.
+        bool ble_leak_prov = has_ble_leak &&
+            provisioning_is_ble_sensor_provisioned(ble_leak_evt.sensor_mac_str);
+        if (ble_leak_prov) {
             rules_engine_evaluate_leak(LEAK_SOURCE_BLE,
                                        ble_leak_evt.leak_detected,
                                        ble_leak_evt.sensor_mac_str);
@@ -2603,7 +2662,10 @@ void iothub_task(void *param)
         }
 
         // ---- BLE leak sensor events ----
-        if (has_ble_leak) {
+        if (has_ble_leak && !ble_leak_prov) {
+            ESP_LOGW(IOTHUB_TAG, "BLE leak event from unprovisioned %s dropped",
+                     ble_leak_evt.sensor_mac_str);
+        } else if (has_ble_leak) {
             ESP_LOGI(IOTHUB_TAG, "Event: BLE Leak %s leak=%d batt=%d",
                      ble_leak_evt.sensor_mac_str,
                      ble_leak_evt.leak_detected, ble_leak_evt.battery);

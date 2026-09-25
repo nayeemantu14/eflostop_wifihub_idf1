@@ -249,19 +249,18 @@ static void build_system_health_reason(const health_device_status_t *health,
     // still unaccounted for — and "All devices healthy" would then be a claim we
     // have not earned.
     //
-    // rollup_syncing is passed in rather than queried here so it is sampled in a defined
-    // order relative to the rating — see the call site. It is the health engine's OWN
-    // exclusion predicate (health_is_rollup_syncing), not the shorter snapshot gate, so
-    // this string can never claim a device is still syncing while the rating has already
-    // started counting it — or vice versa, which is what produced a published
-    // "1 sensor offline" for a healthy sensor that beaconed at 265.6 s.
-    // A leaking device is never counted as "unheard": we plainly have heard from it, and
-    // recalc_system_rating() exempts it from the roll-up exclusion for that reason. Without
-    // the same exemption here the device would be tallied as awaiting contact AND bucketed
-    // as a cause below — described twice, contradictorily.
+    // "Unheard" is the health engine's OWN per-device exclusion predicate (`excused`),
+    // sampled under the same lock as the rating (see the call site), not the shorter
+    // snapshot gate — so this string can never claim a device is still syncing while the
+    // rating has already started counting it, or vice versa, which is what produced a
+    // published "1 sensor offline" for a healthy sensor that beaconed at 265.6 s.
+    // `excused` already exempts a leaking device (we plainly have heard from it), so it
+    // can never be tallied as awaiting contact AND bucketed as a cause below.
+    // rollup_syncing is the same predicate reduced to one flag; the two agree by
+    // construction.
     int unheard = 0;
     for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-        if (health[i].in_use && !health[i].ever_seen && !health[i].leaking) unheard++;
+        if (health[i].in_use && health[i].excused) unheard++;
     }
     bool syncing = (unheard > 0) && rollup_syncing;
 
@@ -291,17 +290,18 @@ static void build_system_health_reason(const health_device_status_t *health,
 
         const health_device_status_t *d = &health[i];
 
-        // While syncing, a device we have never heard from is already accounted for
-        // by the trailing "syncing N devices" part. Bucketing it as "offline" too
-        // would have the same device described twice, in contradictory terms.
+        // An excused device (never heard, still inside its own excuse window) is already
+        // accounted for by the trailing "syncing N devices" part. Bucketing it as
+        // "offline" too would have the same device described twice, in contradictory
+        // terms.
         //
-        // `!d->leaking` mirrors recalc_system_rating() EXACTLY, and must. That function
-        // exempts leaking devices from the roll-up exclusion, so a wet device can set the
-        // rating to critical while ever_seen is still false — the valve especially, since
-        // handle_valve_leak() deliberately does not touch ever_seen. Without the same
-        // exemption the cause would be skipped here and the snapshot would publish
-        // rating:"critical" alongside reason:"syncing N devices", naming no leak at all.
-        if (syncing && !d->ever_seen && !d->leaking) continue;
+        // `excused` is the exact predicate recalc_system_rating() uses, and must be. That
+        // function exempts leaking devices from the roll-up exclusion, so a wet device can
+        // set the rating to critical while ever_seen is still false — the valve
+        // especially, since handle_valve_leak() deliberately does not touch ever_seen.
+        // `excused` is false for it, so its cause is named here rather than the snapshot
+        // publishing rating:"critical" alongside reason:"syncing N devices".
+        if (d->excused) continue;
 
         // LEAK FIRST — it outranks every other cause and must not be bucketed as
         // one. A wet device is rated CRITICAL by compute_*_rating() regardless of
@@ -650,17 +650,21 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     // ---- Fetch health device status for all provisioned devices ----
     health_device_status_t health[HEALTH_MAX_DEVICES];
     uint8_t health_count = 0;
-    bool have_health = health_get_device_status_all(health, &health_count);
 
     // ---- system_health (worst rating + human-readable reason) ----
-    // Order matters: sample the sync state BEFORE the rating. health_is_rollup_syncing()
-    // evaluates the window deadlines on read, and the grace expiring re-rolls the roll-up
-    // (devices never heard from stop being excluded). Reading the rating first would let it
-    // close in between and publish rating:excellent next to reason:"All devices healthy"
-    // for a hub that had, microseconds earlier, become critical over a missing sensor.
-    // Sampling this first means the rating is always the fresher of the two.
-    bool rollup_syncing = health_is_rollup_syncing();
-    health_rating_t sys_rating = health_get_system_rating();
+    // The table, the syncing flag and the rating come from ONE call, sampled under one
+    // health lock after the window deadlines are evaluated. They used to be three reads,
+    // and an excuse expiring between them re-rolled the rating under the reason string —
+    // e.g. rating:excellent next to "All devices healthy" for a hub that had, microseconds
+    // earlier, become critical over a missing sensor. Now they cannot disagree (L15).
+    health_rating_t sys_rating = HEALTH_EXCELLENT;
+    bool rollup_syncing = false;
+    bool have_health = health_get_device_status_all(health, &health_count,
+                                                    &sys_rating, &rollup_syncing);
+    // Copy failed (mutex timeout): never let the EXCELLENT default reach the wire — fall
+    // back to the lock-free roll-up, which is what this path published before.
+    if (!have_health) sys_rating = health_get_system_rating();
+
     cJSON *sys_health = cJSON_CreateObject();
     cJSON_AddStringToObject(sys_health, "rating",
         health_rating_to_str(sys_rating));
@@ -865,10 +869,10 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
              * five consecutive pulse snapshots and only revealed its true -70 at the
              * following heartbeat, 300 s later.
              *
-             * The reload-staleness concern the `connected` gate was protecting against is
-             * handled for free here: health_engine_reload_devices() resets last_battery to
-             * 0xFF and last_rssi to 0, so a just-reloaded device emits null rather than
-             * stale values — and no cache fallback can resurrect them.
+             * The staleness concern the `connected` gate was protecting against is handled
+             * for free here: health_engine_reconcile_devices() seeds a newly added device
+             * with last_battery 0xFF and last_rssi 0, so it emits null rather than stale
+             * values — and no cache fallback can resurrect them.
              *
              * fw_version still comes from the cache: the health table does not carry it and
              * it cannot change at runtime, so staleness is not a concern for that one. */

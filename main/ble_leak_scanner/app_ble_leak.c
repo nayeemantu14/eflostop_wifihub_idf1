@@ -47,8 +47,11 @@
 /* ---------------------------------------------------------
  * Internal types
  * --------------------------------------------------------- */
-// Per-sensor state for delta/dedup tracking
+// Per-sensor state for delta/dedup tracking. Keyed by MAC (find-or-allocate), NOT by
+// whitelist index: a removal shifts the whitelist, and an index key then handed one
+// sensor's seen/last_leak history to its neighbour.
 typedef struct {
+    bool in_use;            // slot holds a whitelisted sensor's state
     uint8_t mac[6];
     uint8_t last_battery;
     bool last_leak;
@@ -73,19 +76,33 @@ static uint8_t s_whitelist_count = 0;
 // Per-sensor tracking for dedup
 static sensor_state_t s_sensors[MAX_TRACKED_SENSORS];
 
+/* Guards s_whitelist[], s_whitelist_count and s_sensors[].
+ *
+ * The whitelist is rewritten by the scan task (every 10 s) while the NimBLE host task
+ * reads it for every advertisement, and 2.1.3 published the new count BEFORE the new
+ * entries — an advertisement in between matched a half-written list. A spinlock rather
+ * than a mutex because the reader is the NimBLE host task, which must never block on the
+ * scan task. Sections hold for microseconds: NO logging, NO queue sends, and no calls
+ * other than memcmp/memcpy/memset and the *_locked helpers below. */
+static portMUX_TYPE s_wl_lock = portMUX_INITIALIZER_UNLOCKED;
+
 /* ---------------------------------------------------------
  * Helper: parse MAC string "XX:XX:XX:XX:XX:XX" to 6-byte array
  * NimBLE stores addresses LSB-first, so we reverse the byte order.
  * "00:80:E1:27:9A:E6" → [0xE6, 0x9A, 0x27, 0xE1, 0x80, 0x00]
+ * Returns false (out untouched) unless all six fields parsed.
  * --------------------------------------------------------- */
-static void mac_str_to_bytes(const char *str, uint8_t *out)
+static bool mac_str_to_bytes(const char *str, uint8_t *out)
 {
     unsigned int b[6];
-    sscanf(str, "%02X:%02X:%02X:%02X:%02X:%02X",
-           &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+    if (sscanf(str, "%02X:%02X:%02X:%02X:%02X:%02X",
+               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
+        return false;
+    }
     for (int i = 0; i < 6; i++) {
         out[i] = (uint8_t)b[5 - i];
     }
+    return true;
 }
 
 /* ---------------------------------------------------------
@@ -99,37 +116,11 @@ static void mac_bytes_to_str(const uint8_t *mac, char *out)
 }
 
 /* ---------------------------------------------------------
- * Reload whitelist from provisioning manager
+ * Lookups — call with s_wl_lock held
  * --------------------------------------------------------- */
-static void reload_whitelist(void)
-{
-    char mac_strs[MAX_BLE_LEAK_SENSORS][18];
-    uint8_t count = 0;
 
-    if (provisioning_get_ble_leak_sensors(mac_strs, &count)) {
-        s_whitelist_count = count;
-        uint32_t sum = count;
-        for (int i = 0; i < count; i++) {
-            mac_str_to_bytes(mac_strs[i], s_whitelist[i]);
-            for (int b = 0; b < 6; b++) sum = sum * 31u + s_whitelist[i][b];
-        }
-        // This runs every 10 s; only log when the whitelist actually changes so
-        // the trace isn't flooded with identical "reloaded" lines.
-        static uint32_t s_prev_wl_sum = 0xFFFFFFFFu;
-        if (sum != s_prev_wl_sum) {
-            s_prev_wl_sum = sum;
-            ESP_LOGI(BLE_LEAK_TAG, "Whitelist reloaded: %d sensor(s)", count);
-        }
-    } else {
-        s_whitelist_count = 0;
-    }
-}
-
-/* ---------------------------------------------------------
- * Check if a MAC is in the whitelist
- * Returns index (0..N-1) or -1 if not found
- * --------------------------------------------------------- */
-static int whitelist_find(const uint8_t *mac)
+// Index of mac in the whitelist, or -1.
+static int whitelist_find_locked(const uint8_t *mac)
 {
     for (int i = 0; i < s_whitelist_count; i++) {
         if (memcmp(s_whitelist[i], mac, 6) == 0) {
@@ -137,6 +128,88 @@ static int whitelist_find(const uint8_t *mac)
         }
     }
     return -1;
+}
+
+// Index of the tracking slot for mac, or -1.
+static int sensor_find_locked(const uint8_t *mac)
+{
+    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+        if (s_sensors[i].in_use && memcmp(s_sensors[i].mac, mac, 6) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Claim a free slot for mac (fresh state, seen=false), or -1 if none. Cannot fail for a
+// whitelisted MAC: slots are pruned to whitelisted MACs in the same section that swaps the
+// list, and the list holds at most MAX_TRACKED_SENSORS entries.
+static int sensor_alloc_locked(const uint8_t *mac)
+{
+    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+        if (!s_sensors[i].in_use) {
+            memset(&s_sensors[i], 0, sizeof(s_sensors[i]));
+            memcpy(s_sensors[i].mac, mac, 6);
+            s_sensors[i].in_use = true;
+            return i;
+        }
+    }
+    return -1;
+}
+
+/* ---------------------------------------------------------
+ * Reload whitelist from provisioning manager
+ * --------------------------------------------------------- */
+static void reload_whitelist(void)
+{
+    /* The atomic device-set read, not provisioning_get_ble_leak_sensors(): that getter
+     * returns false for BOTH "no sensors" and "mutex busy", and the old code treated
+     * false as "no sensors" — one busy mutex blanked the whitelist and deafened the hub
+     * to every leak sensor for up to 10 s. A failed read now keeps the current list. */
+    prov_device_set_t set;
+    if (!provisioning_get_device_set(&set)) {
+        ESP_LOGW(BLE_LEAK_TAG, "Whitelist reload skipped (provisioning busy) - keeping %d sensor(s)",
+                 (int)s_whitelist_count);
+        return;
+    }
+
+    // Convert OUTSIDE the lock (sscanf is not a critical-section call).
+    uint8_t wl[MAX_TRACKED_SENSORS][6];
+    memset(wl, 0, sizeof(wl));
+    uint8_t count = 0;
+    for (int i = 0; i < set.ble_count && count < MAX_TRACKED_SENSORS; i++) {
+        if (!mac_str_to_bytes(set.ble_macs[i], wl[count])) {
+            ESP_LOGW(BLE_LEAK_TAG, "Whitelist: invalid MAC '%s' skipped", set.ble_macs[i]);
+            continue;
+        }
+        count++;
+    }
+
+    uint32_t sum = count;
+    for (int i = 0; i < count; i++) {
+        for (int b = 0; b < 6; b++) sum = sum * 31u + wl[i][b];
+    }
+
+    /* Swap the list and prune the tracking of every MAC no longer on it, in ONE section,
+     * so an advertisement can never see the new count with the old entries, nor find a
+     * slot left over from a removed sensor (a re-added sensor starts from seen=false). */
+    taskENTER_CRITICAL(&s_wl_lock);
+    memcpy(s_whitelist, wl, sizeof(s_whitelist));
+    s_whitelist_count = count;
+    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+        if (s_sensors[i].in_use && whitelist_find_locked(s_sensors[i].mac) < 0) {
+            memset(&s_sensors[i], 0, sizeof(s_sensors[i]));
+        }
+    }
+    taskEXIT_CRITICAL(&s_wl_lock);
+
+    // This runs every 10 s; only log when the whitelist actually changes so
+    // the trace isn't flooded with identical "reloaded" lines.
+    static uint32_t s_prev_wl_sum = 0xFFFFFFFFu;
+    if (sum != s_prev_wl_sum) {
+        s_prev_wl_sum = sum;
+        ESP_LOGI(BLE_LEAK_TAG, "Whitelist reloaded: %d sensor(s)", count);
+    }
 }
 
 /* ---------------------------------------------------------
@@ -164,12 +237,6 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     // Get advertiser MAC (NimBLE stores as addr.val[6], byte 0 = LSB)
     const uint8_t *adv_mac = addr->val;
 
-    // Check whitelist
-    int idx = whitelist_find(adv_mac);
-    if (idx < 0) {
-        return;  // Not a commissioned sensor
-    }
-
     // Verify manufacturer-specific data
     if (fields.mfg_data == NULL || fields.mfg_data_len < ELEAK_MFG_DATA_LEN) {
         return;
@@ -193,7 +260,25 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
                  fields.mfg_data[4], fields.mfg_data[5], fields.mfg_data[6]);
     }
 
-    sensor_state_t *s = &s_sensors[idx];
+    /* Whitelist check + tracking-slot lookup in ONE short critical section, then work on
+     * a local copy: the scan task may swap the whitelist and prune slots at any moment,
+     * so s_sensors[] is never read or written here without the lock. */
+    sensor_state_t snap;
+    memset(&snap, 0, sizeof(snap));
+    bool listed;
+    int slot = -1;
+    taskENTER_CRITICAL(&s_wl_lock);
+    listed = (whitelist_find_locked(adv_mac) >= 0);
+    if (listed) {
+        slot = sensor_find_locked(adv_mac);
+        if (slot < 0) slot = sensor_alloc_locked(adv_mac);
+        if (slot >= 0) memcpy(&snap, &s_sensors[slot], sizeof(snap));
+    }
+    taskEXIT_CRITICAL(&s_wl_lock);
+    if (!listed || slot < 0) {
+        return;  // Not a commissioned sensor
+    }
+    const sensor_state_t *s = &snap;
 
     char mac_str[18];
     mac_bytes_to_str(adv_mac, mac_str);
@@ -232,7 +317,13 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     bool leak_edge = !s->seen || (leak != s->last_leak);
     if (leak_edge || (now_tick - s->last_health_tick) >= pdMS_TO_TICKS(HEALTH_CHECKIN_MIN_MS)) {
         health_post_ble_leak_checkin(mac_str, battery, rssi, leak);
-        s->last_health_tick = now_tick;
+        // Commit to the live slot only if it still belongs to this sensor: a whitelist
+        // reload may have pruned (and even re-used) it since the lookup above.
+        taskENTER_CRITICAL(&s_wl_lock);
+        if (s_sensors[slot].in_use && memcmp(s_sensors[slot].mac, adv_mac, 6) == 0) {
+            s_sensors[slot].last_health_tick = now_tick;
+        }
+        taskEXIT_CRITICAL(&s_wl_lock);
     }
 
     // Delta check: skip if unchanged from last report (unless heartbeat due)
@@ -279,13 +370,21 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
         return;   /* deliberately do NOT commit s->* — the delta must survive */
     }
 
-    // Update tracked state — only now that the event is safely queued
-    memcpy(s->mac, adv_mac, 6);
-    s->last_leak = leak;
-    s->last_battery = battery;
-    strncpy(s->last_fw_version, fw_ver, sizeof(s->last_fw_version) - 1);
-    s->seen = true;
-    s->last_event_tick = now_tick;
+    // Update tracked state — only now that the event is safely queued, and only if the
+    // slot still belongs to this sensor (a reload may have pruned it meanwhile; then the
+    // re-added sensor correctly starts again from seen=false).
+    _Static_assert(sizeof(fw_ver) == sizeof(((sensor_state_t *)0)->last_fw_version),
+                   "fw_ver and last_fw_version must match for the memcpy below");
+    taskENTER_CRITICAL(&s_wl_lock);
+    sensor_state_t *live = &s_sensors[slot];
+    if (live->in_use && memcmp(live->mac, adv_mac, 6) == 0) {
+        live->last_leak = leak;
+        live->last_battery = battery;
+        memcpy(live->last_fw_version, fw_ver, sizeof(live->last_fw_version));
+        live->seen = true;
+        live->last_event_tick = now_tick;
+    }
+    taskEXIT_CRITICAL(&s_wl_lock);
     /* The health check-in already happened above, ahead of the delta gate. */
 }
 
@@ -408,7 +507,11 @@ static void ble_leak_scan_task(void *param)
 
     // Load whitelist
     reload_whitelist();
+    // Under the lock: the valve module's GAP handler can already be feeding
+    // app_ble_leak_process_adv() now that the whitelist is populated.
+    taskENTER_CRITICAL(&s_wl_lock);
     memset(s_sensors, 0, sizeof(s_sensors));
+    taskEXIT_CRITICAL(&s_wl_lock);
 
     // Initial scan start (with small delay to let valve module connect first)
     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -473,7 +576,16 @@ void app_ble_leak_signal_start(void)
 
 void app_ble_leak_reset_tracking(void)
 {
-    memset(s_sensors, 0, sizeof(s_sensors));
+    // Forget what was reported (seen + ticks) but keep each slot's MAC binding, so the
+    // next advertisement from every sensor produces a fresh event. Under the lock: this
+    // runs on iothub_task while the NimBLE host task may be mid-advertisement.
+    taskENTER_CRITICAL(&s_wl_lock);
+    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+        s_sensors[i].seen             = false;
+        s_sensors[i].last_event_tick  = 0;
+        s_sensors[i].last_health_tick = 0;
+    }
+    taskEXIT_CRITICAL(&s_wl_lock);
     ESP_LOGI(BLE_LEAK_TAG, "Sensor tracking reset");
 }
 

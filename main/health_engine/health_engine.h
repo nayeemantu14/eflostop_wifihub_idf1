@@ -132,8 +132,18 @@ typedef struct {
     bool              leaking;          // last reported wet/dry for this device
     uint8_t           last_battery;     // 0xFF = unknown
     int8_t            last_rssi;        // 0 = unknown
+    bool              excused;          // not yet heard AND still inside its own roll-up
+                                        // excuse window (the "Syncing" set). Sits in the
+                                        // padding before last_seen_age_s: no size change.
     uint32_t          last_seen_age_s;  // UINT32_MAX = never seen
 } health_device_status_t;
+
+// Outcome of health_engine_reconcile_devices().
+typedef struct {
+    uint8_t total;     // devices in the table after the reconcile
+    uint8_t added;     // newly provisioned devices appended
+    uint8_t removed;   // devices dropped because they are no longer provisioned
+} health_reconcile_result_t;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -146,14 +156,29 @@ typedef struct {
 void health_engine_init(void);
 
 /**
- * @brief Reload device list from provisioning manager.
+ * @brief Reconcile the device table against provisioning, keyed by (type, id).
  *        Call when provisioning changes (add/remove devices).
- *        Resets all health states and re-arms the sync window.
- * @param sync_window_ms  Length of the "all devices seen, else timeout" window to
- *                        arm from now (HEALTH_BOOT_SYNC_TIMEOUT_MS at boot,
- *                        HEALTH_COMMISSION_SYNC_TIMEOUT_MS after a provision).
+ *
+ *   - devices no longer provisioned are DROPPED;
+ *   - NEW devices are APPENDED: unheard, CRITICAL until first contact, and their own
+ *     roll-up excuse window starts now;
+ *   - SURVIVORS KEEP EVERY FIELD (last seen, battery, RSSI, rating, leak, alert state,
+ *     the valve's disconnect stamp). Removing one device never resets another.
+ *
+ * The snapshot sync window (sync_window_ms) is re-armed ONLY when at least one device
+ * was added; an empty table counts as sync-complete.
+ *
+ * Returns false with the table UNTOUCHED if provisioning or the health mutex is
+ * unavailable — the caller retries. Never call it from the esp-mqtt task: the single
+ * owner of device-set changes is iothub_task (apply_device_set_change()).
+ *
+ * @param sync_window_ms  Snapshot window to arm if devices were added
+ *                        (HEALTH_BOOT_SYNC_TIMEOUT_MS at boot,
+ *                        HEALTH_COMMISSION_SYNC_TIMEOUT_MS after a provision). A new
+ *                        valve's roll-up excuse is this same window.
+ * @param out             Counts after the reconcile; may be NULL.
  */
-void health_engine_reload_devices(uint32_t sync_window_ms);
+bool health_engine_reconcile_devices(uint32_t sync_window_ms, health_reconcile_result_t *out);
 
 /**
  * @brief Get how many provisioned devices have been heard at least once this
@@ -174,8 +199,8 @@ bool health_post_event(const health_event_t *evt);
  *
  * NOT a plain max() over the per-device ratings any more — two deliberate departures,
  * so do not expect it to equal the worst `rating` in health_get_device_status_all():
- *   - devices never heard from this sync cycle are EXCLUDED while the boot/commission
- *     window is open (unless they are leaking), so a device can read CRITICAL
+ *   - devices never heard from are EXCLUDED while their own roll-up excuse window is
+ *     open (unless they are leaking), so a device can read CRITICAL
  *     individually while the roll-up reads EXCELLENT. "Not heard from yet" is not the
  *     same claim as "offline";
  *   - a latched leak interlock raises a WARNING floor, so the roll-up can be worse than
@@ -205,12 +230,21 @@ const char *health_rating_to_str(health_rating_t rating);
 /**
  * @brief Copy status of ALL provisioned devices into caller-supplied array.
  *        Thread-safe (acquires internal mutex). Call from iothub_task for snapshot.
- * @param out       Array of HEALTH_MAX_DEVICES entries.
- * @param count_out Number of valid (in_use) entries written.
+ *
+ * The system rating and the syncing flag are sampled under the SAME lock as the table
+ * copy, after the window deadlines are evaluated, so the three can never disagree
+ * (a separate rating read could land either side of a deadline and publish a rating
+ * that does not match the table beside it).
+ *
+ * @param out            Array of HEALTH_MAX_DEVICES entries.
+ * @param count_out      Number of valid (in_use) entries written.
+ * @param sys_rating_out System roll-up at the moment of the copy; may be NULL.
+ * @param syncing_out    true if any copied device has `excused` set; may be NULL.
  * @return true on success, false if mutex timeout or not initialized.
  */
 bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES],
-                                  uint8_t *count_out);
+                                  uint8_t *count_out, health_rating_t *sys_rating_out,
+                                  bool *syncing_out);
 
 /**
  * @brief Check whether boot sync is complete.
@@ -233,9 +267,10 @@ bool health_is_boot_sync_complete(void);
  * read does not cover every device yet", which is what the fleet LED renders as WHITE
  * "syncing" and what the telemetry reason string reports as "syncing N devices".
  *
- * Goes false when every device has been heard OR the HEALTH_ROLLUP_UNHEARD_MS grace
- * expires (at which point the unheard devices start counting and the rating escalates
- * on its own). A LEAKING device is never counted as syncing — see
+ * Goes false when every device has been heard OR each unheard device's OWN excuse
+ * window has expired (sensors: HEALTH_ROLLUP_UNHEARD_MS from when they were added;
+ * the valve: its sync window), at which point it starts counting and the rating
+ * escalates on its own. A LEAKING device is never counted as syncing — see
  * HEALTH_ROLLUP_UNHEARD_MS.
  *
  * Fails CLOSED (returns false) if the engine is not up or the mutex is busy, so a
@@ -322,10 +357,11 @@ static inline void health_post_ble_leak_checkin(const char *mac_str, uint8_t bat
  * @brief Sticky fallback for a valve DISCONNECTED that the input queue rejected.
  *
  * Every other dropped health event self-heals: the next check-in or notify posts
- * the same truth again. A dropped valve DISCONNECTED does not. disconnect_ms is
- * never stamped, and evaluate_timeouts() only re-rates the valve when
- * disconnect_ms > 0 — so the rating stays at its last healthy value indefinitely.
- * Written by health_post_valve_event(), drained by health_engine_task().
+ * the same truth again. A dropped valve DISCONNECTED does not. evaluate_timeouts()
+ * re-rates the valve on every tick (since 2.1.2), but NOTHING except a DISCONNECTED
+ * event stamps disconnect_ms, so every re-rate still sees a connected valve and the
+ * rating stays at its last healthy value indefinitely. This fallback is therefore
+ * still required. Written by health_post_valve_event(), drained by health_engine_task().
  */
 extern volatile bool g_health_valve_disc_pending;
 

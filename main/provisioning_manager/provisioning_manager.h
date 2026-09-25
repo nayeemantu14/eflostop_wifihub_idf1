@@ -40,6 +40,16 @@ typedef struct {
     rules_config_t rules;                            // D2D rules engine config
 } provisioning_config_t;
 
+// One consistent copy of every provisioned device (see provisioning_get_device_set()).
+typedef struct {
+    bool     has_valve;
+    char     valve_mac[18];
+    uint8_t  lora_count;
+    uint32_t lora_ids[MAX_LORA_SENSORS];
+    uint8_t  ble_count;
+    char     ble_macs[MAX_BLE_LEAK_SENSORS][18];
+} prov_device_set_t;
+
 /**
  * @brief Initialize provisioning manager and load config from NVS
  * 
@@ -177,6 +187,33 @@ bool provisioning_get_lora_sensors(uint32_t *ids_out, uint8_t *count_out);
  * @return true if sensor list is available
  */
 bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out);
+
+/**
+ * @brief Get ONE atomic copy of every provisioned device (valve, LoRa ids, BLE MACs),
+ *        taken under a single mutex hold. MACs are upper-cased, as in the per-list
+ *        getters.
+ *
+ * Returns false ONLY when the manager is not initialised or the mutex (1000 ms) timed
+ * out. An unprovisioned hub returns TRUE with an empty set (has_valve=false, counts 0).
+ *
+ * Callers that reconcile against this set (health table, scanner whitelist, telemetry
+ * caches, rules engine) MUST treat false as "unknown", never as "no devices". The
+ * per-list getters above return false for BOTH "none provisioned" and "mutex timeout",
+ * which is exactly the trap this function exists to avoid: a reconcile that read a
+ * timeout as an empty list would forget every device.
+ *
+ * @param out Output set (~375 B; zeroed first on every call)
+ * @return true if *out is a valid snapshot of the provisioned set
+ */
+bool provisioning_get_device_set(prov_device_set_t *out);
+
+/**
+ * @brief Check if a BLE leak sensor MAC is provisioned (case-insensitive)
+ *
+ * @param mac MAC address "XX:XX:XX:XX:XX:XX"; NULL returns false
+ * @return true if the sensor is provisioned
+ */
+bool provisioning_is_ble_sensor_provisioned(const char *mac);
 
 /**
  * @brief Get current rules engine configuration

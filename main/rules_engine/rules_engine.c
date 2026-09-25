@@ -1519,3 +1519,56 @@ void rules_engine_clear_persistent_state(void)
     g_leak_incident_active = false;
     health_set_interlock_held(false);
 }
+
+bool rules_engine_forget_unprovisioned(void)
+{
+    // Not initialised: evaluate_leak() returns before tracking anything, so the
+    // active-leak set is empty and there is nothing to forget.
+    if (!g_initialized) return true;
+
+    // Provisioning FIRST and released before the rules mutex: no nesting, and a
+    // timeout here is "unknown" (retry), never "nothing is provisioned".
+    prov_device_set_t set;
+    if (!provisioning_get_device_set(&set)) return false;
+
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(RULES_TAG, "Failed to take mutex (forget_unprovisioned)");
+        return false;
+    }
+
+    int i = 0;
+    while (i < g_active_leak_count) {
+        const char *id = g_active_leak_ids[i];
+        bool keep = false;
+
+        if (strcmp(id, VALVE_SOURCE_ID) == 0) {
+            keep = set.has_valve;
+        } else if (id[0] == '0' && (id[1] == 'x' || id[1] == 'X')) {
+            uint32_t sid = (uint32_t)strtoul(id, NULL, 16);
+            for (int k = 0; k < set.lora_count; k++) {
+                if (set.lora_ids[k] == sid) { keep = true; break; }
+            }
+        } else {
+            for (int k = 0; k < set.ble_count; k++) {
+                if (strcasecmp(id, set.ble_macs[k]) == 0) { keep = true; break; }
+            }
+        }
+
+        if (keep) {
+            i++;
+            continue;
+        }
+
+        /* Copy first: track_leak_source() re-packs g_active_leak_ids in place, so the
+         * entry `id` points at is overwritten by its successor. Do NOT advance i — the
+         * successor now sits at this index. */
+        char gone[sizeof(g_active_leak_ids[0])];
+        memcpy(gone, id, sizeof(gone));
+        gone[sizeof(gone) - 1] = '\0';
+        track_leak_source(gone, false);
+        ESP_LOGW(RULES_TAG, "Rules: forgot removed leak source %s", gone);
+    }
+
+    xSemaphoreGive(g_mutex);
+    return true;
+}

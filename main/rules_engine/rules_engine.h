@@ -211,6 +211,24 @@ override_enable_result_t rules_engine_enable_override_remote(void);
  */
 void rules_engine_clear_persistent_state(void);
 
+/**
+ * @brief Drop active-leak sources that are no longer provisioned (a device
+ *        decommissioned while wet).
+ *
+ * Without this a removed wet sensor stayed in the active-leak set forever: leak_reset
+ * was refused as "a leak is still active", and override cancel / override expiry
+ * re-closed the valve for a device that no longer exists. Each dropped source goes
+ * through the normal "leak cleared" path, so when the count reaches 0 a pending
+ * auto-close is cancelled and, if an incident is latched, the all-clear timer starts.
+ *
+ * Call from iothub_task after a device-set change. Takes the provisioning mutex BEFORE
+ * the rules mutex, never nested.
+ *
+ * @return false if it could not run (provisioning or rules mutex unavailable) —
+ *         the caller retries; true otherwise.
+ */
+bool rules_engine_forget_unprovisioned(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -24,7 +24,9 @@ typedef struct {
     health_dev_type_t dev_type;
     char              dev_id[18];       // MAC string or "0xHEXID"
     health_rating_t   rating;
-    health_rating_t   prev_rating;
+    uint32_t          added_s;          // monotonic seconds when this device entered the table
+    uint16_t          excuse_s;         // length of this device's roll-up excuse window (s)
+    bool              excuse_done;      // excuse window elapsed (latched)
     int64_t           last_seen_ms;     // Monotonic: esp_timer_get_time()/1000
     uint8_t           last_battery;     // 0xFF = unknown
     int8_t            last_rssi;        // 0 = unknown
@@ -35,6 +37,11 @@ typedef struct {
                                         // so the matching recovery must stay silent too
     int64_t           disconnect_ms;    // Valve only: disconnect timestamp, 0 = connected
 } health_device_t;
+
+/* The per-device excuse fields live in the padding the old (dead) prev_rating field and
+ * the int64 alignment left behind, so the table does not grow. */
+_Static_assert(sizeof(health_device_t) <= 80,
+               "health_device_t grew: s_devices[] is .bss, every byte is heap on this board");
 
 // ---------------------------------------------------------------------------
 // Static state
@@ -52,12 +59,11 @@ static SemaphoreHandle_t s_mutex = NULL;
 volatile bool   g_health_valve_disc_pending = false;
 static bool     s_boot_sync_done = false;
 static int64_t  s_boot_start_ms  = 0;
-static uint32_t s_boot_sync_timeout_ms = HEALTH_BOOT_SYNC_TIMEOUT_MS;  // window length, set on reload
-/* Second, LONGER deadline measured from the same s_boot_start_ms: the point at which a
- * device we have never heard from stops being excused and starts counting toward the
- * roll-up. Kept as a latched flag rather than recomputed per call so the transition has a
- * single observable edge to hang a recalc + log on — see check_boot_sync_locked(). */
-static bool     s_rollup_grace_done = false;
+static uint32_t s_boot_sync_timeout_ms = HEALTH_BOOT_SYNC_TIMEOUT_MS;  // window length, set when devices are added
+/* The roll-up excuse (how long a never-heard device is kept out of the roll-up) is no
+ * longer a global flag here: it is PER DEVICE (added_s / excuse_s / excuse_done), so a
+ * provision or removal can never re-excuse a device that was already counting. See
+ * rollup_unheard_locked(). */
 /* Monotonic count of sensor check-ins the engine has processed. Written ONLY by
  * health_engine_task (single writer), read lock-free by iothub_task via
  * health_get_checkin_seq(). See that declaration for why this exists. */
@@ -77,6 +83,13 @@ static volatile bool s_interlock_held = false;
 static int64_t now_ms(void)
 {
     return (int64_t)(esp_timer_get_time() / 1000);
+}
+
+// Seconds resolution is plenty for excuse windows of 150..600 s, and keeps added_s
+// 32-bit so it fits in the old padding (see the _Static_assert above).
+static uint32_t now_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000);
 }
 
 const char *health_rating_to_str(health_rating_t rating)
@@ -223,23 +236,52 @@ static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t 
 /* Is this device currently EXCLUDED from the system roll-up purely because we have not
  * heard from it yet? Call with s_mutex held.
  *
- * Every device is seeded CRITICAL by health_engine_reload_devices() and only leaves that
- * state on its first check-in, so an unfiltered max() reported the whole fleet CRITICAL
- * from boot until the LAST sensor's first burst. On the current event-driven sensors that
- * is minutes — one field capture sat RED for 14 min on a hub where all four sensors were
- * fine. "Haven't heard from it yet" is not the same claim as "it is offline", and only
- * the second one should drive a red light.
+ * Every device is seeded CRITICAL by health_engine_reconcile_devices() when it enters the
+ * table and only leaves that state on its first check-in, so an unfiltered max() reported
+ * the whole fleet CRITICAL from boot until the LAST sensor's first burst. On the current
+ * event-driven sensors that is minutes — one field capture sat RED for 14 min on a hub
+ * where all four sensors were fine. "Haven't heard from it yet" is not the same claim as
+ * "it is offline", and only the second one should drive a red light.
  *
  * The per-device rating is deliberately left at CRITICAL: that is the honest answer to
  * "what do we know about this device", the snapshot still reports connected:false for it,
- * and once the grace expires it counts again — so a genuinely absent device is still
+ * and once its excuse expires it counts again — so a genuinely absent device is still
  * escalated, just not prematurely.
  *
- * TWO CLOCKS, not one. The exclusion holds while the short snapshot window is open AND
- * then for the remainder of HEALTH_ROLLUP_UNHEARD_MS. Using only the snapshot window
- * (the pre-2.1.3 behaviour) meant a healthy sensor that happened to beacon after 180 s
- * turned the LED red and published "1 sensor offline" — reproduced on the bench with a
- * first contact at 265.6 s. See HEALTH_ROLLUP_UNHEARD_MS for why 600 s specifically.
+ * THE EXCUSE IS PER DEVICE, measured from when THAT device entered the table (added_s),
+ * for its own length (excuse_s), and latched into excuse_done by check_boot_sync_locked():
+ *   - sensors: HEALTH_ROLLUP_UNHEARD_MS (600 s). Using only the short snapshot window
+ *     (the pre-2.1.3 behaviour) meant a healthy sensor that happened to beacon after
+ *     180 s turned the LED red and published "1 sensor offline" — reproduced on the bench
+ *     with a first contact at 265.6 s. See HEALTH_ROLLUP_UNHEARD_MS for why 600 s;
+ *   - the valve: only its own sync window (HEALTH_BOOT_SYNC_TIMEOUT_MS at boot,
+ *     HEALTH_COMMISSION_SYNC_TIMEOUT_MS after a provision) — the same values as 2.1.3.
+ *
+ * It used to be ONE global grace re-armed by every reload, so a single `decommission`
+ * re-excused every unheard device on the hub — including one that had been missing for
+ * 1100 s — and flipped a RED hub to WHITE/"excellent" (2.1.3 field log, 1193 s). Now a
+ * provision excuses only the devices it adds, and a removal excuses nobody.
+ *
+ * THE VALVE DOES NOT GET THE EXTENDED GRACE. HEALTH_ROLLUP_UNHEARD_MS is calibrated for
+ * the advertising sensors: 600 s covers a ~100 s burst cadence with margin, and it is
+ * justified by being the same deadline at which a previously-seen SENSOR is declared
+ * offline (HEALTH_BLE_LEAK_TIMEOUT_MS). Neither half of that reasoning transfers to the
+ * valve. It sits on a continuous BLE link rather than a burst cadence, so there is no
+ * interval to accommodate, and its own offline deadline is HEALTH_VALVE_DISC_TIMEOUT_MS
+ * (180 s) — a third of the sensor one.
+ *
+ * Extending the excuse to the valve would mask the single device the entire leak response
+ * depends on: handle_valve_event() sets ever_seen only on CONNECTED, so a valve that is
+ * powered off or out of range keeps ever_seen==false and would be excluded from the
+ * roll-up for a full 10 minutes — the fleet LED showing WHITE "syncing" and every snapshot
+ * publishing rating:"excellent" while the hub has no way to shut the water off. And it
+ * would apply on every provision, i.e. precisely during commissioning, when someone is
+ * standing there deciding whether the install works.
+ *
+ * Note the asymmetry this keeps is the right way round: a valve that links once and then
+ * drops stamps disconnect_ms, is not excluded at all, and escalates via
+ * compute_valve_rating()'s own 180 s grace. Never-connected must not be treated more
+ * leniently than connected-then-lost.
  *
  * A device reporting a LEAK is never excluded, whatever ever_seen says. If we know it is
  * wet then we have plainly heard from it, and suppressing that to keep the boot LED tidy
@@ -253,42 +295,11 @@ static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t 
  * telemetry reason string can never disagree about who is still syncing. */
 static bool rollup_unheard_locked(const health_device_t *dev)
 {
-    /* No time argument: BOTH deadlines are latched into flags by
+    /* No time argument: the per-device deadline is latched into excuse_done by
      * check_boot_sync_locked(), which every caller reaches first. That keeps the
      * decision a pure function of state, so the roll-up and health_is_rollup_syncing()
      * cannot straddle a deadline and return different answers in one pass. */
-    if (!dev->in_use)   return false;
-    if (dev->ever_seen) return false;
-    if (dev->leaking)   return false;
-    if (!s_boot_sync_done) return true;
-
-    /* THE VALVE DOES NOT GET THE EXTENDED GRACE — it ends at the snapshot window edge,
-     * exactly as it did before 2.1.3.
-     *
-     * HEALTH_ROLLUP_UNHEARD_MS is calibrated for the advertising sensors: 600 s covers
-     * a ~100 s burst cadence with margin, and it is justified by being the same
-     * deadline at which a previously-seen SENSOR is declared offline
-     * (HEALTH_BLE_LEAK_TIMEOUT_MS). Neither half of that reasoning transfers to the
-     * valve. It sits on a continuous BLE link rather than a burst cadence, so there is
-     * no interval to accommodate, and its own offline deadline is
-     * HEALTH_VALVE_DISC_TIMEOUT_MS (180 s) — a third of the sensor one.
-     *
-     * Extending the excuse to the valve would mask the single device the entire leak
-     * response depends on: handle_valve_event() sets ever_seen only on CONNECTED, so a
-     * valve that is powered off or out of range keeps ever_seen==false and would be
-     * excluded from the roll-up for a full 10 minutes — the fleet LED showing WHITE
-     * "syncing" and every snapshot publishing rating:"excellent" while the hub has no
-     * way to shut the water off. And it re-arms on every provision, i.e. precisely
-     * during commissioning, when someone is standing there deciding whether the install
-     * works.
-     *
-     * Note the asymmetry this restores is the right way round: a valve that links once
-     * and then drops stamps disconnect_ms, is not excluded at all, and escalates via
-     * compute_valve_rating()'s own 180 s grace. Never-connected must not be treated
-     * more leniently than connected-then-lost. */
-    if (dev->dev_type == HEALTH_DEV_VALVE) return false;
-
-    return !s_rollup_grace_done;
+    return dev->in_use && !dev->ever_seen && !dev->leaking && !dev->excuse_done;
 }
 
 static void recalc_system_rating(void)
@@ -363,7 +374,7 @@ static bool maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating
     // crit_is_leak is READ here and MAINTAINED in apply_rating() — deliberately, because
     // it must describe the STATE we are sitting at, not the edge that got us there. Set
     // on the into-critical edge only, it was never set when a leak arrived at a device
-    // that was ALREADY critical (seeded CRITICAL after a reload, or genuinely offline),
+    // that was ALREADY critical (seeded CRITICAL when added, or genuinely offline),
     // so the eventual dry-out took the out_of_critical branch with the flag false and
     // published a bare `device_recovered` for an offline event that was never sent.
     if (into_critical && dev->leaking)      return true;   // leak: no alert
@@ -429,7 +440,6 @@ static bool maybe_enqueue_alert(health_device_t *dev, health_rating_t new_rating
 static void apply_rating(health_device_t *dev, health_rating_t new_rating, int64_t now)
 {
     if (!maybe_enqueue_alert(dev, new_rating, now)) return;
-    dev->prev_rating = dev->rating;
     dev->rating      = new_rating;
     /* Maintained from the STATE, every commit — so it is correct however we arrived at
      * CRITICAL, including CRITICAL -> CRITICAL where there is no edge for
@@ -592,18 +602,21 @@ static void evaluate_timeouts(void)
 // ---------------------------------------------------------------------------
 // Window deadline evaluation (call with s_mutex held)
 //
-// Evaluates BOTH sync deadlines measured from s_boot_start_ms:
-//   1. s_boot_sync_timeout_ms  (180 s) -> s_boot_sync_done    — the SNAPSHOT gate
-//   2. HEALTH_ROLLUP_UNHEARD_MS (600 s) -> s_rollup_grace_done — the ROLL-UP exclusion
+// Evaluates TWO kinds of deadline:
+//   1. s_boot_sync_timeout_ms from s_boot_start_ms -> s_boot_sync_done — the global
+//      SNAPSHOT gate (re-armed only when devices are ADDED);
+//   2. each device's own excuse_s from its added_s  -> excuse_done — the per-device
+//      ROLL-UP exclusion (see rollup_unheard_locked()).
 // They are separate because they answer different questions; see
 // HEALTH_ROLLUP_UNHEARD_MS in the header for the bench capture that forced the split.
 // ---------------------------------------------------------------------------
 static void check_boot_sync_locked(void)
 {
-    /* NO early return on s_boot_sync_done any more: deadline 2 is LONGER than deadline
-     * 1, so this function has to keep being reachable after the first one has closed.
-     * Each flag still has its own one-shot guard below, so there is no repeated work. */
+    /* NO early return on s_boot_sync_done: the per-device excuses outlive the snapshot
+     * gate, so this function has to keep being reachable after the gate has closed.
+     * Every latch has its own one-shot guard below, so there is no repeated work. */
     bool edge = false;
+    uint32_t t_s = now_s();
 
     if (!s_boot_sync_done) {
         bool all_seen = true;
@@ -619,62 +632,69 @@ static void check_boot_sync_locked(void)
             ESP_LOGI(HEALTH_TAG, "Boot sync: all devices seen");
         } else if ((now_ms() - s_boot_start_ms) >= s_boot_sync_timeout_ms) {
             s_boot_sync_done = true;
-            /* State the REMAINING excuse, not the constant. Deadline 2 is measured from
-             * the same s_boot_start_ms, so after a commission (150 s window) only 450 s
-             * of the 600 s is left — a bench capture read "still excused for 600 s" at
-             * t=435 s when the real deadline was t=885 s. A diagnostic line that has to
-             * be corrected by hand is worse than no line. */
+            /* State the REMAINING excuse, not a constant: the longest time any unheard
+             * device is still kept out of the roll-up. A bench capture once read "still
+             * excused for 600 s" at t=435 s when the real deadline was t=885 s; a
+             * diagnostic line that has to be corrected by hand is worse than no line. */
+            uint32_t further_s = 0;
+            for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+                const health_device_t *d = &s_devices[i];
+                if (!rollup_unheard_locked(d)) continue;
+                uint32_t elapsed_s = t_s - d->added_s;
+                uint32_t window_s  = (uint32_t)d->excuse_s;
+                uint32_t left_s = (elapsed_s < window_s) ? (window_s - elapsed_s) : 0;
+                if (left_s > further_s) further_s = left_s;
+            }
             ESP_LOGW(HEALTH_TAG, "Boot sync: timeout (%lu s) — snapshot gate open; "
                      "unheard devices still excused for a further %lld s",
                      (unsigned long)(s_boot_sync_timeout_ms / 1000),
-                     (long long)(((int64_t)HEALTH_ROLLUP_UNHEARD_MS
-                                  - (now_ms() - s_boot_start_ms)) / 1000));
+                     (long long)further_s);
         }
         if (s_boot_sync_done) edge = true;
     }
 
-    /* Deadline 2. Needs its own edge for exactly the same reason deadline 1 does (see
-     * below): nothing else recalcs when it passes, so without this the roll-up would
-     * keep excluding a genuinely absent device — reporting EXCELLENT / GREEN — until
-     * the next 30 s tick happened to come round. */
-    if (s_boot_sync_done && !s_rollup_grace_done &&
-        (now_ms() - s_boot_start_ms) >= (int64_t)HEALTH_ROLLUP_UNHEARD_MS) {
-        s_rollup_grace_done = true;
+    /* Per-device excuse expiry. Needs an edge for the same reason the gate does (see
+     * below): nothing else recalcs when a deadline passes, so without this the roll-up
+     * would keep excluding a genuinely absent device — reporting EXCELLENT / GREEN —
+     * until the next 30 s tick happened to come round. */
+    int newly_counted = 0;
+    uint32_t counted_window_s = 0;
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        health_device_t *d = &s_devices[i];
+        if (!d->in_use || d->excuse_done) continue;
+        if ((uint32_t)(t_s - d->added_s) < (uint32_t)d->excuse_s) continue;
 
-        /* Announce ONLY when the expiry actually changes something, i.e. some device is
-         * still unheard and is about to start counting. On a healthy hub every device has
-         * been heard long before this deadline, so the unconditional version printed
-         * "unheard devices now count" at WARNING level, 600 s after every boot AND every
-         * provision, when there were no unheard devices at all — a line that is both
-         * false and alarming, in the channel people scan first when something is wrong.
-         * Observed on the 2.1.3 bench capture at t=885 s with all four sensors healthy.
-         *
-         * The latch itself is still set unconditionally (it is a deadline, not an event)
-         * and the recalc below still runs, so behaviour is unchanged — only the noise. */
-        int unheard = 0;
-        for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-            if (s_devices[i].in_use && !s_devices[i].ever_seen) unheard++;
+        bool was_unheard = rollup_unheard_locked(d);
+        d->excuse_done = true;
+        if (was_unheard) {
+            newly_counted++;
+            if ((uint32_t)d->excuse_s > counted_window_s) counted_window_s = d->excuse_s;
         }
-        if (unheard > 0) {
-            ESP_LOGW(HEALTH_TAG,
-                     "Roll-up grace expired (%lu s) — %d unheard device(s) now count",
-                     (unsigned long)(HEALTH_ROLLUP_UNHEARD_MS / 1000), unheard);
-        } else {
-            ESP_LOGD(HEALTH_TAG, "Roll-up grace expired (%lu s) — nothing unheard",
-                     (unsigned long)(HEALTH_ROLLUP_UNHEARD_MS / 1000));
-        }
+    }
+
+    /* Announce ONLY when an expiry actually changes something, i.e. some device is still
+     * unheard and is about to start counting. On a healthy hub every device has been heard
+     * long before its deadline; an unconditional line printed "unheard devices now count"
+     * at WARNING level after every boot AND every provision with nothing unheard — both
+     * false and alarming, in the channel people scan first when something is wrong.
+     * Observed on the 2.1.3 bench capture at t=885 s with all four sensors healthy. The
+     * latch itself is set regardless (it is a deadline, not an event). */
+    if (newly_counted > 0) {
+        ESP_LOGW(HEALTH_TAG,
+                 "Roll-up grace expired (%lu s) — %d unheard device(s) now count",
+                 (unsigned long)counted_window_s, newly_counted);
         edge = true;
     }
 
-    /* Re-roll immediately if either window JUST closed — the one-shot guards above mean
-     * a flag can only be set here by the call that sets it, so this is a transition
+    /* Re-roll immediately if a gate or an excuse JUST closed — the one-shot guards above
+     * mean a latch can only be set here by the call that sets it, so this is a transition
      * edge, not a per-call cost.
      *
-     * Needed because recalc_system_rating() EXCLUDES not-yet-heard devices while these
-     * flags are clear, so a flag flipping changes the roll-up's inputs — and this
-     * function is reached from health_is_boot_sync_complete() and
-     * health_is_rollup_syncing(), i.e. from the fleet LED / iothub poll, which do NOT
-     * otherwise recalc.
+     * Needed because recalc_system_rating() EXCLUDES not-yet-heard devices until their
+     * excuse latches, so a latch flipping changes the roll-up's inputs — and this
+     * function is reached from health_is_boot_sync_complete(),
+     * health_is_rollup_syncing() and health_get_device_status_all(), i.e. from the fleet
+     * LED / iothub poll / snapshot, which do NOT otherwise recalc.
      *
      * Without this, a window that times out with a genuinely absent sensor left
      * s_system_rating at its stale EXCELLENT: callers saw "sync complete" and
@@ -794,129 +814,169 @@ static void health_engine_task(void *param)
 // Public API
 // ---------------------------------------------------------------------------
 
-void health_engine_reload_devices(uint32_t sync_window_ms)
+// Is this table entry still in the provisioned set? Keyed by (type, id). Pure.
+static bool device_in_set(const prov_device_set_t *set, const health_device_t *dev)
 {
-    bool have_mutex = (s_mutex != NULL);
-    if (have_mutex) xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000));
+    switch (dev->dev_type) {
+        case HEALTH_DEV_VALVE:
+            return set->has_valve && strcasecmp(set->valve_mac, dev->dev_id) == 0;
+        case HEALTH_DEV_LORA:
+            for (int i = 0; i < set->lora_count; i++) {
+                char id[16];
+                snprintf(id, sizeof(id), "0x%08lX", (unsigned long)set->lora_ids[i]);
+                if (strcasecmp(id, dev->dev_id) == 0) return true;
+            }
+            return false;
+        case HEALTH_DEV_BLE_LEAK:
+            for (int i = 0; i < set->ble_count; i++) {
+                if (strcasecmp(set->ble_macs[i], dev->dev_id) == 0) return true;
+            }
+            return false;
+        default:
+            return false;
+    }
+}
 
-    /* CARRY LEAK STATE ACROSS THE RELOAD.
-     *
-     * The memset below wipes `leaking` along with everything else, and that single bit
-     * is load-bearing now: recalc_system_rating() exempts leaking devices from the
-     * not-yet-heard exclusion, so wiping it makes that exemption inert exactly when it
-     * is needed. A `provision` or per-device `decommission` issued while a sensor is
-     * standing in water would drop that sensor out of the roll-up until its next burst
-     * (~100 s for BLE, longer for LoRa) — and with auto_close disabled there is no
-     * interlock floor to catch it either, so the hub would publish rating:"excellent" /
-     * "Syncing - waiting for N devices" with a wet sensor on the floor. That is the
-     * exact D3/D4 failure this release exists to remove.
-     *
-     * Re-seeding from a producer cache was the alternative, but it depends on another
-     * module's cache surviving the reload and on walking two different ones. Carrying
-     * the bit here is self-contained and cannot be skipped by a caller.
-     *
-     * Only `leaking` and `crit_is_leak` are carried. Everything else SHOULD reset: the
-     * point of a reload is to re-establish liveness from scratch. */
-    typedef struct { health_dev_type_t t; char id[18]; bool leaking; bool crit_is_leak; } leak_carry_t;
-    leak_carry_t carry[HEALTH_MAX_DEVICES];
-    int carry_n = 0;
+/* Append one provisioned device unless it is already in the table (a survivor, or a
+ * duplicate inside the set). Call with s_mutex held, after compaction, so the first free
+ * slot is the end of the used run and survivors keep their order.
+ * Returns 1 = appended, 0 = already present, -1 = table full. */
+static int append_device_locked(health_dev_type_t type, const char *id,
+                                uint16_t excuse_s, uint32_t added_s)
+{
+    if (find_device(type, id)) return 0;
+
     for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-        if (!s_devices[i].in_use || !s_devices[i].leaking) continue;
-        carry[carry_n].t = s_devices[i].dev_type;
-        memcpy(carry[carry_n].id, s_devices[i].dev_id, sizeof(carry[carry_n].id));
-        carry[carry_n].leaking = true;
-        carry[carry_n].crit_is_leak = s_devices[i].crit_is_leak;
-        carry_n++;
+        health_device_t *dev = &s_devices[i];
+        if (dev->in_use) continue;
+
+        // memset seeds every "unknown" field: last_seen_ms/last_alert_ms/disconnect_ms 0,
+        // last_rssi 0, ever_seen/leaking/crit_is_leak/excuse_done false.
+        memset(dev, 0, sizeof(*dev));
+        dev->in_use       = true;
+        dev->dev_type     = type;
+        strncpy(dev->dev_id, id, sizeof(dev->dev_id) - 1);
+        dev->dev_id[sizeof(dev->dev_id) - 1] = '\0';
+        dev->rating       = HEALTH_CRITICAL;   // until first contact
+        dev->last_battery = 0xFF;              // unknown
+        dev->added_s      = added_s;
+        dev->excuse_s     = excuse_s;
+        return 1;
+    }
+    return -1;
+}
+
+bool health_engine_reconcile_devices(uint32_t sync_window_ms, health_reconcile_result_t *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!s_mutex) return false;
+
+    /* Fetch the set BEFORE taking s_mutex: no provisioning call may run while the health
+     * table is locked (the old reload made three of them, 1 s timeout each, under it). */
+    prov_device_set_t set;
+    if (!provisioning_get_device_set(&set)) {
+        ESP_LOGE(HEALTH_TAG, "Reconcile deferred: provisioning unavailable");
+        return false;
     }
 
-    // Clear all entries
-    memset(s_devices, 0, sizeof(s_devices));
-    int idx = 0;
-
-    // Valve
-    char valve_mac[18];
-    if (provisioning_get_valve_mac(valve_mac)) {
-        s_devices[idx].in_use   = true;
-        s_devices[idx].dev_type = HEALTH_DEV_VALVE;
-        strncpy(s_devices[idx].dev_id, valve_mac, sizeof(s_devices[idx].dev_id) - 1);
-        s_devices[idx].rating      = HEALTH_CRITICAL;  // Until connected
-        s_devices[idx].prev_rating = HEALTH_CRITICAL;
-        s_devices[idx].last_battery = 0xFF;
-        idx++;
+    // Checked take: never touch the table, and never give, without holding the mutex.
+    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(HEALTH_TAG, "Reconcile deferred: health table busy");
+        return false;
     }
 
-    // LoRa sensors
-    uint32_t lora_ids[MAX_LORA_SENSORS];
-    uint8_t lora_count = 0;
-    if (provisioning_get_lora_sensors(lora_ids, &lora_count)) {
-        for (int i = 0; i < lora_count && idx < HEALTH_MAX_DEVICES; i++) {
-            s_devices[idx].in_use   = true;
-            s_devices[idx].dev_type = HEALTH_DEV_LORA;
-            snprintf(s_devices[idx].dev_id, sizeof(s_devices[idx].dev_id),
-                     "0x%08lX", (unsigned long)lora_ids[i]);
-            s_devices[idx].rating      = HEALTH_CRITICAL;  // Until first packet
-            s_devices[idx].prev_rating = HEALTH_CRITICAL;
-            s_devices[idx].last_battery = 0xFF;
-            idx++;
+    uint8_t removed = 0, added = 0, dropped = 0;
+
+    /* 1. Drop what is no longer provisioned.
+     *
+     * NOTHING ELSE IS RESET. The 2.1.3 reload wiped the whole table, so removing one
+     * sensor made every survivor unseen again (null battery/RSSI, "Syncing") and handed
+     * an offline valve a fresh excuse by losing its disconnect stamp. Survivors now keep
+     * every field, which also keeps a wet survivor's `leaking` without the old carry
+     * table, and a removed device's leak is correctly forgotten with it. */
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        health_device_t *dev = &s_devices[i];
+        if (!dev->in_use) continue;
+        if (!device_in_set(&set, dev)) {
+            memset(dev, 0, sizeof(*dev));
+            removed++;
         }
     }
 
-    // BLE leak sensors
-    char ble_macs[MAX_BLE_LEAK_SENSORS][18];
-    uint8_t ble_count = 0;
-    if (provisioning_get_ble_leak_sensors(ble_macs, &ble_count)) {
-        for (int i = 0; i < ble_count && idx < HEALTH_MAX_DEVICES; i++) {
-            s_devices[idx].in_use   = true;
-            s_devices[idx].dev_type = HEALTH_DEV_BLE_LEAK;
-            strncpy(s_devices[idx].dev_id, ble_macs[i], sizeof(s_devices[idx].dev_id) - 1);
-            s_devices[idx].rating      = HEALTH_CRITICAL;  // Until first advertisement
-            s_devices[idx].prev_rating = HEALTH_CRITICAL;
-            s_devices[idx].last_battery = 0xFF;
-            idx++;
+    // 2. Compact in place, preserving the survivors' relative order.
+    int w = 0;
+    for (int r = 0; r < HEALTH_MAX_DEVICES; r++) {
+        if (!s_devices[r].in_use) continue;
+        if (r != w) {
+            s_devices[w] = s_devices[r];
+            memset(&s_devices[r], 0, sizeof(s_devices[r]));
         }
+        w++;
     }
 
-    s_boot_sync_done = false;  // Reset boot sync on reload
-    /* Re-open the roll-up grace too. Both deadlines are anchored to s_boot_start_ms
-     * below, so a `provision` restarts BOTH — which is what we want: the newly
-     * commissioned devices have genuinely not been heard yet and deserve the same
-     * excuse a cold boot gets. Forgetting this reset would leave the grace latched
-     * closed from a previous cycle and put a freshly provisioned hub straight to RED. */
-    s_rollup_grace_done = false;
-    s_boot_sync_timeout_ms = sync_window_ms;  // window length for this cycle (boot vs commission)
-    s_boot_start_ms  = now_ms();  // Restart the sync window from THIS reload (boot OR a
-                                  // `provision` command) so the "wait for all commissioned
-                                  // devices to be heard" budget is anchored to the
-                                  // commission event, not to power-on. Without this a
-                                  // provision later than one window after boot would fire
-                                  // the snapshot immediately with devices not yet re-heard.
-
-    /* Restore carried leak state onto any device that is STILL provisioned. A device
-     * that was removed by this reload simply does not match and is correctly forgotten.
-     * Re-rate it immediately so the roll-up below sees CRITICAL rather than the
-     * seeded value. */
-    for (int c = 0; c < carry_n; c++) {
-        health_device_t *dev = find_device(carry[c].t, carry[c].id);
-        if (!dev) continue;
-        dev->leaking      = true;
-        dev->crit_is_leak = carry[c].crit_is_leak;
-        dev->rating       = HEALTH_CRITICAL;
-        dev->prev_rating  = HEALTH_CRITICAL;
-        ESP_LOGW(HEALTH_TAG, "Reload: carried active leak for %s", dev->dev_id);
+    /* 3. Append what is new, valve then LoRa then BLE (the old reload's order). The valve's
+     * excuse is only its sync window; a sensor gets the full HEALTH_ROLLUP_UNHEARD_MS — see
+     * rollup_unheard_locked() for why the two differ. */
+    uint32_t t_s = now_s();
+    int rc;
+    if (set.has_valve) {
+        rc = append_device_locked(HEALTH_DEV_VALVE, set.valve_mac,
+                                  (uint16_t)(sync_window_ms / 1000), t_s);
+        if (rc > 0) added++; else if (rc < 0) dropped++;
+    }
+    for (int i = 0; i < set.lora_count; i++) {
+        char id[16];
+        snprintf(id, sizeof(id), "0x%08lX", (unsigned long)set.lora_ids[i]);
+        rc = append_device_locked(HEALTH_DEV_LORA, id,
+                                  (uint16_t)(HEALTH_ROLLUP_UNHEARD_MS / 1000), t_s);
+        if (rc > 0) added++; else if (rc < 0) dropped++;
+    }
+    for (int i = 0; i < set.ble_count; i++) {
+        rc = append_device_locked(HEALTH_DEV_BLE_LEAK, set.ble_macs[i],
+                                  (uint16_t)(HEALTH_ROLLUP_UNHEARD_MS / 1000), t_s);
+        if (rc > 0) added++; else if (rc < 0) dropped++;
     }
 
-    ESP_LOGI(HEALTH_TAG, "Device table loaded: %d device(s)", idx);
+    uint8_t total = 0;
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        if (s_devices[i].in_use) total++;
+    }
 
-    // Recompute the roll-up NOW so s_system_rating reflects the freshly-loaded
-    // device set immediately, instead of staying at its stale prior value until
-    // the first 30 s tick. Without this, every device is CRITICAL "until seen"
-    // here but the worst-of roll-up read by the fleet LED / snapshot
-    // (health_get_system_rating) still reports the power-on default EXCELLENT,
-    // so a hub with an offline valve shows GREEN for ~30 s before flipping RED.
-    // Safe under the held mutex: recalc_system_rating only reads s_devices[].
+    /* 4. Re-arm the snapshot gate ONLY when something was added: the new devices have
+     * genuinely not been heard, and the "wait for all commissioned devices" budget must be
+     * anchored to this commission, not to power-on. A pure removal leaves an open window
+     * running unchanged and never opens a closed one — it was re-arming here that made
+     * every 2.1.3 removal print "Boot sync: timeout" 150 s later and publish an extra boot
+     * snapshot. An empty table has nothing to wait for. */
+    if (added > 0) {
+        s_boot_sync_done       = false;
+        s_boot_sync_timeout_ms = sync_window_ms;
+        s_boot_start_ms        = now_ms();
+    }
+    if (total == 0) s_boot_sync_done = true;
+
+    /* 5. Recompute the roll-up NOW so s_system_rating reflects the new set immediately,
+     * instead of staying at its stale prior value until the first 30 s tick (a hub with an
+     * offline valve would otherwise show GREEN for ~30 s after boot). */
     recalc_system_rating();
 
-    if (have_mutex) xSemaphoreGive(s_mutex);
+    xSemaphoreGive(s_mutex);
+
+    // 6. Logs outside the lock. Keep the "Device table loaded: N device(s)" prefix: it is
+    //    the bench grep anchor.
+    ESP_LOGI(HEALTH_TAG, "Device table loaded: %d device(s) (+%u added, -%u removed)",
+             (int)total, (unsigned)added, (unsigned)removed);
+    if (dropped > 0) {
+        ESP_LOGE(HEALTH_TAG, "Device table full (%d): %u provisioned device(s) not tracked",
+                 HEALTH_MAX_DEVICES, (unsigned)dropped);
+    }
+
+    if (out) {
+        out->total   = total;
+        out->added   = added;
+        out->removed = removed;
+    }
+    return true;
 }
 
 void health_engine_init(void)
@@ -955,7 +1015,7 @@ void health_engine_init(void)
         return;
     }
 
-    health_engine_reload_devices(HEALTH_BOOT_SYNC_TIMEOUT_MS);   // boot window; also stamps s_boot_start_ms
+    health_engine_reconcile_devices(HEALTH_BOOT_SYNC_TIMEOUT_MS, NULL);   // boot window for every device it adds
 
     xTaskCreate(health_engine_task, "health_engine", 3072, NULL, 2, NULL);
     xTimerStart(s_tick_timer, 0);
@@ -1050,7 +1110,8 @@ char *health_alert_to_json(const health_alert_t *alert)
 }
 
 bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES],
-                                  uint8_t *count_out)
+                                  uint8_t *count_out, health_rating_t *sys_rating_out,
+                                  bool *syncing_out)
 {
     if (!out || !count_out || !s_mutex) return false;
 
@@ -1058,8 +1119,15 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
         return false;
     }
 
+    /* Deadlines FIRST, then the copy, then the rating — all under this one hold. The
+     * snapshot used to take the table, the syncing flag and the rating in three separate
+     * calls, so a deadline could close between them and publish a rating that did not
+     * match the "Syncing" text or the device array beside it (L15). */
+    check_boot_sync_locked();
+
     int64_t now = now_ms();
     uint8_t count = 0;
+    bool syncing = false;
 
     for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
         health_device_status_t *dst = &out[i];
@@ -1075,6 +1143,9 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
         dst->leaking      = src->leaking;
         dst->last_battery = src->last_battery;
         dst->last_rssi    = src->last_rssi;
+        // Same predicate the roll-up uses, so "Syncing" can never disagree with the rating.
+        dst->excused      = rollup_unheard_locked(src);
+        if (dst->excused) syncing = true;
 
         // Compute connected status
         if (src->dev_type == HEALTH_DEV_VALVE) {
@@ -1102,6 +1173,8 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
     }
 
     *count_out = count;
+    if (sys_rating_out) *sys_rating_out = s_system_rating;
+    if (syncing_out)    *syncing_out    = syncing;
     xSemaphoreGive(s_mutex);
     return true;
 }

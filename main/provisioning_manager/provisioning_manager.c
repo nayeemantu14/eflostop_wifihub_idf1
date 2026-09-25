@@ -788,7 +788,76 @@ bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out)
         ESP_LOGW(PROV_TAG, "Failed to take mutex in get_ble_leak_sensors");
         *count_out = 0;
     }
-    
+
+    return result;
+}
+
+bool provisioning_get_device_set(prov_device_set_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if (!g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    // ONE hold for all three lists, so a reconcile can never see a valve from before a
+    // provision next to sensor lists from after it.
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(PROV_TAG, "Failed to take mutex in get_device_set");
+        return false;
+    }
+
+    if (g_config.state == PROV_STATE_PROVISIONED) {
+        if (g_config.valve_mac[0] != '\0') {
+            out->has_valve = true;
+            memcpy(out->valve_mac, g_config.valve_mac, sizeof(out->valve_mac));
+            out->valve_mac[sizeof(out->valve_mac) - 1] = '\0';
+            mac_normalize_upper(out->valve_mac);
+        }
+
+        uint8_t lc = g_config.lora_sensor_count;
+        if (lc > MAX_LORA_SENSORS) lc = MAX_LORA_SENSORS;
+        memcpy(out->lora_ids, g_config.lora_sensor_ids, sizeof(uint32_t) * lc);
+        out->lora_count = lc;
+
+        uint8_t bc = g_config.ble_leak_sensor_count;
+        if (bc > MAX_BLE_LEAK_SENSORS) bc = MAX_BLE_LEAK_SENSORS;
+        for (int i = 0; i < bc; i++) {
+            memcpy(out->ble_macs[i], g_config.ble_leak_sensors[i], sizeof(out->ble_macs[i]));
+            out->ble_macs[i][17] = '\0';
+            mac_normalize_upper(out->ble_macs[i]);
+        }
+        out->ble_count = bc;
+    }
+
+    xSemaphoreGive(g_prov_mutex);
+    return true;
+}
+
+bool provisioning_is_ble_sensor_provisioned(const char *mac)
+{
+    if (!mac || !g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    bool result = false;
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (g_config.state == PROV_STATE_PROVISIONED) {
+            for (int i = 0; i < g_config.ble_leak_sensor_count && i < MAX_BLE_LEAK_SENSORS; i++) {
+                if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
+                    result = true;
+                    break;
+                }
+            }
+        }
+        xSemaphoreGive(g_prov_mutex);
+    } else {
+        ESP_LOGW(PROV_TAG, "Failed to take mutex in is_ble_sensor_provisioned");
+    }
+
     return result;
 }
 
