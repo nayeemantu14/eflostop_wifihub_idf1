@@ -39,11 +39,6 @@ extern "C"
         BLE_CMD_CLEAR_RMLEAK
     } ble_valve_cmd_t;
 
-    typedef struct
-    {
-        ble_valve_cmd_t command;
-    } ble_valve_msg_t;
-
     // -----------------------------------------------------------------------------
     // BLE State Event Bits (for event group synchronization)
     // These bits track the security and connection state machine
@@ -69,7 +64,8 @@ extern "C"
 
     /**
      * @brief Signals the BLE starter task to wake up and initialize the stack.
-     * Call this from the Wi-Fi Connected callback.
+     * Called by iothub_apply_provisioned_mac() when a valve or a BLE sensor is provisioned:
+     * at boot, once iothub_task has built its event QueueSet, and on every `provision`.
      * It is safe to call multiple times (subsequent calls are ignored).
      */
     void app_ble_valve_signal_start(void);

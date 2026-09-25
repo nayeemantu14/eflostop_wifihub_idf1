@@ -40,7 +40,7 @@ void app_ble_leak_signal_start(void);
 /**
  * @brief Reset per-sensor tracking state so next advertisement
  * from each sensor is treated as "first seen".
- * Call after draining ble_leak_rx_queue (e.g. at IoT Hub startup).
+ * Called once by iothub_task at startup, before BLE starts.
  */
 void app_ble_leak_reset_tracking(void);
 
