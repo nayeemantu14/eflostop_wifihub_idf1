@@ -226,10 +226,9 @@ void uart_command_task(void *pvParameters) {
 
 extern "C" void lora_task(void* param)
 {
-    // 1. Initialize Objects
+    // 1. Initialize Objects (lora_rx_queue already exists: configurelora() creates it)
     lora_mutex = xSemaphoreCreateMutex();
-    lora_rx_queue = xQueueCreate(10, sizeof(lora_packet_t)); // Holds 10 packets
-    
+
     // 2. Hardware Init
     ESP_LOGI(TAG, "Initializing LoRa Driver...");
     
@@ -289,7 +288,9 @@ extern "C" void lora_task(void* param)
                     send_ack(&packet);
 
                     // Send Data to IoT Task via Queue
-                    if (xQueueSend(lora_rx_queue, &packet, 0) != pdTRUE) {
+                    if (lora_rx_queue == NULL) {
+                        ESP_LOGW(TAG, "No Rx Queue! Packet dropped.");
+                    } else if (xQueueSend(lora_rx_queue, &packet, 0) != pdTRUE) {
                         ESP_LOGW(TAG, "Rx Queue Full! Packet dropped.");
                     }
 
@@ -328,5 +329,12 @@ extern "C" void lora_task(void* param)
 
 void configurelora(void)
 {
+    // Created here, BEFORE the task and before iothub_task starts: iothub_task adds this
+    // queue to its event QueueSet as soon as it runs (no longer after Wi-Fi), and a queue
+    // the task created later could be missing from the set until reboot.
+    lora_rx_queue = xQueueCreate(10, sizeof(lora_packet_t)); // Holds 10 packets
+    if (lora_rx_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create the LoRa RX queue - LoRa packets will be dropped");
+    }
     xTaskCreate(lora_task, "lora_task", 10240, NULL, 4, NULL);
 }

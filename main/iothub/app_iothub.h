@@ -2,6 +2,7 @@
 #define APP_IOTHUB_H
 #pragma once
 
+#include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -41,18 +42,27 @@ extern "C"
 void url_encode(const char *src, char *dst, size_t dst_len);
 char *generate_sas_token(const char *resource_uri, const char *key, long expiry_seconds);
 
-// Global Handle (Exposed so Wi-Fi can notify it)
+// Handle of iothub_task (set by initialize_iothub())
 extern TaskHandle_t iothub_task_handle;
 
 // Task entry point
 void iothub_task(void *param);
 
-// Initialize and start the IoT Hub task
+// Initialize and start the IoT Hub task. Every event queue it selects on (LoRa, valve,
+// BLE leak) must already exist: the task builds its QueueSet as soon as it starts.
 void initialize_iothub(void);
+
+// Wi-Fi STA got an IP (the Wi-Fi manager's callback; called on every (re)connect, safe at
+// any time, even before initialize_iothub()). iothub_task no longer waits for Wi-Fi - leak
+// protection and BLE run from boot - so this only marks the network usable and wakes the
+// loop, which then starts SNTP and the cloud bring-up (DPS, MQTT) without blocking.
+void iothub_on_wifi_connected(void);
 
 // Apply the provisioned device set to BLE: the valve target becomes the provisioned valve
 // (or none), and BLE starts when there is a valve or a BLE leak sensor to serve.
-void iothub_apply_provisioned_mac(void);
+// Returns false when provisioning could not be read (busy): NOTHING was applied, and the
+// caller must hand the retry to iothub_task (it retries every pass until one succeeds).
+bool iothub_apply_provisioned_mac(void);
 
 // Suspend/resume the MQTT client on WiFi loss/restore. Stopping the client while
 // STA is down frees the large TLS buffers so the SoftAP captive portal stays

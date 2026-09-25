@@ -56,9 +56,9 @@ static char g_device_key[64] = {0};
 // the wall clock. Two things follow, and both used to be unhandled:
 //   1. Minting before SNTP has synced yields se=<1970+ttl>, which IoT Hub rejects
 //      with a 401 forever — esp-mqtt keeps retrying the same dead credential.
-//      SNTP can legitimately still be unsynced here: initialize_sntp() gives up
-//      after ~120 s, and on every boot after the first, DPS returns straight from
-//      its NVS cache so nothing else stalls long enough for NTP to land.
+//      SNTP can legitimately still be unsynced here: nothing waits for it any more
+//      (net_maintain() polls it from the loop), and on every boot after the first,
+//      DPS returns straight from its NVS cache.
 //   2. A token always expires eventually; when it does, the hub drops off and
 //      reconnects with the same expired credential until someone power-cycles it.
 // So: never start the client without a valid clock, and re-mint well before expiry.
@@ -84,16 +84,28 @@ static volatile bool   s_mqtt_suspended = false;
 static StaticSemaphore_t s_mqtt_ctl_mutex_buf;
 static SemaphoreHandle_t s_mqtt_ctl_mutex = NULL;
 
-// Cloud bring-up state. DPS registration is NOT allowed to block iothub_task before
-// its event loop: this task is the sole caller of rules_engine_tick() and
-// rules_engine_evaluate_leak(), so spinning on an unreachable DPS would disable leak
-// auto-close entirely. Registration is attempted a bounded number of times at boot
-// and then retried from inside the loop by dps_maintain().
+// Cloud bring-up state. Neither Wi-Fi, SNTP nor DPS registration may block iothub_task
+// before its event loop: this task is the sole caller of rules_engine_tick() and
+// rules_engine_evaluate_leak(), so waiting on any of them disabled leak auto-close (N1).
+// All three are driven from inside the loop (net_maintain(), dps_maintain()): the first
+// DPS_BOOT_ATTEMPTS registrations back off 5..30 s, later ones every
+// DPS_RETRY_INTERVAL_MS.
 #define DPS_BOOT_ATTEMPTS     6
 #define DPS_RETRY_INTERVAL_MS (5 * 60 * 1000)
 
 static bool    g_cloud_ready      = false;   // DPS assigned + MQTT client built
 static int64_t s_dps_next_try_ms  = 0;
+static int     s_dps_attempts     = 0;       // registrations tried so far (dps_maintain)
+
+// Wi-Fi STA has an IP. Set by iothub_on_wifi_connected() and cleared by
+// iothub_suspend_mqtt() (both on the Wi-Fi event task); read by iothub_task.
+static volatile bool s_wifi_up = false;
+
+// SNTP bring-up, iothub_task only (net_maintain()).
+static bool    s_sntp_started   = false;   // esp_sntp_init() done (first Wi-Fi IP)
+static bool    s_sntp_fallback  = false;   // initial sync timed out; 60 s re-poll timer armed
+static bool    s_time_ok        = false;   // wall clock valid (>= SNTP_EPOCH_VALID)
+static int64_t s_sntp_start_ms  = 0;       // monotonic ms of esp_sntp_init()
 
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
@@ -112,6 +124,18 @@ static volatile bool g_decommission_reboot = false;
 // removed device, and no scheduler flag (incl. the int64 g_commission_until_ms) is
 // written from two tasks. 2.1.3 did all of that on the esp-mqtt task.
 static volatile bool g_devset_changed = false;
+
+// iothub_apply_provisioned_mac() found provisioning busy (at boot, or for a `provision` on
+// the esp-mqtt task), so the BLE target and the BLE start are still owed. iothub_task
+// retries at the top of every pass until one succeeds: a busy mutex must never leave BLE
+// unstarted or the valve target stale.
+static volatile bool s_ble_apply_owed = false;
+
+// Bumped by the esp-mqtt task BEFORE it changes the valve target (provision, valve or full
+// decommission). An owed retry that read the device set just before such a change could
+// apply that OLDER set after it - re-targeting a removed valve. The retry compares this
+// across its apply and, if it moved, runs again on the next pass from the newest set.
+static volatile uint32_t s_ble_target_gen = 0;
 
 // True while the health table holds no device (nothing provisioned, or a rules-only
 // provision). iothub_task ONLY: seeded after health_engine_init() and updated by
@@ -1099,6 +1123,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE !!!");
             if (provisioning_remove_valve()) {
                 // The BLE target change stays here, synchronous: it is the safety half.
+                s_ble_target_gen++;   // an owed BLE-apply retry must not re-target this valve
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
                 // Health reconcile, purges and twin run on iothub_task (D0). No snapshot
@@ -1155,6 +1180,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 // reboots, and the boot-time empty-hub reset runs again on a clean mutex.
                 (void)rules_engine_reset_all();
                 telemetry_v2_clear_settings();   // heartbeat cadence back to default
+                s_ble_target_gen++;   // see s_ble_target_gen
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
 
@@ -1259,7 +1285,13 @@ static void handle_c2d_command(const char *data, size_t data_len)
         if (cmd.payload_json &&
             provisioning_handle_azure_payload_json(
                 cmd.payload_json, strlen(cmd.payload_json))) {
-            iothub_apply_provisioned_mac();
+            // The BLE target stays synchronous here (the safety half). A busy provisioning
+            // read applies nothing: the retry goes to iothub_task. Bumped first - see
+            // s_ble_target_gen.
+            s_ble_target_gen++;
+            if (!iothub_apply_provisioned_mac()) {
+                s_ble_apply_owed = true;
+            }
             // WI-3: apply any inline per-sensor metadata carried in the SAME
             // provision payload (optional "sensor_meta":[{sensor_type,sensor_id,
             // location_code,label},...]). Shares the standalone-command apply path;
@@ -1537,6 +1569,7 @@ static void handle_twin_get_response(const char *data, int data_len)
 // ---------------------------------------------------------------------------
 void iothub_suspend_mqtt(void)
 {
+    s_wifi_up        = false;  // only ever called on Wi-Fi loss; also holds DPS attempts
     s_mqtt_suspended = true;   // also blocks sas_maintain() from restarting behind us
     if (mqtt_client == NULL) return;
 
@@ -1569,6 +1602,15 @@ void iothub_resume_mqtt(void)
         }
     }
     xSemaphoreGive(s_mqtt_ctl_mutex);
+}
+
+// Runs on the Wi-Fi event task. A flag and a wake only: SNTP and DPS are started by
+// iothub_task (net_maintain / dps_maintain), never here. The wake is a no-op until
+// telemetry_v2_init() has created the queue; the loop reads the flag on its first pass.
+void iothub_on_wifi_connected(void)
+{
+    s_wifi_up = true;
+    telemetry_v2_wake_snapshot();
 }
 
 // ---------------------------------------------------------------------------
@@ -1922,17 +1964,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
-// Apply the provisioned device set to BLE (boot, and every `provision`; runs on iothub_task
-// or the esp-mqtt task). The valve module's target IS the provisioned valve, or none, so it
-// can never link or command another one (P0-a). BLE starts for a valve OR a BLE sensor: the
-// leak scanner starts with the BLE stack, and a sensors-only hub used to never scan (P0-b).
-void iothub_apply_provisioned_mac(void)
+// Apply the provisioned device set to BLE (boot, every `provision`, and iothub_task's retry
+// of an owed apply; runs on iothub_task or the esp-mqtt task). The valve module's target IS
+// the provisioned valve, or none, so it can never link or command another one (P0-a). BLE
+// starts for a valve OR a BLE sensor: the leak scanner starts with the BLE stack, and a
+// sensors-only hub used to never scan (P0-b). False = provisioning busy, nothing applied.
+bool iothub_apply_provisioned_mac(void)
 {
     prov_device_set_t set;   // ~376 B, on whichever task calls this
     if (!provisioning_get_device_set(&set)) {
-        // Unknown is not "no valve": leave the current target alone.
+        // Unknown is not "no valve": leave the current target alone. The caller owes a retry.
         ESP_LOGW(IOTHUB_TAG, "Apply provisioned devices: provisioning busy - BLE target unchanged");
-        return;
+        return false;
     }
 
     if (set.has_valve) {
@@ -1960,6 +2003,7 @@ void iothub_apply_provisioned_mac(void)
             ble_valve_connect();
         }
     }
+    return true;
 }
 
 // SNTP_EPOCH_VALID now lives in app_iothub.h — dps_client.c needs the same
@@ -1980,6 +2024,9 @@ static void sntp_retry_cb(TimerHandle_t xTimer)
     esp_sntp_restart();
 }
 
+// Start SNTP only. The first sync is awaited by net_maintain() from the event loop: the
+// 120 s blocking wait that used to be here ran before the loop and so held off leak
+// auto-close (N1).
 static void initialize_sntp(void)
 {
     ESP_LOGI(IOTHUB_TAG, "Initializing SNTP...");
@@ -1987,24 +2034,36 @@ static void initialize_sntp(void)
     esp_sntp_setservername(0, "pool.ntp.org");
     setenv("TZ", "UTC0", 1); tzset();
     esp_sntp_init();
+}
 
-    time_t now = 0;
-    struct tm timeinfo = {0};
-    int retry = 0;
+// How long the first sync may take before the 60 s re-poll timer takes over (the old
+// blocking wait's 60 x 2 s).
+#define SNTP_INITIAL_SYNC_MS  (120 * 1000)
 
-    while (timeinfo.tm_year < (2020 - 1900))
-    {
-        ESP_LOGI(IOTHUB_TAG, "Waiting for time... (%d)", ++retry);
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        time(&now);
+// Network bring-up, one non-blocking step per loop pass. iothub_task only.
+// SNTP starts at the first Wi-Fi IP. The clock is checked on every pass until it is valid
+// - possibly before Wi-Fi, since a software reset keeps the RTC time.
+static void net_maintain(void)
+{
+    if (!s_sntp_started && s_wifi_up) {
+        initialize_sntp();
+        s_sntp_started  = true;
+        s_sntp_start_ms = snap_now_ms();
+    }
+    if (s_time_ok) return;
+
+    time_t now = time(NULL);
+    if (now >= SNTP_EPOCH_VALID) {
+        s_time_ok = true;
+        struct tm timeinfo = {0};
         localtime_r(&now, &timeinfo);
-        if (retry > 60)
-            break;
+        ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
+        return;
     }
 
-    if (now >= SNTP_EPOCH_VALID) {
-        ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
-    } else {
+    if (s_sntp_started && !s_sntp_fallback &&
+        snap_now_ms() - s_sntp_start_ms >= SNTP_INITIAL_SYNC_MS) {
+        s_sntp_fallback = true;   // once, even if the timer cannot be created
         ESP_LOGW(IOTHUB_TAG, "SNTP initial sync failed — starting 60s retry timer");
         s_sntp_retry_timer = xTimerCreate("sntp_retry", pdMS_TO_TICKS(60000),
                                            pdTRUE, NULL, sntp_retry_cb);
@@ -2218,21 +2277,117 @@ static bool cloud_bringup(void)
     return true;
 }
 
-// Retry cloud bring-up from inside the event loop, so a DPS outage never stops leak
-// evaluation. Rate-limited, and gated on a valid clock because DPS registration
-// stamps its own SAS token.
+// Cloud bring-up from inside the event loop, so neither Wi-Fi nor a DPS outage ever stops
+// leak evaluation (N1). Gated on Wi-Fi (a CACHED assignment would otherwise build and start
+// MQTT into a dead network, the TLS thrash iothub_suspend_mqtt() exists to prevent) and on
+// a valid clock (DPS registration stamps its own SAS token). The first attempt runs as soon
+// as both are up; failures back off like the boot loop this replaces, then settle to
+// DPS_RETRY_INTERVAL_MS. NOTE a live (uncached) registration still blocks this pass for up
+// to the DPS client's own timeout.
 static void dps_maintain(void)
 {
     if (g_cloud_ready) return;
+    if (!s_wifi_up) return;
     if (time(NULL) < SNTP_EPOCH_VALID) return;
 
-    int64_t now_ms_ = snap_now_ms();
-    if (s_dps_next_try_ms != 0 && now_ms_ < s_dps_next_try_ms) return;
-    s_dps_next_try_ms = now_ms_ + DPS_RETRY_INTERVAL_MS;
+    if (s_dps_next_try_ms != 0 && snap_now_ms() < s_dps_next_try_ms) return;
 
-    ESP_LOGI(IOTHUB_TAG, "DPS: retrying registration...");
+    s_dps_attempts++;
+    bool boot_phase = (s_dps_attempts <= DPS_BOOT_ATTEMPTS);
+    if (!boot_phase) {
+        ESP_LOGI(IOTHUB_TAG, "DPS: retrying registration...");
+    }
     if (cloud_bringup()) {
-        ESP_LOGI(IOTHUB_TAG, "DPS: registration recovered — cloud path up");
+        if (!boot_phase) {
+            ESP_LOGI(IOTHUB_TAG, "DPS: registration recovered — cloud path up");
+        }
+        return;
+    }
+
+    // Measured from AFTER the attempt, which can itself block for a while.
+    if (s_dps_attempts < DPS_BOOT_ATTEMPTS) {
+        int backoff = s_dps_attempts * 5;
+        if (backoff > 30) backoff = 30;
+        ESP_LOGW(IOTHUB_TAG, "DPS failed (attempt %d/%d), retry in %ds",
+                 s_dps_attempts, DPS_BOOT_ATTEMPTS, backoff);
+        s_dps_next_try_ms = snap_now_ms() + (int64_t)backoff * 1000;
+    } else {
+        if (s_dps_attempts == DPS_BOOT_ATTEMPTS) {
+            ESP_LOGE(IOTHUB_TAG,
+                     "DPS unavailable after %d attempts — continuing without cloud. "
+                     "Leak detection and valve auto-close run normally; DPS retried every %d min.",
+                     DPS_BOOT_ATTEMPTS, DPS_RETRY_INTERVAL_MS / 60000);
+        }
+        s_dps_next_try_ms = snap_now_ms() + DPS_RETRY_INTERVAL_MS;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event QueueSet membership
+// ---------------------------------------------------------------------------
+
+// Largest backlog one member add carries over: all 10 LoRa packets (10 x 24 B).
+#define QSET_STASH_BYTES  256
+
+// Add one member queue to the event QueueSet without losing what it already holds (N3).
+//
+// FreeRTOS refuses to add a queue that is not empty, and 2.1.3 ignored the result: an item
+// landing between its drain and the add kept that queue out of the set until reboot. The
+// producers are already running here, and the LoRa task queues a packet only AFTER it has
+// ACKed it, so a discarded packet (a leak included) is never sent again. So the backlog is
+// taken out, the add is retried (bounded), and the backlog is put back IN ORDER once the
+// queue is a member, which posts each item to the set. Only what does not fit the stash or
+// the queue is discarded, and that is logged.
+//
+// `required`: a data queue that cannot join the set would be ignored until reboot, so its
+// leak events would never be evaluated: reboot instead. Stack buffer kept out of
+// iothub_task's frame (noinline): this runs once, at boot.
+static __attribute__((noinline)) void qset_add_member(QueueSetHandle_t set, QueueHandle_t q,
+                                                      size_t item_size, const char *name,
+                                                      bool required)
+{
+    if (q == NULL) {
+        ESP_LOGE(IOTHUB_TAG, "QueueSet: %s queue missing - its events will not be handled", name);
+        return;
+    }
+
+    uint8_t stash[QSET_STASH_BYTES] = {0};
+    const int cap = (int)(sizeof(stash) / item_size);
+    int held = 0, discarded = 0;
+    bool added = false;
+
+    for (int tries = 0; tries < 10 && !added; tries++) {
+        while (held < cap && xQueueReceive(q, &stash[held * item_size], 0) == pdTRUE) {
+            held++;
+        }
+        UBaseType_t extra = uxQueueMessagesWaiting(q);
+        if (held >= cap && extra > 0) {   // stash full: the rest cannot be kept
+            discarded += (int)extra;
+            xQueueReset(q);
+        }
+        added = (xQueueAddToSet(q, set) == pdPASS);
+    }
+
+    if (added) {
+        // Oldest ends up at the FRONT, ahead of anything that arrived during the add.
+        for (int i = held - 1; i >= 0; i--) {
+            if (xQueueSendToFront(q, &stash[i * item_size], 0) != pdTRUE) discarded++;
+        }
+    } else {
+        discarded += held;
+    }
+
+    if (held > 0 || discarded > 0) {
+        ESP_LOGW(IOTHUB_TAG, "QueueSet: %s queue held %d item(s) at boot - %d discarded",
+                 name, held, discarded);
+    }
+    if (!added) {
+        ESP_LOGE(IOTHUB_TAG, "QueueSet: %s queue could not be added%s", name,
+                 required ? " - rebooting" : "");
+        if (required) {
+            vTaskDelay(pdMS_TO_TICKS(1000));   // let the log drain
+            esp_restart();
+        }
     }
 }
 
@@ -2242,8 +2397,10 @@ static void dps_maintain(void)
 
 void iothub_task(void *param)
 {
-    ESP_LOGI(IOTHUB_TAG, "Waiting for Wi-Fi...");
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    // No Wi-Fi wait (N1). 2.1.3 blocked here until the first IP, then up to 120 s on SNTP
+    // and through six DPS attempts, all before provisioning, the rules and health engines
+    // and BLE were initialised: a hub without Wi-Fi had no leak protection at all. SNTP and
+    // DPS now run from the loop (net_maintain / dps_maintain) without blocking it.
     ESP_LOGI(IOTHUB_TAG, "Starting IOT Hub Task...");
 
     // Initialize provisioning manager
@@ -2310,17 +2467,13 @@ void iothub_task(void *param)
         }
     }
 
-    // Check provisioning state
+    // Log only. BLE is decided further down by iothub_apply_provisioned_mac(), whose read is
+    // definite: this answer is also false for a busy mutex, which used to leave BLE unstarted.
     if (provisioning_is_provisioned()) {
         ESP_LOGI(IOTHUB_TAG, "Hub is PROVISIONED");
-        // Same path as a `provision`: BLE target = the provisioned valve (or none), and BLE
-        // starts for a valve or a BLE sensor.
-        iothub_apply_provisioned_mac();
     } else {
         ESP_LOGI(IOTHUB_TAG, "Hub is UNPROVISIONED - waiting for provisioning JSON from Azure");
     }
-
-    initialize_sntp();
 
     // Initialize offline event buffer (loads pending events from NVS)
     offline_buffer_init();
@@ -2334,47 +2487,11 @@ void iothub_task(void *param)
     // client yet. publish_json() gates on a non-NULL client, so until the cloud path
     // is up every event — including a leak — takes the offline-buffer branch instead
     // of being dropped. cloud_bringup() attaches the client and corrects the topic.
+    // (Before the FIRST clock sync, build_envelope() suppresses every message, events
+    // included, so nothing is buffered then.)
     telemetry_v2_init(NULL, hub_identity_get_gateway_id(),
                       hub_identity_get_gateway_id(),
                       g_telem_lora_cache, g_telem_ble_cache);
-
-    // ---- DPS registration: bounded here, retried from the event loop ----
-    // This must NOT spin indefinitely. iothub_task is the sole caller of
-    // rules_engine_tick() and rules_engine_evaluate_leak(), so blocking before the
-    // loop disables leak auto-close. A provisioning-epoch bump sends every fielded
-    // hub through live registration on its first boot after the upgrade, and that
-    // needs both WAN reachability and a synced clock — neither is guaranteed.
-    for (int attempt = 1; attempt <= DPS_BOOT_ATTEMPTS; attempt++) {
-        if (cloud_bringup()) break;
-        int backoff = (attempt < 5) ? attempt * 5 : 30;
-        ESP_LOGW(IOTHUB_TAG, "DPS failed (attempt %d/%d), retry in %ds",
-                 attempt, DPS_BOOT_ATTEMPTS, backoff);
-        vTaskDelay(pdMS_TO_TICKS(backoff * 1000));
-    }
-    if (!g_cloud_ready) {
-        ESP_LOGE(IOTHUB_TAG,
-                 "DPS unavailable after %d attempts — entering event loop without cloud. "
-                 "Leak detection and valve auto-close run normally; DPS retried every %d min.",
-                 DPS_BOOT_ATTEMPTS, DPS_RETRY_INTERVAL_MS / 60000);
-    }
-
-    // Drain queues before adding to QueueSet
-    lora_packet_t dummy_pkt;
-    ble_update_type_t dummy_upd;
-    ble_leak_event_t dummy_leak;
-    uint8_t dummy_snap;
-    while (xQueueReceive(lora_rx_queue, &dummy_pkt, 0) == pdTRUE)
-        ;
-    while (xQueueReceive(ble_update_queue, &dummy_upd, 0) == pdTRUE)
-        ;
-    while (ble_leak_rx_queue && xQueueReceive(ble_leak_rx_queue, &dummy_leak, 0) == pdTRUE)
-        ;
-    // Drain snapshot queue (just created, should be empty — defensive)
-    QueueHandle_t snap_q = telemetry_v2_get_snapshot_queue();
-    while (snap_q && xQueueReceive(snap_q, &dummy_snap, 0) == pdTRUE)
-        ;
-    // Reset BLE leak sensor tracking so next advertisement triggers a fresh event
-    app_ble_leak_reset_tracking();
 
     // QueueSet length MUST be >= the SUM of every member queue's depth. FreeRTOS
     // pushes one handle into the set per successful member send and asserts
@@ -2395,27 +2512,32 @@ void iothub_task(void *param)
     // filling their queues, i.e. during a leak incident with the cloud down.
     #define EVT_QUEUE_SET_LEN  (10 + 16 + 10 + 1)
     QueueSetHandle_t evt_queue_set = xQueueCreateSet(EVT_QUEUE_SET_LEN);
-    xQueueAddToSet(lora_rx_queue, evt_queue_set);
-    xQueueAddToSet(ble_update_queue, evt_queue_set);
-    if (ble_leak_rx_queue) {
-        xQueueAddToSet(ble_leak_rx_queue, evt_queue_set);
+    if (evt_queue_set == NULL) {
+        // Without the set no leak event is ever dequeued; a clean reboot is the only recovery.
+        ESP_LOGE(IOTHUB_TAG, "QueueSet: creation failed (out of memory) - rebooting");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
     }
-    if (snap_q) {
-        /* Checked, unlike the data queues above. A wake can land between the drain and this
-         * add (MQTT connect, an alert, and a rating change on ANY task, the fleet LED's
-         * 250 ms poll included), and FreeRTOS refuses to add a queue that is not empty.
-         * Unchecked, every later wake missed the loop until reboot, leaving snapshots to
-         * the 30 s idle cap. A wake token only means "iterate now" and the loop is about
-         * to start, so draining it again is harmless. Bounded, and logged if it gives up. */
-        int tries = 0;
-        while (xQueueAddToSet(snap_q, evt_queue_set) != pdPASS) {
-            while (xQueueReceive(snap_q, &dummy_snap, 0) == pdTRUE)
-                ;
-            if (++tries >= 10) {
-                ESP_LOGE(IOTHUB_TAG, "QueueSet: snapshot wake queue could not be added");
-                break;
-            }
-        }
+
+    // Every member is added checked, keeping its backlog (qset_add_member()). BLE has not
+    // started yet, so only a LoRa packet or a snapshot wake token (MQTT connect, an alert,
+    // a rating change on any task - the fleet LED's 250 ms poll included) can be waiting.
+    QueueHandle_t snap_q = telemetry_v2_get_snapshot_queue();
+    qset_add_member(evt_queue_set, lora_rx_queue, sizeof(lora_packet_t), "LoRa", true);
+    qset_add_member(evt_queue_set, ble_update_queue, sizeof(ble_update_type_t), "valve", true);
+    qset_add_member(evt_queue_set, ble_leak_rx_queue, sizeof(ble_leak_event_t), "BLE leak", true);
+    // Not required: a missing wake only leaves snapshots to the 30 s idle cap.
+    qset_add_member(evt_queue_set, snap_q, sizeof(uint8_t), "snapshot wake", false);
+
+    // Reset BLE leak sensor tracking so next advertisement triggers a fresh event
+    app_ble_leak_reset_tracking();
+
+    // BLE starts only NOW, with every member already in the set (N2): 2.1.3 started it
+    // before its pre-loop drain, which could discard the valve's CONNECTED and so skip the
+    // reconnect reconciliation. Same path as a `provision`; a busy provisioning read is
+    // retried from the loop's first pass on.
+    if (!iothub_apply_provisioned_mac()) {
+        s_ble_apply_owed = true;
     }
 
     // Start the periodic snapshot timer (fixed liveness backstop that only wakes
@@ -2462,6 +2584,18 @@ void iothub_task(void *param)
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
             esp_restart();
+        }
+
+        // A BLE apply that found provisioning busy (boot, or a `provision`). Before the
+        // device-set change below, so its valve resync already sees the right target.
+        // Clear-then-apply, like g_devset_changed: a failure raised while this runs is
+        // never lost.
+        if (s_ble_apply_owed) {
+            s_ble_apply_owed = false;
+            uint32_t gen = s_ble_target_gen;
+            if (!iothub_apply_provisioned_mac() || gen != s_ble_target_gen) {
+                s_ble_apply_owed = true;   // still busy, or a C2D target change raced it
+            }
         }
 
         // A provision/decommission changed the device set (D0). Consumed BEFORE the
@@ -2549,6 +2683,15 @@ void iothub_task(void *param)
              (snap_now_ms() < g_commission_until_ms) ||
              (g_prov_pulse_until_ms != 0));
 
+        // Cloud bring-up in progress, which used to be a blocking boot sequence: poll at 2 s
+        // so the first clock sync, the boot DPS backoff and the first SAS mint are acted on
+        // promptly. The clock wait is bounded to the initial sync window; after it the 60 s
+        // re-poll timer owns SNTP and the normal cadence is plenty.
+        bool cloud_pending = s_wifi_up &&
+            ((!s_time_ok && !s_sntp_fallback) ||
+             (!g_cloud_ready && s_dps_attempts < DPS_BOOT_ATTEMPTS) ||
+             (g_cloud_ready && s_sas_expiry == 0));
+
         // Flush trigger = derive the select timeout from the snapshot deadline so
         // the loop wakes in time to flush a pending snapshot (defeats the 30 s idle
         // block). If a snapshot is due but we can't publish (offline), idle at the
@@ -2559,7 +2702,7 @@ void iothub_task(void *param)
         if (delta < 0) delta = 0;
         bool can_pub = mqtt_up;
         if (delta <= 0 && !can_pub) delta = SNAP_OFFLINE_FLOOR_MS;
-        int64_t base = commission_pending ? 2000 : 30000;
+        int64_t base = (commission_pending || cloud_pending || s_ble_apply_owed) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
@@ -2584,7 +2727,10 @@ void iothub_task(void *param)
         bool  vlk_mac_ok  = false;
         char  vlk_mac[18] = {0};
 
-        if (active_queue == lora_rx_queue) {
+        if (active_queue == NULL) {
+            // Idle timeout. Checked first: a member queue that failed to be created is NULL
+            // too, and must not be read.
+        } else if (active_queue == lora_rx_queue) {
             has_lora = xQueueReceive(lora_rx_queue, &pkt, 0);
         } else if (active_queue == ble_update_queue) {
             has_valve = xQueueReceive(ble_update_queue, &ble_upd_type, 0);
@@ -2727,6 +2873,7 @@ void iothub_task(void *param)
         // Deliberately AFTER Phase 2: both can block this task (esp_mqtt_client_stop()
         // waits on the mqtt task, and DPS registration runs a whole MQTT session), and
         // leak evaluation must never queue behind that within an iteration.
+        net_maintain();   // SNTP start on the first Wi-Fi IP; first-sync watch
         dps_maintain();   // no cloud yet? keep trying, without stalling the loop
         sas_maintain();   // mint on first valid clock, then renew before expiry
 

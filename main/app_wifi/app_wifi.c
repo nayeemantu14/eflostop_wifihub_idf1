@@ -11,7 +11,6 @@
 #include "hub_identity/hub_identity.h"
 
 TaskHandle_t wifiTaskHandle = NULL;
-static bool has_notified_azure = false;
 
 void cb_connection_ok(void *pvParameter);
 void cb_connection_lost(void *pvParameter);
@@ -39,24 +38,20 @@ void cb_connection_ok(void *pvParameter)
 
     ESP_LOGI(WIFI_TAG, "Connected! IP: %s", str_ip);
 
-    // 1. Wake up Azure IoT Task
-    if (!has_notified_azure && iothub_task_handle != NULL)
-    {
-        ESP_LOGI(WIFI_TAG, "Waking up Azure IoT Task...");
-        xTaskNotifyGive(iothub_task_handle);
-        has_notified_azure = true;
-    }
+    // BLE is not started here, and never waits for Wi-Fi: iothub_task starts it at boot
+    // from the provisioned device set, together with leak protection.
 
-    // 2. BLE will be started by IoT Hub task after provisioning is checked
-    // No BLE start here - provisioning manager initializes after this callback
-
-    // 3. Network LED -> "connecting" (beat blue). The MQTT handler promotes it
+    // 1. Network LED -> "connecting" (beat blue). The MQTT handler promotes it
     //    to "connected" (ramp blue) once the IoT Hub session is up.
     net_status_set_wifi(true);
 
-    // 4. Restart MQTT if it was stopped while STA was down. No-op on first connect
-    //    (the client isn't created until the IoT Hub task runs after provisioning).
+    // 2. Restart MQTT if it was stopped while STA was down. No-op until iothub_task has
+    //    built the client (DPS done, with Wi-Fi up and a valid clock).
     iothub_resume_mqtt();
+
+    // 3. Tell iothub_task the network is up: its loop starts SNTP and the cloud bring-up.
+    //    Last, so the wake finds a reconnect's MQTT suspend already lifted.
+    iothub_on_wifi_connected();
 }
 
 void cb_connection_lost(void *pvParameter)

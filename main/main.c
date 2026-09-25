@@ -64,9 +64,13 @@ void app_main(void)
 	configureUART();
     app_wifi_start();
 	configurelora();
-	initialize_iothub();
+	/* LoRa and both BLE modules create their event queues BEFORE iothub_task starts: it
+	 * no longer waits for Wi-Fi (leak protection runs from boot) and builds its event
+	 * QueueSet immediately, so every member queue must already exist. The BLE radio still
+	 * starts later, when iothub_task applies the provisioned device set. */
 	app_ble_valve_init();
 	app_ble_leak_init();
+	initialize_iothub();
 
 	/* WiFi reset button (GPIO 40, hold 10s to clear WiFi credentials + reboot into AP
 	 * captive portal; commissioning is preserved in nvs_prov, decommission is app-only) */
