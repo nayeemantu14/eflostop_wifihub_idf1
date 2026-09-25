@@ -649,10 +649,16 @@ static void handle_valve_leak(bool leaking)
  * is applied after it. Reading is_ready on iothub_task and posting a CONNECTED from there
  * could land a stale CONNECTED after a DISCONNECTED.
  *
- * Only the link is resynced; the battery is NOT re-fed. The deleted
- * reseed_valve_health_if_connected() fed the unknown battery as 0 % (the BUG-1 trap), and
- * the valve's battery reaches this engine by itself from on_notify() on every read/notify,
- * with 0xFF ignored by handle_valve_battery(). Call with s_mutex held. */
+ * The link-up READINGS are lost in the same race: the setup reads post the flood probe and
+ * the battery ahead of that CONNECTED, and they found no entry either. The flood probe
+ * notifies only on a change, so a valve that was already wet at commissioning read dry here
+ * for the whole episode, and the battery waited for the valve's next notify. So both are
+ * re-read from the live values as well. That is safe now that an unknown battery is 0xFF,
+ * which handle_valve_battery() ignores, rather than the 0 % the deleted
+ * reseed_valve_health_if_connected() fed in (the BUG-1 trap). Both handlers are keyed on
+ * the value, so re-feeding what the entry already holds changes nothing, and the values are
+ * read at processing time under the same FIFO argument as the link.
+ * Call with s_mutex held. */
 static void handle_valve_resync(void)
 {
     if (!ble_valve_is_ready()) return;
@@ -660,16 +666,18 @@ static void handle_valve_resync(void)
     health_device_t *dev = find_valve();
     if (!dev) return;
 
-    // The entry already reflects a live link: nothing was lost.
-    if (dev->last_seen_ms != 0 && dev->disconnect_ms == 0) return;
-
     // Only a link to THIS valve: the valve module can still hold a link to another one
     // (it can relink a valve by name), and this handler asserts the provisioned one is up.
     char live_mac[18];
     if (!ble_valve_get_mac(live_mac) || strcasecmp(live_mac, dev->dev_id) != 0) return;
 
-    ESP_LOGI(HEALTH_TAG, "Valve link resync: link was already up when its table entry was added");
-    handle_valve_event(true);
+    // The link only if the entry does not already reflect it; the readings always.
+    if (dev->last_seen_ms == 0 || dev->disconnect_ms != 0) {
+        ESP_LOGI(HEALTH_TAG, "Valve link resync: link was already up when its table entry was added");
+        handle_valve_event(true);
+    }
+    handle_valve_leak(ble_valve_get_leak());
+    handle_valve_battery(ble_valve_get_battery());
 }
 
 static void evaluate_timeouts(void)

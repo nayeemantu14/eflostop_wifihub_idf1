@@ -224,7 +224,8 @@ bool health_post_event(const health_event_t *evt);
  * @brief Ask the engine to re-check the live valve link against the valve's table entry.
  *        Non-blocking post; the link state is read on the health task when the event is
  *        processed, not here. Call after a reconcile that ADDED devices: a valve whose
- *        link came up before its entry existed had its CONNECTED dropped.
+ *        link came up before its entry existed had its CONNECTED, and its link-up flood
+ *        probe and battery readings, dropped. Re-applies all three from the live values.
  * @return false if the event queue rejected the request.
  */
 bool health_request_valve_resync(void);

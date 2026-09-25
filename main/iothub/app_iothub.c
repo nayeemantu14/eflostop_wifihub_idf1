@@ -726,8 +726,10 @@ static void on_hub_emptied(void)
     // Nothing left to protect: drop the latch, the override, the active leaks and any
     // pending close, and put the rules back to the provisioning defaults, so the next
     // deployment starts clean (Q6; L12). Same keys as a normal rules_config write.
-    if (!rules_engine_reset_all()) {
-        s_rules_reset_owed = true;   // retried when the hub next gains a device
+    // Assigned both ways: a success also settles a reset still owed from an earlier failure,
+    // which would otherwise force an unneeded reset on the next empty -> non-empty edge.
+    s_rules_reset_owed = !rules_engine_reset_all();   // retried when the hub next gains a device
+    if (s_rules_reset_owed) {
         ESP_LOGE(IOTHUB_TAG, "Hub empty: rules-engine RAM reset failed - retry owed");
     }
     rules_config_t def = { .auto_close_enabled = true, .trigger_mask = RULES_TRIGGER_ALL };
@@ -767,11 +769,24 @@ static void on_hub_emptied(void)
 //   - a NEW valve inherited the old one's edges, so a new wet valve's leak_detected was
 //     suppressed and a new dry one produced a phantom leak_cleared — presetting -1/0/-2
 //     makes it publish its own first link, leak and state edges.
+//
+// Read through provisioning_get_device_set(), NOT provisioning_get_valve_mac(): the latter
+// returns false both for "no valve" and for a busy provisioning mutex, and s_det_valve_mac
+// also gates the valve link-edge snapshot, so one busy read used to blank it and silence
+// every valve_linked/valve_unlinked until the next device-set change. Unknown now leaves
+// the detectors alone and retries the whole (idempotent) change on the next pass.
 static void sync_valve_detectors(void)
 {
+    prov_device_set_t set;   // ~376 B on the iothub stack (10 KB)
+    if (!provisioning_get_device_set(&set)) {
+        ESP_LOGW(IOTHUB_TAG, "Valve detectors: provisioning busy, retrying");
+        g_devset_changed = true;
+        return;
+    }
+
+    bool have = set.has_valve;
     char mac[18];
-    bool have = provisioning_get_valve_mac(mac);
-    if (!have) mac[0] = '\0';
+    snprintf(mac, sizeof(mac), "%s", have ? set.valve_mac : "");
 
     if (strcasecmp(mac, s_det_valve_mac) == 0) return;   // same valve (or still none)
 
@@ -2203,10 +2218,6 @@ void iothub_task(void *param)
         ESP_LOGE(IOTHUB_TAG, "Failed to initialize provisioning manager");
     }
 
-    // The valve detectors start out describing the valve provisioned at boot (their
-    // initial values are already the "nothing published yet" sentinels).
-    if (!provisioning_get_valve_mac(s_det_valve_mac)) s_det_valve_mac[0] = '\0';
-
     // Initialize sensor metadata and rules engine
     sensor_meta_init();
     rules_engine_init();
@@ -2226,12 +2237,20 @@ void iothub_task(void *param)
      * The rules CONFIG is not touched: a rules_config set on an empty hub must survive a
      * reboot.
      *
-     * If provisioning cannot be read, s_hub_empty stays false: that costs the 2 s
-     * commission poll until the first boot snapshot, and an on_hub_emptied() (which does
-     * reset) if the next device-set change finds the table empty. */
+     * The same read seeds the valve change detectors with the valve provisioned at boot
+     * (their initial values are already the "nothing published yet" sentinels).
+     *
+     * If provisioning cannot be read, s_hub_empty stays false and the whole device-set
+     * change is handed to the loop's first pass. There, before any event is processed, a
+     * hub that really is empty takes the non-empty -> empty edge and on_hub_emptied() resets
+     * it (still race-free, and it also puts the rules config back to the defaults, as any
+     * hub that becomes empty does); a hub with devices keeps its latch; and
+     * sync_valve_detectors() seeds the detectors. A first ADD alone would never reset. */
     {
-        prov_device_set_t set;
+        prov_device_set_t set;   // ~376 B on the iothub stack (10 KB)
         if (provisioning_get_device_set(&set)) {
+            snprintf(s_det_valve_mac, sizeof(s_det_valve_mac), "%s",
+                     set.has_valve ? set.valve_mac : "");
             int n = (set.has_valve ? 1 : 0) + set.lora_count + set.ble_count;
             s_hub_empty = (n == 0);
             if (s_hub_empty) {
@@ -2253,7 +2272,8 @@ void iothub_task(void *param)
                 }
             }
         } else {
-            ESP_LOGW(IOTHUB_TAG, "Boot: provisioning unavailable - empty-hub state unknown");
+            ESP_LOGW(IOTHUB_TAG, "Boot: provisioning unavailable - empty-hub state unknown, retrying in the loop");
+            g_devset_changed = true;
         }
     }
 
@@ -2352,7 +2372,21 @@ void iothub_task(void *param)
         xQueueAddToSet(ble_leak_rx_queue, evt_queue_set);
     }
     if (snap_q) {
-        xQueueAddToSet(snap_q, evt_queue_set);
+        /* Checked, unlike the data queues above. A wake can land between the drain and this
+         * add (MQTT connect, an alert, and a rating change on ANY task, the fleet LED's
+         * 250 ms poll included), and FreeRTOS refuses to add a queue that is not empty.
+         * Unchecked, every later wake missed the loop until reboot, leaving snapshots to
+         * the 30 s idle cap. A wake token only means "iterate now" and the loop is about
+         * to start, so draining it again is harmless. Bounded, and logged if it gives up. */
+        int tries = 0;
+        while (xQueueAddToSet(snap_q, evt_queue_set) != pdPASS) {
+            while (xQueueReceive(snap_q, &dummy_snap, 0) == pdTRUE)
+                ;
+            if (++tries >= 10) {
+                ESP_LOGE(IOTHUB_TAG, "QueueSet: snapshot wake queue could not be added");
+                break;
+            }
+        }
     }
 
     // Start the periodic snapshot timer (fixed liveness backstop that only wakes

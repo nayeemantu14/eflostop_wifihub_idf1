@@ -1521,8 +1521,9 @@ bool rules_engine_reset_all(void)
         // g_pending_telemetry is kept: an already-built event describes something that
         // really happened, and iothub_task still publishes it.
     } else {
-        // Decommission must not be blocked by a stuck mutex: the NVS erase and the
-        // interlock release below still run, only the RAM state is left alone.
+        // A stuck mutex must not block a decommission, a boot or the empty-hub edge: the
+        // NVS erase and the interlock release below still run, only the RAM state is left
+        // alone, and the false return tells the caller a RAM reset is still owed.
         ESP_LOGE(RULES_TAG, "Rules reset: mutex unavailable — erasing NVS state only");
     }
 
@@ -1555,7 +1556,8 @@ bool rules_engine_reset_all(void)
 
     if (locked) xSemaphoreGive(g_mutex);
 
-    ESP_LOGW(RULES_TAG, "Rules engine reset to defaults (no devices remain / decommission)");
+    // STATE only: the rules config (auto_close_enabled / trigger_mask) is the caller's call.
+    ESP_LOGW(RULES_TAG, "Rules-engine state reset (hub empty / decommission)");
     return locked;
 }
 

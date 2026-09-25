@@ -654,7 +654,7 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
 
     // Trigger reason (heartbeat | event | commission | boot) — lets the app
     // attribute each snapshot in its event-log-vs-UI-refresh model. (Named
-    // `trigger` to avoid colliding with the system_health `char reason[128]` below.)
+    // `trigger` to avoid colliding with the system_health `char reason[192]` below.)
     if (trigger && trigger[0])
         cJSON_AddStringToObject(data, "reason", trigger);
 
