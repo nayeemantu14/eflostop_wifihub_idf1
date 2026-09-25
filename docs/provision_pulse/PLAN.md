@@ -273,7 +273,42 @@ are now matched and the count parks on a sentinel above them.
 - Grace expiry flips EXCELLENT→CRITICAL with no snapshot/alert coupling — `apply_rating()`/`maybe_enqueue_alert()` already cover the per-device transition, and the health-alert branch couples a snapshot.
 - `s_checkin_seq++` fires for unprovisioned LoRa sensors — `find_device()` returns NULL for an unknown id, so the handler returns before the bump is reached.
 
-## 6. Out of scope (scoped, not built)
+## 6. Known open defect — `device_recovered` can be withheld (OPEN, not fixed)
+
+Found by the pre-merge audit, verified by hand, landed deliberately as a follow-up because it does
+not touch the shutoff path.
+
+`maybe_enqueue_alert()` suppresses the out-of-critical alert when `dev->crit_is_leak`
+(`health_engine.c:370`), but `crit_is_leak` is re-derived from **state** on every commit
+(`:438`, `(new_rating == HEALTH_CRITICAL) ? dev->leaking : false`) rather than from whether an
+offline alert was ever actually emitted. So:
+
+1. A sensor goes quiet → 600 s staleness → CRITICAL with `leaking == false` → **`device_offline`
+   published**, `crit_is_leak = false`.
+2. The sensor comes back **wet** → CRITICAL→CRITICAL, no edge, no alert — but `:438` now flips
+   `crit_is_leak` to **true**.
+3. It dries → the only `out_of_critical` edge that will ever occur → `:370` suppresses it →
+   **no `device_recovered`.**
+
+A backend tracking reachability from the health event plane keeps that sensor flagged offline until
+some later, unrelated offline/recovery cycle re-pairs the events. Not permanent, but unbounded.
+
+**Not a safety defect.** Valve actuation lives in `rules_engine.c` and is untouched;
+`leak_detected`/`leak_cleared` still publish, and the coupled snapshot still carries that device's
+`rating` and `connected`. Only the event-plane pairing is wrong.
+
+Note the irony: `:438` is state-derived *because* an earlier council round found the edge-derived
+version published a bare `device_recovered` for an offline event that was never sent. The fix
+traded one asymmetry for another.
+
+**Fix (not applied):** track what was emitted, not why we are critical. Add
+`bool offline_alert_sent` to `health_device_t`, set it on the successful `xQueueSend` when
+`into_critical`, clear it on a successful out-of-critical send, and change `:370` to
+`if (out_of_critical && !dev->offline_alert_sent) return true;`. Leave `:369` alone so a purely
+leak-driven critical still recovers silently. Carry the new flag in the reload carry struct
+(`:826`/`:834`/`:908`) alongside `leaking`/`crit_is_leak`.
+
+## 7. Out of scope (scoped, not built)
 
 - **C2D ack gaps** found while auditing this session: legacy-text commands and parse failures emit
   no `cmd_ack` at all (even when the message carried a correlation id); `error.code` is the command

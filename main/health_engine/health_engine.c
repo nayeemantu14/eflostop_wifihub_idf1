@@ -720,20 +720,6 @@ static void health_engine_task(void *param)
 
         xSemaphoreTake(s_mutex, portMAX_DELAY);
 
-        // Recover a valve DISCONNECTED that never made it onto the queue.
-        //
-        // health_post_valve_event() posts non-blocking from the NimBLE host task.
-        // If that send fails the event is gone, and for a DISCONNECTED that is
-        // UNRECOVERABLE by any other path: disconnect_ms is never stamped, and
-        // evaluate_timeouts() gates the valve re-rate on `disconnect_ms > 0`, so no
-        // tick can ever notice. The rating pins at its last healthy value forever
-        // — and since the app colours its tile from the rating, that is a green
-        // valve that is not there.
-        //
-        // The asymmetry is the point: a dropped CONNECTED self-heals on the next
-        // data-bearing notify, a dropped DISCONNECTED does not. So the fallback is
-        // biased toward applying the disconnect — if it turns out to be stale, the
-        // next notify corrects it, which is the safe direction to be wrong in.
         switch (evt.type) {
             /* Both sensor check-ins bump s_checkin_seq — this task is its single
              * writer. Valve events deliberately do NOT: they already couple their own
@@ -768,9 +754,17 @@ static void health_engine_task(void *param)
         //
         // health_post_valve_event() posts non-blocking from the NimBLE host task.
         // If that send fails the event is gone, and for a DISCONNECTED that is
-        // UNRECOVERABLE by any other path: disconnect_ms is never stamped, and
-        // evaluate_timeouts() gates the valve re-rate on `disconnect_ms > 0`, so
-        // no tick can ever notice. The rating pins at its last healthy value.
+        // UNRECOVERABLE by any other path: NOTHING except a DISCONNECTED event ever
+        // stamps disconnect_ms, so compute_valve_rating() keeps returning a
+        // connected-valve rating however many ticks run. The rating pins at its last
+        // healthy value — a green valve that is not there.
+        //
+        // NB the premise here used to be "evaluate_timeouts() gates the valve re-rate
+        // on disconnect_ms > 0, so no tick can ever notice". That gate was removed in
+        // 2.1.2 (the valve is now re-rated every tick), but the fallback is still
+        // REQUIRED for the reason above. Do not read the missing gate as evidence that
+        // this is dead code and delete it — that restores the silently-green absent
+        // valve, which is the one failure mode this whole release exists to remove.
         //
         // MUST run AFTER the switch, not before. The flag is only ever set when
         // the 16-deep queue was FULL, so a backlog of strictly OLDER events sits
