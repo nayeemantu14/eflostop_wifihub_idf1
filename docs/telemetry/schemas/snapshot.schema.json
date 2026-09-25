@@ -19,8 +19,9 @@
     },
     "ts": {
       "type": "number",
-      "description": "Device wall-clock at message BUILD time. The whole message is destroyed (never sent, never buffered) if ts < 1704067200, so a pre-SNTP leak event is lost permanently. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
-      "x-source": "main/telemetry/telemetry_v2.c:66-76; SNTP gate :70-74; threshold :57",
+      "description": "Device wall-clock at message BUILD time. Built before the first clock sync (ts < 1704067200), this message is destroyed, never sent and never buffered; it is regenerated after connect. (Events are held and time-stamped instead, since 2.1.4.) Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
+      "x-source": "build_envelope() main/telemetry/telemetry_v2.c; threshold EPOCH_VALID_THRESHOLD_TELEM",
+      "minimum": 1704067200,
       "x-category": "12.1"
     },
     "gateway": {
@@ -567,15 +568,17 @@
         },
         "override_remaining_s": {
           "type": "number",
-          "description": "Seconds left in the override window. Reports the FULL window duration when the clock is unsynced, and 0 when expired but not yet processed by the rules tick. Units: seconds. Range/enum: >= 0 when present. Presence: snapshot: OMITTED unless override_active AND remaining >= 0. auto_close_blocked_override event: OMITTED when remaining < 0..",
-          "x-source": "main/telemetry/telemetry_v2.c:595-597; main/rules_engine/rules_engine.c:472-474; semantics main/rules_engine/rules_engine.c:1187-1200",
-          "x-category": "12.10"
+          "description": "Seconds left in the override window, and 0 when expired but not yet processed by the rules tick. A window started before the clock synced is measured on the hub uptime until the rules tick re-bases it to the synced clock, within about 30 s of the sync (2.1.4); a window restored from an earlier unsynced power cycle reads 0 until that tick ends it. Units: seconds. Range/enum: >= 0 when present. Presence: snapshot: OMITTED unless override_active AND remaining >= 0. auto_close_blocked_override event: OMITTED when remaining < 0.",
+          "x-source": "telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c; rules_engine_get_override_status() main/rules_engine/rules_engine.c",
+          "x-category": "12.10",
+          "minimum": 0
         },
         "expires_ts": {
           "type": "number",
-          "description": "Absolute epoch at which the override window expires. Same field name and meaning on both message types. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200. Presence: snapshot: OMITTED unless override_active AND the expiry is known/in-future. water_access_override_enabled event: always..",
-          "x-source": "main/telemetry/telemetry_v2.c:598-599; main/rules_engine/rules_engine.c:217",
-          "x-category": "12.10"
+          "description": "Absolute epoch at which the override window expires. Same field name and meaning on both message types. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200. Presence: snapshot: OMITTED unless override_active AND the expiry is known and in the future, so also OMITTED for a window started before the clock synced until the rules tick re-bases it (2.1.4). water_access_override_enabled event: OMITTED when the window was started before the clock synced (2.1.4), present otherwise.",
+          "x-source": "telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c; rules_engine_get_override_status() main/rules_engine/rules_engine.c",
+          "x-category": "12.10",
+          "minimum": 1704067200
         }
       },
       "required": [

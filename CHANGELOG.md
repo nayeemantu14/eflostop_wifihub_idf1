@@ -74,11 +74,40 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
 - **P0-c: commands issued with no valve were replayed on the next valve that linked.**
   - They are now refused.
   - When the provisioned valve changes or is removed, every queued, pending or in-flight valve command is
-    discarded. A link still up to the old valve is disconnected, and a connect in progress is cancelled.
+    discarded, and a link still up to the old valve is disconnected.
+  - When the valve is removed, a connect in progress is also cancelled. When it is replaced by another valve,
+    a connect already in flight to the old one is not cancelled: it completes, and the hub then drops it at
+    GAP CONNECT, before pairing, discovery or any command (as in P0-a).
 - **N1: leak protection waited for Wi-Fi.**
   - Provisioning, the rules and health engines, and BLE used to start only after the first IP address, then
     up to 120 s of SNTP and the DPS retries.
-  - They now start at boot, without Wi-Fi. SNTP and DPS run from the main loop without blocking it.
+  - They now start at boot, without Wi-Fi. SNTP runs from the main loop without blocking it. DPS also runs
+    from the main loop, but a live registration still blocks it for up to 60 s per attempt (see Known
+    limitations). With NTP blocked, the loop polls every 2 s only during the initial 120 s sync window, then
+    returns to its normal 30 s cadence.
+  - Leak protection now runs before the clock is set, so it can raise events before the first clock sync:
+    a `leak_detected`, the `auto_close` that follows it, a health alert. The hub used to discard every such
+    event, because its `ts` would have been seconds since power-on. It is now kept in the offline buffer. As
+    soon as the clock first syncs, its `ts` is corrected from the hub uptime (the synced clock minus the uptime
+    elapsed since the event's `gateway.uptime_s`) and rewritten in flash; it goes out after the first connect,
+    in order. Once stamped, it survives a restart like any other buffered event.
+  - A pre-sync event still unstamped when the hub restarts (a restart before the clock synced, a software
+    reset included) is dropped at replay, because its time cannot be known: which slots hold this boot's
+    pre-sync events is tracked in RAM only.
+  - Snapshots and lifecycle are still not sent before the first sync; they are regenerated after connect.
+- **The override window before the first clock sync.**
+  - A window started before the clock synced (a valve long-press while the router is down) was stamped with
+    an expiry in 1970. It ended the moment the clock synced, and with no internet it never expired at all.
+  - It is now measured on the hub uptime until the clock syncs, then re-based to the synced clock and carried
+    on (the rules tick does this within about 30 s of the sync). With no internet it expires after 24 h of
+    uptime, through the normal expiry path (auto-close if a leak is still active, RMLEAK before CLOSE).
+  - A window restored after a restart from an earlier unsynced power cycle cannot be re-based, because its
+    elapsed time is unknown. Until the first sync it is timed from this boot's power-on, never beyond its
+    stored expiry. At the first sync it ends, as in 2.1.3, which fails toward auto-close.
+  - `water_access_override_enabled` omits `expires_ts` while the clock is unsynced (it used to carry the 1970
+    instant). `override_remaining_s` (snapshot, `auto_close_blocked_override`) and `previous_remaining_s`
+    (`auto_close_reenabled`) are measured on the uptime meanwhile. NVS keeps its keys and their meaning: the
+    uptime basis is RAM only, and after the re-base `ovr_expiry` holds a real epoch.
 - **N2/N3: the valve's first link-up could be lost.** The queue set is now complete before BLE starts, and every
   queue-set add is checked.
 - **N4: packets from LoRa sensors that are not provisioned were evaluated by the rules engine.**
@@ -93,8 +122,19 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
   - A valve or RMLEAK write that the BLE stack refuses is retried up to 3 times, 200 ms and then 400 ms apart.
   - After that, the link is dropped and the command is re-applied when the valve reconnects. It used to be
     lost.
-  - RMLEAK is always applied before the valve command.
-  - BLE start-up (`nimble_port_init`) is retried up to 5 times.
+  - Forced reconnects are capped at 3 in a row. After that a failed write stays pending for the next natural
+    reconnect, and the cap is lifted once a write succeeds with nothing left pending (or the valve target
+    changes).
+  - A re-applied command that fails again at reconnect is replayed ahead of any newer command, never after
+    it, so it can no longer undo a newer command. A command cancelled or superseded meanwhile is not
+    replayed. A newer command written during the reconnect is never overwritten by an older pending one.
+  - RMLEAK is applied before the valve command, on every path. One exception, once the reconnect cap is
+    reached (or the link could not be dropped): if the RMLEAK write itself keeps failing on a live link, an
+    open waits behind it, but a close is still written, because holding a close back during a leak is worse.
+  - A disconnect the controller refuses (`BLE_GAP_EVENT_TERM_FAILURE`) no longer leaves valve commands
+    blocked for the rest of the link.
+  - BLE start-up (`nimble_port_init`) is retried up to 5 times, and each failed attempt now releases the
+    NimBLE porting-layer memory it allocated.
 - **Health.**
   - A debounced alert is sent once the debounce has passed, instead of being dropped.
   - A rating change with no device event (for example the end of the sync window, or a valve battery going
@@ -106,6 +146,11 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     flash disagreeing.
   - Duplicate sensor ids in a `provision` payload are ignored.
   - Removing a valve from a hub that has none now reports an error.
+  - Applying the provisioned valve to BLE reads and sets the valve target in one provisioning lock hold. A
+    retry of an apply that found provisioning busy can therefore never re-target a valve that a C2D
+    `provision` or `decommission` removed or replaced meanwhile.
+  - A corrupt sensor count in flash is clamped to 16 at load (and logged) instead of overrunning the device
+    lists, and every stored MAC string is terminated. Nothing is erased and no NVS data changes.
 - **Sensor metadata** is copied out under its lock. Callers used to hold a pointer into the table after the lock
   was released.
 - **Offline buffer.**
@@ -115,7 +160,7 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
 - **Twin reported** is refreshed after every device-set change. A decommission used to leave the twin naming the
   removed device.
 - **The UART log no longer prints the site Wi-Fi password** (it came from the Wi-Fi provisioning component's
-  INFO logging).
+  INFO logging), **nor the valve's fixed BLE passkey** (it was printed at every BLE start and on pairing).
 
 ### Wire changes
 
@@ -131,6 +176,9 @@ Telemetry (`eflostop.v2`):
 | hub with no devices | no lifecycle, twin or snapshots | lifecycle (`provisioned:false`), twin, and snapshots: `event` / `heartbeat` / `boot` |
 | `device_offline` / `device_recovered` | sent on every non-leak critical edge, named from the rating alone; a debounced alert was dropped | reachability only: `device_offline` is always a lost link; no event for a battery- or leak-driven critical; `device_recovered` may carry `rating:"critical"` (back into a leak); `prev_rating` may equal `rating` (an alert sent after its debounce) |
 | rules events `valve_id` | the linked valve's MAC while one was linked, else the provisioned one | always the provisioned valve's MAC |
+| events raised before the first clock sync | discarded, never sent | sent after the first connect, in order, `ts` corrected from the hub uptime when the clock first syncs; one left by a restart before the sync is dropped. `ts` is never below 1704067200 |
+| `water_access_override_enabled.expires_ts`, window started before the clock synced | an instant in 1970 | omitted (the expiry is about `ts` + `remaining_s`) |
+| `override_remaining_s` / `previous_remaining_s`, window started before the clock synced | full duration, omitted or 0 | measured on the hub uptime; snapshots omit `expires_ts` until the window is re-based, within about 30 s of the sync |
 
 Commands (`C2D_COMMANDS.md` §4.1–4.3 and §6.1). The `detail` strings are exact:
 
@@ -150,7 +198,9 @@ valve's own report (`valve_state_changed`, the next snapshot) confirms it.
   partition table. The valve, sensors, sensor metadata, rules, hub name, DPS cache and snapshot interval all
   carry over.
 - **Rolling back to 2.1.3 keeps provisioning too,** for the same reason. The 2.1.3 behaviour returns with it,
-  including P0-a.
+  including P0-a. Pre-sync events still in the offline buffer at the rollback are replayed by 2.1.3 unchanged,
+  with a `ts` in 1970. An override window re-based by 2.1.4 is stored with a real epoch, so 2.1.3 restores it
+  with the right remaining time.
 - **A hub that boots with no devices** clears any persisted leak latch and override window on that boot.
 - **Cloud and app parsers must accept:**
   - `data.valve` equal to `{}`;
@@ -158,11 +208,62 @@ valve's own report (`valve_state_changed`, the next snapshot) confirms it.
   - snapshots and lifecycle from a hub with no devices;
   - `device_recovered` with `rating:"critical"`;
   - `prev_rating` equal to `rating`;
-  - the new valve-command error acks.
+  - the new valve-command error acks;
+  - events that arrive late, after the first connect, with a `ts` earlier than that connect's lifecycle
+    message (events raised before the first clock sync);
+  - `water_access_override_enabled` without `expires_ts`, and a snapshot with `override_active:true` and no
+    `expires_ts` for up to about 30 s after the first clock sync.
 - **Serial log.**
   - Unchanged: every line the production tool and the bench scripts match.
   - A refused valve command now logs its full reason: `VALVE_OPEN refused — <detail>`, and likewise for
     `VALVE_CLOSE` and `VALVE_SET_STATE open|closed`. It used to print `... — valve RMLEAK is asserted`.
+  - The fixed BLE passkey is no longer printed. Changed lines (`BLE_VALVE`):
+    - `[PASSKEY] INPUT required. Responding with the fixed passkey`
+    - `[PASSKEY] DISPLAY action. Responding with the fixed passkey`
+    - `[SM] Fixed Passkey: configured (not logged)`
+  - New, pre-sync events. `TELEMETRY_V2`: `Time not synced (ts=%ld) - holding %s for replay; stamped when the
+    clock syncs` (snapshot and lifecycle keep `Time not synced (ts=%ld) — suppressing %s`). `OFFLINE_BUF`:
+    - `Stamped pre-sync event [%s] at clock sync: ts=%lld (%lld s ago)`
+    - `Stamped pre-sync event [%s]: ts=%lld (%lld s before this replay)` (only when the stamp at the sync
+      could not be written)
+    - `Dropped a buffered event from an earlier power cycle that was never time-stamped [%s]` (also after a
+      software restart before the clock synced)
+    - `Dropped a buffered pre-sync event [%s] - cannot be time-stamped from its uptime_s`
+    - `Dropped a buffered pre-sync event [%s] - too long once time-stamped`
+    - `Clock not synced - pre-sync event [%s] and %d after it kept for the next drain`
+
+    The last three should never appear in a normal run.
+  - New, override window (`RULES_ENGINE`):
+    - `Override window stamped before clock sync - timed on uptime (start=%lus) until the clock syncs`
+    - `Override window re-based to the synced clock (expiry=%ld, remaining=%lds)`
+    - `Override window ran its full duration before the clock synced (elapsed=%lus) - expiring it now`
+    - `Override window was stamped before a clock sync in an earlier boot - elapsed time unknown, expiring it now`
+    - `NVS: that window was stamped before a clock sync - elapsed time unknown, not restored`
+  - New, provisioning (`PROVISIONING`):
+    - `LoRa sensor count %u in NVS exceeds %d - clamped`
+    - `BLE leak sensor count %u in NVS exceeds %d - clamped`
+    - `Failed to take mutex in with_valve_target`
+  - New, valve command replay and reconnects (`BLE_VALVE`). Each replay is announced by `[CMD] Replaying
+    pending ...` and then logs the usual `[CMD] Writing ...`, so a script counting `[CMD] Writing` as live
+    commands also counts replays.
+    - `[TASK] CMD: REPLAY_PENDING`
+    - `[CMD] Replaying pending %s command=%d`
+    - `[CMD] Replay of pending valve commands dropped - the valve target changed`
+    - `[CMD] Pending %s command=%d cancelled or superseded meanwhile - not applied`
+    - `[CMD] Pending %s command=%d cancelled, superseded or flushed meanwhile - not replayed`
+    - `[CMD] Pending %s command=%d kept for the next link`
+    - `[CMD] Pending valve command=1 kept behind the RMLEAK command`
+    - `[CMD] Pending valve commands not applied - left to the replay already queued`
+    - `[CMD] Pending valve commands not applied - replay queued ahead of newer commands`
+    - `[CMD] Pending valve commands not applied, command queue full - kept for the next link`
+    - `[CMD] Valve=%u not written - kept behind the pending RMLEAK command`
+    - `[CMD] valve writes keep failing - no more forced reconnects until a write succeeds`
+    - `[CMD] valve write failed %d times (rc=%d) - kept for the next link, no forced reconnect (%s=%u)`
+    - `[DISCONNECT] terminate failed status=%d - link stays up (handle=%u)`
+  - Gone: the requeue lines of the 2.1.4 development builds, `... not applied (rc=%d) - requeued for retry`,
+    `... flushed or superseded meanwhile - not requeued`, `... not written - it follows the requeued RMLEAK
+    command`, `... kept for the next link, behind the RMLEAK command` and `Pending %s command=%d not applied,
+    command queue full - kept for the next link`.
 - **The NimBLE bond store** may still hold a bond to a neighbour's valve made under 2.1.3's name match. It is no
   longer used, and 2.1.4 does not delete it.
 - **Not changed in 2.1.4:**
@@ -176,3 +277,12 @@ valve's own report (`valve_state_changed`, the next snapshot) confirms it.
     - sensors going unheard during a valve connect attempt;
     - LoRa driver hardening;
     - removing the valve bond on decommission.
+- **Known limitations.**
+  - A live DPS registration still blocks `iothub_task` for up to 60 s per attempt. While it runs, leak
+    evaluation, auto-close and the rules tick wait for it. It happens only when the hub has no valid DPS cache:
+    the first boot, after decommission all, or after a provisioning-epoch change. Moving DPS to its own task is
+    future work.
+  - For a few milliseconds between a valve target change and the old link's DISCONNECT, rules and C2D checks
+    can read the old valve's cached state (RMLEAK, battery, connected).
+  - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
+    oldest held events, as it already could after the sync.

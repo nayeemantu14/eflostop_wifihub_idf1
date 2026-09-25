@@ -8,10 +8,10 @@
 |---|---|
 | Document version | 5.0 (supersedes v2.0, which documented firmware 1.9.0) |
 | Firmware version | 2.1.4 — `CMakeLists.txt:12` |
-| Git commit | `d76241d86894f146f0e336b825cf921d3357cbbd` |
+| Git commit | `0e7cd44920486a3cc610d2eb1ee1bd00dc6ab313` |
 | Schema | `eflostop.v2` |
 | Topic | `devices/<device_id>/messages/events/` (QoS 1) |
-| Message count | 47 distinct messages across 8 families |
+| Message count | 48 distinct messages across 8 families |
 
 This document lists every real telemetry message the eFloStop II Wi-Fi Hub can publish to Azure
 IoT Hub. Each entry is a complete message exactly as it appears on the wire: the same keys, in the same order,
@@ -85,7 +85,7 @@ naming a valve that does not exist — so treat it as optional there. The same a
 emit a placeholder, the hub omits the key when no MAC resolves.
 
 **Changes in firmware 2.1.4 — the empty hub, the missing valve and the unknown battery.** A bug-fix release
-for defects found in the field on 2.1.3. Nothing is renamed; four shapes you may not have seen before now
+for defects found in the field on 2.1.3. Nothing is renamed; several shapes you may not have seen before now
 appear, and every one of them replaces a message that stated something false.
 
 1. **A hub with no devices keeps talking.** Up to 2.1.3 a hub whose last device was removed sent one
@@ -112,6 +112,14 @@ Health events now report reachability only: `device_offline` is always a lost li
 sent late instead of dropped, and `device_recovered` can carry `rating:"critical"` when the device came back
 wet (H4). On the command plane, `valve_open` / `valve_close` / `valve_set_state` now ack `error` when there
 is no valve (C5), at a critical battery (C6), or when the command could not be queued — see `C2D_COMMANDS.md`.
+
+**Events raised before the hub's clock syncs now arrive, late.** Leak protection runs from power-up, before
+Wi-Fi. An event raised before the first clock sync (say a leak while the router is still coming back after a
+power cut) used to be thrown away. It is now held in the hub's offline buffer, given its real `ts` (worked out from
+the hub uptime) as soon as the clock syncs, and sent after the first connect, in order. A held event left over
+from a restart before the clock synced is dropped, because its time can no longer be known. Snapshots and lifecycle are still not
+sent before the sync; they are rebuilt after connect. `ts` is therefore never earlier than 2024 on any message.
+An override window started before the sync sends `water_access_override_enabled` without `expires_ts` (R10).
 
 **Identifiers are always UPPERCASE.** A BLE MAC is rendered `AA:BB:CC:DD:EE:FF` — colon-separated, upper
 case — and a LoRa id `0x1A2B3C4D`, on every message and every plane, regardless of the case the device was
@@ -161,6 +169,8 @@ The table is cumulative, so a reader holding any earlier revision can use it. Ro
 | Hub with no devices | `one stale snapshot, then silence: no lifecycle, twin, snapshot or events` | `lifecycle (provisioned:false), twin, and snapshots with valve {}, [] arrays and "No devices provisioned"  (2.1.4)` |
 | Health alerts (device_offline / device_recovered) | `any non-leak critical, battery included; a debounced alert was dropped` | `reachability only; a debounced alert is sent late (prev_rating may equal rating); device_recovered may be critical  (2.1.4)` |
 | valve_open / valve_close / valve_set_state acks | `ok unless RMLEAK — even with no valve, at a critical battery, or when nothing was queued` | `error: "No valve is set up for this hub.", battery critical (open), "The valve command could not be queued. Try again."  (2.1.4)` |
+| Events raised before the hub's first clock sync | `destroyed: a leak_detected or auto_close raised while the router was still down never reached the cloud` | `held in the offline buffer, ts worked out from the hub uptime when the clock first syncs, sent after the first connect; one left over from a restart before the sync is dropped  (2.1.4)` |
+| water_access_override_enabled, override started before the clock synced (R10) | `expires_ts an instant in 1970, and the window ended the moment the clock synced` | `expires_ts omitted; the window runs on the hub uptime until the clock syncs, then carries on  (2.1.4)` |
 | Firmware version | `1.9.0` | `2.1.4 — breaking changes on both the telemetry and command planes` |
 
 ## Index of messages
@@ -202,6 +212,7 @@ The table is cumulative, so a reader holding any earlier revision can use it. Ro
 | R7 | `event` | `auto_close_reenabled` | The override was cancelled by command |
 | R8 | `event` | `rmleak_cleared` | The leak interlock was cleared |
 | R9 | `event` | `rmleak_auto_cleared` | The leak interlock cleared itself |
+| R10 | `event` | `water_access_override_enabled` | An override started before the hub's clock synced |
 | H1 | `event` | `device_offline` | A device stopped responding |
 | H2 | `event` | `device_recovered` | A device came back |
 | H3 | `event` | `device_offline` | The valve stopped responding |
@@ -219,7 +230,7 @@ The table is cumulative, so a reader holding any earlier revision can use it. Ro
 
 ### L1 — Hub connected, fully commissioned
 
-Every MQTT connect once provisioned, including reconnects — so not once per boot.
+Every MQTT connect, including reconnects — so not once per boot. Since 2.1.4 it goes out whether or not the hub is provisioned; a hub with no devices sends L4.
 
 ```json
 {
@@ -571,7 +582,7 @@ Sensor unheard for 10 minutes. connected goes false and the rating critical. bat
 
 ### S4 — Snapshot while a water-access override is running
 
-A 24-hour override is open. override_active is on EVERY snapshot; override_remaining_s and expires_ts are the conditional pair.
+A 24-hour override is open. override_active is on EVERY snapshot; override_remaining_s and expires_ts are the conditional pair. For a window started before the hub's clock synced (R10), expires_ts is missing for up to about 30 s after the sync, until the hub re-bases the window to the real clock.
 
 ```json
 {
@@ -1546,7 +1557,7 @@ A structurally different auto_close: carries active_leak_count and data.cause "r
 
 ### R4 — A leak occurred but auto-close was suppressed
 
-An override window is open, so the hub deliberately did not close. override_remaining_s is omitted when the remaining time is negative.
+An override window is open, so the hub deliberately did not close. override_remaining_s is omitted when the remaining time is unknown: the window has just expired but the hub has not processed it yet, or a window restored after a reboot has a real expiry and the clock has not synced yet. Since 2.1.4 a window started before the clock synced is timed on the hub uptime, so it does carry override_remaining_s.
 
 ```json
 {
@@ -1573,7 +1584,7 @@ An override window is open, so the hub deliberately did not close. override_rema
 
 ### R5 — A 24-hour water-access override started
 
-Started by a valve long-press ("button") or the override_enable command ("c2d_command"). remaining_s is always the full 86400.
+Started by a valve long-press ("button") or the override_enable command ("c2d_command"). remaining_s is always the full 86400. expires_ts is omitted when the window started before the hub's clock synced (R10).
 
 ```json
 {
@@ -1701,6 +1712,32 @@ Every source dry for 30 seconds, so the hub released the latch itself. Does NOT 
 ```
 
 *`rules_engine_tick() main/rules_engine/rules_engine.c:1164-1303; AUTO_CLOSE_COOLDOWN_MS main/rules_engine/rules_engine.c:17`*
+
+### R10 — An override started before the hub's clock synced
+
+New in 2.1.4. R5 from a hub that had no clock yet: it powered up with the router down, and the valve button was pressed 95 s after boot. expires_ts is omitted rather than naming an instant in 1970; the expiry is about ts + remaining_s. The event was held in the hub's offline buffer and sent after the first connect, with ts rewritten to the moment of the press, worked out from the hub uptime (gateway.uptime_s is the uptime at the press). Every event raised before the first clock sync arrives this way, late but correctly time-stamped; one left over from a restart before the clock synced is dropped. The window runs on the hub uptime until the clock syncs and is then re-based to it, so snapshots carry expires_ts from then on (S4).
+
+```json
+{
+  "schema": "eflostop.v2",
+  "ts": 1785438400,
+  "gateway": {
+    "id": "GW-A0B7651C2D3E",
+    "short_id": "2D3E",
+    "name": "Main House",
+    "fw": "2.1.4",
+    "uptime_s": 95
+  },
+  "type": "event",
+  "data": {
+    "event": "water_access_override_enabled",
+    "trigger": "button",
+    "remaining_s": 86400
+  }
+}
+```
+
+*`start_override_window() and rules_engine_tick() main/rules_engine/rules_engine.c; pre-sync hold publish_json() main/telemetry/telemetry_v2.c; stamping ob_prepare_replay_locked() main/offline_buffer/offline_buffer.c`*
 
 ## Health events
 

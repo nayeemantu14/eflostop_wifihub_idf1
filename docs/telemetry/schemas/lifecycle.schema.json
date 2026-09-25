@@ -19,8 +19,9 @@
     },
     "ts": {
       "type": "number",
-      "description": "Device wall-clock at message BUILD time. The whole message is destroyed (never sent, never buffered) if ts < 1704067200, so a pre-SNTP leak event is lost permanently. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
-      "x-source": "main/telemetry/telemetry_v2.c:66-76; SNTP gate :70-74; threshold :57",
+      "description": "Device wall-clock at message BUILD time. Built before the first clock sync (ts < 1704067200), this message is destroyed, never sent and never buffered; it is regenerated after connect. (Events are held and time-stamped instead, since 2.1.4.) Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
+      "x-source": "build_envelope() main/telemetry/telemetry_v2.c; threshold EPOCH_VALID_THRESHOLD_TELEM",
+      "minimum": 1704067200,
       "x-category": "12.1"
     },
     "gateway": {

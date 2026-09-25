@@ -19,8 +19,9 @@
     },
     "ts": {
       "type": "number",
-      "description": "Device wall-clock at message BUILD time. The whole message is destroyed (never sent, never buffered) if ts < 1704067200, so a pre-SNTP leak event is lost permanently. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
-      "x-source": "main/telemetry/telemetry_v2.c:66-76; SNTP gate :70-74; threshold :57",
+      "description": "Device wall-clock when the message was built. Never below 1704067200 on the wire. Since 2.1.4 an event built before the first clock sync is not destroyed: it is held in the offline buffer and replayed after the first connect, with ts rewritten to the time the event happened, worked out from the hub uptime (the synced clock minus the uptime elapsed since gateway.uptime_s) and written into the buffer as soon as the clock first syncs. A pre-sync event still unstamped when the hub restarts (a restart before the clock synced) is dropped at replay, because its time cannot be known. Up to 2.1.3 every pre-sync event was destroyed, so a leak raised before the first sync was lost. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200 (2024-01-01T00:00:00Z).",
+      "x-source": "build_envelope() / publish_json() main/telemetry/telemetry_v2.c; stamping ob_prepare_replay_locked() main/offline_buffer/offline_buffer.c; threshold EPOCH_VALID_THRESHOLD_TELEM",
+      "minimum": 1704067200,
       "x-category": "12.1"
     },
     "gateway": {
@@ -52,7 +53,7 @@
         },
         "uptime_s": {
           "type": "number",
-          "description": "Seconds since boot from the monotonic esp_timer. On an offline-buffer replay this is the ORIGINAL build-time value, possibly from a previous boot. Units: seconds. Range/enum: >= 0.",
+          "description": "Seconds since boot from the monotonic esp_timer. On an offline-buffer replay this is the ORIGINAL build-time value, possibly from a previous boot. For an event held from before the first clock sync (2.1.4) it is the uptime the replay used to work out ts. Units: seconds. Range/enum: >= 0.",
           "x-source": "main/telemetry/telemetry_v2.c:85-86; replay main/offline_buffer/offline_buffer.c:148",
           "x-category": "12.3"
         }

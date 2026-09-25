@@ -7,7 +7,7 @@ guarantees: every example is a complete message exactly as it goes on the wire, 
 and the build fails rather than shipping a page with leaked markdown or invalid JSON.
 
 Outputs:
-    eFloStop2_C2D_Commands_v1.0.docx
+    eFloStop2_C2D_Commands_v<DOC_VERSION>.docx
     c2d_commands_catalogue.md
 
 Run: python docs/telemetry/build_commands.py
@@ -31,7 +31,7 @@ from docx.shared import Inches, Pt, RGBColor               # noqa: E402
 
 MONO = "Consolas"
 TITLE = "eFloStop II Wi-Fi Hub — Cloud-to-Device Command Catalogue"
-DOC_VERSION = "2.0"
+DOC_VERSION = "3.0"
 
 # The revision this one supersedes, named in the "What changed" section.
 PREV_VERSION = "1.0"

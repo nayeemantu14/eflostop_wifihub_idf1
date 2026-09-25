@@ -6,6 +6,10 @@ Reads whatever `az iot hub monitor-events` printed (or a UART log containing `Pu
 lines), pulls every JSON message out of it, and checks each one against the rules the
 2.1.4 firmware is supposed to follow. Reports per-message failures and a summary.
 
+Events held before the first clock sync and replayed from the offline buffer never appear
+as `Pub event:` lines on UART (the drain logs only "Replayed [ob_NN]"); validate them from
+an `az iot hub monitor-events` capture.
+
 This encodes the contract as ASSERTIONS, not as prose — so a passing run is evidence the
 firmware and the catalogue agree, rather than an assumption that they do.
 
@@ -52,6 +56,13 @@ LEAK_EVENTS = {"leak_detected", "leak_cleared"}
 RETIRED_KEYS = {"dev_type", "valve_device_id", "valve_flood_detected",
                 "valve_flood_cleared", "device_id"}
 
+# Minimum epoch the hub treats as a synced clock (2024-01-01T00:00:00Z). No ts or absolute
+# expiry below it may reach the wire: since 2.1.4 an event raised before the first clock
+# sync is held in the offline buffer and its ts rewritten from the hub uptime once the
+# clock syncs (one left by a restart before the sync is dropped), and water_access_override_enabled
+# omits expires_ts while the clock is unsynced instead of sending a 1970 instant.
+EPOCH_VALID = 1704067200
+
 MAC_RE = re.compile(r"^[0-9A-F]{2}(:[0-9A-F]{2}){5}$")
 LORA_RE = re.compile(r"^0x[0-9A-F]{8}$")
 
@@ -75,6 +86,11 @@ def expected_identity(source_type):
     if source_type in {"ble_leak_sensor", "lora"}:
         return "sensor_id"
     return None
+
+
+def is_num(v):
+    """A JSON number, never a bool."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def is_battery(v):
@@ -185,6 +201,19 @@ def check_system_health(d):
     return f
 
 
+def check_override_times(d, where):
+    """Override-window numbers, wherever they appear. A duration is never negative (the key
+    is omitted instead) and an absolute expiry is never from an unsynced clock."""
+    f = []
+    for k in ("override_remaining_s", "remaining_s", "previous_remaining_s"):
+        if k in d and (not is_num(d[k]) or d[k] < 0):
+            f.append(f"{where}: {k} = {d[k]!r}, expected a number >= 0 (omitted when unknown)")
+    if "expires_ts" in d and (not is_num(d["expires_ts"]) or d["expires_ts"] < EPOCH_VALID):
+        f.append(f"{where}: expires_ts = {d['expires_ts']!r} is below {EPOCH_VALID} "
+                 f"(omitted, never sent, while the clock is unsynced)")
+    return f
+
+
 def walk_keys(o, path="data"):
     """Yield (json_path, key) for every key in a nested structure."""
     if isinstance(o, dict):
@@ -206,6 +235,10 @@ def check(msg):
         f.append(f"envelope key order is {ks}, expected [schema, ts, gateway, type, data]")
     if msg.get("schema") != SCHEMA:
         f.append(f"schema is {msg.get('schema')!r}, expected {SCHEMA!r}")
+    ts = msg.get("ts")
+    if not is_num(ts) or ts < EPOCH_VALID:
+        f.append(f"ts = {ts!r} is below {EPOCH_VALID}: an unsynced clock reached the wire "
+                 f"(a pre-sync event must be time-stamped by the replay, or dropped)")
 
     gw = msg.get("gateway", {})
     gk = [k for k in gw if k != "name"]          # name is conditional
@@ -251,6 +284,7 @@ def check(msg):
                              f"expected a number or null (always present)")
         if "override_active" not in d:
             f.append("data.override_active missing (unconditional on snapshots)")
+        f += check_override_times(d, "snapshot")
         f += check_system_health(d)
 
     # ---- lifecycle ----
@@ -340,6 +374,16 @@ def check(msg):
                 f.append("cmd_ack status ok carries an error object")
             if d.get("id") == "":
                 f.append("cmd_ack id is \"\" (omitted when the command had none)")
+
+        if ev == "water_access_override_enabled":
+            # 2.1.4: expires_ts is omitted while the clock is unsynced; trigger and
+            # remaining_s are always there.
+            for k in ("trigger", "remaining_s"):
+                if k not in d:
+                    f.append(f"{ev}: {k} missing (always present)")
+        if ev in {"water_access_override_enabled", "auto_close_blocked_override",
+                  "auto_close_reenabled"}:
+            f += check_override_times(d, ev)
 
         if ev == "auto_close" and "active_leak_count" in d:
             # the reconnect variant

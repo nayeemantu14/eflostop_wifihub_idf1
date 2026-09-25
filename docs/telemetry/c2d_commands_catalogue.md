@@ -1,14 +1,14 @@
 # eFloStop II Wi-Fi Hub — Cloud-to-Device Command Catalogue
 
-*Every command the cloud can send, as a real example — v2.0*
+*Every command the cloud can send, as a real example — v3.0*
 
 > GENERATED FILE — produced by `docs/telemetry/build_commands.py` from `commands_data.py`.
 
 | | |
 |---|---|
-| Document version | 2.0 (supersedes v1.0, which documented firmware 1.9.0) |
-| Firmware version | 2.1.0 — `CMakeLists.txt:12` |
-| Git commit | `33f7af69ef2a2604353ee25af32be61cf7f27b35` |
+| Document version | 3.0 (supersedes v1.0, which documented firmware 1.9.0) |
+| Firmware version | 2.1.4 — `CMakeLists.txt:12` |
+| Git commit | `0e7cd44920486a3cc610d2eb1ee1bd00dc6ab313` |
 | Schema | `eflostop.cmd` |
 | Direction | cloud → hub (C2D) |
 | Transport | devices/<device_id>/messages/devicebound/#  (MQTT, QoS 1) |
@@ -22,15 +22,18 @@ Commands arrive as ordinary Azure IoT Hub cloud-to-device messages. There are no
 device-twin commands; the twin carries configuration only. The hub subscribes once on connect and dispatches
 every message it receives on that topic.
 
+This revision, v3.0, documents firmware 2.1.4. v2.0 (firmware 2.1.0) is the interim revision between v1.0
+and this one; anything marked 2.1.4 is new since v2.0, chiefly the new refusals of the valve commands.
+
 **Read the Traps section at the end before you write the client.** Several behaviours are surprising enough to
 cost a day if you meet them in the field instead of here — in particular, a command with the wrong `schema` can
 still execute while sending you no acknowledgement at all.
 
 ## What changed since v1.0
 
-Document **v1.0** described firmware **1.9.0**; this is **v2.0**, describing firmware **2.1.0**. Unlike the telemetry plane, the command plane keeps a compatibility path: the one renamed key still accepts its old spelling.
+Document **v1.0** described firmware **1.9.0**; this is **v3.0**, describing firmware **2.1.4**. Unlike the telemetry plane, the command plane keeps a compatibility path: the one renamed key still accepts its old spelling.
 
-| | v1.0 — firmware 1.9.0 | v2.0 — firmware 2.1.0 |
+| | v1.0 — firmware 1.9.0 | v3.0 — firmware 2.1.4 |
 |---|---|---|
 | Maximum command size | `~1 KB shared with the topic; anything larger was dropped silently, with no ack — a provision with inline sensor_meta broke at about six sensors` | `4 KB buffer plus fragment reassembly, so all 16 sensors fit in one provision. Over 8 KB is rejected WITH a cmd_ack error correlated to your id  (2.1.0)` |
 | provision — valve identifier | `payload.valve_mac` | `payload.valve_id  (valve_mac still accepted, deprecated, logs a warning)` |
@@ -47,7 +50,12 @@ Document **v1.0** described firmware **1.9.0**; this is **v2.0**, describing fir
 | Twin reported — snapshot_interval_s | `not reported at all` | `reported unconditionally` |
 | Snapshot after a command | `only sensor_meta, provision and decommission; rules_config produced NOTHING, so the change was invisible until the next heartbeat` | `every command that succeeds is followed by a snapshot, labelled with the command name` |
 | rules_config — twin reported | `stale until the next MQTT reconnect, so polling the twin to confirm read the OLD auto_close_enabled / trigger_mask` | `republished immediately after the ack` |
-| Firmware version | `1.9.0` | `2.0.2` |
+| valve_open / valve_close / valve_set_state — no valve provisioned | `ok, and the hub then connected to any nearby eFloStop valve and drove it` | `error: No valve is set up for this hub.  (2.1.4)` |
+| valve_open / valve_set_state open — valve battery at or below 10 % | `ok, for a valve that refused to open` | `error: Valve battery critical (≤10 %): the valve will not open. Replace the batteries.  (2.1.4)` |
+| valve_open / valve_close / valve_set_state — command queue full | `ok, and the command was dropped` | `error: The valve command could not be queued. Try again.  (2.1.4)` |
+| decommission — target valve on a hub with no valve | `ok, with nothing to remove` | `error: valve decommission failed  (2.1.4)` |
+| Valve commands when the valve is changed or removed | `a command queued for the old valve could be applied to the next valve that linked` | `every queued, pending or in-flight valve command is discarded  (2.1.4)` |
+| Firmware version | `1.9.0` | `2.1.4` |
 
 ## The command envelope
 
@@ -103,7 +111,7 @@ published every 5 seconds, so state may be batched but is never skipped.
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 3600
   },
   "type": "event",
@@ -126,7 +134,7 @@ published every 5 seconds, so state may be batched but is never skipped.
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 3612
   },
   "type": "event",
@@ -161,11 +169,11 @@ published every 5 seconds, so state may be batched but is never skipped.
 
 ## Valve control
 
-> Three commands, two code paths. `valve_set_state` routes to exactly the same handlers as `valve_open` and `valve_close`, so prefer it for new work: one command, one shape, and the state you want is explicit rather than implied by the command name. All three queue a BLE write and return immediately — the ack means *accepted*, not *the valve moved*. Watch for the `valve_state_changed` event to know it actually moved.
+> Three commands, two code paths. `valve_set_state` routes to exactly the same handlers as `valve_open` and `valve_close`, so prefer it for new work: one command, one shape, and the state you want is explicit rather than implied by the command name. All three queue a BLE write and return immediately — the ack means *accepted*, not *the valve moved*. Watch for the `valve_state_changed` event to know it actually moved. Since 2.1.4 all three are refused when no valve is provisioned or the valve command queue is full, and an open also while the valve's battery is critical; up to 2.1.3 every one of those cases acked `ok`.
 
 ### V1 — `valve_open`
 
-Queues a BLE write. Refused only while the RMLEAK interlock is set. No provisioning check, so an uncommissioned hub accepts it and queues a connect that never matches.
+Queues a BLE write to the provisioned valve. Checked in this order before anything is sent, and the first failure is the answer: a valve is provisioned; the RMLEAK interlock is clear; the valve's battery is not critical; the command fits in the queue.
 
 ```json
 {
@@ -176,7 +184,7 @@ Queues a BLE write. Refused only while the RMLEAK interlock is set. No provision
 }
 ```
 
-The ack means the write was **queued**, not that the valve moved — a full command queue is dropped silently and still acks `ok`. Opening an already-open valve emits no event, because `valve_state_changed` is delta-gated.
+The ack means the write was **queued**, not that the valve moved. Opening an already-open valve emits no event, because `valve_state_changed` is delta-gated.
 
 **Acknowledgement on success:**
 
@@ -188,7 +196,7 @@ The ack means the write was **queued**, not that the valve moved — a full comm
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 3600
   },
   "type": "event",
@@ -205,13 +213,16 @@ The ack means the write was **queued**, not that the valve moved — a full comm
 
 | `error.detail` | When |
 |---|---|
+| `No valve is set up for this hub.` | No valve is provisioned on this hub (2.1.4). Up to 2.1.3 this acked `ok`, and the hub then connected to any nearby eFloStop valve and opened it. |
 | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | The valve's RMLEAK interlock is asserted, i.e. it latched after a leak. Clear it with leak_reset, or use override_enable to get water during a live leak. |
+| `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | The valve's last real battery reading is at or below 10 % (2.1.4). The valve refuses to open at that level, so up to 2.1.3 the hub acked `ok` for a valve that stayed shut. |
+| `The valve command could not be queued. Try again.` | The hub's valve command queue was full, so nothing was queued (2.1.4; it used to ack `ok` and drop the command). |
 
-*`main/iothub/app_iothub.c:670-680; refusal main/iothub/app_iothub.c:537-544`*
+*`c2d_valve_command() and valve_open_reject_reason() main/iothub/app_iothub.c`*
 
 ### V2 — `valve_close`
 
-Queues a BLE write. Unconditional — no rejection path, so it can only ack `ok`.
+Queues a BLE write to the provisioned valve. Never refused for RMLEAK or battery; refused only when there is no valve to send it to or it cannot be queued. Up to 2.1.3 it always acked `ok`.
 
 ```json
 {
@@ -234,7 +245,7 @@ Does **not** touch RMLEAK, the incident latch or an active override window.
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 3600
   },
   "type": "event",
@@ -247,11 +258,18 @@ Does **not** touch RMLEAK, the incident latch or an active override window.
 }
 ```
 
-*`main/iothub/app_iothub.c:681-686`*
+**Rejections.** Each is a `cmd_ack` with `status:"error"`; the `error.detail` text below is exact.
+
+| `error.detail` | When |
+|---|---|
+| `No valve is set up for this hub.` | No valve is provisioned on this hub (2.1.4). |
+| `The valve command could not be queued. Try again.` | The hub's valve command queue was full, so nothing was queued (2.1.4). |
+
+*`c2d_valve_command() main/iothub/app_iothub.c`*
 
 ### V3 — `valve_set_state`
 
-The unified form, and the one to prefer. Same code path as V1/V2, including the RMLEAK refusal when opening.
+The unified form, and the one to prefer. "open" runs exactly the V1 checks and "closed" the V2 ones.
 
 ```json
 {
@@ -281,7 +299,7 @@ No legacy plain-text form — which is a safety property: a wrong `schema` here 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 3600
   },
   "type": "event",
@@ -299,10 +317,13 @@ No legacy plain-text form — which is a safety property: a wrong `schema` here 
 | `error.detail` | When |
 |---|---|
 | `missing 'state' field (expected "open" or "closed")` | No payload, payload is not valid JSON, `state` is absent, or `state` is not a string. Checked before the value is looked at. |
+| `No valve is set up for this hub.` | Either state, no valve provisioned on this hub (2.1.4). |
 | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | state is "open" and the RMLEAK interlock is set. Same refusal as V1, but error.code here is "valve_set_state". |
+| `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | state is "open" and the last real valve battery reading is at or below 10 % (2.1.4). |
+| `The valve command could not be queued. Try again.` | Either state, the hub's valve command queue was full (2.1.4). |
 | `invalid state value (expected "open" or "closed")` | `state` is a string but is neither exactly "open" nor exactly "closed". Checked last. |
 
-*`main/iothub/app_iothub.c:687-713`*
+*`valve_set_state branch of handle_c2d_command(); c2d_valve_command() main/iothub/app_iothub.c`*
 
 ## Leak and override
 
@@ -333,7 +354,7 @@ With nothing to clear it still acks `ok` and emits nothing. Treat a following `r
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 3600
   },
   "type": "event",
@@ -379,7 +400,7 @@ The sanctioned way to get water during a live leak: clears the incident, blocks 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 8200
   },
   "type": "event",
@@ -429,7 +450,7 @@ With no window running it acks `ok` and changes nothing. The window otherwise en
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 9000
   },
   "type": "event",
@@ -499,7 +520,7 @@ Sets the valve, the sensor lists, the auto-close choice and optional per-sensor 
 | `rules` | object | no | Merged. Accepts auto_close_enabled (boolean) and trigger_mask (number). The three convenience booleans of rules_config are NOT honoured here. Applied AFTER the top-level auto_close_enabled, so specific beats shorthand: {"auto_close_enabled":true,"rules":{"trigger_mask":3}} ends up enabled with the valve probe excluded. |
 | `sensor_meta` | object[] | no | Applied after commissioning succeeds. Elements use exactly the same rules as the standalone sensor_meta command. A rejected element is skipped and never fails the provision. IMPORTANT: this key alone does not satisfy the at-least-one requirement (Trap 3). |
 
-A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries.
+A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries. **A provision that changes the valve** (2.1.4) discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one.
 
 **Acknowledgement on success:**
 
@@ -511,7 +532,7 @@ A commissioning window follows: a `commission` snapshot once every device has be
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 95
   },
   "type": "event",
@@ -554,7 +575,7 @@ Removes one commissioned device, or erases everything and reboots. Removing a se
 | `target` | string | yes | One of "valve", "lora", "ble_leak_sensor" or "all". The BLE family also accepts the aliases "ble_leak" and "ble". All targets are matched case-INSENSITIVELY as of firmware 2.0.0; before that only the BLE family was, so "ALL" and "LORA" were rejected. |
 | `sensor_id` | string | conditional | Required for "lora" and for the BLE family; ignored for "valve" and "all". A LoRa id is parsed as hexadecimal with the "0x" prefix optional here. A BLE MAC must be the full 17-character form, matched case-insensitively. |
 
-**Target `all` is the only command here that reboots.** Its final snapshot describes the CLEARED hub — empty arrays, disconnected valve, no name — not the site you wiped.
+**Target `all` is the only command here that reboots.** Its final snapshot describes the CLEARED hub — `valve` `{}`, empty arrays, no name, "No devices provisioned" — not the site you wiped. **Target `valve`** discards every valve command still queued, pending or in flight, disconnects a link still up to the valve and cancels a connect in progress, so nothing sent for the removed valve reaches it or the next one (2.1.4).
 
 **Acknowledgement on success:**
 
@@ -566,7 +587,7 @@ Removes one commissioned device, or erases everything and reboots. Removing a se
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 12000
   },
   "type": "event",
@@ -585,7 +606,7 @@ Removes one commissioned device, or erases everything and reboots. Removing a se
 |---|---|
 | `missing decommission target` | No payload, payload not parseable, or `target` absent or not a string. |
 | `unknown decommission target` | `target` is a string but matches none of the accepted values — including a case-mismatched "ALL", "Valve" or "LORA". |
-| `valve decommission failed` | Internal failure: manager not initialised, lock timeout, or the storage write failed. |
+| `valve decommission failed` | The hub has no valve provisioned (2.1.4; it used to ack `ok`), or an internal failure: manager not initialised, lock timeout, or the storage write failed. |
 | `lora sensor decommission failed` | sensor_id absent or unparseable, the id is not in the commissioned list, or an internal failure. |
 | `ble sensor decommission failed` | sensor_id absent, malformed, not in the commissioned list, or an internal failure. |
 | `full decommission failed` | target "all" and the erase failed. No reboot happens in this case. |
@@ -634,7 +655,7 @@ Accepted codes: `unknown`, `bathroom`, `kitchen`, `laundry`, `garage`, `garden`,
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 13000
   },
   "type": "event",
@@ -692,7 +713,7 @@ Emits no telemetry EVENT, but from 2.0.2 a snapshot and a twin reported publish 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 14000
   },
   "type": "event",
@@ -745,7 +766,7 @@ Publishes twin reported immediately. The handler ignores the storage result, so 
     "id": "GW-A0B7651C2D3E",
     "short_id": "2D3E",
     "name": "Main House",
-    "fw": "2.1.0",
+    "fw": "2.1.4",
     "uptime_s": 15000
   },
   "type": "event",

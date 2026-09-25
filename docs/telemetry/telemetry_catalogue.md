@@ -1,3 +1,5 @@
+> **Superseded for firmware 2.1.4.** This document describes firmware 1.8.0. For 2.1.4 use `telemetry_messages.md` (v5.0) and the JSON schemas in `docs/telemetry/schemas/`.
+
 # eFloStop II Wi-Fi Hub — Azure IoT Hub Telemetry Catalogue
 
 *Complete telemetry surface and consolidation review*

@@ -99,7 +99,7 @@ def snap(reason, valve, sensors, override=None, rules=True, health=None):
 MESSAGES = [
     # ---------------- lifecycle ----------------
     dict(group="Lifecycle", id="L1", title="Hub connected, fully commissioned",
-         when="Every MQTT connect once provisioned, including reconnects — so not once per boot.",
+         when="Every MQTT connect, including reconnects — so not once per boot. Since 2.1.4 it goes out whether or not the hub is provisioned; a hub with no devices sends L4.",
          cite="telemetry_v2_publish_lifecycle() main/telemetry/telemetry_v2.c:482-516; trigger iothub_task() main/iothub/app_iothub.c:2000-2004",
          msg=env(TS, 42, "lifecycle", {
              "event": "online", "reset_reason": "power_on", "provisioned": True,
@@ -147,7 +147,7 @@ MESSAGES = [
                                        connected=False, age=734)],
                       health={"rating": "critical", "reason": "1 sensor offline"}))),
     dict(group="Snapshot", id="S4", title="Snapshot while a water-access override is running",
-         when="A 24-hour override is open. override_active is on EVERY snapshot; override_remaining_s and expires_ts are the conditional pair.",
+         when="A 24-hour override is open. override_active is on EVERY snapshot; override_remaining_s and expires_ts are the conditional pair. For a window started before the hub's clock synced (R10), expires_ts is missing for up to about 30 s after the sync, until the hub re-bases the window to the real clock.",
          cite="telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c:520-757; window constant OVERRIDE_WINDOW_DURATION_S main/rules_engine/rules_engine.c:29",
          msg=env(TS, 12000, "snapshot",
                  snap("event", VALVE_OK, [S_A, S_B], override=(82740, TS + 82740)))),
@@ -304,13 +304,13 @@ MESSAGES = [
                                     "sensor_id": SENSOR_A, "rmleak_asserted": True,
                                     "active_leak_count": 1})),
     dict(group="Rules events", id="R4", title="A leak occurred but auto-close was suppressed",
-         when="An override window is open, so the hub deliberately did not close. override_remaining_s is omitted when the remaining time is negative.",
+         when="An override window is open, so the hub deliberately did not close. override_remaining_s is omitted when the remaining time is unknown: the window has just expired but the hub has not processed it yet, or a window restored after a reboot has a real expiry and the clock has not synced yet. Since 2.1.4 a window started before the clock synced is timed on the hub uptime, so it does carry override_remaining_s.",
          cite="rules_engine_evaluate_leak() main/rules_engine/rules_engine.c:493-651",
          msg=env(TS, 20000, "event", {"event": "auto_close_blocked_override",
                                       "source_type": "ble_leak_sensor", "sensor_id": SENSOR_A,
                                       "override_remaining_s": 61200})),
     dict(group="Rules events", id="R5", title="A 24-hour water-access override started",
-         when="Started by a valve long-press (\"button\") or the override_enable command (\"c2d_command\"). remaining_s is always the full 86400.",
+         when="Started by a valve long-press (\"button\") or the override_enable command (\"c2d_command\"). remaining_s is always the full 86400. expires_ts is omitted when the window started before the hub's clock synced (R10).",
          cite="start_override_window() main/rules_engine/rules_engine.c:193-223; OVERRIDE_WINDOW_DURATION_S main/rules_engine/rules_engine.c:29",
          msg=env(TS, 19000, "event", {"event": "water_access_override_enabled",
                                       "trigger": "button", "expires_ts": TS + 86400,
@@ -337,6 +337,11 @@ MESSAGES = [
          cite="rules_engine_tick() main/rules_engine/rules_engine.c:1164-1303; AUTO_CLOSE_COOLDOWN_MS main/rules_engine/rules_engine.c:17",
          msg=env(TS, 8700, "event", {"event": "rmleak_auto_cleared", "valve_id": VALVE_MAC,
                                      "clear_after_seconds": 30})),
+    dict(group="Rules events", id="R10", title="An override started before the hub's clock synced",
+         when="New in 2.1.4. R5 from a hub that had no clock yet: it powered up with the router down, and the valve button was pressed 95 s after boot. expires_ts is omitted rather than naming an instant in 1970; the expiry is about ts + remaining_s. The event was held in the hub's offline buffer and sent after the first connect, with ts rewritten to the moment of the press, worked out from the hub uptime (gateway.uptime_s is the uptime at the press). Every event raised before the first clock sync arrives this way, late but correctly time-stamped; one left over from a restart before the clock synced is dropped. The window runs on the hub uptime until the clock syncs and is then re-based to it, so snapshots carry expires_ts from then on (S4).",
+         cite="start_override_window() and rules_engine_tick() main/rules_engine/rules_engine.c; pre-sync hold publish_json() main/telemetry/telemetry_v2.c; stamping ob_prepare_replay_locked() main/offline_buffer/offline_buffer.c",
+         msg=env(TS + 40000, 95, "event", {"event": "water_access_override_enabled",
+                                           "trigger": "button", "remaining_s": 86400})),
 
     # ---------------- health events ----------------
     dict(group="Health events", id="H1", title="A device stopped responding",
@@ -551,6 +556,12 @@ CHANGES = [
     ("valve_open / valve_close / valve_set_state acks",
      "ok unless RMLEAK — even with no valve, at a critical battery, or when nothing was queued",
      "error: \"No valve is set up for this hub.\", battery critical (open), \"The valve command could not be queued. Try again.\"  (2.1.4)"),
+    ("Events raised before the hub's first clock sync",
+     "destroyed: a leak_detected or auto_close raised while the router was still down never reached the cloud",
+     "held in the offline buffer, ts worked out from the hub uptime when the clock first syncs, sent after the first connect; one left over from a restart before the sync is dropped  (2.1.4)"),
+    ("water_access_override_enabled, override started before the clock synced (R10)",
+     "expires_ts an instant in 1970, and the window ended the moment the clock synced",
+     "expires_ts omitted; the window runs on the hub uptime until the clock syncs, then carries on  (2.1.4)"),
     ("Firmware version",
      "1.9.0",
      "2.1.4 — breaking changes on both the telemetry and command planes"),
@@ -628,7 +639,7 @@ naming a valve that does not exist — so treat it as optional there. The same a
 emit a placeholder, the hub omits the key when no MAC resolves.
 
 **Changes in firmware 2.1.4 — the empty hub, the missing valve and the unknown battery.** A bug-fix release
-for defects found in the field on 2.1.3. Nothing is renamed; four shapes you may not have seen before now
+for defects found in the field on 2.1.3. Nothing is renamed; several shapes you may not have seen before now
 appear, and every one of them replaces a message that stated something false.
 
 1. **A hub with no devices keeps talking.** Up to 2.1.3 a hub whose last device was removed sent one
@@ -655,6 +666,14 @@ Health events now report reachability only: `device_offline` is always a lost li
 sent late instead of dropped, and `device_recovered` can carry `rating:"critical"` when the device came back
 wet (H4). On the command plane, `valve_open` / `valve_close` / `valve_set_state` now ack `error` when there
 is no valve (C5), at a critical battery (C6), or when the command could not be queued — see `C2D_COMMANDS.md`.
+
+**Events raised before the hub's clock syncs now arrive, late.** Leak protection runs from power-up, before
+Wi-Fi. An event raised before the first clock sync (say a leak while the router is still coming back after a
+power cut) used to be thrown away. It is now held in the hub's offline buffer, given its real `ts` (worked out from
+the hub uptime) as soon as the clock syncs, and sent after the first connect, in order. A held event left over
+from a restart before the clock synced is dropped, because its time can no longer be known. Snapshots and lifecycle are still not
+sent before the sync; they are rebuilt after connect. `ts` is therefore never earlier than 2024 on any message.
+An override window started before the sync sends `water_access_override_enabled` without `expires_ts` (R10).
 
 **Identifiers are always UPPERCASE.** A BLE MAC is rendered `AA:BB:CC:DD:EE:FF` — colon-separated, upper
 case — and a LoRa id `0x1A2B3C4D`, on every message and every plane, regardless of the case the device was

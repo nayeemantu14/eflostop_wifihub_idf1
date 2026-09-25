@@ -81,6 +81,11 @@ def ack(id_, name, ok=True, code=None, detail=None, uptime=3600):
 
 RMLEAK_ERR = ("Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, "
               "or use override to open the valve during a leak.")
+# 2.1.4 valve-command refusals, quoted exactly from c2d_valve_command() and
+# valve_open_reject_reason() in main/iothub/app_iothub.c.
+NO_VALVE_ERR = "No valve is set up for this hub."
+BATTERY_ERR = "Valve battery critical (≤10 %): the valve will not open. Replace the batteries."
+QUEUE_ERR = "The valve command could not be queued. Try again."
 
 INTRO = """This document lists every command the cloud can send to the eFloStop II Wi-Fi Hub. Each entry is a
 complete message exactly as it goes on the wire, followed by the acknowledgement you get back and every rejection
@@ -89,6 +94,9 @@ the hub can answer with. The error text is quoted exactly as the firmware emits 
 Commands arrive as ordinary Azure IoT Hub cloud-to-device messages. There are no direct methods and no
 device-twin commands; the twin carries configuration only. The hub subscribes once on connect and dispatches
 every message it receives on that topic.
+
+This revision, v3.0, documents firmware 2.1.4. v2.0 (firmware 2.1.0) is the interim revision between v1.0
+and this one; anything marked 2.1.4 is new since v2.0, chiefly the new refusals of the valve commands.
 
 **Read the Traps section at the end before you write the client.** Several behaviours are surprising enough to
 cost a day if you meet them in the field instead of here — in particular, a command with the wrong `schema` can
@@ -148,7 +156,9 @@ GROUP_NOTES = {
         "`valve_open` and `valve_close`, so prefer it for new work: one command, one shape, and the state you "
         "want is explicit rather than implied by the command name. All three queue a BLE write and return "
         "immediately — the ack means *accepted*, not *the valve moved*. Watch for the "
-        "`valve_state_changed` event to know it actually moved.",
+        "`valve_state_changed` event to know it actually moved. Since 2.1.4 all three are refused when no "
+        "valve is provisioned or the valve command queue is full, and an open also while the valve's "
+        "battery is critical; up to 2.1.3 every one of those cases acked `ok`.",
     "Leak and override":
         "These manage the post-leak interlock. `leak_reset` is the normal path once the leak is fixed; "
         "`override_enable` is the sanctioned way to get water while a leak is still live. Note that "
@@ -166,35 +176,48 @@ COMMANDS = [
     # ---------------- valve control ----------------
     dict(group="Valve control", id="V1", name="valve_open",
          title="Open the valve",
-         when="Queues a BLE write. Refused only while the RMLEAK interlock is set. No provisioning check, so an uncommissioned hub accepts it and queues a connect that never matches.",
-         cite="main/iothub/app_iothub.c:670-680; refusal main/iothub/app_iothub.c:537-544",
+         when="Queues a BLE write to the provisioned valve. Checked in this order before anything is sent, and the first failure is the answer: a valve is provisioned; the RMLEAK interlock is clear; the valve's battery is not critical; the command fits in the queue.",
+         cite="c2d_valve_command() and valve_open_reject_reason() main/iothub/app_iothub.c",
          req=cmd("req-open-001", "valve_open"),
          ack_ok=ack("req-open-001", "valve_open"),
-         ack_errs=[(RMLEAK_ERR,
-                    "The valve's RMLEAK interlock is asserted, i.e. it latched after a leak. Clear it with leak_reset, or use override_enable to get water during a live leak.")],
-         notes="The ack means the write was **queued**, not that the valve moved — a full command queue is dropped silently and still acks `ok`. Opening an already-open valve emits no event, because `valve_state_changed` is delta-gated."),
+         ack_errs=[(NO_VALVE_ERR,
+                    "No valve is provisioned on this hub (2.1.4). Up to 2.1.3 this acked `ok`, and the hub then connected to any nearby eFloStop valve and opened it."),
+                   (RMLEAK_ERR,
+                    "The valve's RMLEAK interlock is asserted, i.e. it latched after a leak. Clear it with leak_reset, or use override_enable to get water during a live leak."),
+                   (BATTERY_ERR,
+                    "The valve's last real battery reading is at or below 10 % (2.1.4). The valve refuses to open at that level, so up to 2.1.3 the hub acked `ok` for a valve that stayed shut."),
+                   (QUEUE_ERR,
+                    "The hub's valve command queue was full, so nothing was queued (2.1.4; it used to ack `ok` and drop the command).")],
+         notes="The ack means the write was **queued**, not that the valve moved. Opening an already-open valve emits no event, because `valve_state_changed` is delta-gated."),
 
     dict(group="Valve control", id="V2", name="valve_close",
          title="Close the valve",
-         when="Queues a BLE write. Unconditional — no rejection path, so it can only ack `ok`.",
-         cite="main/iothub/app_iothub.c:681-686",
+         when="Queues a BLE write to the provisioned valve. Never refused for RMLEAK or battery; refused only when there is no valve to send it to or it cannot be queued. Up to 2.1.3 it always acked `ok`.",
+         cite="c2d_valve_command() main/iothub/app_iothub.c",
          req=cmd("req-close-001", "valve_close"),
          ack_ok=ack("req-close-001", "valve_close"),
-         ack_errs=[],
+         ack_errs=[(NO_VALVE_ERR, "No valve is provisioned on this hub (2.1.4)."),
+                   (QUEUE_ERR, "The hub's valve command queue was full, so nothing was queued (2.1.4).")],
          notes="Does **not** touch RMLEAK, the incident latch or an active override window."),
 
     dict(group="Valve control", id="V3", name="valve_set_state",
          title="Set the valve to a given position",
-         when="The unified form, and the one to prefer. Same code path as V1/V2, including the RMLEAK refusal when opening.",
-         cite="main/iothub/app_iothub.c:687-713",
+         when="The unified form, and the one to prefer. \"open\" runs exactly the V1 checks and \"closed\" the V2 ones.",
+         cite="valve_set_state branch of handle_c2d_command(); c2d_valve_command() main/iothub/app_iothub.c",
          req=cmd("req-state-001", "valve_set_state", {"state": "closed"}),
          params=[("state", "string", "yes",
                   'Exactly "open" or "closed", case-sensitive. No aliases, no trimming. "OPEN", "Open", "close" and "shut" are all rejected.')],
          ack_ok=ack("req-state-001", "valve_set_state"),
          ack_errs=[('missing \'state\' field (expected "open" or "closed")',
                     "No payload, payload is not valid JSON, `state` is absent, or `state` is not a string. Checked before the value is looked at."),
+                   (NO_VALVE_ERR,
+                    "Either state, no valve provisioned on this hub (2.1.4)."),
                    (RMLEAK_ERR,
                     'state is "open" and the RMLEAK interlock is set. Same refusal as V1, but error.code here is "valve_set_state".'),
+                   (BATTERY_ERR,
+                    'state is "open" and the last real valve battery reading is at or below 10 % (2.1.4).'),
+                   (QUEUE_ERR,
+                    "Either state, the hub's valve command queue was full (2.1.4)."),
                    ('invalid state value (expected "open" or "closed")',
                     "`state` is a string but is neither exactly \"open\" nor exactly \"closed\". Checked last.")],
          notes="No legacy plain-text form — which is a safety property: a wrong `schema` here is rejected outright, where the same mistake on V1/V2 executes silently (Trap 1)."),
@@ -270,7 +293,7 @@ COMMANDS = [
          ack_ok=ack("req-prov-001", "provision", uptime=95),
          ack_errs=[("provisioning failed",
                     "One string for every cause: no payload; payload not valid JSON; a valve key was offered but no spelling of it yielded a valid MAC; none of valve_id / valve_mac / lora_sensors / ble_leak_sensors / auto_close_enabled / rules present and well-typed; or the storage write failed.")],
-         notes="A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries."),
+         notes="A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries. **A provision that changes the valve** (2.1.4) discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one."),
 
     dict(group="Commissioning", id="P2", name="decommission",
          title="Remove one device, or wipe the hub",
@@ -287,11 +310,11 @@ COMMANDS = [
                     "No payload, payload not parseable, or `target` absent or not a string."),
                    ("unknown decommission target",
                     "`target` is a string but matches none of the accepted values — including a case-mismatched \"ALL\", \"Valve\" or \"LORA\"."),
-                   ("valve decommission failed", "Internal failure: manager not initialised, lock timeout, or the storage write failed."),
+                   ("valve decommission failed", "The hub has no valve provisioned (2.1.4; it used to ack `ok`), or an internal failure: manager not initialised, lock timeout, or the storage write failed."),
                    ("lora sensor decommission failed", "sensor_id absent or unparseable, the id is not in the commissioned list, or an internal failure."),
                    ("ble sensor decommission failed", "sensor_id absent, malformed, not in the commissioned list, or an internal failure."),
                    ("full decommission failed", "target \"all\" and the erase failed. No reboot happens in this case.")],
-         notes="**Target `all` is the only command here that reboots.** Its final snapshot describes the CLEARED hub — empty arrays, disconnected valve, no name — not the site you wiped."),
+         notes="**Target `all` is the only command here that reboots.** Its final snapshot describes the CLEARED hub — `valve` `{}`, empty arrays, no name, \"No devices provisioned\" — not the site you wiped. **Target `valve`** discards every valve command still queued, pending or in flight, disconnects a link still up to the valve and cancels a connect in progress, so nothing sent for the removed valve reaches it or the next one (2.1.4)."),
 
     # ---------------- configuration ----------------
     dict(group="Configuration", id="C1", name="sensor_meta",
@@ -515,7 +538,9 @@ is unrecognised, it is dropped silently instead."""),
 ]
 
 # Side-by-side map for anyone diffing this against document v1.0 (firmware 1.9.0).
-# (what, v1.0 / FW 1.9.0, v2.0 / FW 2.0.2)
+# Cumulative, like the telemetry catalogue's: v2.0 (firmware 2.1.0) is an interim
+# revision, and each row new since then is marked (2.1.4).
+# (what, v1.0 / FW 1.9.0, v3.0 / FW 2.1.4)
 CHANGES = [
     ("Maximum command size",
      "~1 KB shared with the topic; anything larger was dropped silently, with no "
@@ -572,7 +597,22 @@ CHANGES = [
      "stale until the next MQTT reconnect, so polling the twin to confirm read the "
      "OLD auto_close_enabled / trigger_mask",
      "republished immediately after the ack"),
+    ("valve_open / valve_close / valve_set_state — no valve provisioned",
+     "ok, and the hub then connected to any nearby eFloStop valve and drove it",
+     "error: No valve is set up for this hub.  (2.1.4)"),
+    ("valve_open / valve_set_state open — valve battery at or below 10 %",
+     "ok, for a valve that refused to open",
+     "error: Valve battery critical (≤10 %): the valve will not open. Replace the batteries.  (2.1.4)"),
+    ("valve_open / valve_close / valve_set_state — command queue full",
+     "ok, and the command was dropped",
+     "error: The valve command could not be queued. Try again.  (2.1.4)"),
+    ("decommission — target valve on a hub with no valve",
+     "ok, with nothing to remove",
+     "error: valve decommission failed  (2.1.4)"),
+    ("Valve commands when the valve is changed or removed",
+     "a command queued for the old valve could be applied to the next valve that linked",
+     "every queued, pending or in-flight valve command is discarded  (2.1.4)"),
     ("Firmware version",
      "1.9.0",
-     "2.0.2"),
+     "2.1.4"),
 ]

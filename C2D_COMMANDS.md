@@ -137,7 +137,7 @@ The hub publishes a `cmd_ack` only when **`cmd.is_envelope || cmd.id[0]`** is tr
 - **Legacy text commands never ack** (`VALVE_OPEN`, `DECOMMISSION_ALL`, etc.) — they aren't envelopes and carry no `id`. Fire-and-forget.
 - The hub does **not** deduplicate by `id`. Send the same `id` twice and the command runs twice (commands are not idempotent — `valve_close` twice tries to close twice). Use a new `id` per retry.
 
-⚠️ **Pre-clock suppression.** All `eflostop.v2` telemetry — including `cmd_ack` — is **suppressed until the hub's clock is SNTP-synced** (the envelope builder returns nothing before epoch `1704067200` / 2024-01-01 UTC). So a command received right after a cold boot may **execute but produce no ack**. Confirm real state from the next snapshot, never assume failure from a missing ack. (Twin reported PATCHes are *not* clock-gated — see §8.)
+⚠️ **Before the clock syncs.** The hub only connects to IoT Hub once its clock is SNTP-synced, so no command can reach it earlier. No `eflostop.v2` message goes out with a `ts` before epoch `1704067200` (2024-01-01 UTC). Since 2.1.4 an event built before the first sync, `cmd_ack` included, is held in the offline buffer and sent after the first connect, its `ts` corrected from the hub uptime once the clock syncs; one left over from a restart before the sync is dropped. Snapshots and lifecycle are not sent before the sync. Up to 2.1.3 every pre-sync event was discarded. An ack can still arrive late or not at all (a restart, a full offline buffer), so confirm real state from the next snapshot and never assume failure from a missing ack. (Twin reported PATCHes are *not* clock-gated — see §8.)
 
 ---
 
@@ -494,6 +494,8 @@ Payload fields:
 
 At least one field is required. Each present array does a **full replace** of that whole category (e.g. sending `ble_leak_sensors` replaces all BLE sensors but leaves the valve and `lora_sensors` untouched).
 
+**Changing the valve (2.1.4).** A `provision` that names a different valve discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one.
+
 **`auto_close_enabled` — the one-question opt-in (FW 2.0.2).** The app asks the user once, while adding the valve and sensors, whether a leak should close the valve, and sends the answer in the same `provision` payload as the devices it applies to.
 
 - **`true`** sets the master flag **and** arms `trigger_mask` to `7` — BLE leak sensors, LoRa sensors *and* the valve's own flood probe. A user who wants leaks to shut the water off means all of them; the valve standing in water is the least ambiguous leak there is. The user can narrow this afterwards with `rules_config` (§4.7).
@@ -625,7 +627,7 @@ Removes devices from the hub. The `target` field says what to remove.
 | `payload.sensor_id` | required for `"lora"` / `"ble_leak_sensor"` |
 
 ### 4.10.1 target: "valve"
-Removes the valve, clears its target MAC, and disconnects BLE. Any valve command still queued or waiting for a reconnect is discarded, so nothing sent for the removed valve reaches the next one. Since 2.1.4, sending it to a hub that has no valve acks `error` `valve decommission failed` (it used to ack `ok`).
+Removes the valve, clears its target MAC, and disconnects BLE. A connect in progress is cancelled, and any valve command still queued or waiting for a reconnect is discarded, so nothing sent for the removed valve reaches the next one. Since 2.1.4, sending it to a hub that has no valve acks `error` `valve decommission failed` (it used to ack `ok`).
 ```json
 { "schema": "eflostop.cmd", "ver": 1, "id": "decom-v-001", "cmd": "decommission", "payload": { "target": "valve" } }
 ```
@@ -760,9 +762,9 @@ Note: an `ok` from `valve_open` / `valve_close` / `valve_set_state` means the co
 
 If a message can't be parsed at all (broken JSON, random text, nothing matches), the hub logs a warning and sends no ack (no correlation ID to respond to).
 
-## 6.3 No ack before clock sync
+## 6.3 Acks and the clock sync
 
-Even a successful command produces no `cmd_ack` if the hub's clock isn't SNTP-synced yet (see §3.4). Reconcile via the next snapshot.
+No `cmd_ack` is sent with an unsynced `ts`. Since 2.1.4 one built before the first clock sync is held and sent after the first connect with its `ts` corrected, and one left by a restart before the sync is dropped (see §3.4). Reconcile a missing ack via the next snapshot.
 
 ---
 
@@ -783,7 +785,7 @@ Commands are authenticated through the Azure IoT Hub device identity (SAS token 
 ## 7.2 App-side guidance
 
 - Confirm before sending `decommission` (especially `all`) and `override_enable`.
-- Use correlation IDs to match acks — but treat a missing ack as *unknown*, not *failed* (reconcile via snapshot; acks are clock-gated and C2D delivery can be delayed/queued).
+- Use correlation IDs to match acks — but treat a missing ack as *unknown*, not *failed* (reconcile via snapshot; an ack can be held until the hub reconnects, and C2D delivery can be delayed/queued).
 - Don't let end users build raw C2D commands. Validate in the app/backend first.
 
 ---
@@ -876,7 +878,8 @@ decommission         { "target": "valve|lora|ble|all", sensor_id? }
 set_hub_name         { "name": "max 31 chars" }   [envelope-only]
 
 Acks:  envelope cmds always ack (id optional); legacy text never acks;
-       all acks suppressed until SNTP clock sync.
+       no ack carries an unsynced ts: one built before the first
+       clock sync is held and sent after connect (2.1.4).
 
 Device Twin Desired:  (both persisted; both echoed in reported)
 Property             Range
