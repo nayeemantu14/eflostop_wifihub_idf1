@@ -75,16 +75,36 @@ extern "C"
     void app_ble_valve_signal_start(void);
 
     // API
+    //
+    // The module only keeps a link to, commands, or reports the PROVISIONED valve (the target
+    // MAC below); any other peer is disconnected at connect. open / close / connect (and
+    // ble_valve_set_rmleak) return false - logged, nothing queued, settle barrier not
+    // armed - when no valve is provisioned, and also when the command queue is full.
+    // A queued command is pended while the provisioned valve is not linked and ready, and
+    // replayed on its link only. ble_valve_disconnect() is never gated: it also cancels a
+    // connect in flight and a valve scan.
     bool ble_valve_open(void);
     bool ble_valve_close(void);
     bool ble_valve_connect(void);
     bool ble_valve_disconnect(void);
 
     // Provisioning support
+    /**
+     * @brief Point the module at the provisioned valve (NULL = no valve).
+     * A CHANGE (or removal) flushes every queued and pending valve command, and a link
+     * still up to the previous valve is disconnected. NULL also stops reconnecting;
+     * callers removing a valve still send ble_valve_disconnect() for its link.
+     */
     void ble_valve_set_target_mac(const char *mac_str);
     bool ble_valve_has_target_mac(void);
 
     // Getters
+    /**
+     * @brief MAC ("XX:XX:XX:XX:XX:XX") of the peer currently linked, if any.
+     * @param mac_buffer At least 18 bytes.
+     * Not necessarily the provisioned valve: a link being torn down after a target change
+     * still answers. Compare it with the provisioned MAC, or use ble_valve_is_ready().
+     */
     bool ble_valve_get_mac(char *mac_buffer);
     /**
      * @brief Battery percent from the current link's last read/notify.
@@ -95,6 +115,9 @@ extern "C"
     bool ble_valve_get_leak(void);
     int ble_valve_get_state(void);
 
+    /**
+     * @brief GATT-ready (connected, encrypted, discovered) AND linked to the provisioned valve.
+     */
     bool ble_valve_is_ready(void);
     bool ble_valve_is_secured(void);
     bool ble_valve_is_authenticated(void);
@@ -114,6 +137,7 @@ extern "C"
     /**
      * @brief Write RMLEAK characteristic on the valve (1=assert interlock, 0=clear).
      * Non-blocking: queues a BLE command. If disconnected, queues pending and triggers reconnect.
+     * @return false when no valve is provisioned or the command queue is full (nothing queued).
      */
     bool ble_valve_set_rmleak(bool enabled);
 

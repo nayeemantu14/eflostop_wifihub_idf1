@@ -715,28 +715,39 @@ bool provisioning_get_valve_mac(char *mac_out)
     return result;
 }
 
-bool provisioning_is_lora_sensor_provisioned(uint32_t sensor_id)
+// UNKNOWN is logged here, distinctly, because the caller acts on it as if provisioned: a
+// packet from a sensor that is really gone would otherwise be handled with no trace of why.
+prov_member_t provisioning_lora_sensor_membership(uint32_t sensor_id)
 {
     if (!g_initialized || g_prov_mutex == NULL) {
-        return false;
+        ESP_LOGW(PROV_TAG, "LoRa 0x%08lX membership UNKNOWN: provisioning not initialised",
+                 (unsigned long)sensor_id);
+        return PROV_MEMBER_UNKNOWN;
     }
-    
-    bool result = false;
+
+    prov_member_t result = PROV_MEMBER_NO;
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         if (g_config.state == PROV_STATE_PROVISIONED) {
-            for (int i = 0; i < g_config.lora_sensor_count; i++) {
+            for (int i = 0; i < g_config.lora_sensor_count && i < MAX_LORA_SENSORS; i++) {
                 if (g_config.lora_sensor_ids[i] == sensor_id) {
-                    result = true;
+                    result = PROV_MEMBER_YES;
                     break;
                 }
             }
         }
         xSemaphoreGive(g_prov_mutex);
     } else {
-        ESP_LOGW(PROV_TAG, "Failed to take mutex in is_lora_sensor_provisioned");
+        ESP_LOGW(PROV_TAG, "LoRa 0x%08lX membership UNKNOWN: provisioning mutex timeout",
+                 (unsigned long)sensor_id);
+        result = PROV_MEMBER_UNKNOWN;
     }
-    
+
     return result;
+}
+
+bool provisioning_is_lora_sensor_provisioned(uint32_t sensor_id)
+{
+    return provisioning_lora_sensor_membership(sensor_id) == PROV_MEMBER_YES;
 }
 
 bool provisioning_get_lora_sensors(uint32_t *ids_out, uint8_t *count_out)
@@ -837,28 +848,38 @@ bool provisioning_get_device_set(prov_device_set_t *out)
     return true;
 }
 
-bool provisioning_is_ble_sensor_provisioned(const char *mac)
+prov_member_t provisioning_ble_sensor_membership(const char *mac)
 {
-    if (!mac || !g_initialized || g_prov_mutex == NULL) {
-        return false;
+    if (!mac) {
+        return PROV_MEMBER_NO;   // no address: nothing it could match
+    }
+    if (!g_initialized || g_prov_mutex == NULL) {
+        ESP_LOGW(PROV_TAG, "BLE %s membership UNKNOWN: provisioning not initialised", mac);
+        return PROV_MEMBER_UNKNOWN;
     }
 
-    bool result = false;
+    prov_member_t result = PROV_MEMBER_NO;
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
         if (g_config.state == PROV_STATE_PROVISIONED) {
             for (int i = 0; i < g_config.ble_leak_sensor_count && i < MAX_BLE_LEAK_SENSORS; i++) {
                 if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
-                    result = true;
+                    result = PROV_MEMBER_YES;
                     break;
                 }
             }
         }
         xSemaphoreGive(g_prov_mutex);
     } else {
-        ESP_LOGW(PROV_TAG, "Failed to take mutex in is_ble_sensor_provisioned");
+        ESP_LOGW(PROV_TAG, "BLE %s membership UNKNOWN: provisioning mutex timeout", mac);
+        result = PROV_MEMBER_UNKNOWN;
     }
 
     return result;
+}
+
+bool provisioning_is_ble_sensor_provisioned(const char *mac)
+{
+    return provisioning_ble_sensor_membership(mac) == PROV_MEMBER_YES;
 }
 
 // ============================================================================

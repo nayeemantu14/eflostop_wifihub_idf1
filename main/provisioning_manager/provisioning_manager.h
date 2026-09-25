@@ -40,6 +40,15 @@ typedef struct {
     rules_config_t rules;                            // D2D rules engine config
 } provisioning_config_t;
 
+// Answer to "is this sensor provisioned?". UNKNOWN (manager not initialised, or the mutex
+// timed out) is NOT "no": a caller deciding whether to act on a leak must treat it as
+// provisioned, so a busy provisioning mutex can never drop a real leak.
+typedef enum {
+    PROV_MEMBER_NO = 0,
+    PROV_MEMBER_YES,
+    PROV_MEMBER_UNKNOWN
+} prov_member_t;
+
 // One consistent copy of every provisioned device (see provisioning_get_device_set()).
 typedef struct {
     bool     has_valve;
@@ -166,9 +175,15 @@ bool provisioning_get_valve_mac(char *mac_out);
  * @brief Check if a LoRa sensor ID is provisioned
  * 
  * @param sensor_id Sensor ID to check
- * @return true if sensor is provisioned
+ * @return true if sensor is provisioned (false for "no" AND for "unknown")
  */
 bool provisioning_is_lora_sensor_provisioned(uint32_t sensor_id);
+
+/**
+ * @brief Tri-state LoRa membership: YES, NO, or UNKNOWN (not initialised / mutex timeout,
+ *        logged). See prov_member_t for how UNKNOWN must be handled.
+ */
+prov_member_t provisioning_lora_sensor_membership(uint32_t sensor_id);
 
 /**
  * @brief Get list of provisioned LoRa sensor IDs
@@ -211,9 +226,15 @@ bool provisioning_get_device_set(prov_device_set_t *out);
  * @brief Check if a BLE leak sensor MAC is provisioned (case-insensitive)
  *
  * @param mac MAC address "XX:XX:XX:XX:XX:XX"; NULL returns false
- * @return true if the sensor is provisioned
+ * @return true if the sensor is provisioned (false for "no" AND for "unknown")
  */
 bool provisioning_is_ble_sensor_provisioned(const char *mac);
+
+/**
+ * @brief Tri-state BLE leak sensor membership (case-insensitive): YES, NO (also for a NULL
+ *        mac), or UNKNOWN (not initialised / mutex timeout, logged).
+ */
+prov_member_t provisioning_ble_sensor_membership(const char *mac);
 
 /**
  * @brief Get current rules engine configuration

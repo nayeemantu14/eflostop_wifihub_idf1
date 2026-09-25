@@ -50,7 +50,8 @@ void iothub_task(void *param);
 // Initialize and start the IoT Hub task
 void initialize_iothub(void);
 
-// Trigger provisioning MAC application to BLE
+// Apply the provisioned device set to BLE: the valve target becomes the provisioned valve
+// (or none), and BLE starts when there is a valve or a BLE leak sensor to serve.
 void iothub_apply_provisioned_mac(void);
 
 // Suspend/resume the MQTT client on WiFi loss/restore. Stopping the client while

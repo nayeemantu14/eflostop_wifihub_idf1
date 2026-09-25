@@ -648,6 +648,24 @@ static const char *valve_open_reject_reason(void)
     return NULL;
 }
 
+// valve_open / valve_close / valve_set_state. Returns the cmd_ack error, or NULL once the
+// command is queued. No provisioned valve is refused outright (P0-a): the valve module
+// would refuse it anyway, and "ok" for a command that went nowhere is what N9 removes.
+// A queued command is still only QUEUED — the valve's own report confirms it.
+static const char *c2d_valve_command(bool open)
+{
+    if (!ble_valve_has_target_mac()) {
+        return "No valve is set up for this hub.";
+    }
+    if (open) {
+        const char *why = valve_open_reject_reason();
+        if (why) return why;
+    }
+    ble_valve_connect();
+    bool queued = open ? ble_valve_open() : ble_valve_close();
+    return queued ? NULL : "The valve command could not be queued. Try again.";
+}
+
 // Arm the commission snapshot after devices were ADDED: re-arm the one-shot initial
 // snapshot, reset the published seen-count, and open the incremental-refresh grace window
 // so a device heard after the initial snapshot still gets reported promptly (not only at
@@ -1010,19 +1028,19 @@ static void handle_c2d_command(const char *data, size_t data_len)
     // ---- Valve control ----
     if (strcmp(cmd.cmd, C2D_CMD_VALVE_OPEN) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: VALVE_OPEN");
-        error_msg = valve_open_reject_reason();
+        error_msg = c2d_valve_command(true);
         if (error_msg) {
             success = false;
             ESP_LOGW(IOTHUB_TAG, "VALVE_OPEN refused — %s", error_msg);
-        } else {
-            ble_valve_connect();
-            ble_valve_open();
         }
     }
     else if (strcmp(cmd.cmd, C2D_CMD_VALVE_CLOSE) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Command: VALVE_CLOSE");
-        ble_valve_connect();
-        ble_valve_close();
+        error_msg = c2d_valve_command(false);
+        if (error_msg) {
+            success = false;
+            ESP_LOGW(IOTHUB_TAG, "VALVE_CLOSE refused — %s", error_msg);
+        }
     }
     // ---- Valve set state (unified open/close) ----
     else if (strcmp(cmd.cmd, C2D_CMD_VALVE_SET_STATE) == 0) {
@@ -1033,18 +1051,18 @@ static void handle_c2d_command(const char *data, size_t data_len)
             error_msg = "missing 'state' field (expected \"open\" or \"closed\")";
         } else if (strcmp(desired, "open") == 0) {
             ESP_LOGI(IOTHUB_TAG, "Command: VALVE_SET_STATE -> open");
-            error_msg = valve_open_reject_reason();
+            error_msg = c2d_valve_command(true);
             if (error_msg) {
                 success = false;
                 ESP_LOGW(IOTHUB_TAG, "VALVE_SET_STATE open refused — %s", error_msg);
-            } else {
-                ble_valve_connect();
-                ble_valve_open();
             }
         } else if (strcmp(desired, "closed") == 0) {
             ESP_LOGI(IOTHUB_TAG, "Command: VALVE_SET_STATE -> closed");
-            ble_valve_connect();
-            ble_valve_close();
+            error_msg = c2d_valve_command(false);
+            if (error_msg) {
+                success = false;
+                ESP_LOGW(IOTHUB_TAG, "VALVE_SET_STATE closed refused — %s", error_msg);
+            }
         } else {
             success = false;
             error_msg = "invalid state value (expected \"open\" or \"closed\")";
@@ -1904,26 +1922,41 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
+// Apply the provisioned device set to BLE (boot, and every `provision`; runs on iothub_task
+// or the esp-mqtt task). The valve module's target IS the provisioned valve, or none, so it
+// can never link or command another one (P0-a). BLE starts for a valve OR a BLE sensor: the
+// leak scanner starts with the BLE stack, and a sensors-only hub used to never scan (P0-b).
 void iothub_apply_provisioned_mac(void)
 {
-    char valve_mac[18];
-    if (provisioning_get_valve_mac(valve_mac)) {
-        ESP_LOGI(IOTHUB_TAG, "Applying provisioned valve MAC: %s", valve_mac);
-        ble_valve_set_target_mac(valve_mac);
+    prov_device_set_t set;   // ~376 B, on whichever task calls this
+    if (!provisioning_get_device_set(&set)) {
+        // Unknown is not "no valve": leave the current target alone.
+        ESP_LOGW(IOTHUB_TAG, "Apply provisioned devices: provisioning busy - BLE target unchanged");
+        return;
+    }
 
-        // Start BLE now that we're provisioned
-        ESP_LOGI(IOTHUB_TAG, "Starting BLE with provisioned MAC...");
+    if (set.has_valve) {
+        ESP_LOGI(IOTHUB_TAG, "Applying provisioned valve MAC: %s", set.valve_mac);
+    }
+    ble_valve_set_target_mac(set.has_valve ? set.valve_mac : NULL);
+
+    if (set.has_valve || set.ble_count > 0) {
+        ESP_LOGI(IOTHUB_TAG, "Starting BLE (valve=%s, BLE sensors=%u)",
+                 set.has_valve ? set.valve_mac : "none", (unsigned)set.ble_count);
         app_ble_valve_signal_start();
+    }
 
-        // If we're already connected to wrong device, disconnect
+    if (set.has_valve) {
+        // A link to another valve is dropped by ble_valve_set_target_mac() itself; this
+        // (re)starts the search for the provisioned one.
         char current_mac[18];
         if (ble_valve_get_mac(current_mac)) {
-            if (strcasecmp(current_mac, valve_mac) != 0) {
-                ESP_LOGW(IOTHUB_TAG, "Connected to wrong MAC, will reconnect to: %s", valve_mac);
+            if (strcasecmp(current_mac, set.valve_mac) != 0) {
+                ESP_LOGW(IOTHUB_TAG, "Connected to wrong MAC, will reconnect to: %s", set.valve_mac);
                 ble_valve_connect();
             }
         } else {
-            ESP_LOGI(IOTHUB_TAG, "Not connected, triggering connection to: %s", valve_mac);
+            ESP_LOGI(IOTHUB_TAG, "Not connected, triggering connection to: %s", set.valve_mac);
             ble_valve_connect();
         }
     }
@@ -2280,13 +2313,9 @@ void iothub_task(void *param)
     // Check provisioning state
     if (provisioning_is_provisioned()) {
         ESP_LOGI(IOTHUB_TAG, "Hub is PROVISIONED");
-        char valve_mac[18];
-        if (provisioning_get_valve_mac(valve_mac)) {
-            ESP_LOGI(IOTHUB_TAG, "Provisioned valve MAC: %s", valve_mac);
-            ble_valve_set_target_mac(valve_mac);
-            ESP_LOGI(IOTHUB_TAG, "Starting BLE with provisioned MAC...");
-            app_ble_valve_signal_start();
-        }
+        // Same path as a `provision`: BLE target = the provisioned valve (or none), and BLE
+        // starts for a valve or a BLE sensor.
+        iothub_apply_provisioned_mac();
     } else {
         ESP_LOGI(IOTHUB_TAG, "Hub is UNPROVISIONED - waiting for provisioning JSON from Azure");
     }
@@ -2571,20 +2600,27 @@ void iothub_task(void *param)
         // =================================================================
         // Phase 2: RULES (always -- works offline, no MQTT needed)
         // =================================================================
+        // Sensor packets drive the rules (here) and are published (Phase 3) only for a
+        // sensor provisioned to THIS hub (N4): a neighbour's LoRa sensor must not close our
+        // valve, and the BLE scanner re-reads its whitelist only every 10 s, so a
+        // just-removed sensor can still be heard and would re-add a ghost to the rules
+        // engine's active-leak set right after the removal purged it. Membership is sampled
+        // ONCE per packet so the rules decision and the publish decision cannot disagree.
+        // UNKNOWN (provisioning busy) counts as provisioned: fail toward protection — a busy
+        // mutex must never drop a real leak.
+        prov_member_t lora_member = PROV_MEMBER_NO;
         if (has_lora) {
-            char lora_id_str[16];
-            snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
-                     (unsigned long)pkt.sensorId);
-            rules_engine_evaluate_leak(LEAK_SOURCE_LORA,
-                                       (pkt.leakStatus != 0), lora_id_str);
+            lora_member = provisioning_lora_sensor_membership(pkt.sensorId);
+            if (lora_member != PROV_MEMBER_NO) {
+                char lora_id_str[16];
+                snprintf(lora_id_str, sizeof(lora_id_str), "0x%08lX",
+                         (unsigned long)pkt.sensorId);
+                rules_engine_evaluate_leak(LEAK_SOURCE_LORA,
+                                           (pkt.leakStatus != 0), lora_id_str);
+            }
         }
-        // BLE leak events are dropped (rules here AND publish in Phase 3) unless the MAC is
-        // still provisioned: the scanner re-reads its whitelist only every 10 s, so an
-        // advertisement from a just-removed sensor can still arrive — and would re-add a
-        // ghost to the rules engine's active-leak set right after the removal purged it.
-        // Sampled ONCE so the rules decision and the publish decision cannot disagree.
         bool ble_leak_prov = has_ble_leak &&
-            provisioning_is_ble_sensor_provisioned(ble_leak_evt.sensor_mac_str);
+            provisioning_ble_sensor_membership(ble_leak_evt.sensor_mac_str) != PROV_MEMBER_NO;
         if (ble_leak_prov) {
             rules_engine_evaluate_leak(LEAK_SOURCE_BLE,
                                        ble_leak_evt.leak_detected,
@@ -2605,6 +2641,17 @@ void iothub_task(void *param)
             char prov_mac[18];
             bool have_live = ble_valve_get_mac(vlk_mac);
             bool have_prov = provisioning_get_valve_mac(prov_mac);
+            // The getter answers false for "no valve" AND for a busy mutex. vlk_mac_ok now
+            // also gates the valve's own leak evaluation and link-up reconciliation, so busy
+            // must not read as "no valve" (a steady flood at the valve does not re-notify).
+            // While the valve module still has a target a valve IS provisioned: check the
+            // live link against the one the detectors were last synced to.
+            if (!have_prov && s_det_valve_mac[0] != '\0' && ble_valve_has_target_mac()) {
+                snprintf(prov_mac, sizeof(prov_mac), "%s", s_det_valve_mac);
+                have_prov = true;
+                ESP_LOGW(IOTHUB_TAG, "Provisioned valve unreadable - checking against last known %s",
+                         prov_mac);
+            }
             if (have_live && have_prov) {
                 vlk_mac_ok = (strcasecmp(vlk_mac, prov_mac) == 0);
                 if (!vlk_mac_ok) {
@@ -2655,12 +2702,19 @@ void iothub_task(void *param)
             // VALVE_SOURCE_ID, not the MAC: this is the rules engine's internal
             // tracking key and must stay stable across a BLE dropout. The wire
             // valve_id is resolved to the real MAC inside the rules engine.
-            rules_engine_evaluate_leak(LEAK_SOURCE_VALVE, vlk_wet, VALVE_SOURCE_ID);
+            //
+            // Only for the provisioned valve's live link (vlk_mac_ok). Otherwise the
+            // sample is another valve's, or the cache the disconnect just zeroed — which
+            // would read "dry" and drop a real valve flood from the active-leak set.
+            if (vlk_mac_ok)
+                rules_engine_evaluate_leak(LEAK_SOURCE_VALVE, vlk_wet, VALVE_SOURCE_ID);
         }
 
-        // Valve reconnect reconciliation: re-evaluate active leaks and hub/valve sync
+        // Valve reconnect reconciliation: re-evaluate active leaks and hub/valve sync.
+        // Provisioned valve only, as above: it may close the valve and write NVS.
         if (has_valve && ble_upd_type == BLE_UPD_CONNECTED) {
-            rules_engine_on_valve_connected();
+            if (vlk_mac_ok)
+                rules_engine_on_valve_connected();
             // Reset the valve_state_changed delta-gate so the first state notify
             // after a (re)connect / re-provision always emits the event + snapshot.
             s_valve_pub_state = -2;
@@ -2684,9 +2738,9 @@ void iothub_task(void *param)
         // twin, the offline drain, alert popping, the rules events and the ONLY snapshot
         // flush — an emptied hub went silent for ~9 min (BUG-6), and its one stale
         // snapshot came from a `provisioned` value sampled before the wait (BUG-3).
-        // Every publisher below gates itself on its own device instead: LoRa via
-        // provisioning_is_lora_sensor_provisioned(), BLE via
-        // provisioning_is_ble_sensor_provisioned(), the valve events via vlk_mac_ok, and
+        // Every publisher below gates itself on its own device instead: LoRa and BLE via the
+        // membership sampled in Phase 2 (only a definite NO drops), the valve events via
+        // vlk_mac_ok, and
         // the valve link edge via s_det_valve_mac (a provisioned valve exists; the
         // detectors sync_valve_detectors() re-points only absorb the first teardown
         // DISCONNECTED after a removal). The empty-hub scheduler state is set once, on the
@@ -2746,7 +2800,7 @@ void iothub_task(void *param)
             ESP_LOGI(IOTHUB_TAG, "Event: LoRa Packet from 0x%08lX",
                      (unsigned long)pkt.sensorId);
 
-            if (!provisioning_is_lora_sensor_provisioned(pkt.sensorId)) {
+            if (lora_member == PROV_MEMBER_NO) {   // sampled in Phase 2
                 ESP_LOGW(IOTHUB_TAG, "Sensor 0x%08lX not provisioned, skipping",
                          (unsigned long)pkt.sensorId);
             } else {
@@ -2790,10 +2844,10 @@ void iothub_task(void *param)
             // SNAP_MIN_INTERVAL_MS rate cap still applies.
             //
             // Only with a PROVISIONED valve (s_det_valve_mac). An empty or valve-less hub
-            // has no valve to report, yet the valve module can still link one (it can
-            // relink an unprovisioned valve by name). sync_valve_detectors()'s preset of 0
-            // absorbs only the first teardown DISCONNECTED after a removal; this gate is
-            // what stops every later edge.
+            // has no valve to report. Since 2.1.4 the valve module links and reports only
+            // the provisioned valve, and a link whose target was removed tears down without
+            // a DISCONNECTED; this gate and sync_valve_detectors()'s preset of 0 remain the
+            // hub-side backstop for an update queued just before a removal.
             int linked = (ble_upd_type == BLE_UPD_CONNECTED)    ? 1
                        : (ble_upd_type == BLE_UPD_DISCONNECTED) ? 0
                        : -1;

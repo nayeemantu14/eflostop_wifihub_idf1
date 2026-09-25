@@ -34,11 +34,11 @@
 #include "os/os_mbuf.h"
 
 #define BLE_TAG "BLE_VALVE"
-/* Must EXACTLY match the valve's advertised Complete Local Name (app_ble.c on the
- * STM32WB valve). The valve was corrected from the misspelled "eFlofStopV2" to
- * "eFloStopV2"; this central-side matcher (see handle_valve_disc) does a strict
- * length+content compare, so a one-char drift silently breaks name-based valve
- * discovery on an unprovisioned hub. Keep the two in lockstep. */
+/* The valve's advertised Complete Local Name (app_ble.c on the STM32WB valve). No longer
+ * used for matching (2.1.4, P0-a): EVERY eFloStop valve advertises this name and answers
+ * the same fixed passkey, so a hub with no (or a different) provisioned valve linked a
+ * neighbour's valve by name and then auto-close / C2D / the rules tick drove it. Discovery
+ * now matches the provisioned valve's MAC only (handle_valve_disc). Kept for reference. */
 #define VALVE_DEVICE_NAME "eFloStopV2"
 
 // -----------------------------------------------------------------------------
@@ -198,6 +198,40 @@ static bool g_setup_in_progress = false;
 static char g_target_valve_mac[18] = {0};
 static bool g_has_target_mac = false;
 
+// Guards g_target_valve_mac, g_has_target_mac and g_valve_mac: the target is written on
+// the esp-mqtt / iothub tasks while the NimBLE host task matches against it, and a torn
+// 18-byte read could match (or miss) the wrong valve. Held only around mem*/str* calls.
+static portMUX_TYPE s_mac_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// True from rejecting a link to a valve that is not the provisioned one (GAP CONNECT)
+// until its DISCONNECT, which then closes it silently. NimBLE host task only.
+static bool s_rejecting_conn = false;
+
+// Copies the provisioned valve's MAC; returns false (out = "") when there is none.
+static bool target_copy(char out[18])
+{
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool has = g_has_target_mac;
+    memcpy(out, g_target_valve_mac, sizeof(g_target_valve_mac));
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (!has)
+        out[0] = '\0';
+    return has;
+}
+
+// True only while the current link is to the PROVISIONED valve. The single gate for
+// everything that may act on, or report from, a link (P0-a).
+static bool link_is_target(void)
+{
+    if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+        return false;
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool match = g_has_target_mac && g_valve_mac[0] != '\0' &&
+                 strcasecmp(g_valve_mac, g_target_valve_mac) == 0;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    return match;
+}
+
 // Forward declarations
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static void start_scan(void);
@@ -296,6 +330,15 @@ static void initiate_security(void)
     if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
     {
         ESP_LOGW(BLE_TAG, "[SECURITY] Cannot initiate - no connection");
+        return;
+    }
+
+    // Never pair with (or encrypt to) a valve that is not the provisioned one: the fixed
+    // passkey would bond it. Drop the link instead of leaving it idle.
+    if (!link_is_target())
+    {
+        ESP_LOGW(BLE_TAG, "[SECURITY] Not initiating - link is not the provisioned valve; disconnecting");
+        ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         return;
     }
 
@@ -477,6 +520,17 @@ static const char *batt_to_str(uint8_t batt, char *buf, size_t len)
 // -----------------------------------------------------------------------------
 static void notify_hub_update(ble_update_type_t update_type)
 {
+    /* Only the provisioned valve may reach the hub and the health engine (P0-a). A link
+     * can outlive its target (changed or removed while linked) until the queued DISCONNECT
+     * lands. A DISCONNECTED is posted after the link is gone, so the DISCONNECT handler
+     * makes that call itself. */
+    if (update_type != BLE_UPD_DISCONNECTED && !link_is_target())
+    {
+        ESP_LOGW(BLE_TAG, "[NOTIFY] update type=%d dropped - link is not the provisioned valve",
+                 (int)update_type);
+        return;
+    }
+
     if (ble_update_queue != NULL)
     {
         /* Non-blocking, deliberately. An earlier version waited 50 ms for
@@ -524,6 +578,15 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
 {
     (void)conn_handle;
     (void)arg;
+
+    // Values from any other valve must not reach the cache, the health engine (flood probe,
+    // battery) or the hub. Covers notifies and every read that lands here.
+    if (!link_is_target())
+    {
+        ESP_LOGW(BLE_TAG, "[NOTIFY] attr_handle=%u ignored - link is not the provisioned valve",
+                 attr_handle);
+        return 0;
+    }
 
     uint8_t data[16] = {0};
     uint16_t len = OS_MBUF_PKTLEN(om);
@@ -782,9 +845,12 @@ static int on_read_dis_cb(uint16_t conn_handle,
     return 0;
 }
 
+// Both replays run only on the provisioned valve's link: a command pended for it must never
+// be written to whichever valve happens to finish setup (P0-c).
 static void apply_pending_valve_cmd_if_any(void)
 {
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0)
+    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0 ||
+        !link_is_target())
         return;
 
     if (g_pending_valve_cmd == 0 || g_pending_valve_cmd == 1)
@@ -814,7 +880,8 @@ static void apply_pending_valve_cmd_if_any(void)
 
 static void apply_pending_rmleak_cmd_if_any(void)
 {
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0)
+    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0 ||
+        !link_is_target())
         return;
 
     if (g_pending_rmleak_cmd == 0 || g_pending_rmleak_cmd == 1)
@@ -1267,6 +1334,13 @@ static void start_discovery_chain(void)
         return;
     }
 
+    if (!link_is_target())
+    {
+        ESP_LOGW(BLE_TAG, "[DISC] Not discovering - link is not the provisioned valve; disconnecting");
+        ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return;
+    }
+
     ESP_LOGI(BLE_TAG, "╔══════════════════════════════════════════════════════════════╗");
     ESP_LOGI(BLE_TAG, "║            STARTING SERVICE DISCOVERY                        ║");
     ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
@@ -1312,12 +1386,33 @@ static void start_discovery_chain(void)
 // Forward-declare so handle_valve_disc can reference it via ble_gap_connect callback
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 
-// Common handler for valve discovery from both legacy and extended scan events
-static void handle_valve_disc(const ble_addr_t *addr, const uint8_t *data,
-                              uint8_t data_len)
+// Forget everything the last link told us. 0xFF battery = unknown (not 0 %), and RMLEAK
+// resets like the other fields so a missing/failed read cannot carry a prior session's value.
+static void reset_link_cache(void)
 {
-    struct ble_hs_adv_fields fields;
-    if (ble_hs_adv_parse_fields(&fields, data, data_len) != 0)
+    h_valve_char = 0;
+    h_flood_char = 0;
+    h_rmleak_char = 0;
+    h_batt_char = 0;
+    h_dis_char = 0;
+    h_valve_svc_end = 0;
+    h_flood_svc_end = 0;
+    h_batt_svc_end = 0;
+    h_dis_svc_end = 0;
+    g_val_battery = 0xFF;
+    g_val_leak = false;
+    g_val_state = -1;
+    g_val_rmleak = false;
+    g_firmware_rev[0] = '\0';
+}
+
+// Common handler for valve discovery from both legacy and extended scan events.
+// Matches the PROVISIONED valve's MAC only; with no provisioned valve nothing is ever
+// linked (P0-a). The advertised name is no longer consulted, so the payload is not parsed.
+static void handle_valve_disc(const ble_addr_t *addr)
+{
+    char target[18];
+    if (!target_copy(target))
         return;
 
     char discovered_mac[18];
@@ -1325,22 +1420,7 @@ static void handle_valve_disc(const ble_addr_t *addr, const uint8_t *data,
              addr->val[5], addr->val[4], addr->val[3],
              addr->val[2], addr->val[1], addr->val[0]);
 
-    bool mac_match = false;
-    if (g_has_target_mac && strcasecmp(discovered_mac, g_target_valve_mac) == 0)
-    {
-        mac_match = true;
-        ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched: %s", discovered_mac);
-    }
-
-    bool name_match = false;
-    if (fields.name &&
-        fields.name_len == strlen(VALVE_DEVICE_NAME) &&
-        strncmp((const char *)fields.name, VALVE_DEVICE_NAME, fields.name_len) == 0)
-    {
-        name_match = true;
-    }
-
-    if ((g_has_target_mac && mac_match) || (!g_has_target_mac && name_match))
+    if (strcasecmp(discovered_mac, target) == 0)
     {
         // Re-entrancy guard. ble_gap_disc_cancel() stops the scan but does NOT
         // flush advertisement reports already queued in the host, so a second
@@ -1356,10 +1436,8 @@ static void handle_valve_disc(const ble_addr_t *addr, const uint8_t *data,
         if (g_connecting)
             return;
 
-        if (g_has_target_mac)
-            ESP_LOGI(BLE_TAG, "[SCAN] Connecting to provisioned valve: %s", discovered_mac);
-        else
-            ESP_LOGI(BLE_TAG, "[SCAN] Connecting to valve by name: %s", VALVE_DEVICE_NAME);
+        ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched - connecting to provisioned valve: %s",
+                 discovered_mac);
 
         memcpy(&g_peer_addr, addr, sizeof(ble_addr_t));
         g_peer_addr_valid = true;
@@ -1383,6 +1461,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     (void)arg;
     struct ble_gap_conn_desc desc;
     int rc;
+    bool was_target = false;   // DISCONNECT only
 
     switch (event->type)
     {
@@ -1390,8 +1469,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         // Forward to leak scanner so leak sensors are detected during valve scan
         app_ble_leak_process_adv(&event->disc.addr, event->disc.rssi,
                                  event->disc.data, event->disc.length_data);
-        handle_valve_disc(&event->disc.addr, event->disc.data,
-                          event->disc.length_data);
+        handle_valve_disc(&event->disc.addr);
         return 0;
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
@@ -1400,8 +1478,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             // Forward to leak scanner so leak sensors are detected during valve scan
             app_ble_leak_process_adv(&event->ext_disc.addr, event->ext_disc.rssi,
                                      event->ext_disc.data, event->ext_disc.length_data);
-            handle_valve_disc(&event->ext_disc.addr, event->ext_disc.data,
-                              event->ext_disc.length_data);
+            handle_valve_disc(&event->ext_disc.addr);
         }
         return 0;
 #endif
@@ -1421,33 +1498,49 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         {
             valve_conn_handle = event->connect.conn_handle;
             is_scanning = false;
+            s_rejecting_conn = false;
 
             clear_all_state_bits();
+            reset_link_cache();
 
-            h_valve_char = 0;
-            h_flood_char = 0;
-            h_rmleak_char = 0;
-            h_batt_char = 0;
-            h_dis_char = 0;
-            h_valve_svc_end = 0;
-            h_flood_svc_end = 0;
-            h_batt_svc_end = 0;
-            h_dis_svc_end = 0;
-            g_val_battery = 0xFF;   // unknown until this link reads it (not 0 %)
-            g_val_leak = false;
-            g_val_state = -1;
-            g_val_rmleak = false;   // reset like the other fields — a missing/failed RMLEAK read must not leak the prior session's value
-            g_firmware_rev[0] = '\0';
-
+            // The IDENTITY address, so a bonded valve that connects with an RPA still
+            // matches its provisioned MAC. Left "" if the lookup fails: an unverifiable
+            // peer is rejected below like any other.
+            char peer_mac[18] = {0};
             if (ble_gap_conn_find(valve_conn_handle, &desc) == 0)
             {
-                snprintf(g_valve_mac, sizeof(g_valve_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
+                snprintf(peer_mac, sizeof(peer_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
                          desc.peer_id_addr.val[5], desc.peer_id_addr.val[4], desc.peer_id_addr.val[3],
                          desc.peer_id_addr.val[2], desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
-                ESP_LOGI(BLE_TAG, "[CONNECT] MAC=%s, handle=%u", g_valve_mac, valve_conn_handle);
+                ESP_LOGI(BLE_TAG, "[CONNECT] MAC=%s, handle=%u", peer_mac, valve_conn_handle);
 
                 memcpy(&g_peer_addr, &desc.peer_id_addr, sizeof(ble_addr_t));
                 g_peer_addr_valid = true;
+            }
+            taskENTER_CRITICAL(&s_mac_lock);
+            memcpy(g_valve_mac, peer_mac, sizeof(g_valve_mac));
+            taskEXIT_CRITICAL(&s_mac_lock);
+
+            // Not the provisioned valve (the target changed or was removed while this
+            // connect was in flight): drop it before anything runs on it — no state bits,
+            // no pairing, no timers, nothing to the hub or the health engine (P0-a).
+            if (!link_is_target())
+            {
+                char target[18];
+                bool has_target = target_copy(target);
+                ESP_LOGW(BLE_TAG, "[CONNECT] Peer %s is not the provisioned valve (%s) - disconnecting",
+                         peer_mac[0] ? peer_mac : "unknown", has_target ? target : "none");
+                s_rejecting_conn = true;
+                rc = ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                if (rc != 0)
+                {
+                    // Backstop so a failed terminate cannot hold the foreign link forever:
+                    // sec_timeout_cb() terminates any link that never became ready.
+                    ESP_LOGE(BLE_TAG, "[CONNECT] terminate rc=%d - retrying via the setup timeout", rc);
+                    if (sec_timeout_timer)
+                        xTimerReset(sec_timeout_timer, 0);
+                }
+                return 0;
             }
 
             set_state_bit(BLE_STATE_BIT_CONNECTED);
@@ -1467,7 +1560,10 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGW(BLE_TAG, "[CONNECT] Failed status=%d", event->connect.status);
             valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             clear_all_state_bits();
-            start_scan();
+            // Not after BLE_CMD_DISCONNECT cancelled this connect (status BLE_HS_EAPP):
+            // rescanning would undo the disconnect (N8).
+            if (g_connect_requested)
+                start_scan();
         }
         return 0;
 
@@ -1477,22 +1573,31 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGW(BLE_TAG, "[DISCONNECT] reason=0x%02x", event->disconnect.reason);
 
-        valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        if (s_rejecting_conn)
+        {
+            // The link GAP CONNECT rejected. It never reached the hub or the health
+            // engine, so it leaves the same way: no notify, no health post.
+            s_rejecting_conn = false;
+            valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            reset_link_cache();
+            clear_all_state_bits();
+            taskENTER_CRITICAL(&s_mac_lock);
+            memset(g_valve_mac, 0, sizeof(g_valve_mac));
+            taskEXIT_CRITICAL(&s_mac_lock);
+            if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);   // the terminate backstop
+            ESP_LOGI(BLE_TAG, "[DISCONNECT] Rejected link closed");
+            if (g_connect_requested && ble_valve_has_target_mac())
+                start_scan();
+            return 0;
+        }
 
-        h_valve_char = 0;
-        h_flood_char = 0;
-        h_rmleak_char = 0;
-        h_batt_char = 0;
-        h_dis_char = 0;
-        h_valve_svc_end = 0;
-        h_flood_svc_end = 0;
-        h_batt_svc_end = 0;
-        h_dis_svc_end = 0;
-        g_val_battery = 0xFF;   // unknown with no link (not 0 %)
-        g_val_leak = false;
-        g_val_state = -1;
-        g_val_rmleak = false;   // reset like the other fields — no stale prior-session RMLEAK across a reconnect
-        g_firmware_rev[0] = '\0';
+        // Sampled before the link state is cleared. A link whose target was changed or
+        // removed while it was up is no longer the provisioned valve's, and its teardown
+        // must not reach the hub or the health engine either.
+        was_target = link_is_target();
+
+        valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        reset_link_cache();
 
         /* DELIBERATELY does NOT clear the health engine's valve leak state here.
          *
@@ -1518,8 +1623,13 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
          * far better failure than under-reporting the severity of an active flood. */
 
         clear_all_state_bits();
+        taskENTER_CRITICAL(&s_mac_lock);
         memset(g_valve_mac, 0, sizeof(g_valve_mac));
-        notify_hub_update(BLE_UPD_DISCONNECTED);
+        taskEXIT_CRITICAL(&s_mac_lock);
+        if (was_target)
+            notify_hub_update(BLE_UPD_DISCONNECTED);
+        else
+            ESP_LOGW(BLE_TAG, "[DISCONNECT] Link was not the provisioned valve - hub not notified");
 
         if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);
         if (post_connect_timer) xTimerStop(post_connect_timer, 0);
@@ -1569,6 +1679,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "║            ENCRYPTION CHANGE EVENT                           ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGI(BLE_TAG, "[ENC_CHANGE] status=%d", event->enc_change.status);
+
+        // A peer-initiated encryption on a link that is not (or no longer) the provisioned
+        // valve's: no discovery, no bond housekeeping. That link is already being dropped.
+        if (!link_is_target())
+        {
+            ESP_LOGW(BLE_TAG, "[ENC_CHANGE] Ignored - link is not the provisioned valve");
+            return 0;
+        }
 
         if (event->enc_change.status == 0)
         {
@@ -1647,6 +1765,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGI(BLE_TAG, "[PASSKEY] action=%d", event->passkey.params.action);
 
+        // The passkey is fixed and shared by every eFloStop valve: answering it would bond
+        // whichever valve asked. Only the provisioned valve gets it.
+        if (!link_is_target())
+        {
+            ESP_LOGW(BLE_TAG, "[PASSKEY] Not answered - link is not the provisioned valve");
+            return 0;
+        }
+
         if (event->passkey.params.action == BLE_SM_IOACT_INPUT)
         {
             ESP_LOGI(BLE_TAG, "[PASSKEY] INPUT required. Responding with fixed passkey: %lu",
@@ -1692,6 +1818,12 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "║            REPEAT PAIRING EVENT                              ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
 
+        if (!link_is_target())
+        {
+            ESP_LOGW(BLE_TAG, "[REPEAT_PAIR] Ignored - link is not the provisioned valve");
+            return BLE_GAP_REPEAT_PAIRING_IGNORE;
+        }
+
         rc = ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc);
         if (rc == 0)
         {
@@ -1714,6 +1846,15 @@ static void start_scan(void)
     if (!g_ble_synced)
     {
         ESP_LOGW(BLE_TAG, "[SCAN] Not synced");
+        return;
+    }
+
+    // Nothing to look for: this scan exists to find the provisioned valve (P0-a). The leak
+    // scanner runs its own scan.
+    char target[18];
+    if (!target_copy(target))
+    {
+        ESP_LOGI(BLE_TAG, "[SCAN] No provisioned valve - not scanning for valves");
         return;
     }
 
@@ -1750,7 +1891,7 @@ static void start_scan(void)
     //
     // Cost of turning it off: duplicate valve advertisement reports, which
     // handle_valve_disc()'s g_connecting guard absorbs.
-    ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for '%s'...", VALVE_DEVICE_NAME);
+    ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for provisioned valve %s...", target);
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
     // Extended scan: 1M PHY (valve + legacy leak sensors) + Coded PHY (long-range leak sensors)
@@ -1805,13 +1946,27 @@ static void write_valve_command(uint8_t val)
     // Every return path releases the settle barrier armed at enqueue: once we
     // know whether the cache was updated (or that it will not be), the snapshot
     // has nothing left to wait for.
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0)
+
+    // The target was removed after this was queued: drop it. Pending it would replay it
+    // on the next valve provisioned (P0-c).
+    if (!ble_valve_has_target_mac())
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] Valve write val=%u dropped - no provisioned valve", val);
+        cmd_settle_release();
+        return;
+    }
+
+    // Not ready includes a link that is not the provisioned valve's: pend for the real one.
+    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0 ||
+        !link_is_target())
     {
         ESP_LOGW(BLE_TAG, "[CMD] Valve write not ready. Queuing val=%u", val);
         g_pending_valve_cmd = (int)val;
         g_connect_requested = true;
         cmd_settle_release();
-        start_scan();
+        // With a foreign link still up, its DISCONNECT rescans (g_connect_requested).
+        if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+            start_scan();
         return;
     }
 
@@ -1886,13 +2041,23 @@ static void write_valve_command(uint8_t val)
 // -----------------------------------------------------------------------------
 static void write_rmleak_command(uint8_t val)
 {
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0)
+    // Same target rules as write_valve_command().
+    if (!ble_valve_has_target_mac())
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] RMLEAK write val=%u dropped - no provisioned valve", val);
+        cmd_settle_release();
+        return;
+    }
+
+    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0 ||
+        !link_is_target())
     {
         ESP_LOGW(BLE_TAG, "[CMD] RMLEAK write not ready. Queuing val=%u", val);
         g_pending_rmleak_cmd = (int)val;
         g_connect_requested = true;
         cmd_settle_release();
-        start_scan();
+        if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+            start_scan();
         return;
     }
 
@@ -2022,6 +2187,13 @@ static void ble_valve_task(void *pvParameters)
         {
         case BLE_CMD_CONNECT:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: CONNECT");
+            // Queued before the target was removed: there is nothing to connect to.
+            if (!ble_valve_has_target_mac())
+            {
+                ESP_LOGW(BLE_TAG, "[TASK] CONNECT ignored - no provisioned valve");
+                g_connect_requested = false;
+                break;
+            }
             g_connect_requested = true;
             start_scan();
             break;
@@ -2039,6 +2211,22 @@ static void ble_valve_task(void *pvParameters)
         case BLE_CMD_DISCONNECT:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: DISCONNECT");
             g_connect_requested = false;
+            // Stop every stage, not only an established link (N8): a connect still in
+            // flight would otherwise complete and link the valve anyway, and a valve scan
+            // would keep running. The cancelled connect reports status BLE_HS_EAPP, which
+            // the CONNECT handler does not rescan on. The leak scanner restarts its own
+            // scan once ours is gone.
+            if (g_connecting)
+            {
+                int crc = ble_gap_conn_cancel();
+                ESP_LOGI(BLE_TAG, "[TASK] Connect in flight cancelled (rc=%d)", crc);
+                g_connecting = false;
+            }
+            if (is_scanning)
+            {
+                ble_gap_disc_cancel();
+                is_scanning = false;
+            }
             if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE)
                 ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             break;
@@ -2131,7 +2319,7 @@ static void ble_starter_task(void *param)
 
     nimble_port_freertos_init(nimble_host_task);
     xTaskCreate(ble_valve_task, "ble_valve", 4096, NULL, 5, NULL);
-    ble_valve_connect();
+    ble_valve_connect();   // refused (logged) on a hub with no provisioned valve
 
     // Signal BLE leak scanner that NimBLE stack is ready
     app_ble_leak_signal_start();
@@ -2198,13 +2386,46 @@ void app_ble_valve_signal_start(void)
     }
 }
 
+static bool enqueue_cmd(ble_valve_cmd_t cmd)
+{
+    ble_valve_msg_t m = {.command = cmd};
+    return ble_cmd_queue != NULL &&
+           xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+}
+
+// With no provisioned valve every command is refused up front: nothing is queued, the
+// settle barrier is not armed, and nothing is left to replay on whichever valve is
+// provisioned next (P0-a/c).
+static bool refuse_without_target(const char *what)
+{
+    if (ble_valve_has_target_mac())
+        return false;
+    ESP_LOGW(BLE_TAG, "[CMD] %s refused - no provisioned valve", what);
+    return true;
+}
+
+// Drop every queued and pending valve command, for a valve target change or removal: a
+// command meant for the old valve (or for none) must not reach the next one (P0-c, N7).
+static void flush_valve_commands(const char *reason)
+{
+    if (ble_cmd_queue != NULL)
+        xQueueReset(ble_cmd_queue);
+    g_pending_valve_cmd = -1;
+    g_pending_rmleak_cmd = -1;
+    // The flushed commands' releases will never run; left armed, the barrier would hold
+    // snapshots back until its deadline.
+    atomic_store(&g_cmd_inflight, 0);
+    ESP_LOGW(BLE_TAG, "[CMD] Flushed queued/pending valve commands (%s)", reason);
+}
+
 // Arming here rather than at the call sites means every caller — rules engine
 // auto-close, C2D valve_open/valve_close, the override paths — gets the snapshot
 // settle barrier without having to remember it.
 bool ble_valve_open(void)
 {
-    ble_valve_msg_t m = {.command = BLE_CMD_OPEN_VALVE};
-    bool queued = xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (refuse_without_target("OPEN"))
+        return false;
+    bool queued = enqueue_cmd(BLE_CMD_OPEN_VALVE);
     if (queued) cmd_settle_arm();
     else ESP_LOGE(BLE_TAG, "[CMD] OPEN ENQUEUE FAILED — command queue full, valve NOT commanded");
     return queued;
@@ -2212,8 +2433,9 @@ bool ble_valve_open(void)
 
 bool ble_valve_close(void)
 {
-    ble_valve_msg_t m = {.command = BLE_CMD_CLOSE_VALVE};
-    bool queued = xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (refuse_without_target("CLOSE"))
+        return false;
+    bool queued = enqueue_cmd(BLE_CMD_CLOSE_VALVE);
     if (queued) cmd_settle_arm();
     else ESP_LOGE(BLE_TAG, "[CMD] CLOSE ENQUEUE FAILED — command queue full, valve NOT commanded");
     return queued;
@@ -2221,27 +2443,28 @@ bool ble_valve_close(void)
 
 bool ble_valve_connect(void)
 {
-    ble_valve_msg_t m = {.command = BLE_CMD_CONNECT};
-    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (refuse_without_target("CONNECT"))
+        return false;
+    return enqueue_cmd(BLE_CMD_CONNECT);
 }
 
+// Deliberately NOT gated on a target: it is how a removed valve's link is torn down.
 bool ble_valve_disconnect(void)
 {
-    ble_valve_msg_t m = {.command = BLE_CMD_DISCONNECT};
-    return xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    return enqueue_cmd(BLE_CMD_DISCONNECT);
 }
 
 bool ble_valve_get_mac(char *b)
 {
-    if (b == NULL)
+    if (b == NULL || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
         return false;
 
-    if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE && g_valve_mac[0] != 0)
-    {
-        strcpy(b, g_valve_mac);
-        return true;
-    }
-    return false;
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool have = (g_valve_mac[0] != '\0');
+    if (have)
+        memcpy(b, g_valve_mac, sizeof(g_valve_mac));
+    taskEXIT_CRITICAL(&s_mac_lock);
+    return have;
 }
 
 uint8_t ble_valve_get_battery(void)
@@ -2259,9 +2482,11 @@ int ble_valve_get_state(void)
     return g_val_state;
 }
 
+// Ready AND linked to the provisioned valve: every caller (health resync, rules tick,
+// override, fast snapshot) means "our valve is usable", never "some valve is".
 bool ble_valve_is_ready(void)
 {
-    return is_ready_for_gatt();
+    return is_ready_for_gatt() && link_is_target();
 }
 
 bool ble_valve_is_secured(void)
@@ -2276,25 +2501,59 @@ bool ble_valve_is_authenticated(void)
 
 void ble_valve_set_target_mac(const char *mac_str)
 {
+    char now_target[18];
+    bool changed = false;
+
+    taskENTER_CRITICAL(&s_mac_lock);
     if (!mac_str)
     {
+        changed = g_has_target_mac;
         g_has_target_mac = false;
         g_target_valve_mac[0] = '\0';
+    }
+    else
+    {
+        changed = !g_has_target_mac || strcasecmp(g_target_valve_mac, mac_str) != 0;
+        strncpy(g_target_valve_mac, mac_str, sizeof(g_target_valve_mac) - 1);
+        g_target_valve_mac[sizeof(g_target_valve_mac) - 1] = '\0';
+        g_has_target_mac = true;
+    }
+    memcpy(now_target, g_target_valve_mac, sizeof(now_target));
+    taskEXIT_CRITICAL(&s_mac_lock);
+
+    if (!mac_str)
+    {
         g_connect_requested = false;
         ESP_LOGI(BLE_TAG, "[API] Target MAC cleared");
-        return;
+    }
+    else
+    {
+        ESP_LOGI(BLE_TAG, "[API] Target MAC set to: %s", now_target);
     }
 
-    strncpy(g_target_valve_mac, mac_str, sizeof(g_target_valve_mac) - 1);
-    g_target_valve_mac[sizeof(g_target_valve_mac) - 1] = '\0';
-    g_has_target_mac = true;
+    // Same valve again (every provision re-applies it): keep its queued commands.
+    if (!changed)
+        return;
 
-    ESP_LOGI(BLE_TAG, "[API] Target MAC set to: %s", g_target_valve_mac);
+    flush_valve_commands(mac_str ? "valve target changed" : "valve decommissioned");
+
+    // Still linked to the previous valve: drop it so the new one can be found (N6). Sent
+    // directly, not via ble_valve_disconnect(), so it survives the flush just above.
+    if (mac_str && valve_conn_handle != BLE_HS_CONN_HANDLE_NONE && !link_is_target())
+    {
+        if (enqueue_cmd(BLE_CMD_DISCONNECT))
+            ESP_LOGW(BLE_TAG, "[API] Linked to a valve that is no longer the target - disconnecting");
+        else
+            ESP_LOGE(BLE_TAG, "[API] DISCONNECT of the previous valve could not be queued");
+    }
 }
 
 bool ble_valve_has_target_mac(void)
 {
-    return g_has_target_mac;
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool has = g_has_target_mac;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    return has;
 }
 
 EventGroupHandle_t ble_valve_get_state_event_group(void)
@@ -2311,8 +2570,9 @@ void ble_valve_clear_bonds(void)
 
 bool ble_valve_set_rmleak(bool enabled)
 {
-    ble_valve_msg_t m = {.command = enabled ? BLE_CMD_SET_RMLEAK : BLE_CMD_CLEAR_RMLEAK};
-    bool queued = xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+    if (refuse_without_target(enabled ? "RMLEAK SET" : "RMLEAK CLEAR"))
+        return false;
+    bool queued = enqueue_cmd(enabled ? BLE_CMD_SET_RMLEAK : BLE_CMD_CLEAR_RMLEAK);
     if (queued) cmd_settle_arm();
     else ESP_LOGE(BLE_TAG, "[CMD] RMLEAK ENQUEUE FAILED — command queue full, valve NOT commanded");
     return queued;

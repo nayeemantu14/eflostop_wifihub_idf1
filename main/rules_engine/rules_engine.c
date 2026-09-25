@@ -354,14 +354,12 @@ const char *leak_identity_key(bool is_valve)
 // beside valve_id and sensor_id. The emitter already performs the test — it must,
 // to resolve the MAC at all — so naming the key from it costs nothing.
 //
-// ble_valve_get_mac() only answers while the GATT link is up, and an auto_close
-// can fire in the moments around a dropout — so the PROVISIONED MAC is tried
-// second. Without it the same incident would name the valve by its MAC on one
-// event and by the literal "valve" on the next, which is worse for joining than
-// being uniformly wrong: the cloud would see a phantom device called "valve"
-// appear intermittently alongside the real one. provisioning_get_valve_mac()
-// works while disconnected and returns the same upper-case normalised string
-// every other message carries.
+// The valve's wire identity is the PROVISIONED MAC only (L18). It used to prefer
+// ble_valve_get_mac(), the MAC of whatever valve was linked — which until 2.1.4 could
+// be a neighbour's valve linked by name, so an event could name a device this hub does
+// not own. provisioning_get_valve_mac() also works while disconnected (an auto_close
+// can fire around a dropout) and returns the same upper-case normalised string every
+// other message carries, so one incident names the valve the same way throughout.
 #define WIRE_DEVICE_ID_BUF  18   // "XX:XX:XX:XX:XX:XX" + NUL
 
 // Returns NULL when no real identity exists, so callers OMIT the key rather than
@@ -371,9 +369,9 @@ const char *leak_identity_key(bool is_valve)
 static const char *wire_device_id(const char *source_id, char *buf)
 {
     if (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0) {
-        if (ble_valve_get_mac(buf) || provisioning_get_valve_mac(buf))
+        if (provisioning_get_valve_mac(buf))
             return buf;
-        return NULL;                  // valve has no resolvable MAC
+        return NULL;                  // no valve provisioned (or provisioning busy)
     }
     return source_id;                 // sensors carry their own id (may be NULL)
 }
@@ -413,6 +411,18 @@ static void add_interlock_device_id(cJSON *root)
 {
     char idbuf[WIRE_DEVICE_ID_BUF];
     add_device_id(root, VALVE_SOURCE_ID, idbuf);
+}
+
+// A false return from ble_valve_connect / _close / _open / _set_rmleak means either that
+// no valve is provisioned (the valve module then refuses every command: P0-a/c) or that
+// its command queue is full. Say which: the first is routine on a sensors-only hub, the
+// second never is.
+static void valve_cmd_not_sent(const char *what, const char *consequence)
+{
+    if (!ble_valve_has_target_mac())
+        ESP_LOGW(RULES_TAG, "%s not sent - no provisioned valve", what);
+    else
+        ESP_LOGE(RULES_TAG, "%s enqueue FAILED — %s", what, consequence);
 }
 
 static sensor_type_t source_to_sensor_type(leak_source_t source)
@@ -701,13 +711,18 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
         // the interlock/close never reaches the valve, and silence there looks
         // identical to success in every log and every telemetry field.
         if (!ble_valve_set_rmleak(true))
-            ESP_LOGE(RULES_TAG, "AUTO-CLOSE: RMLEAK enqueue FAILED — interlock not applied");
+            valve_cmd_not_sent("AUTO-CLOSE: RMLEAK", "interlock not applied");
         if (!ble_valve_close())
-            ESP_LOGE(RULES_TAG, "AUTO-CLOSE: close enqueue FAILED — valve NOT closed");
+            valve_cmd_not_sent("AUTO-CLOSE: close", "valve NOT closed");
+    } else if (!ble_valve_has_target_mac()) {
+        // Sensors-only hub: the incident is latched and reported, there is nothing to close.
+        ESP_LOGW(RULES_TAG, "AUTO-CLOSE: no provisioned valve - nothing to close");
     } else {
         ESP_LOGW(RULES_TAG, "AUTO-CLOSE: valve not connected — scanning; "
                             "close deferred to reconnect reconciliation");
-        ble_valve_connect();  // Trigger scan; reconciliation closes on connect
+        // Trigger scan; reconciliation closes on connect
+        if (!ble_valve_connect())
+            valve_cmd_not_sent("AUTO-CLOSE: connect", "no reconnect scan requested");
     }
 }
 
@@ -889,7 +904,8 @@ bool rules_engine_reset_leak_incident(void)
     // Always clear RMLEAK on valve — handles case where hub rebooted but
     // valve still has RMLEAK=1 from previous session
     if (was_active || valve_rmleak) {
-        ble_valve_set_rmleak(false);
+        if (!ble_valve_set_rmleak(false))
+            valve_cmd_not_sent("LEAK_RESET: RMLEAK clear", "valve interlock left set");
     }
     return true;
 }
@@ -944,10 +960,12 @@ bool rules_engine_cancel_override(void)
             /* RMLEAK before close — see comment in rules_engine_evaluate_leak.
              * Ensures the valve_state_changed event reports rmleak=true. */
             if (ble_valve_is_connected()) {
-                ble_valve_set_rmleak(true);
-                ble_valve_close();
-            } else {
-                ble_valve_connect();
+                if (!ble_valve_set_rmleak(true))
+                    valve_cmd_not_sent("OVERRIDE CANCEL: RMLEAK", "interlock not applied");
+                if (!ble_valve_close())
+                    valve_cmd_not_sent("OVERRIDE CANCEL: close", "valve NOT closed");
+            } else if (!ble_valve_connect()) {
+                valve_cmd_not_sent("OVERRIDE CANCEL: connect", "no reconnect scan requested");
             }
             return true;
         }
@@ -994,7 +1012,8 @@ override_enable_result_t rules_engine_enable_override_remote(void)
     if (!ble_valve_is_ready()) {
         ESP_LOGI(RULES_TAG, "override_enable: valve not ready — reconnecting (<=%dms)",
                  OVERRIDE_CONNECT_TIMEOUT_MS);
-        ble_valve_connect();
+        if (!ble_valve_connect())
+            valve_cmd_not_sent("override_enable: connect", "no reconnect scan requested");
         TickType_t start = xTaskGetTickCount();
         while (!ble_valve_is_ready()) {
             if ((xTaskGetTickCount() - start) >= pdMS_TO_TICKS(OVERRIDE_CONNECT_TIMEOUT_MS)) {
@@ -1046,8 +1065,10 @@ override_enable_result_t rules_engine_enable_override_remote(void)
     // RMLEAK must be cleared BEFORE the open — the valve refuses an open while
     // its remote_leak_active interlock is set (mirrors the physical button,
     // which clears its local latch before driving the motor open).
-    ble_valve_set_rmleak(false);
-    ble_valve_open();
+    if (!ble_valve_set_rmleak(false))
+        valve_cmd_not_sent("override_enable: RMLEAK clear", "valve interlock left set");
+    if (!ble_valve_open())
+        valve_cmd_not_sent("override_enable: open", "valve NOT opened");
 
     ESP_LOGW(RULES_TAG, "override_enable: 24h override started remotely — RMLEAK cleared, valve opening");
     return OVERRIDE_ENABLE_OK;
@@ -1230,9 +1251,9 @@ void rules_engine_on_valve_connected(void)
              * command queue here means the deferred close never happens, and
              * this is the recovery path for a leak the hub already missed once. */
             if (!ble_valve_set_rmleak(true))
-                ESP_LOGE(RULES_TAG, "RECONNECT AUTO-CLOSE: RMLEAK enqueue FAILED");
+                valve_cmd_not_sent("RECONNECT AUTO-CLOSE: RMLEAK", "interlock not applied");
             if (!ble_valve_close())
-                ESP_LOGE(RULES_TAG, "RECONNECT AUTO-CLOSE: close enqueue FAILED — valve NOT closed");
+                valve_cmd_not_sent("RECONNECT AUTO-CLOSE: close", "valve NOT closed");
             return;
         }
     }
@@ -1267,7 +1288,8 @@ void rules_engine_on_valve_connected(void)
             ESP_LOGW(RULES_TAG, "Reconnected: hub incident active, valve closed + RMLEAK clear — re-asserting");
             g_rmleak_assert_tick = xTaskGetTickCount();
             xSemaphoreGive(g_mutex);
-            ble_valve_set_rmleak(true);
+            if (!ble_valve_set_rmleak(true))
+                valve_cmd_not_sent("RECONNECT: RMLEAK re-assert", "interlock not applied");
         }
     } else if (!hub_active && valve_rmleak) {
         // Valve has RMLEAK but hub lost incident (hub rebooted).
@@ -1335,10 +1357,12 @@ void rules_engine_tick(void)
 
                     /* RMLEAK before close — see comment in rules_engine_evaluate_leak. */
                     if (ble_valve_is_connected()) {
-                        ble_valve_set_rmleak(true);
-                        ble_valve_close();
-                    } else {
-                        ble_valve_connect();
+                        if (!ble_valve_set_rmleak(true))
+                            valve_cmd_not_sent("OVERRIDE EXPIRED: RMLEAK", "interlock not applied");
+                        if (!ble_valve_close())
+                            valve_cmd_not_sent("OVERRIDE EXPIRED: close", "valve NOT closed");
+                    } else if (!ble_valve_connect()) {
+                        valve_cmd_not_sent("OVERRIDE EXPIRED: connect", "no reconnect scan requested");
                     }
                     return;
                 }
@@ -1378,7 +1402,8 @@ void rules_engine_tick(void)
             }
 
             xSemaphoreGive(g_mutex);
-            ble_valve_set_rmleak(false);  // Does NOT open valve
+            if (!ble_valve_set_rmleak(false))  // Does NOT open valve
+                valve_cmd_not_sent("AUTO-CLEAR: RMLEAK clear", "valve interlock left set");
             return;
         }
     }
