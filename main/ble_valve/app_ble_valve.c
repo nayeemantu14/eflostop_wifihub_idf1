@@ -62,6 +62,10 @@
 // Maximum security initiation retries
 #define MAX_SECURITY_RETRIES 3
 
+// nimble_port_init() attempts at BLE start, and the pause between them
+#define NIMBLE_INIT_ATTEMPTS  5
+#define NIMBLE_INIT_RETRY_MS  5000
+
 // -----------------------------------------------------------------------------
 // UUIDS (128-bit Explicit)
 // -----------------------------------------------------------------------------
@@ -147,8 +151,29 @@ static bool g_val_leak = false;
 static int g_val_state = -1;
 static bool g_val_rmleak = false;
 
+// Commands pended for the provisioned valve's next setup completion (-1 = none, else the
+// value). Every access is under s_mac_lock, and a pend checks s_cmd_gen in the same
+// critical section (pending_update()), so it can never survive the valve-target flush.
 static int g_pending_valve_cmd = -1;
 static int g_pending_rmleak_cmd = -1;
+#define PEND_ANY (-2)   // pending_update(): match whatever the slot holds
+
+// ---- Failed-write handling (G4c) --------------------------------------------
+// A GATT write the host refuses (rc != 0) is never dropped. The command task retries it
+// on the same link (CMD_WRITE_ATTEMPTS, 200 ms then 400 ms apart); when the link is gone,
+// or every attempt failed, it is pended and the next setup completion replays it, and
+// after failed attempts the link is dropped so that replay comes promptly.
+#define CMD_WRITE_ATTEMPTS   3
+#define CMD_WR_NO_MUTEX     (-1)   // gatt_mutex not taken within 1 s
+#define CMD_WR_STALE        (-2)   // issued before a valve target change: drop it
+#define CMD_WR_RELINK       (-3)   // no set-up link to the provisioned valve: pend it
+
+// ble_cmd_queue items carry the command (bits 0-7) and the generation it was issued under
+// (bits 8-31); still 4 bytes, so the queue costs no more RAM than the old ble_valve_msg_t.
+#define CMD_GEN_MASK        0x00FFFFFFu
+#define CMD_ITEM(cmd, gen)  ((((uint32_t)(gen) & CMD_GEN_MASK) << 8) | ((uint32_t)(cmd) & 0xFFu))
+#define CMD_ITEM_CMD(item)  ((ble_valve_cmd_t)((item) & 0xFFu))
+#define CMD_ITEM_GEN(item)  (((item) >> 8) & CMD_GEN_MASK)
 
 // ---- Hub-issued command settle barrier -------------------------------------
 // ble_valve_open/close/set_rmleak only ENQUEUE onto ble_cmd_queue; the cached
@@ -174,9 +199,9 @@ static void cmd_settle_arm(void)
                  esp_timer_get_time() + (int64_t)VALVE_CMD_SETTLE_MS * 1000);
 }
 
-// Idempotent-ish: clamps at zero so the apply_pending_* replay path — which
-// reaches write_*_command() without a matching arm — cannot drive the count
-// negative and wedge the barrier permanently open.
+// Every arm is matched by exactly one release (a replay requeued by apply_pending_cmd()
+// arms too). The clamp at zero is a backstop: an unmatched release must not drive the
+// count negative and wedge the barrier permanently open.
 static void cmd_settle_release(void)
 {
     int prev = atomic_fetch_sub(&g_cmd_inflight, 1);
@@ -207,6 +232,12 @@ static portMUX_TYPE s_mac_lock = portMUX_INITIALIZER_UNLOCKED;
 // until its DISCONNECT, which then closes it silently. NimBLE host task only.
 static bool s_rejecting_conn = false;
 
+// True from finish_cmd_write() dropping the link after failed writes (command task) until
+// the next GAP CONNECT/DISCONNECT (host task). The link still reads as ready until its
+// DISCONNECT lands, and a command written on it now could be lost with it: it is pended
+// for the next link instead. Set late (after a DISCONNECT) it only lingers until CONNECT.
+static bool s_link_dropping = false;
+
 // Copies the provisioned valve's MAC; returns false (out = "") when there is none.
 static bool target_copy(char out[18])
 {
@@ -230,6 +261,38 @@ static bool link_is_target(void)
                  strcasecmp(g_valve_mac, g_target_valve_mac) == 0;
     taskEXIT_CRITICAL(&s_mac_lock);
     return match;
+}
+
+// Valve-command generation, under s_mac_lock. Bumped with every valve target change, in the
+// same critical section that writes the new target and clears the pending slots. Each
+// queued command carries the generation it was issued under (CMD_ITEM), and a pend or a
+// retry re-checks it, so a command issued for the previous valve (or for none) is dropped
+// wherever it is: queued, already dequeued, mid-retry or being replayed (P0-c).
+static uint32_t s_cmd_gen = 0;
+
+static uint32_t cmd_gen_now(void)
+{
+    taskENTER_CRITICAL(&s_mac_lock);
+    uint32_t gen = s_cmd_gen;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    return gen;
+}
+
+static bool cmd_gen_is_current(uint32_t gen)
+{
+    return gen == cmd_gen_now();
+}
+
+// Sets *slot (a pending slot) to `val` only while `gen` is still current and the slot holds
+// `expect` (PEND_ANY = anything). False = the target changed, or the slot moved on.
+static bool pending_update(int *slot, int expect, int val, uint32_t gen)
+{
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool ok = (gen == s_cmd_gen) && (expect == PEND_ANY || *slot == expect);
+    if (ok)
+        *slot = val;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    return ok;
 }
 
 // Forward declarations
@@ -319,6 +382,14 @@ static bool is_ready_for_gatt(void)
 {
     EventBits_t bits = get_state_bits();
     return (bits & BLE_STATE_BIT_READY_FOR_GATT) == BLE_STATE_BIT_READY_FOR_GATT;
+}
+
+// A hub command may be written now: the link is the provisioned valve's, fully set up, not
+// being dropped, and `handle` (its characteristic) was discovered.
+static bool cmd_link_ready(uint16_t handle)
+{
+    return handle != 0 && !s_link_dropping && valve_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+           is_ready_for_gatt() && link_is_target();
 }
 
 // -----------------------------------------------------------------------------
@@ -845,67 +916,112 @@ static int on_read_dis_cb(uint16_t conn_handle,
     return 0;
 }
 
-// Both replays run only on the provisioned valve's link: a command pended for it must never
-// be written to whichever valve happens to finish setup (P0-c).
-static void apply_pending_valve_cmd_if_any(void)
+// Replays the command pended in *slot on a freshly set-up link (setup completion, NimBLE
+// host task). Only on the provisioned valve's link: a command pended for it must never be
+// written to whichever valve happens to finish setup (P0-c).
+//
+// The slot is cleared only once the host accepts the write. On a mutex timeout or rc != 0
+// the command moves to ble_cmd_queue, tagged with its own generation, so the command task
+// retries it (write_cmd_with_retry()) and a target change still drops it. A full queue
+// leaves it pended for the next link.
+// `ahead` is the outcome of a command that must land first (the RMLEAK command, for the
+// valve command; PEND_DONE when there is none): requeued, this one follows it through the
+// queue; kept pended, this one stays pended behind it. It never overtakes it.
+typedef enum { PEND_DONE = 0, PEND_REQUEUED, PEND_KEPT } pend_outcome_t;
+
+static pend_outcome_t apply_pending_cmd(int *slot, uint16_t handle, bool is_rmleak, pend_outcome_t ahead)
 {
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0 ||
-        !link_is_target())
-        return;
+    const char *what = is_rmleak ? "RMLEAK" : "valve";
 
-    if (g_pending_valve_cmd == 0 || g_pending_valve_cmd == 1)
+    if (!cmd_link_ready(handle))
+        return PEND_DONE;
+
+    taskENTER_CRITICAL(&s_mac_lock);
+    int v = *slot;
+    uint32_t gen = s_cmd_gen;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (v != 0 && v != 1)
+        return PEND_DONE;
+
+    if (ahead == PEND_KEPT)
     {
-        uint8_t v = (uint8_t)g_pending_valve_cmd;
+        ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d kept for the next link, behind the RMLEAK command", what, v);
+        return PEND_KEPT;
+    }
 
-        ESP_LOGI(BLE_TAG, "[CMD] Applying pending valve command=%d", g_pending_valve_cmd);
+    int rc = CMD_WR_NO_MUTEX;
+    if (ahead == PEND_REQUEUED)
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d not written - it follows the requeued RMLEAK command",
+                 what, v);
+    }
+    else
+    {
+        ESP_LOGI(BLE_TAG, "[CMD] Applying pending %s command=%d", what, v);
 
         if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
         {
-            int rc = ble_gattc_write_flat(valve_conn_handle, h_valve_char, &v, 1, NULL, NULL);
-            ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d (position awaits the valve's own report)", rc);
-            // Deliberately does NOT cache `v`, and reads straight back as a
-            // backstop against a session with no VALVESTATE subscription — see
-            // write_valve_command() for the full reasoning.
+            // Re-checked after the wait: the target may have changed (its flush already
+            // cleared the slot) or the link dropped (the slot waits for the next one).
+            if (!cmd_gen_is_current(gen) || !cmd_link_ready(handle))
+            {
+                xSemaphoreGive(gatt_mutex);
+                ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d not applied - valve target or link changed", what, v);
+                return PEND_DONE;
+            }
+            uint8_t b = (uint8_t)v;
+            rc = ble_gattc_write_flat(valve_conn_handle, handle, &b, 1, NULL, NULL);
+            ESP_LOGI(BLE_TAG, "[CMD] Pending %s write rc=%d (value awaits the valve's own report)", what, rc);
+            // Deliberately does NOT cache `b`, and reads straight back: a backstop for the
+            // position (no VALVESTATE subscription), mandatory for RMLEAK (the valve does
+            // not echo REMOTE_LEAK on the write path). See write_valve_command() and
+            // write_rmleak_command().
             if (rc == 0)
             {
-                int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_cmd_read_cb, NULL);
+                int rrc = ble_gattc_read(valve_conn_handle, handle, on_cmd_read_cb, NULL);
                 if (rrc != 0)
-                    ESP_LOGW(BLE_TAG, "[CMD] Valve state read-back rc=%d — position unconfirmed", rrc);
+                    ESP_LOGW(BLE_TAG, "[CMD] %s read-back rc=%d - %s unconfirmed", what, rrc,
+                             is_rmleak ? "interlock state" : "position");
             }
             xSemaphoreGive(gatt_mutex);
         }
-        g_pending_valve_cmd = -1;
-    }
-}
-
-static void apply_pending_rmleak_cmd_if_any(void)
-{
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0 ||
-        !link_is_target())
-        return;
-
-    if (g_pending_rmleak_cmd == 0 || g_pending_rmleak_cmd == 1)
-    {
-        uint8_t v = (uint8_t)g_pending_rmleak_cmd;
-
-        ESP_LOGI(BLE_TAG, "[CMD] Applying pending RMLEAK command=%d", g_pending_rmleak_cmd);
-
-        if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
+        else
         {
-            int rc = ble_gattc_write_flat(valve_conn_handle, h_rmleak_char, &v, 1, NULL, NULL);
-            ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d (value awaits the valve's own report)", rc);
-            // Deliberately does NOT cache `v`, and MUST read back — the valve does
-            // not echo REMOTE_LEAK on the write path. See write_rmleak_command().
-            if (rc == 0)
-            {
-                int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_cmd_read_cb, NULL);
-                if (rrc != 0)
-                    ESP_LOGW(BLE_TAG, "[CMD] RMLEAK read-back rc=%d — interlock state unconfirmed", rrc);
-            }
-            xSemaphoreGive(gatt_mutex);
+            ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d: GATT mutex timeout", what, v);
         }
-        g_pending_rmleak_cmd = -1;
     }
+
+    if (rc == 0)
+    {
+        (void)pending_update(slot, v, -1, gen);
+        return PEND_DONE;
+    }
+
+    // Taken out of the slot BEFORE the send (the command task can dequeue it, fail and
+    // re-pend it straight away), and only while the slot still holds it: a flush,
+    // ble_valve_cancel_pending_close() or a newer command since the read above wins.
+    if (!pending_update(slot, v, -1, gen))
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d flushed or superseded meanwhile - not requeued", what, v);
+        return PEND_DONE;
+    }
+
+    ble_valve_cmd_t cmd = is_rmleak ? (v ? BLE_CMD_SET_RMLEAK : BLE_CMD_CLEAR_RMLEAK)
+                                    : (v ? BLE_CMD_OPEN_VALVE : BLE_CMD_CLOSE_VALVE);
+    uint32_t item = CMD_ITEM(cmd, gen);
+    cmd_settle_arm();   // released by the command task's write, like any hub command
+    if (ble_cmd_queue != NULL && xQueueSend(ble_cmd_queue, &item, 0) == pdTRUE)
+    {
+        if (ahead != PEND_REQUEUED)
+            ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d not applied (rc=%d) - requeued for retry", what, v, rc);
+        return PEND_REQUEUED;
+    }
+
+    cmd_settle_release();
+    (void)pending_update(slot, -1, v, gen);   // back in the slot unless flushed/superseded
+    ESP_LOGE(BLE_TAG, "[CMD] Pending %s command=%d not applied, command queue full - kept for the next link",
+             what, v);
+    return PEND_KEPT;
 }
 
 static void setup_next_step(void)
@@ -1098,8 +1214,15 @@ static void setup_next_step(void)
             ESP_LOGI(BLE_TAG, "[READY] Announcing flood probe state (dry) for reconciliation");
         notify_hub_update(BLE_UPD_LEAK);
 
-        apply_pending_valve_cmd_if_any();
-        apply_pending_rmleak_cmd_if_any();
+        /* RMLEAK before the valve command, the order every live pair is issued in (rules
+         * engine: set_rmleak(true) then close, set_rmleak(false) then open). A CLOSE must
+         * not land ahead of its interlock, nor an OPEN ahead of the interlock's release.
+         * If the RMLEAK command could not be written now, the valve command follows it
+         * (through the queue, or into the next link) instead of overtaking it. */
+        {
+            pend_outcome_t rmleak_outcome = apply_pending_cmd(&g_pending_rmleak_cmd, h_rmleak_char, true, PEND_DONE);
+            (void)apply_pending_cmd(&g_pending_valve_cmd, h_valve_char, false, rmleak_outcome);
+        }
         break;
     }
 }
@@ -1493,6 +1616,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         // guard before branching, so a failure path that calls start_scan() can
         // legitimately attempt the next connection.
         g_connecting = false;
+        s_link_dropping = false;   // a new link (or none): see finish_cmd_write()
 
         if (event->connect.status == 0)
         {
@@ -1572,6 +1696,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "║            GAP DISCONNECT EVENT                              ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGW(BLE_TAG, "[DISCONNECT] reason=0x%02x", event->disconnect.reason);
+        s_link_dropping = false;   // the dropped link is gone (finish_cmd_write())
 
         if (s_rejecting_conn)
         {
@@ -1941,12 +2066,123 @@ static void start_scan(void)
 // -----------------------------------------------------------------------------
 // WRITE COMMAND
 // -----------------------------------------------------------------------------
-static void write_valve_command(uint8_t val)
+// Writes a hub command to the provisioned valve's characteristic *handle (re-read on every
+// attempt: a rediscovery zeroes it) and issues the read-back. Up to CMD_WRITE_ATTEMPTS
+// attempts, 200 ms then 400 ms apart, with gatt_mutex released in between so the host
+// task's replays are not held off. Command task only: it sleeps.
+// Returns 0 once the host accepted the write, CMD_WR_STALE, CMD_WR_RELINK, or the last
+// failure (a NimBLE rc, or CMD_WR_NO_MUTEX) when every attempt failed on a live link.
+static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t gen,
+                                const char *what, const char *unconfirmed)
 {
-    // Every return path releases the settle barrier armed at enqueue: once we
-    // know whether the cache was updated (or that it will not be), the snapshot
-    // has nothing left to wait for.
+    int rc = CMD_WR_RELINK;
+    for (int attempt = 1; attempt <= CMD_WRITE_ATTEMPTS; attempt++)
+    {
+        if (attempt > 1)
+        {
+            int delay_ms = (attempt == 2) ? 200 : 400;
+            ESP_LOGW(BLE_TAG, "[CMD] %s write attempt %d/%d failed (rc=%d) - retrying in %d ms",
+                     what, attempt - 1, CMD_WRITE_ATTEMPTS, rc, delay_ms);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
 
+        if (gatt_mutex == NULL || xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+        {
+            rc = CMD_WR_NO_MUTEX;
+            continue;
+        }
+
+        // Checked right before each write: while this task waited or slept, the target may
+        // have changed (its flush must win) or the link dropped.
+        if (!cmd_gen_is_current(gen))
+        {
+            rc = CMD_WR_STALE;
+        }
+        else if (!cmd_link_ready(*handle))
+        {
+            rc = CMD_WR_RELINK;
+        }
+        else
+        {
+            ESP_LOGI(BLE_TAG, "[CMD] Writing %s=%u", what, val);
+            rc = ble_gattc_write_flat(valve_conn_handle, *handle, &val, 1, NULL, NULL);
+            ESP_LOGI(BLE_TAG, "[CMD] %s write rc=%d (value awaits the valve's own report)", what, rc);
+            if (rc == 0)
+            {
+                // The read-back write_valve_command() / write_rmleak_command() explain.
+                int rrc = ble_gattc_read(valve_conn_handle, *handle, on_cmd_read_cb, NULL);
+                if (rrc != 0)
+                    ESP_LOGW(BLE_TAG, "[CMD] %s read-back rc=%d - %s unconfirmed", what, rrc, unconfirmed);
+            }
+            else if (rc == BLE_HS_ENOTCONN || !link_is_target())
+            {
+                // Retrying on this link is pointless: pend for the provisioned valve's next one.
+                ESP_LOGW(BLE_TAG, "[CMD] %s write rc=%d - link to the provisioned valve lost", what, rc);
+                rc = CMD_WR_RELINK;
+            }
+        }
+        xSemaphoreGive(gatt_mutex);
+
+        if (rc == 0 || rc == CMD_WR_STALE || rc == CMD_WR_RELINK)
+            return rc;
+    }
+    return rc;
+}
+
+// Settles a hub command after write_cmd_with_retry(). Releases the settle barrier armed at
+// enqueue on every path: once we know whether the write went out (or that it will not now),
+// the snapshot has nothing left to wait for. `slot` is the command's pending slot.
+static void finish_cmd_write(int rc, uint8_t val, uint32_t gen, int *slot, const char *what)
+{
+    if (rc == 0)
+    {
+        // Supersedes an older command of the same kind still pended (one a full queue kept
+        // back in apply_pending_cmd()): replayed at the next link, it would undo this one.
+        (void)pending_update(slot, PEND_ANY, -1, gen);
+    }
+    else if (rc == CMD_WR_STALE || !pending_update(slot, PEND_ANY, (int)val, gen))
+    {
+        // Issued for the previous valve (or for none): pending it would replay it on the
+        // valve provisioned now (P0-c).
+        ESP_LOGW(BLE_TAG, "[CMD] %s write val=%u dropped - the valve target changed since it was issued",
+                 what, val);
+    }
+    else if (rc == CMD_WR_RELINK)
+    {
+        // Pended above, for the provisioned valve's next setup completion.
+        ESP_LOGW(BLE_TAG, "[CMD] %s write not ready. Queuing val=%u", what, val);
+        g_connect_requested = true;
+        // With a foreign link still up, its DISCONNECT rescans (g_connect_requested).
+        if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+            start_scan();
+    }
+    else
+    {
+        // Pended above. Every attempt failed on a live link: drop it, and the setup
+        // completion of the next one replays the command (apply_pending_cmd()).
+        ESP_LOGE(BLE_TAG, "[CMD] valve write failed %d times (rc=%d) - reconnecting to re-apply (%s=%u)",
+                 CMD_WRITE_ATTEMPTS, rc, what, val);
+        g_connect_requested = true;
+        uint16_t conn = valve_conn_handle;
+        if (conn == BLE_HS_CONN_HANDLE_NONE)
+        {
+            start_scan();
+        }
+        else
+        {
+            int trc = ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+            if (trc == 0)
+                s_link_dropping = true;   // later commands pend behind this one
+            else
+                ESP_LOGE(BLE_TAG, "[CMD] terminate rc=%d - %s=%u stays pending for the next link",
+                         trc, what, val);
+        }
+    }
+    cmd_settle_release();
+}
+
+static void write_valve_command(uint8_t val, uint32_t gen)
+{
     // The target was removed after this was queued: drop it. Pending it would replay it
     // on the next valve provisioned (P0-c).
     if (!ble_valve_has_target_mac())
@@ -1956,90 +2192,61 @@ static void write_valve_command(uint8_t val)
         return;
     }
 
-    // Not ready includes a link that is not the provisioned valve's: pend for the real one.
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_valve_char == 0 ||
-        !link_is_target())
-    {
-        ESP_LOGW(BLE_TAG, "[CMD] Valve write not ready. Queuing val=%u", val);
-        g_pending_valve_cmd = (int)val;
-        g_connect_requested = true;
-        cmd_settle_release();
-        // With a foreign link still up, its DISCONNECT rescans (g_connect_requested).
-        if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
-            start_scan();
-        return;
-    }
-
-    if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
-    {
-        ESP_LOGI(BLE_TAG, "[CMD] Writing valve command=%u", val);
-        int rc = ble_gattc_write_flat(valve_conn_handle, h_valve_char, &val, 1, NULL, NULL);
-        ESP_LOGI(BLE_TAG, "[CMD] Valve write rc=%d (position awaits the valve's own report)", rc);
-
-        // The cache is DELIBERATELY not written here.
-        //
-        // This used to do `g_val_state = val; notify_hub_update(BLE_UPD_STATE);`
-        // on rc == 0. But rc == 0 is local NimBLE host acceptance — the write has
-        // been queued, not delivered, not acknowledged, and certainly not acted
-        // on. The hub was therefore publishing its own INTENT as fact: both wire
-        // legs (valve_state_changed and the snapshot's data.valve.state) read
-        // g_val_state. A valve that never received the command, or received it
-        // and failed to move, was reported as closed.
-        //
-        // Worse, it was self-concealing: when the valve's real value did arrive,
-        // on_notify()'s delta gate (old_state == g_val_state) saw no change and
-        // suppressed the correcting event.
-        //
-        // Leaving the cache alone makes the valve the source of truth. The valve
-        // notifies CUSTOM_STM_VALVESTATE from its own BLE-write handler
-        // (DK-Servo_Motor app_main.c, the `echo` push), so a command that lands
-        // produces a genuine old != new transition and emits
-        // valve_state_changed sourced from the device. A command that does not
-        // land produces no event, and the snapshot keeps honestly reporting the
-        // last state the valve actually reported. Setup step 5 re-reads the
-        // characteristic on every reconnect, so a lost notify self-corrects.
-        //
-        // Honest limitation: the valve reports its COMMANDED state, not a sensed
-        // position — it has no position feedback. This upgrades the hub from
-        // "reports what it asked for" to "reports what the valve says it did",
-        // which proves delivery and actuation intent. It does not prove the gate
-        // physically moved.
-        //
-        // BACKSTOP: read the characteristic straight back, because the notify is
-        // not guaranteed. on_dsc_disc_cb() logs a missing CCCD and then calls
-        // setup_next_step() anyway, so a session can reach DISCOVERY_DONE with no
-        // VALVESTATE subscription at all. Before this commit the optimistic cache
-        // write accidentally masked that; without a backstop it would surface as
-        // a repeating auto_close — rules_engine's idempotence guard
-        // (valve_state == 0 && rmleak_already) could never become true, so every
-        // cooldown would re-issue the close while a sensor stayed wet.
-        //
-        // ATT is sequential on one connection, so this read is serviced after the
-        // write and returns the value the valve's write handler just published.
-        // It lands via on_read_cb() -> on_notify(), i.e. through the SAME delta
-        // gate as an unsolicited notify, so it cannot double-report. One extra
-        // round trip per valve command, and commands are rare.
-        if (rc == 0)
-        {
-            int rrc = ble_gattc_read(valve_conn_handle, h_valve_char, on_cmd_read_cb, NULL);
-            if (rrc != 0)
-                ESP_LOGW(BLE_TAG, "[CMD] Valve state read-back rc=%d — position unconfirmed", rrc);
-        }
-        xSemaphoreGive(gatt_mutex);
-        cmd_settle_release();
-    }
-    else
-    {
-        ESP_LOGW(BLE_TAG, "[CMD] Failed to acquire mutex. Queuing val=%u", val);
-        g_pending_valve_cmd = (int)val;
-        cmd_settle_release();
-    }
+    // A link that is not ready, or not the provisioned valve's, pends the command for the
+    // real one (CMD_WR_RELINK). write_cmd_with_retry() issues the read-back below after
+    // every accepted write.
+    //
+    // The cache is DELIBERATELY not written here.
+    //
+    // This used to do `g_val_state = val; notify_hub_update(BLE_UPD_STATE);`
+    // on rc == 0. But rc == 0 is local NimBLE host acceptance — the write has
+    // been queued, not delivered, not acknowledged, and certainly not acted
+    // on. The hub was therefore publishing its own INTENT as fact: both wire
+    // legs (valve_state_changed and the snapshot's data.valve.state) read
+    // g_val_state. A valve that never received the command, or received it
+    // and failed to move, was reported as closed.
+    //
+    // Worse, it was self-concealing: when the valve's real value did arrive,
+    // on_notify()'s delta gate (old_state == g_val_state) saw no change and
+    // suppressed the correcting event.
+    //
+    // Leaving the cache alone makes the valve the source of truth. The valve
+    // notifies CUSTOM_STM_VALVESTATE from its own BLE-write handler
+    // (DK-Servo_Motor app_main.c, the `echo` push), so a command that lands
+    // produces a genuine old != new transition and emits
+    // valve_state_changed sourced from the device. A command that does not
+    // land produces no event, and the snapshot keeps honestly reporting the
+    // last state the valve actually reported. Setup step 5 re-reads the
+    // characteristic on every reconnect, so a lost notify self-corrects.
+    //
+    // Honest limitation: the valve reports its COMMANDED state, not a sensed
+    // position — it has no position feedback. This upgrades the hub from
+    // "reports what it asked for" to "reports what the valve says it did",
+    // which proves delivery and actuation intent. It does not prove the gate
+    // physically moved.
+    //
+    // BACKSTOP: read the characteristic straight back, because the notify is
+    // not guaranteed. on_dsc_disc_cb() logs a missing CCCD and then calls
+    // setup_next_step() anyway, so a session can reach DISCOVERY_DONE with no
+    // VALVESTATE subscription at all. Before this commit the optimistic cache
+    // write accidentally masked that; without a backstop it would surface as
+    // a repeating auto_close — rules_engine's idempotence guard
+    // (valve_state == 0 && rmleak_already) could never become true, so every
+    // cooldown would re-issue the close while a sensor stayed wet.
+    //
+    // ATT is sequential on one connection, so this read is serviced after the
+    // write and returns the value the valve's write handler just published.
+    // It lands via on_cmd_read_cb() -> on_notify(), i.e. through the SAME delta
+    // gate as an unsolicited notify, so it cannot double-report. One extra
+    // round trip per valve command, and commands are rare.
+    int rc = write_cmd_with_retry(&h_valve_char, val, gen, "Valve", "position");
+    finish_cmd_write(rc, val, gen, &g_pending_valve_cmd, "Valve");
 }
 
 // -----------------------------------------------------------------------------
 // RMLEAK WRITE COMMAND
 // -----------------------------------------------------------------------------
-static void write_rmleak_command(uint8_t val)
+static void write_rmleak_command(uint8_t val, uint32_t gen)
 {
     // Same target rules as write_valve_command().
     if (!ble_valve_has_target_mac())
@@ -2049,69 +2256,39 @@ static void write_rmleak_command(uint8_t val)
         return;
     }
 
-    if (!is_ready_for_gatt() || valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || h_rmleak_char == 0 ||
-        !link_is_target())
-    {
-        ESP_LOGW(BLE_TAG, "[CMD] RMLEAK write not ready. Queuing val=%u", val);
-        g_pending_rmleak_cmd = (int)val;
-        g_connect_requested = true;
-        cmd_settle_release();
-        if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
-            start_scan();
-        return;
-    }
-
-    if (gatt_mutex != NULL && xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) == pdTRUE)
-    {
-        ESP_LOGI(BLE_TAG, "[CMD] Writing RMLEAK=%u", val);
-        int rc = ble_gattc_write_flat(valve_conn_handle, h_rmleak_char, &val, 1, NULL, NULL);
-        ESP_LOGI(BLE_TAG, "[CMD] RMLEAK write rc=%d", rc);
-        if (rc == 0)
-        {
-            // Like write_valve_command(), this deliberately does NOT cache the
-            // value it just asked for. rc == 0 is local host acceptance, and the
-            // same false-assurance argument applies verbatim: reporting
-            // rmleak:true for a write that never reached the valve is exactly the
-            // failure P0-7 removed from the position path. The valve pushes
-            // CUSTOM_STM_REMOTE_LEAK back itself, so on_notify() supplies the
-            // real value; setup re-reads it on every reconnect.
-            //
-            // Leaving this asymmetric would have been worse than either choice
-            // consistently: rules_engine_on_valve_connected() disambiguates a
-            // physical override by comparing valve state against rmleak, and
-            // feeding it one optimistic and one honest input is how that
-            // inference goes wrong.
-            //
-            // The wake stays — it refreshes valve liveness in the health engine
-            // and BLE_UPD_RMLEAK emits no D2C event of its own, so it is a wake,
-            // not traffic.
-            //
-            // READ-BACK IS MANDATORY HERE, unlike the position path where it is
-            // only a backstop. The valve echoes CUSTOM_STM_VALVESTATE from its own
-            // BLE-write handler, but it does NOT do the same for REMOTE_LEAK — it
-            // pushes that characteristic only on the physical-override path and at
-            // init (DK-Servo_Motor app_main.c:227, :72). So a hub-written RMLEAK
-            // produces NO notify at all, and without this read the cache would
-            // stay stale until the next reconnect re-read it.
-            //
-            // Observed in the field on 2.1.1 before this line existed: nine
-            // auto_close events reporting rmleak_asserted:true, valve connected
-            // throughout, and valve.rmleak false in every snapshot — which also
-            // kept the fleet LED green through an active leak, since its override
-            // reads ble_valve_get_rmleak_state().
-            int rrc = ble_gattc_read(valve_conn_handle, h_rmleak_char, on_cmd_read_cb, NULL);
-            if (rrc != 0)
-                ESP_LOGW(BLE_TAG, "[CMD] RMLEAK read-back rc=%d — interlock state unconfirmed", rrc);
-        }
-        xSemaphoreGive(gatt_mutex);
-        cmd_settle_release();
-    }
-    else
-    {
-        ESP_LOGW(BLE_TAG, "[CMD] Failed to acquire mutex for RMLEAK. Queuing val=%u", val);
-        g_pending_rmleak_cmd = (int)val;
-        cmd_settle_release();
-    }
+    // Like write_valve_command(), this deliberately does NOT cache the
+    // value it just asked for. rc == 0 is local host acceptance, and the
+    // same false-assurance argument applies verbatim: reporting
+    // rmleak:true for a write that never reached the valve is exactly the
+    // failure P0-7 removed from the position path. The valve pushes
+    // CUSTOM_STM_REMOTE_LEAK back itself, so on_notify() supplies the
+    // real value; setup re-reads it on every reconnect.
+    //
+    // Leaving this asymmetric would have been worse than either choice
+    // consistently: rules_engine_on_valve_connected() disambiguates a
+    // physical override by comparing valve state against rmleak, and
+    // feeding it one optimistic and one honest input is how that
+    // inference goes wrong.
+    //
+    // The wake stays — it refreshes valve liveness in the health engine
+    // and BLE_UPD_RMLEAK emits no D2C event of its own, so it is a wake,
+    // not traffic.
+    //
+    // READ-BACK IS MANDATORY HERE, unlike the position path where it is
+    // only a backstop. The valve echoes CUSTOM_STM_VALVESTATE from its own
+    // BLE-write handler, but it does NOT do the same for REMOTE_LEAK — it
+    // pushes that characteristic only on the physical-override path and at
+    // init (DK-Servo_Motor app_main.c:227, :72). So a hub-written RMLEAK
+    // produces NO notify at all, and without this read the cache would
+    // stay stale until the next reconnect re-read it.
+    //
+    // Observed in the field on 2.1.1 before this line existed: nine
+    // auto_close events reporting rmleak_asserted:true, valve connected
+    // throughout, and valve.rmleak false in every snapshot — which also
+    // kept the fleet LED green through an active leak, since its override
+    // reads ble_valve_get_rmleak_state().
+    int rc = write_cmd_with_retry(&h_rmleak_char, val, gen, "RMLEAK", "interlock state");
+    finish_cmd_write(rc, val, gen, &g_pending_rmleak_cmd, "RMLEAK");
 }
 
 // -----------------------------------------------------------------------------
@@ -2174,16 +2351,20 @@ static void on_stack_sync(void)
 static void ble_valve_task(void *pvParameters)
 {
     (void)pvParameters;
-    ble_valve_msg_t msg;
+    uint32_t item = 0;
 
     ESP_LOGI(BLE_TAG, "[TASK] BLE command task started");
 
     while (1)
     {
-        if (xQueueReceive(ble_cmd_queue, &msg, portMAX_DELAY) != pdTRUE)
+        if (xQueueReceive(ble_cmd_queue, &item, portMAX_DELAY) != pdTRUE)
             continue;
 
-        switch (msg.command)
+        // The generation the command was issued under (see s_cmd_gen): a valve write from
+        // before a target change is dropped by write_cmd_with_retry().
+        uint32_t gen = CMD_ITEM_GEN(item);
+
+        switch (CMD_ITEM_CMD(item))
         {
         case BLE_CMD_CONNECT:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: CONNECT");
@@ -2200,12 +2381,12 @@ static void ble_valve_task(void *pvParameters)
 
         case BLE_CMD_OPEN_VALVE:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: OPEN_VALVE");
-            write_valve_command(1);
+            write_valve_command(1, gen);
             break;
 
         case BLE_CMD_CLOSE_VALVE:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: CLOSE_VALVE");
-            write_valve_command(0);
+            write_valve_command(0, gen);
             break;
 
         case BLE_CMD_DISCONNECT:
@@ -2239,12 +2420,12 @@ static void ble_valve_task(void *pvParameters)
 
         case BLE_CMD_SET_RMLEAK:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: SET_RMLEAK");
-            write_rmleak_command(1);
+            write_rmleak_command(1, gen);
             break;
 
         case BLE_CMD_CLEAR_RMLEAK:
             ESP_LOGI(BLE_TAG, "[TASK] CMD: CLEAR_RMLEAK");
-            write_rmleak_command(0);
+            write_rmleak_command(0, gen);
             break;
 
         default:
@@ -2263,9 +2444,25 @@ static void ble_starter_task(void *param)
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     ESP_LOGI(BLE_TAG, "[INIT] Signal received. Starting BLE stack...");
 
-    int rc = nimble_port_init();
+    // Retried: the likely failure is a heap shortfall for the controller, which can pass,
+    // and giving up leaves the hub with no valve link and no BLE leak sensors until a
+    // reboot. nimble_port_init() disables/deinits the controller again when it fails.
+    int rc = ESP_FAIL;
+    for (int attempt = 1; attempt <= NIMBLE_INIT_ATTEMPTS; attempt++)
+    {
+        rc = nimble_port_init();
+        if (rc == ESP_OK)
+            break;
+        if (attempt < NIMBLE_INIT_ATTEMPTS)
+        {
+            ESP_LOGW(BLE_TAG, "[INIT] nimble_port_init failed (rc=%d), attempt %d/%d - retrying in %d s",
+                     rc, attempt, NIMBLE_INIT_ATTEMPTS, NIMBLE_INIT_RETRY_MS / 1000);
+            vTaskDelay(pdMS_TO_TICKS(NIMBLE_INIT_RETRY_MS));
+        }
+    }
     if (rc != ESP_OK) {
-        ESP_LOGE(BLE_TAG, "[INIT] nimble_port_init failed (rc=%d)", rc);
+        ESP_LOGE(BLE_TAG, "[INIT] nimble_port_init failed (rc=%d) after %d attempts - BLE is not available",
+                 rc, NIMBLE_INIT_ATTEMPTS);
         vTaskDelete(NULL);
         return;
     }
@@ -2351,7 +2548,7 @@ void app_ble_valve_init(void)
         return;
     }
 
-    ble_cmd_queue = xQueueCreate(10, sizeof(ble_valve_msg_t));
+    ble_cmd_queue = xQueueCreate(10, sizeof(uint32_t));   // CMD_ITEM: command + generation
     if (ble_cmd_queue == NULL)
     {
         ESP_LOGE(BLE_TAG, "[INIT] Failed to create command queue");
@@ -2386,11 +2583,13 @@ void app_ble_valve_signal_start(void)
     }
 }
 
+// Tagged with the current generation: if the valve target changes before the command task
+// writes it, the write is dropped rather than sent to the next valve (see s_cmd_gen).
 static bool enqueue_cmd(ble_valve_cmd_t cmd)
 {
-    ble_valve_msg_t m = {.command = cmd};
+    uint32_t item = CMD_ITEM(cmd, cmd_gen_now());
     return ble_cmd_queue != NULL &&
-           xQueueSend(ble_cmd_queue, &m, pdMS_TO_TICKS(10)) == pdTRUE;
+           xQueueSend(ble_cmd_queue, &item, pdMS_TO_TICKS(10)) == pdTRUE;
 }
 
 // With no provisioned valve every command is refused up front: nothing is queued, the
@@ -2404,18 +2603,19 @@ static bool refuse_without_target(const char *what)
     return true;
 }
 
-// Drop every queued and pending valve command, for a valve target change or removal: a
-// command meant for the old valve (or for none) must not reach the next one (P0-c, N7).
-static void flush_valve_commands(const char *reason)
+// Logs what a valve target change flushed (ble_valve_set_target_mac() does the flushing).
+// WARN only when something was actually dropped: the first target at boot counts as a
+// change, so an unconditional WARN used to print on every boot with a valve.
+static void report_valve_cmd_flush(const char *reason, unsigned queued, int inflight,
+                                   int pend_valve, int pend_rmleak)
 {
-    if (ble_cmd_queue != NULL)
-        xQueueReset(ble_cmd_queue);
-    g_pending_valve_cmd = -1;
-    g_pending_rmleak_cmd = -1;
-    // The flushed commands' releases will never run; left armed, the barrier would hold
-    // snapshots back until its deadline.
-    atomic_store(&g_cmd_inflight, 0);
-    ESP_LOGW(BLE_TAG, "[CMD] Flushed queued/pending valve commands (%s)", reason);
+    if (queued == 0 && inflight <= 0 && pend_valve < 0 && pend_rmleak < 0)
+    {
+        ESP_LOGI(BLE_TAG, "[CMD] No valve commands to flush (%s)", reason);
+        return;
+    }
+    ESP_LOGW(BLE_TAG, "[CMD] Flushed queued/pending valve commands (%s): queued=%u, in flight=%d, "
+             "pending valve=%d rmleak=%d", reason, queued, inflight, pend_valve, pend_rmleak);
 }
 
 // Arming here rather than at the call sites means every caller — rules engine
@@ -2499,12 +2699,38 @@ bool ble_valve_is_authenticated(void)
     return (get_state_bits() & BLE_STATE_BIT_AUTHENTICATED) != 0;
 }
 
+// A CHANGE (or removal) flushes every valve command issued before it, so none reaches the
+// next valve (P0-c, N7): the queue is wiped, then the generation moves with the target in
+// one critical section that also clears the pending slots. A command queued between the
+// two still carries the old generation and is dropped when dequeued, as is one already
+// dequeued, mid-retry or being replayed; one queued after carries the new generation and
+// is never wiped.
 void ble_valve_set_target_mac(const char *mac_str)
 {
     char now_target[18];
     bool changed = false;
+    bool had_target = false;
+    int pend_valve = -1;
+    int pend_rmleak = -1;
 
     taskENTER_CRITICAL(&s_mac_lock);
+    bool will_change = mac_str ? (!g_has_target_mac || strcasecmp(g_target_valve_mac, mac_str) != 0)
+                               : g_has_target_mac;
+    taskEXIT_CRITICAL(&s_mac_lock);
+
+    unsigned queued = 0;
+    int inflight = 0;
+    if (will_change && ble_cmd_queue != NULL)
+    {
+        queued = (unsigned)uxQueueMessagesWaiting(ble_cmd_queue);
+        xQueueReset(ble_cmd_queue);
+        // The wiped commands' releases will never run; left armed, the barrier would hold
+        // snapshots back until its deadline.
+        inflight = atomic_exchange(&g_cmd_inflight, 0);
+    }
+
+    taskENTER_CRITICAL(&s_mac_lock);
+    had_target = g_has_target_mac;
     if (!mac_str)
     {
         changed = g_has_target_mac;
@@ -2517,6 +2743,14 @@ void ble_valve_set_target_mac(const char *mac_str)
         strncpy(g_target_valve_mac, mac_str, sizeof(g_target_valve_mac) - 1);
         g_target_valve_mac[sizeof(g_target_valve_mac) - 1] = '\0';
         g_has_target_mac = true;
+    }
+    if (changed)
+    {
+        s_cmd_gen = (s_cmd_gen + 1) & CMD_GEN_MASK;
+        pend_valve = g_pending_valve_cmd;
+        pend_rmleak = g_pending_rmleak_cmd;
+        g_pending_valve_cmd = -1;
+        g_pending_rmleak_cmd = -1;
     }
     memcpy(now_target, g_target_valve_mac, sizeof(now_target));
     taskEXIT_CRITICAL(&s_mac_lock);
@@ -2535,10 +2769,12 @@ void ble_valve_set_target_mac(const char *mac_str)
     if (!changed)
         return;
 
-    flush_valve_commands(mac_str ? "valve target changed" : "valve decommissioned");
+    report_valve_cmd_flush(!mac_str ? "valve decommissioned"
+                                    : (had_target ? "valve target changed" : "valve target set"),
+                           queued, inflight, pend_valve, pend_rmleak);
 
-    // Still linked to the previous valve: drop it so the new one can be found (N6). Sent
-    // directly, not via ble_valve_disconnect(), so it survives the flush just above.
+    // Still linked to the previous valve: drop it so the new one can be found (N6). Queued
+    // after the flush above, so it survives it.
     if (mac_str && valve_conn_handle != BLE_HS_CONN_HANDLE_NONE && !link_is_target())
     {
         if (enqueue_cmd(BLE_CMD_DISCONNECT))
@@ -2596,14 +2832,24 @@ bool ble_valve_is_connected(void)
 
 void ble_valve_cancel_pending_close(void)
 {
+    // Under s_mac_lock like every other pending-slot update, so a replay's take
+    // (apply_pending_cmd()) sees the cancel and does not requeue the close.
+    bool valve = false;
+    bool rmleak = false;
+    taskENTER_CRITICAL(&s_mac_lock);
     if (g_pending_valve_cmd == 0) {
         g_pending_valve_cmd = -1;
-        ESP_LOGI(BLE_TAG, "[CMD] Pending valve CLOSE cancelled (leak resolved)");
+        valve = true;
     }
     if (g_pending_rmleak_cmd == 1) {
         g_pending_rmleak_cmd = -1;
-        ESP_LOGI(BLE_TAG, "[CMD] Pending RMLEAK SET cancelled (leak resolved)");
+        rmleak = true;
     }
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (valve)
+        ESP_LOGI(BLE_TAG, "[CMD] Pending valve CLOSE cancelled (leak resolved)");
+    if (rmleak)
+        ESP_LOGI(BLE_TAG, "[CMD] Pending RMLEAK SET cancelled (leak resolved)");
 }
 
 bool ble_valve_get_firmware_rev(char *buffer, size_t len)
