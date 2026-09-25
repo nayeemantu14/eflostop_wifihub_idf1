@@ -1,27 +1,40 @@
 #!/usr/bin/env python3
 # ruff: noqa: E501
-"""Validate a captured Azure IoT Hub monitor log against the firmware 2.1.0 wire contract.
+"""Validate a captured Azure IoT Hub monitor log against the firmware 2.1.4 wire contract.
 
 Reads whatever `az iot hub monitor-events` printed (or a UART log containing `Pub event:`
 lines), pulls every JSON message out of it, and checks each one against the rules the
-2.1.0 firmware is supposed to follow. Reports per-message failures and a summary.
+2.1.4 firmware is supposed to follow. Reports per-message failures and a summary.
 
 This encodes the contract as ASSERTIONS, not as prose — so a passing run is evidence the
 firmware and the catalogue agree, rather than an assumption that they do.
 
-Run: python docs/telemetry/validate_capture.py "<path to capture>"
+Standard library only. Run: python docs/telemetry/validate_capture.py "<path to capture>"
 """
 import json
 import re
 import sys
 
 # ---------------------------------------------------------------------------
-# Contract — firmware 2.1.0
+# Contract — firmware 2.1.4
 # ---------------------------------------------------------------------------
-EXPECTED_FW = "2.1.0"
+EXPECTED_FW = "2.1.4"
 SCHEMA = "eflostop.v2"
 DEVICE_TYPES = {"valve", "ble_leak_sensor", "lora"}
 RATINGS = {"excellent", "good", "warning", "critical", "unknown"}
+# Severity order of the ratings, for the system-health consistency checks.
+RATING_RANK = {"excellent": 0, "good": 1, "warning": 2, "critical": 3}
+SNAPSHOT_REASONS = {"heartbeat", "event", "commission", "boot", "fast", "decommission"}
+
+# 2.1.4 snapshot valve object. {} when no valve is provisioned; otherwise these keys
+# always, plus the live keys only while connected to the PROVISIONED valve.
+VALVE_ALWAYS = ("valve_id", "state", "connected", "rating", "last_seen_age_s")
+VALVE_LIVE = ("battery", "leak_state", "rmleak", "fw_version")
+
+# system_health.reason texts that only an EXCELLENT rating can carry.
+EMPTY_HUB_REASON = "No devices provisioned"
+EXCELLENT_REASONS = {"All devices healthy", EMPTY_HUB_REASON}
+SYNCING_RE = re.compile(r"^Syncing - waiting for (\d+) devices?$")
 
 # Events the hub raises ABOUT a device, vs events a device reports about ITSELF.
 # Since 2.1.0 BOTH families name the device the same way — valve_id for the valve,
@@ -62,6 +75,114 @@ def expected_identity(source_type):
     if source_type in {"ble_leak_sensor", "lora"}:
         return "sensor_id"
     return None
+
+
+def is_battery(v):
+    """A battery value: a number, or null for unknown (0xFF on the hub). Never a bool."""
+    return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
+def check_valve(valve):
+    """2.1.4 snapshot valve object: {} with no valve, never a stale or foreign valve."""
+    f = []
+    if not isinstance(valve, dict):
+        return [f"data.valve is {type(valve).__name__}, expected an object ({{}} when no valve)"]
+    if not valve:
+        return f                     # no valve provisioned (BUG-5)
+    for k in VALVE_ALWAYS:
+        if k not in valve:
+            f.append(f"data.valve.{k} missing (valve object has keys {list(valve)})")
+    if valve.get("connected") is True:
+        for k in VALVE_LIVE:
+            if k not in valve:
+                f.append(f"data.valve.{k} missing on a connected valve")
+        if valve.get("state") not in {"open", "closed", "unknown"}:
+            f.append(f"connected valve has state {valve.get('state')!r}")
+    elif valve.get("connected") is False:
+        if valve.get("state") != "disconnected":
+            f.append(f"disconnected valve has state {valve.get('state')!r}, expected 'disconnected'")
+        for k in VALVE_LIVE:
+            if k in valve:
+                f.append(f"data.valve.{k} present on a disconnected valve (live data only from the link)")
+    if "battery" in valve and not is_battery(valve["battery"]):
+        f.append(f"data.valve.battery = {valve['battery']!r}, expected a number or null")
+    return f
+
+
+def check_system_health(d):
+    """system_health against the device arrays of the SAME snapshot (one lock on the hub)."""
+    f = []
+    sh = d.get("system_health") or {}
+    rating, reason = sh.get("rating"), sh.get("reason")
+    if rating not in RATING_RANK:
+        f.append(f"system_health.rating = {rating!r}")
+        return f
+    if not isinstance(reason, str) or not reason:
+        f.append(f"system_health.reason = {reason!r}")
+        return f
+
+    valve = d.get("valve") if isinstance(d.get("valve"), dict) else {}
+    devices = ([valve] if valve else []) + list(d.get("lora_sensors", [])) \
+        + list(d.get("ble_leak_sensors", []))
+
+    # Empty hub (BUG-3/5/6): valve {}, both arrays [], its own reason, excellent.
+    empty = not devices
+    if empty != (reason == EMPTY_HUB_REASON):
+        f.append(f"empty hub mismatch: {len(devices)} device(s) but reason {reason!r} "
+                 f"(\"{EMPTY_HUB_REASON}\" exactly when valve is {{}} and both arrays are [])")
+    if empty and rating != "excellent":
+        f.append(f"empty hub rated {rating!r}, expected 'excellent'")
+
+    m = SYNCING_RE.match(reason)
+    if rating == "excellent":
+        if reason not in EXCELLENT_REASONS and not m:
+            f.append(f"rating excellent with reason {reason!r}")
+    elif reason in EXCELLENT_REASONS or m:
+        f.append(f"rating {rating!r} with reason {reason!r}")
+
+    # "Syncing - waiting for N": N devices never heard (excused ones have no last_seen).
+    unheard = sum(1 for x in devices if x.get("last_seen_age_s") is None)
+    if m and int(m.group(1)) > unheard:
+        f.append(f"reason says waiting for {m.group(1)} device(s) but only {unheard} "
+                 f"have last_seen_age_s null")
+
+    # A device that has been heard is never excused, so it counts in the roll-up.
+    sys_rank = RATING_RANK[rating]
+    for x in devices:
+        r = RATING_RANK.get(x.get("rating"))
+        if r is not None and x.get("last_seen_age_s") is not None and r > sys_rank:
+            ident = x.get("valve_id") or x.get("sensor_id")
+            f.append(f"{ident} is {x.get('rating')!r} but the system is only {rating!r}")
+    # The cause list is ", "-joined, and the hub turns commas in a user label into
+    # semicolons, so splitting is exact: a label such as "Valve closet" is one whole part.
+    parts = reason.split(", ")
+
+    # Some device carries the system rating, unless the interlock floor raised it.
+    if sys_rank > 0 and "Leak interlock latched" not in parts \
+            and not any(x.get("rating") == rating for x in devices):
+        f.append(f"system {rating!r} but no device is {rating!r} and no interlock floor")
+
+    # A wet sensor is critical and named (leak outranks every other cause).
+    wet = [x for x in d.get("lora_sensors", []) + d.get("ble_leak_sensors", [])
+           if x.get("leak_state") is True]
+    leak_named = any(p.startswith("Leak detected: ") or re.match(r"^\d+ leaks detected$", p)
+                     for p in parts)
+    if wet and (rating != "critical" or not leak_named):
+        f.append(f"{len(wet)} wet sensor(s) but system_health is {rating!r} / {reason!r}")
+
+    # Valve cause parts name the valve's own rating (BUG-1: battery-critical is critical).
+    vr = valve.get("rating")
+    if "Valve battery critical" in parts and not (rating == "critical" and vr == "critical"):
+        f.append(f"'Valve battery critical' with system {rating!r}, valve {vr!r}")
+    if "Valve battery low" in parts and not (vr == rating and rating != "critical"):
+        f.append(f"'Valve battery low' with system {rating!r}, valve {vr!r}")
+    if "Valve offline" in parts and rating != "critical":
+        f.append(f"'Valve offline' with system {rating!r}")
+    valve_parts = {"Valve offline", "Valve disconnected", "Valve battery critical",
+                   "Valve battery low"}
+    if valve_parts.intersection(parts) and not valve:
+        f.append(f"reason names the valve ({reason!r}) but data.valve is {{}}")
+    return f
 
 
 def walk_keys(o, path="data"):
@@ -114,17 +235,23 @@ def check(msg):
 
     # ---- snapshot ----
     if mtype == "snapshot":
-        valve = d.get("valve", {})
-        if valve.get("connected") and "valve_id" not in valve:
-            f.append("data.valve.valve_id missing on a connected valve")
+        if d.get("reason") not in SNAPSHOT_REASONS:
+            f.append(f"data.reason = {d.get('reason')!r}, expected one of {sorted(SNAPSHOT_REASONS)}")
+        if "valve" not in d:
+            f.append("data.valve missing (must be present, {} when no valve)")
+        f += check_valve(d.get("valve", {}))
         for arr in ("lora_sensors", "ble_leak_sensors"):
             if arr not in d:
                 f.append(f"data.{arr} missing (must be present, [] when empty)")
             for i, s in enumerate(d.get(arr, [])):
                 if "sensor_id" not in s:
                     f.append(f"data.{arr}[{i}] has no sensor_id (keys: {list(s)})")
+                if "battery" not in s or not is_battery(s["battery"]):
+                    f.append(f"data.{arr}[{i}].battery = {s.get('battery', '<missing>')!r}, "
+                             f"expected a number or null (always present)")
         if "override_active" not in d:
             f.append("data.override_active missing (unconditional on snapshots)")
+        f += check_system_health(d)
 
     # ---- lifecycle ----
     if mtype == "lifecycle" and "valve_device_id" in d:
@@ -144,6 +271,16 @@ def check(msg):
             if len(keys) < 3 or keys[2] != want:
                 f.append(f"{ev} (source_type={st!r}): 3rd key is "
                          f"{keys[2] if len(keys) > 2 else '<none>'!r}, expected {want!r}")
+
+        # 2.1.4: an unknown battery is null (never 0) on every device-reported event.
+        if ev in LEAK_EVENTS or ev == "valve_state_changed":
+            if "battery" not in d:
+                f.append(f"{ev}: battery missing (required; null when unknown)")
+            elif not is_battery(d["battery"]):
+                f.append(f"{ev}: battery = {d['battery']!r}, expected a number or null")
+        if ev == "valve_state_changed" and (st != "valve" or "valve_id" not in d):
+            f.append(f"valve_state_changed: source_type={st!r}, valve_id "
+                     f"{'present' if 'valve_id' in d else 'missing'} (expected 'valve' + valve_id)")
 
         if ev in LEAK_EVENTS:
             want_state = ev == "leak_detected"
@@ -183,6 +320,26 @@ def check(msg):
             for k in ("rating", "prev_rating"):
                 if d.get(k) not in RATINGS:
                     f.append(f"{ev}.{k} = {d.get(k)!r} not a valid rating")
+            # 2.1.4: reachability only. device_offline is always critical; device_recovered
+            # MAY be critical (back into a leak/battery critical), and prev_rating may equal
+            # rating on a debounced trailing edge, so neither is flagged.
+            if ev == "device_offline" and d.get("rating") != "critical":
+                f.append(f"device_offline with rating {d.get('rating')!r}, expected 'critical'")
+            if ev == "device_recovered" and "offline_duration_s" in d:
+                f.append("device_recovered carries offline_duration_s (device_offline only)")
+            if "battery" in d and (d["battery"] is None or not is_battery(d["battery"])):
+                f.append(f"{ev}: battery = {d['battery']!r} (health alerts OMIT an unknown battery)")
+
+        if ev == "cmd_ack":
+            err = d.get("error")
+            if d.get("status") == "error":
+                if not isinstance(err, dict) or err.get("code") != d.get("cmd") \
+                        or not isinstance(err.get("detail"), str):
+                    f.append(f"cmd_ack error without error.code == cmd and a detail: {err!r}")
+            elif err is not None:
+                f.append("cmd_ack status ok carries an error object")
+            if d.get("id") == "":
+                f.append("cmd_ack id is \"\" (omitted when the command had none)")
 
         if ev == "auto_close" and "active_leak_count" in d:
             # the reconnect variant

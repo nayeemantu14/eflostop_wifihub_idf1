@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/c2d_command.schema.json",
   "title": "C2D command (inbound)",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: C2D commands (INBOUND — not telemetry). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0 and re-verified field by field against FW 2.1.4 (branch fix/2.1.4, release commit \"chore(release): 2.1.4\", whose parent is x-nearest-commit). x-source line numbers are from the 1.8.0 generation and are STALE; fields added or changed for 2.1.4 cite functions instead. This is not a specification and not a proposal; it records what the device emits today. Plane: C2D commands (INBOUND — not telemetry). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "C2D commands (INBOUND — not telemetry)",
-  "x-firmware-version": "1.8.0",
+  "x-firmware-version": "2.1.4",
   "x-firmware-version-source": "CMakeLists.txt:12",
-  "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "x-tree-state": "committed on branch fix/2.1.4 (release commit \"chore(release): 2.1.4\")",
+  "x-nearest-commit": "d76241d86894f146f0e336b825cf921d3357cbbd",
   "type": "object",
   "properties": {
     "schema": {

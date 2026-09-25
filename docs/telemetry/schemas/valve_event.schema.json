@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/valve_event.schema.json",
   "title": "Valve event",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0 and re-verified field by field against FW 2.1.4 (branch fix/2.1.4, release commit \"chore(release): 2.1.4\", whose parent is x-nearest-commit). x-source line numbers are from the 1.8.0 generation and are STALE; fields added or changed for 2.1.4 cite functions instead. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "D2C telemetry",
-  "x-firmware-version": "1.8.0",
+  "x-firmware-version": "2.1.4",
   "x-firmware-version-source": "CMakeLists.txt:12",
-  "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "x-tree-state": "committed on branch fix/2.1.4 (release commit \"chore(release): 2.1.4\")",
+  "x-nearest-commit": "d76241d86894f146f0e336b825cf921d3357cbbd",
   "type": "object",
   "properties": {
     "schema": {
@@ -46,7 +46,7 @@
         },
         "fw": {
           "type": "string",
-          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"1.8.0\" in the working tree (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
+          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"2.1.4\" for this release (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
           "x-source": "main/telemetry/telemetry_v2.c:84; main/telemetry/telemetry_v2.c:50-54; source CMakeLists.txt:12",
           "x-category": "12.4"
         },
@@ -80,18 +80,29 @@
       "properties": {
         "event": {
           "type": "string",
-          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum: enum, 18 values: online | valve_state_changed | valve_flood_detected | valve_flood_cleared | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
+          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum across the whole D2C plane, 16 values: online | valve_state_changed | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine (valve_flood_detected / valve_flood_cleared were retired in 1.9.0). The enum below lists the values this message type carries. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
           "x-source": "main/telemetry/telemetry_v2.c:340 (\"online\"), :614, :641, :668, :687, :704; main/rules_engine/rules_engine.c:215, :333, :469, :678, :720, :934, :1025, :1082; main/health_engine/health_engine.c:587-588",
           "x-category": "12.9",
           "enum": [
-            "valve_state_changed",
-            "valve_flood_detected",
-            "valve_flood_cleared"
+            "valve_state_changed"
           ]
+        },
+        "source_type": {
+          "type": "string",
+          "description": "Always \"valve\": the same identity pair every device-reported event carries. Presence: always.",
+          "x-source": "telemetry_v2_publish_valve_event() main/telemetry/telemetry_v2.c",
+          "x-category": "12.5",
+          "const": "valve"
+        },
+        "valve_id": {
+          "type": "string",
+          "description": "The provisioned valve's MAC, validated against provisioning by the caller before the event is built. Range/enum: uppercase colon MAC. Presence: always.",
+          "x-source": "telemetry_v2_publish_valve_event(); connected_mac / vlk_mac_ok in iothub_task()",
+          "x-category": "12.1"
         },
         "valve_state": {
           "type": "string",
-          "description": "Valve position at the moment of a valve event. DIFFERENT PATH from data.valve.state and it never carries \"disconnected\". Range/enum: enum: open | closed | unknown. Presence: always (valve events only).",
+          "description": "Valve position at the event. Never \"disconnected\". Range/enum: open | closed | unknown. Presence: always.",
           "x-source": "main/telemetry/telemetry_v2.c:616-618",
           "x-category": "12.6",
           "enum": [
@@ -101,14 +112,17 @@
           ]
         },
         "battery": {
-          "type": "number",
-          "description": "Battery of the peer the event is about. Note the health-alert variant omits the key when unknown while the leak/valve variants always emit it. Units: percent. Range/enum: 0..255 as emitted; sender intent 0..100. Presence: always (leak events, valve events); conditional in health alerts (OMITTED when 0xFF).",
-          "x-source": "main/telemetry/telemetry_v2.c:645 (leak), :619 (valve), main/health_engine/health_engine.c:595-597 (health, omit-on-0xFF)",
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Valve battery. null when no real reading exists on this link (0xFF), never 0 for unknown (2.1.4, BUG-1). Units: percent. Presence: always.",
+          "x-source": "telemetry_v2_publish_valve_event() main/telemetry/telemetry_v2.c",
           "x-category": "12.8"
         },
         "leak_state": {
           "type": "boolean",
-          "description": "Leak asserted or cleared at the moment of the event. Range/enum: true | false. Presence: always (leak events and valve events).",
+          "description": "The valve's own flood probe at the event. Presence: always.",
           "x-source": "main/telemetry/telemetry_v2.c:644 (leak events), :620 (valve events)",
           "x-category": "12.5"
         },
@@ -127,14 +141,16 @@
       },
       "required": [
         "event",
+        "source_type",
+        "valve_id",
         "valve_state",
         "battery",
         "leak_state",
         "rmleak"
       ],
       "additionalProperties": false,
-      "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
-      "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
+      "description": "valve_state_changed: a real valve POSITION change (delta-gated). The valve's flood probe is reported through leak_event (source_type valve), not here.",
+      "x-source": "telemetry_v2_publish_valve_event() main/telemetry/telemetry_v2.c",
       "x-category": "12.1"
     }
   },

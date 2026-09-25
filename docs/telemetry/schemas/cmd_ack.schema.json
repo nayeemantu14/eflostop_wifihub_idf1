@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/cmd_ack.schema.json",
   "title": "Command acknowledgement",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry (acknowledging a C2D command). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0 and re-verified field by field against FW 2.1.4 (branch fix/2.1.4, release commit \"chore(release): 2.1.4\", whose parent is x-nearest-commit). x-source line numbers are from the 1.8.0 generation and are STALE; fields added or changed for 2.1.4 cite functions instead. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry (acknowledging a C2D command). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "D2C telemetry (acknowledging a C2D command)",
-  "x-firmware-version": "1.8.0",
+  "x-firmware-version": "2.1.4",
   "x-firmware-version-source": "CMakeLists.txt:12",
-  "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "x-tree-state": "committed on branch fix/2.1.4 (release commit \"chore(release): 2.1.4\")",
+  "x-nearest-commit": "d76241d86894f146f0e336b825cf921d3357cbbd",
   "type": "object",
   "properties": {
     "schema": {
@@ -46,7 +46,7 @@
         },
         "fw": {
           "type": "string",
-          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"1.8.0\" in the working tree (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
+          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"2.1.4\" for this release (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
           "x-source": "main/telemetry/telemetry_v2.c:84; main/telemetry/telemetry_v2.c:50-54; source CMakeLists.txt:12",
           "x-category": "12.4"
         },
@@ -80,7 +80,7 @@
       "properties": {
         "event": {
           "type": "string",
-          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum: enum, 18 values: online | valve_state_changed | valve_flood_detected | valve_flood_cleared | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
+          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum across the whole D2C plane, 16 values: online | valve_state_changed | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine (valve_flood_detected / valve_flood_cleared were retired in 1.9.0). The enum below lists the values this message type carries. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
           "x-source": "main/telemetry/telemetry_v2.c:340 (\"online\"), :614, :641, :668, :687, :704; main/rules_engine/rules_engine.c:215, :333, :469, :678, :720, :934, :1025, :1082; main/health_engine/health_engine.c:587-588",
           "x-category": "12.9",
           "enum": [
@@ -89,13 +89,13 @@
         },
         "id": {
           "type": "string",
-          "description": "Echo of the inbound command's correlation id so the app can match the ack to its request. C2D_COMMANDS.md:127 claims an empty string here; the source omits the key. Range/enum: free text, max 63 chars. Presence: conditional: OMITTED when the inbound command carried no correlation id (NOT \"\").",
+          "description": "Echo of the inbound command's correlation id. Range/enum: free text, max 63 chars. Presence: OMITTED (NOT \"\") when the inbound command carried no correlation id.",
           "x-source": "main/telemetry/telemetry_v2.c:705-706",
           "x-category": "12.9"
         },
         "cmd": {
           "type": "string",
-          "description": "Echo of the command name being acked, taken verbatim from the inbound cmd field (so it may be an unrecognised name). Range/enum: free text, max 31 chars. Presence: always (cmd_ack only).",
+          "description": "Echo of the command name, taken verbatim from the inbound cmd field (so it may be an unrecognised name); \"unknown\" when an oversized message was dropped before its name could be read. Presence: always.",
           "x-source": "main/telemetry/telemetry_v2.c:707; source main/iothub/app_iothub.c:934",
           "x-category": "12.9"
         },
@@ -114,21 +114,25 @@
           "properties": {
             "code": {
               "type": "string",
-              "description": "The failing command's name (NOT a numeric or symbolic error code) — it is literally cmd_name again. Range/enum: same value as data.cmd. Presence: present whenever data.error is present.",
+              "description": "The failing command's name (NOT an error code): the same value as data.cmd. Presence: whenever data.error is present.",
               "x-source": "main/telemetry/telemetry_v2.c:711",
               "x-category": "12.9"
             },
             "detail": {
               "type": "string",
-              "description": "Human-readable, end-user-facing failure reason. Longest strings come from the override_enable rejection set. Range/enum: free text. Presence: present whenever data.error is present.",
-              "x-source": "main/telemetry/telemetry_v2.c:712; message set main/iothub/app_iothub.c:539-541, :679, :696, :708, :720, :832-845",
+              "description": "Human-readable, end-user-facing failure reason; the only real discriminator. The valve commands (2.1.4) send exactly: \"No valve is set up for this hub.\" (no valve provisioned; valve_open, valve_close, valve_set_state), \"Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.\" (open), \"Valve battery critical (≤10 %): the valve will not open. Replace the batteries.\" (open, last real valve battery <= 10 %), \"The valve command could not be queued. Try again.\" (queue full). The full list per command is in C2D_COMMANDS.md §6.1. Presence: whenever data.error is present.",
+              "x-source": "c2d_valve_command(), valve_open_reject_reason(), handle_c2d_command(), rx_reject() main/iothub/app_iothub.c",
               "x-category": "12.9"
             }
           },
           "additionalProperties": false,
-          "description": "Failure detail container. Presence: conditional: OMITTED on success or when no error message was supplied.",
+          "description": "Failure detail container. Presence: status error only (every refusal supplies a detail).",
           "x-source": "main/telemetry/telemetry_v2.c:709-713",
-          "x-category": "12.9"
+          "x-category": "12.9",
+          "required": [
+            "code",
+            "detail"
+          ]
         }
       },
       "required": [
@@ -139,7 +143,31 @@
       "additionalProperties": false,
       "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
       "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
-      "x-category": "12.1"
+      "x-category": "12.1",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "error"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "required": [
+              "error"
+            ]
+          },
+          "else": {
+            "properties": {
+              "error": false
+            }
+          }
+        }
+      ]
     }
   },
   "required": [

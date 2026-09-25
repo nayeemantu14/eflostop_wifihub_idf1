@@ -666,8 +666,10 @@ static void handle_valve_resync(void)
     health_device_t *dev = find_valve();
     if (!dev) return;
 
-    // Only a link to THIS valve: the valve module can still hold a link to another one
-    // (it can relink a valve by name), and this handler asserts the provisioned one is up.
+    // Only a link to THIS valve. Since 2.1.4 the valve module matches valves by MAC only and
+    // ble_valve_is_ready() already requires the provisioned target's link, so this check is
+    // defence in depth: the module's target changes on the esp-mqtt task and this table on
+    // iothub_task, so during a valve swap the entry can still name the previous valve.
     char live_mac[18];
     if (!ble_valve_get_mac(live_mac) || strcasecmp(live_mac, dev->dev_id) != 0) return;
 

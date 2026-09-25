@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/rules_event.schema.json",
   "title": "Rules-engine event",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0 and re-verified field by field against FW 2.1.4 (branch fix/2.1.4, release commit \"chore(release): 2.1.4\", whose parent is x-nearest-commit). x-source line numbers are from the 1.8.0 generation and are STALE; fields added or changed for 2.1.4 cite functions instead. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "D2C telemetry",
-  "x-firmware-version": "1.8.0",
+  "x-firmware-version": "2.1.4",
   "x-firmware-version-source": "CMakeLists.txt:12",
-  "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "x-tree-state": "committed on branch fix/2.1.4 (release commit \"chore(release): 2.1.4\")",
+  "x-nearest-commit": "d76241d86894f146f0e336b825cf921d3357cbbd",
   "type": "object",
   "properties": {
     "schema": {
@@ -46,7 +46,7 @@
         },
         "fw": {
           "type": "string",
-          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"1.8.0\" in the working tree (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
+          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"2.1.4\" for this release (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
           "x-source": "main/telemetry/telemetry_v2.c:84; main/telemetry/telemetry_v2.c:50-54; source CMakeLists.txt:12",
           "x-category": "12.4"
         },
@@ -80,7 +80,7 @@
       "properties": {
         "event": {
           "type": "string",
-          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum: enum, 18 values: online | valve_state_changed | valve_flood_detected | valve_flood_cleared | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
+          "description": "Event discriminator inside data. The single most important routing key for the backend event log. Range/enum across the whole D2C plane, 16 values: online | valve_state_changed | leak_detected | leak_cleared | cmd_ack | auto_close | auto_close_blocked_override | auto_close_reenabled | rmleak_cleared | rmleak_auto_cleared | water_access_override_enabled | water_access_override_expired | device_offline | device_recovered | rules_engine | health_engine (valve_flood_detected / valve_flood_cleared were retired in 1.9.0). The enum below lists the values this message type carries. Presence: always in lifecycle and in every event shape; ABSENT in snapshot.",
           "x-source": "main/telemetry/telemetry_v2.c:340 (\"online\"), :614, :641, :668, :687, :704; main/rules_engine/rules_engine.c:215, :333, :469, :678, :720, :934, :1025, :1082; main/health_engine/health_engine.c:587-588",
           "x-category": "12.9",
           "enum": [
@@ -96,26 +96,39 @@
         },
         "source_type": {
           "type": "string",
-          "description": "Which transport/peer class the leak came from. \"reconnect\" is a pseudo-source used only by the valve-reconnect auto_close. Range/enum: enum: lora | ble_leak_sensor | valve_flood | reconnect | unknown. Presence: always in leak events and in the auto_close / auto_close_blocked_override rules events.",
-          "x-source": "main/telemetry/telemetry_v2.c:642 (leak events, \"lora\" | \"ble_leak_sensor\" from main/iothub/app_iothub.c:1749, :1809); main/rules_engine/rules_engine.c:334, :470 via source_to_str main/rules_engine/rules_engine.c:259-267; reconnect variant main/rules_engine/rules_engine.c:935",
+          "description": "Which device detected the water that triggered the rule. Range/enum: ble_leak_sensor | lora | valve. Presence: auto_close (except the reconnect variant, which carries cause instead) and auto_close_blocked_override. NEVER on rmleak_cleared / rmleak_auto_cleared.",
+          "x-source": "build_auto_close_telemetry(), rules_engine_evaluate_leak() main/rules_engine/rules_engine.c",
           "x-category": "12.5",
           "enum": [
-            "lora",
             "ble_leak_sensor",
-            "valve_flood",
-            "reconnect",
-            "unknown"
+            "lora",
+            "valve"
           ]
+        },
+        "cause": {
+          "type": "string",
+          "description": "Why a reconnect-variant auto_close fired: the valve reconnected with a leak still active. Replaces source_type on that variant (since 2.0.0). Range/enum: reconnect. Presence: reconnect auto_close only.",
+          "x-source": "rules_engine_on_valve_connected() main/rules_engine/rules_engine.c",
+          "x-category": "12.10",
+          "enum": [
+            "reconnect"
+          ]
+        },
+        "valve_id": {
+          "type": "string",
+          "description": "The PROVISIONED valve's MAC (2.1.4: never the live link's). On auto_close / auto_close_blocked_override when the source is the valve; on rmleak_cleared / rmleak_auto_cleared always when it resolves. Range/enum: uppercase colon MAC. Presence: OMITTED when no valve is provisioned (or provisioning is busy); never a placeholder.",
+          "x-source": "wire_device_id() / add_device_id() main/rules_engine/rules_engine.c",
+          "x-category": "12.1"
         },
         "sensor_id": {
           "type": "string",
-          "description": "Identifies the sensor. LoRa uses 0x+8hex, BLE uses a colon MAC, the valve's own flood sensor uses the literal \"valve\", and an unresolved id becomes \"unknown\". Range/enum: \"0x\"+8hex | colon MAC | \"valve\" | \"unknown\". Presence: always in leak events, auto_close, auto_close_blocked_override and health alerts.",
-          "x-source": "main/telemetry/telemetry_v2.c:643; main/rules_engine/rules_engine.c:335, :471, :936; main/health_engine/health_engine.c:591; \"valve\" literal main/iothub/app_iothub.c:1650",
+          "description": "The triggering sensor's id: \"0x\" + 8 uppercase hex (lora) or uppercase colon MAC (ble_leak_sensor). Presence: auto_close / auto_close_blocked_override when the source is a sensor.",
+          "x-source": "add_device_id() main/rules_engine/rules_engine.c",
           "x-category": "12.5"
         },
         "rmleak_asserted": {
           "type": "boolean",
-          "description": "Confirms the hub asserted the valve's RMLEAK interlock as part of the auto-close. Hardcoded true at both sites. Range/enum: always true when present. Presence: always (auto_close events only).",
+          "description": "Whether the RMLEAK + close writes were actually issued (the valve was reachable). false when it was not, including on a hub with no valve (since 2.0.2; it was hardcoded true). Presence: auto_close only.",
           "x-source": "main/rules_engine/rules_engine.c:336, :938",
           "x-category": "12.10"
         },
@@ -124,8 +137,8 @@
           "properties": {
             "code": {
               "type": "string",
-              "description": "Machine-readable room code. Range/enum: enum, 13 values: unknown | bathroom | kitchen | laundry | garage | garden | basement | utility | hallway | bedroom | living_room | attic | outdoor. Presence: present whenever data.location is present.",
-              "x-source": "main/telemetry/telemetry_v2.c:148; main/rules_engine/rules_engine.c:344; table main/sensor_meta/sensor_meta.c:23-27",
+              "description": "Machine-readable room code from the sensor_meta table; \"unknown\" when no metadata is stored. Range/enum: enum, 13 values.",
+              "x-source": "sensor_meta_location_code_to_str() main/sensor_meta/sensor_meta.c",
               "x-category": "12.5",
               "enum": [
                 "unknown",
@@ -145,25 +158,29 @@
             },
             "label": {
               "type": "string",
-              "description": "User-entered free-text location label. Range/enum: free text, max 31 chars. Presence: present whenever data.location is present.",
-              "x-source": "main/telemetry/telemetry_v2.c:151; main/rules_engine/rules_engine.c:346",
+              "description": "User-entered free-text location label. Range/enum: free text, max 31 chars; \"\" when no metadata is stored.",
+              "x-source": "sensor_meta_entry_t.label main/sensor_meta/sensor_meta.h",
               "x-category": "12.5"
             }
           },
+          "required": [
+            "code",
+            "label"
+          ],
           "additionalProperties": false,
-          "description": "Installed-location metadata for the sensor that raised the event. TWO DIFFERENT ABSENCE CONVENTIONS on the same path depending on the producer. Presence: leak events: ALWAYS. auto_close: OMITTED when the source is valve_flood or no metadata is stored..",
-          "x-source": "always-emit main/telemetry/telemetry_v2.c:650 -> :143-153; omit-when-unknown main/rules_engine/rules_engine.c:338-349",
+          "description": "Installed-location metadata for the triggering SENSOR. Presence: auto_close only; OMITTED for a valve source and when the sensor has no metadata (the opposite convention from leak events).",
+          "x-source": "build_auto_close_telemetry() main/rules_engine/rules_engine.c",
           "x-category": "12.5"
         },
         "active_leak_count": {
           "type": "number",
-          "description": "How many sensors were simultaneously asserting a leak. Present ONLY in these two shapes, so the normal auto_close lacks it. Units: count. Range/enum: >= 0. Presence: always in the valve-reconnect auto_close and in water_access_override_expired.",
+          "description": "How many sources were asserting a leak. Units: count. Presence: reconnect auto_close and water_access_override_expired only.",
           "x-source": "main/rules_engine/rules_engine.c:939, :1028",
           "x-category": "12.10"
         },
         "override_remaining_s": {
           "type": "number",
-          "description": "Seconds left in the override window. Reports the FULL window duration when the clock is unsynced, and 0 when expired but not yet processed by the rules tick. Units: seconds. Range/enum: >= 0 when present. Presence: snapshot: OMITTED unless override_active AND remaining >= 0. auto_close_blocked_override event: OMITTED when remaining < 0..",
+          "description": "Seconds left in the override window. Units: seconds. Presence: auto_close_blocked_override; OMITTED when the remaining time is negative.",
           "x-source": "main/telemetry/telemetry_v2.c:595-597; main/rules_engine/rules_engine.c:472-474; semantics main/rules_engine/rules_engine.c:1187-1200",
           "x-category": "12.10"
         },
@@ -179,7 +196,7 @@
         },
         "expires_ts": {
           "type": "number",
-          "description": "Absolute epoch at which the override window expires. Same field name and meaning on both message types. Units: seconds (Unix epoch, UTC). Range/enum: >= 1704067200. Presence: snapshot: OMITTED unless override_active AND the expiry is known/in-future. water_access_override_enabled event: always..",
+          "description": "Absolute epoch at which the override window expires. Units: seconds (Unix epoch, UTC). Presence: water_access_override_enabled only.",
           "x-source": "main/telemetry/telemetry_v2.c:598-599; main/rules_engine/rules_engine.c:217",
           "x-category": "12.10"
         },
@@ -203,7 +220,7 @@
         },
         "reason": {
           "type": "string",
-          "description": "TWO DISTINCT MEANINGS ON ONE PATH. In a snapshot it is the trigger that caused the snapshot. In the auto_close_reenabled rules event it is the cause of the override cancellation. Range/enum: enum, 7 values total. snapshot: heartbeat | event | commission | boot | fast | decommission. rules event: c2d_command. Presence: snapshot: always in practice; rules event: always.",
+          "description": "Cause of the override cancellation on auto_close_reenabled. (A snapshot's data.reason is a different vocabulary.) Range/enum: c2d_command. Presence: auto_close_reenabled only.",
           "x-source": "snapshot main/telemetry/telemetry_v2.c:383 with main/iothub/app_iothub.c:581-591 and :1570; rules event main/rules_engine/rules_engine.c:722",
           "x-category": "12.10",
           "enum": [
@@ -233,9 +250,219 @@
         "event"
       ],
       "additionalProperties": false,
-      "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
-      "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
-      "x-category": "12.1"
+      "description": "Rules-engine event (the engine's JSON becomes data), or the rules_engine fallback when it could not be re-parsed. Identity: valve_id or sensor_id per source, never both, never a placeholder.",
+      "x-source": "main/rules_engine/rules_engine.c; telemetry_v2_publish_rules_event()",
+      "x-category": "12.1",
+      "allOf": [
+        {
+          "not": {
+            "required": [
+              "valve_id",
+              "sensor_id"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source_type": {
+                "const": "valve"
+              }
+            },
+            "required": [
+              "source_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "sensor_id": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "source_type": {
+                "enum": [
+                  "lora",
+                  "ble_leak_sensor"
+                ]
+              }
+            },
+            "required": [
+              "source_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "valve_id": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "auto_close"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "rmleak_asserted"
+            ],
+            "if": {
+              "required": [
+                "cause"
+              ]
+            },
+            "then": {
+              "required": [
+                "active_leak_count"
+              ],
+              "properties": {
+                "source_type": false
+              }
+            },
+            "else": {
+              "required": [
+                "source_type"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "auto_close_blocked_override"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "source_type"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "rmleak_cleared"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "properties": {
+              "source_type": false,
+              "sensor_id": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "rmleak_auto_cleared"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "clear_after_seconds"
+            ],
+            "properties": {
+              "source_type": false,
+              "sensor_id": false
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "water_access_override_enabled"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "trigger",
+              "expires_ts",
+              "remaining_s"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "water_access_override_expired"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "auto_close_resumed",
+              "active_leak_count"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "auto_close_reenabled"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "previous_remaining_s",
+              "reason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event": {
+                "const": "rules_engine"
+              }
+            },
+            "required": [
+              "event"
+            ]
+          },
+          "then": {
+            "required": [
+              "raw"
+            ]
+          }
+        }
+      ]
     }
   },
   "required": [

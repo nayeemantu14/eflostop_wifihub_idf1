@@ -124,7 +124,7 @@ The `gateway` object also carries `name` when a hub name is set. `fw` is the run
 | Field | Type | What it is |
 |-------|------|------------|
 | `event` | string | Always `"cmd_ack"` |
-| `id` | string | Same correlation ID you sent. Empty string if the request didn't have one. |
+| `id` | string | Same correlation ID you sent. **Omitted** (not `""`) if the request didn't have one. |
 | `cmd` | string | Which command ran |
 | `status` | string | `"ok"` or `"error"` |
 | `error` | object | Only on errors. Has `code` (the command name) and `detail` (a readable message). |
@@ -133,7 +133,7 @@ The `gateway` object also carries `name` when a hub name is set. `fw` is the run
 
 The hub publishes a `cmd_ack` only when **`cmd.is_envelope || cmd.id[0]`** is true. In practice:
 
-- **Envelope commands always ack** (canonical or legacy envelope), even without an `id` — the ack just comes back with an empty `id`.
+- **Envelope commands always ack** (canonical or legacy envelope), even without an `id` — the ack then has no `data.id` key at all.
 - **Legacy text commands never ack** (`VALVE_OPEN`, `DECOMMISSION_ALL`, etc.) — they aren't envelopes and carry no `id`. Fire-and-forget.
 - The hub does **not** deduplicate by `id`. Send the same `id` twice and the command runs twice (commands are not idempotent — `valve_close` twice tries to close twice). Use a new `id` per retry.
 
@@ -156,12 +156,26 @@ Opens the water valve.
 { "schema": "eflostop.cmd", "ver": 1, "id": "open-001", "cmd": "valve_open" }
 ```
 
-What happens: if the valve's RMLEAK latch is asserted (valve locked after an auto-close), the hub **rejects the command up front** with a `cmd_ack` error and sends nothing to the valve — this prevents the sub-second water-on transient you'd otherwise get from letting the valve briefly honor the open before its own RMLEAK interlock re-closes it. Otherwise the hub calls `ble_valve_connect()` then `ble_valve_open()`; on that (allowed) path there is **no transport/BLE success check**, so a forwarded open `cmd_ack`s **`ok`** regardless of whether the valve is reachable. The actual open is confirmed asynchronously by a `valve_state_changed` event (emitted by the BLE-notify path when the valve reports its new state) and by the next snapshot — **not** by this command. To open during an active leak, use `override_enable` (it clears RMLEAK as part of the guarded 24h window, so it bypasses this check by design).
+What happens: the hub runs these checks in order, **before anything is sent to the valve**. The first one that fails is refused with a `cmd_ack` error, and nothing is queued:
 
-Errors:
+1. **No valve provisioned** → `No valve is set up for this hub.` The hub only ever connects to, and commands, the valve in its provisioning.
+2. **The valve's RMLEAK latch is asserted** (valve locked after an auto-close) → the RMLEAK error below. Forwarding the open would let the valve briefly honour it before its own RMLEAK interlock re-closes it, a sub-second water-on transient.
+3. **The valve battery is at or below 10 %** → `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` The check uses the last real battery reading, which is kept while the valve is disconnected. An unknown battery (no reading yet) does not block the open. The valve itself refuses to open at that level.
+4. Otherwise the hub requests a connect and queues the open. If the valve command queue is full → `The valve command could not be queued. Try again.`
+
+An **`ok` ack means the open was queued, not that the valve opened**. GATT writes have no completion callback. The actual open is confirmed asynchronously by a `valve_state_changed` event (emitted when the valve reports its new state) and by the next snapshot, **not** by this command. To open during an active leak, use `override_enable`. It clears RMLEAK as part of the guarded 24 h window, so it bypasses check 2 by design.
+
+**Changed in 2.1.4.** Up to 2.1.3 checks 1, 3 and 4 did not exist, so `valve_open` acked `ok` with no valve provisioned, at a critical battery, and when the enqueue failed. With no valve provisioned, the hub also connected to *any* nearby eFloStop valve by name and applied the open to it.
+
+Errors (the `detail` strings are exact):
 | Detail | Why |
 |--------|-----|
+| `No valve is set up for this hub.` | No valve is provisioned on this hub (2.1.4) |
 | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch is asserted — clear it via `leak_reset`, or open during a leak via `override_enable` |
+| `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | Last real valve battery reading is ≤ 10 % (2.1.4) |
+| `The valve command could not be queued. Try again.` | The hub's valve command queue was full (2.1.4) |
+
+The legacy text form sends no ack, so a refusal is visible only in the serial log: `VALVE_OPEN refused — <detail>`.
 
 Legacy text: `VALVE_OPEN`
 
@@ -180,7 +194,17 @@ Closes the water valve.
 { "schema": "eflostop.cmd", "ver": 1, "id": "close-001", "cmd": "valve_close" }
 ```
 
-Same shape as `valve_open` but closes. Always acks `ok` (no transport check); the real state arrives later as a `valve_state_changed` event. Note a manual close does **not** assert RMLEAK or latch a leak incident — that only happens on auto-close.
+Same shape as `valve_open` but closes. A close is never refused for RMLEAK or battery. It is refused only when there is no valve to send it to, or it cannot be queued (below). An `ok` ack means the close was **queued**; the real state arrives later as a `valve_state_changed` event. Note a manual close does **not** assert RMLEAK or latch a leak incident — that only happens on auto-close.
+
+**Changed in 2.1.4.** Up to 2.1.3 `valve_close` always acked `ok`.
+
+Errors (the `detail` strings are exact):
+| Detail | Why |
+|--------|-----|
+| `No valve is set up for this hub.` | No valve is provisioned on this hub |
+| `The valve command could not be queued. Try again.` | The hub's valve command queue was full |
+
+Serial log on a refusal: `VALVE_CLOSE refused — <detail>`.
 
 Legacy text: `VALVE_CLOSE`
 
@@ -199,12 +223,19 @@ Single command that opens or closes depending on the `state` you pass. Preferred
 { "schema": "eflostop.cmd", "ver": 1, "id": "valve-001", "cmd": "valve_set_state", "payload": { "state": "open" } }
 ```
 
-Errors:
+`state:"open"` runs exactly the `valve_open` checks (§4.1), and `state:"closed"` the `valve_close` ones (§4.2). As there, `ok` means queued.
+
+Errors (the `detail` strings are exact):
 | Detail | Why |
 |--------|-----|
 | `missing 'state' field (expected "open" or "closed")` | Payload missing or no `state` key |
 | `invalid state value (expected "open" or "closed")` | `state` is something other than `"open"`/`"closed"` |
+| `No valve is set up for this hub.` | Either state, no valve provisioned (2.1.4) |
 | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | `state:"open"` while the valve RMLEAK latch is asserted (same guard as `valve_open`) |
+| `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | `state:"open"` with the last real valve battery reading ≤ 10 % (2.1.4) |
+| `The valve command could not be queued. Try again.` | Either state, the hub's valve command queue was full (2.1.4) |
+
+Serial log on a refusal: `VALVE_SET_STATE open refused — <detail>` or `VALVE_SET_STATE closed refused — <detail>`.
 
 Envelope-only. No legacy text form.
 
@@ -594,7 +625,7 @@ Removes devices from the hub. The `target` field says what to remove.
 | `payload.sensor_id` | required for `"lora"` / `"ble_leak_sensor"` |
 
 ### 4.10.1 target: "valve"
-Removes the valve, clears its target MAC, and disconnects BLE.
+Removes the valve, clears its target MAC, and disconnects BLE. Any valve command still queued or waiting for a reconnect is discarded, so nothing sent for the removed valve reaches the next one. Since 2.1.4, sending it to a hub that has no valve acks `error` `valve decommission failed` (it used to ack `ok`).
 ```json
 { "schema": "eflostop.cmd", "ver": 1, "id": "decom-v-001", "cmd": "decommission", "payload": { "target": "valve" } }
 ```
@@ -697,6 +728,10 @@ Keyword detection is case-insensitive; JSON after a `:` keeps its original case.
 
 | Command | Error detail | What went wrong |
 |---------|-------------|-----------------|
+| `valve_open`, `valve_close`, `valve_set_state` | `No valve is set up for this hub.` | No valve provisioned (2.1.4) |
+| `valve_open`, `valve_set_state` (open) | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch asserted |
+| `valve_open`, `valve_set_state` (open) | `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | Last real valve battery reading ≤ 10 % (2.1.4) |
+| `valve_open`, `valve_close`, `valve_set_state` | `The valve command could not be queued. Try again.` | Valve command queue full (2.1.4) |
 | `valve_set_state` | `missing 'state' field ...` | No `state` in payload |
 | `valve_set_state` | `invalid state value ...` | `state` not `"open"`/`"closed"` |
 | `leak_reset` | `A leak is still active. Fix the leak first, or use override to open the valve during a leak.` | A leak source is still wet (guard) |
@@ -719,7 +754,7 @@ Keyword detection is case-insensitive; JSON after a `:` keeps its original case.
 | `set_hub_name` | `name too long (max 31 chars)` | Name > 31 chars |
 | (any) | `unknown command` | `cmd` not recognized |
 
-Note: `valve_open` / `valve_close` never report a transport/BLE failure — they always ack `ok` (the real outcome arrives later as `valve_state_changed` / next snapshot).
+Note: an `ok` from `valve_open` / `valve_close` / `valve_set_state` means the command was **queued**, not that the valve moved. Those commands report no BLE transport failure: the real outcome arrives later as `valve_state_changed` and the next snapshot. They ack `error` only for the refusals listed above. Up to 2.1.3 the only refusal was RMLEAK; every other case acked `ok`.
 
 ## 6.2 Parse failures
 

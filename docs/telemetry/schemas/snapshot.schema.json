@@ -2,12 +2,12 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/snapshot.schema.json",
   "title": "Snapshot (full state roll-up)",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0 and re-verified field by field against FW 2.1.4 (branch fix/2.1.4, release commit \"chore(release): 2.1.4\", whose parent is x-nearest-commit). x-source line numbers are from the 1.8.0 generation and are STALE; fields added or changed for 2.1.4 cite functions instead. This is not a specification and not a proposal; it records what the device emits today. Plane: D2C telemetry. `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "D2C telemetry",
-  "x-firmware-version": "1.8.0",
+  "x-firmware-version": "2.1.4",
   "x-firmware-version-source": "CMakeLists.txt:12",
-  "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "x-tree-state": "committed on branch fix/2.1.4 (release commit \"chore(release): 2.1.4\")",
+  "x-nearest-commit": "d76241d86894f146f0e336b825cf921d3357cbbd",
   "type": "object",
   "properties": {
     "schema": {
@@ -46,7 +46,7 @@
         },
         "fw": {
           "type": "string",
-          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"1.8.0\" in the working tree (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
+          "description": "Hub firmware version, read at runtime from the ESP-IDF app descriptor (PROJECT_VER). Never a hardcoded string. Range/enum: \"2.1.4\" for this release (CMakeLists.txt:12); \"0.0.0\" if the descriptor is empty.",
           "x-source": "main/telemetry/telemetry_v2.c:84; main/telemetry/telemetry_v2.c:50-54; source CMakeLists.txt:12",
           "x-category": "12.4"
         },
@@ -80,8 +80,8 @@
       "properties": {
         "reason": {
           "type": "string",
-          "description": "TWO DISTINCT MEANINGS ON ONE PATH. In a snapshot it is the trigger that caused the snapshot. In the auto_close_reenabled rules event it is the cause of the override cancellation. Range/enum: enum, 7 values total. snapshot: heartbeat | event | commission | boot | fast | decommission. rules event: c2d_command. Presence: snapshot: always in practice; rules event: always.",
-          "x-source": "snapshot main/telemetry/telemetry_v2.c:383 with main/iothub/app_iothub.c:581-591 and :1570; rules event main/rules_engine/rules_engine.c:722",
+          "description": "The trigger that caused this snapshot. Range/enum: heartbeat | event | commission | boot | fast | decommission. Since 2.1.4 a hub with NO devices publishes snapshots too: \"event\" for the transition to empty (e.g. the snapshot that follows the last decommission), \"heartbeat\" at the interval, and one \"boot\" per boot or MQTT (re)connect; the final snapshot before a decommission-all reboot keeps \"decommission\". Presence: always.",
+          "x-source": "snap_reason_str() and the single flush block in iothub_task(), main/iothub/app_iothub.c; \"decommission\" in the g_decommission_reboot block",
           "x-category": "12.10",
           "enum": [
             "heartbeat",
@@ -97,8 +97,8 @@
           "properties": {
             "rating": {
               "type": "string",
-              "description": "Worst rating across all provisioned devices. Does NOT track leak state, so it can read \"excellent\" while the hub's fleet LED is RED for a valve flood. Range/enum: enum: excellent | good | warning | critical | unknown. Presence: always (snapshot only).",
-              "x-source": "main/telemetry/telemetry_v2.c:391-394; source main/health_engine/health_engine.c:57-66; LED asymmetry main/rgb/fleet_led.c:149-156",
+              "description": "Worst rating across the provisioned devices. A leaking device is critical; a valve battery <= 10 % is critical (valve only; 11-20 % is warning); a latched leak interlock raises a warning floor while at least one device is provisioned. Devices never heard and still inside their own sync excuse are left out. \"excellent\" on a hub with no devices. Range/enum: excellent | good | warning | critical (\"unknown\" is not emitted in practice). Presence: always.",
+              "x-source": "recalc_system_rating() main/health_engine/health_engine.c; health_get_device_status_all()",
               "x-category": "12.3",
               "enum": [
                 "excellent",
@@ -110,8 +110,8 @@
             },
             "reason": {
               "type": "string",
-              "description": "Comma-joined human-readable cause list built from the devices sitting at the system rating. Free text intended for display, not parsing. Range/enum: free text, max 127 chars; \"All devices healthy\" when rating is excellent; \"Degraded\" fallback; \"Health data unavailable\" on a health mutex timeout. Presence: always (snapshot only).",
-              "x-source": "main/telemetry/telemetry_v2.c:395-401; builder :157-231; fallback \"Health data unavailable\" :399",
+              "description": "Human-readable cause list for the rating. Free text for display, not parsing. Range/enum: max 191 chars. \"No devices provisioned\" on a hub with no devices (2.1.4). With rating excellent: \"All devices healthy\" or \"Syncing - waiting for N device(s)\". Otherwise a comma-joined list, most urgent first, drawn from: \"Leak detected: <label>\" | \"N leaks detected\" | \"Leak interlock latched\" | one of \"Valve offline\" / \"Valve disconnected\" / \"Valve battery critical\" (2.1.4) / \"Valve battery low\" | \"N sensor(s) offline\" | \"N sensor(s) battery low\" | \"N sensor(s) signal weak\" | \"syncing N device(s)\"; \"Degraded\" as the fallback. The rating and the reason are sampled under one lock, so they cannot disagree. (\"Health data unavailable\" is gone: since 2.1.4 a snapshot is not published at all when the health table is busy.) Presence: always.",
+              "x-source": "build_system_health_reason() and telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.3"
             }
           },
@@ -127,16 +127,16 @@
         "valve": {
           "type": "object",
           "properties": {
-            "mac": {
+            "valve_id": {
               "type": "string",
-              "description": "Valve BLE MAC. Prefers the live link, falls back to the provisioned health record so a disconnected valve still identifies itself. Range/enum: colon-separated MAC. Presence: conditional: OMITTED when neither the live BLE link nor a health record has a MAC.",
-              "x-source": "main/telemetry/telemetry_v2.c:420-425",
+              "description": "The PROVISIONED valve's MAC (from the health table, which is reconciled against provisioning). Never the live link's MAC. Range/enum: uppercase colon-separated MAC. Presence: whenever a valve is provisioned; the whole object is {} when none is (2.1.4).",
+              "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.1"
             },
             "state": {
               "type": "string",
-              "description": "Valve position. \"disconnected\" is emitted in place of a position when the BLE link is down, so this field mixes position and link state. Range/enum: enum: open | closed | unknown | disconnected (unknown = characteristic byte is neither 0 nor 1). Presence: always (snapshot only).",
-              "x-source": "main/telemetry/telemetry_v2.c:427-430 (connected), :442 (disconnected)",
+              "description": "Valve position, or the link state. open | closed from a live, GATT-ready link to the provisioned valve; \"unknown\" while that link is up but not yet GATT-ready (2.1.4), or when the characteristic byte is neither 0 nor 1; \"disconnected\" when there is no live link to the provisioned valve. Presence: whenever valve_id is present.",
+              "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.6",
               "enum": [
                 "open",
@@ -146,27 +146,30 @@
               ]
             },
             "battery": {
-              "type": "number",
-              "description": "Valve battery from GATT byte 0. Reads 0 between CONNECTED and GATT-setup completion, indistinguishable from a genuinely flat battery. Units: percent. Range/enum: 0..255 as emitted; header intent is 0..100. Presence: conditional: OMITTED when the valve is disconnected.",
-              "x-source": "main/telemetry/telemetry_v2.c:431; cache init main/ble_valve/app_ble_valve.c:134, reset :1209",
+              "type": [
+                "number",
+                "null"
+              ],
+              "description": "Valve battery. null until the valve is GATT-ready, and when no real reading exists on this link (0xFF); never 0 for unknown (2.1.4, BUG-1). Units: percent. Range/enum: 0..100 when a number. Presence: when connected is true; ABSENT when connected is false.",
+              "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c; g_val_battery 0xFF main/ble_valve/app_ble_valve.c",
               "x-category": "12.8"
             },
             "leak_state": {
               "type": "boolean",
-              "description": "Water detected AT THE VALVE body (its own flood sensor), distinct from the remote leak sensors. Range/enum: true | false. Presence: conditional: OMITTED when the valve is disconnected.",
-              "x-source": "main/telemetry/telemetry_v2.c:432; source main/ble_valve/app_ble_valve.c:474 (data[0] != 0)",
+              "description": "Water detected AT THE VALVE body (its own flood probe), distinct from the remote leak sensors. Reads the module's cached value, which is false until the first read on this link. Presence: when connected is true; ABSENT when connected is false.",
+              "x-source": "ble_valve_get_leak() in telemetry_v2_publish_snapshot()",
               "x-category": "12.6"
             },
             "rmleak": {
               "type": "boolean",
-              "description": "The valve's remote-leak interlock latch. While true the valve refuses to open, and the hub refuses to forward a valve_open command. Range/enum: true | false. Presence: conditional: OMITTED when the valve is disconnected.",
-              "x-source": "main/telemetry/telemetry_v2.c:433; source main/ble_valve/app_ble_valve.c:482; open-refusal main/iothub/app_iothub.c:536-543",
+              "description": "The valve's remote-leak interlock latch. While true the valve refuses to open, and the hub refuses a valve_open command. Presence: when connected is true; ABSENT when connected is false.",
+              "x-source": "ble_valve_get_rmleak_state() in telemetry_v2_publish_snapshot(); open refusal valve_open_reject_reason() main/iothub/app_iothub.c",
               "x-category": "12.6"
             },
             "connected": {
               "type": "boolean",
-              "description": "Whether the valve GATT link is currently up. The authoritative liveness flag; there is NO valve_disconnected event. Range/enum: true | false. Presence: always (snapshot only).",
-              "x-source": "main/telemetry/telemetry_v2.c:434 (true), :443 (false)",
+              "description": "true only for a live link to the PROVISIONED valve (MAC match). A link that is up but not yet GATT-ready also reads true, with state \"unknown\" and battery null. Presence: whenever valve_id is present.",
+              "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.2"
             },
             "fw_version": {
@@ -174,14 +177,14 @@
                 "string",
                 "null"
               ],
-              "description": "Valve firmware revision from the BLE Device Information Service, copied verbatim with no format validation. Range/enum: free text, max 31 chars. Presence: THREE-STATE: string when read; explicit null when connected but DIS read failed; key ABSENT when disconnected.",
-              "x-source": "main/telemetry/telemetry_v2.c:436-440 (string or null), and absent via the :441 else-branch",
+              "description": "Valve firmware revision from the BLE Device Information Service, copied verbatim. Range/enum: free text, max 31 chars. Presence: string when read; explicit null when connected but not read; ABSENT when connected is false.",
+              "x-source": "ble_valve_get_firmware_rev() in telemetry_v2_publish_snapshot()",
               "x-category": "12.4"
             },
             "rating": {
               "type": "string",
-              "description": "Valve health rating from the health engine (connection + battery), independent of leak state. Range/enum: enum: excellent | good | warning | critical | unknown. Presence: conditional: OMITTED when the valve has no health record.",
-              "x-source": "main/telemetry/telemetry_v2.c:446-449",
+              "description": "Valve health rating: link (WARNING grace, then CRITICAL), battery (<= 10 % critical, 11-20 % warning, 2.1.4) and the valve's own flood probe (wet = critical). Presence: whenever valve_id is present.",
+              "x-source": "compute_valve_rating() main/health_engine/health_engine.c",
               "x-category": "12.3",
               "enum": [
                 "excellent",
@@ -196,18 +199,83 @@
                 "number",
                 "null"
               ],
-              "description": "Seconds since the valve was last heard from. Units: seconds. Range/enum: >= 0 when a number. Presence: THREE-STATE: number when known; explicit null when UINT32_MAX (never seen); key ABSENT when the valve has no health record.",
-              "x-source": "main/telemetry/telemetry_v2.c:450-455",
+              "description": "Seconds since the valve was last heard from. Units: seconds. Presence: whenever valve_id is present; explicit null when never seen this uptime.",
+              "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.2"
             }
           },
-          "required": [
-            "state",
-            "connected"
+          "required": [],
+          "dependentRequired": {
+            "valve_id": [
+              "state",
+              "connected",
+              "rating",
+              "last_seen_age_s"
+            ],
+            "state": [
+              "valve_id"
+            ],
+            "connected": [
+              "valve_id"
+            ]
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "connected": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "connected"
+                ]
+              },
+              "then": {
+                "required": [
+                  "battery",
+                  "leak_state",
+                  "rmleak",
+                  "fw_version"
+                ],
+                "properties": {
+                  "state": {
+                    "enum": [
+                      "open",
+                      "closed",
+                      "unknown"
+                    ]
+                  }
+                }
+              }
+            },
+            {
+              "if": {
+                "properties": {
+                  "connected": {
+                    "const": false
+                  }
+                },
+                "required": [
+                  "connected"
+                ]
+              },
+              "then": {
+                "properties": {
+                  "state": {
+                    "const": "disconnected"
+                  },
+                  "battery": false,
+                  "leak_state": false,
+                  "rmleak": false,
+                  "fw_version": false
+                }
+              }
+            }
           ],
           "additionalProperties": false,
-          "description": "Live valve state container. Always present even when the valve is disconnected. Presence: always (snapshot only).",
-          "x-source": "main/telemetry/telemetry_v2.c:405, :458",
+          "description": "The PROVISIONED valve. {} (empty object) when no valve is provisioned (2.1.4, BUG-5); before 2.1.4 a valve-less hub sent {\"state\":\"disconnected\",\"connected\":false} and a valve still linked during its removal was published live (BUG-3). Live data (battery, leak_state, rmleak, fw_version) only from a link to the provisioned MAC. Presence: always (snapshot only).",
+          "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
           "x-category": "12.6"
         },
         "lora_sensors": {
@@ -223,7 +291,7 @@
               },
               "connected": {
                 "type": "boolean",
-                "description": "Heard within the LoRa health timeout. Also gates whether the cached radio values below are merged at all. Range/enum: true | false. Presence: always for each element.",
+                "description": "Heard within the health timeout. Also gates the telemetry-cache merge (snr). Presence: always.",
                 "x-source": "main/telemetry/telemetry_v2.c:469; merge gate :485",
                 "x-category": "12.2"
               },
@@ -254,14 +322,14 @@
                   "number",
                   "null"
                 ],
-                "description": "Battery from the decrypted LoRa frame. Units: percent. Range/enum: 0..255 as emitted; sender intent 0..100. Presence: always present; explicit null when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:499 (value), :505 (null)",
+                "description": "Battery from the HEALTH table, updated on every check-in. Units: percent. Range/enum: 0..100 when a number. Presence: always present; explicit null until the device's first reading since it was added (0xFF).",
+                "x-source": "health[i].last_battery in telemetry_v2_publish_snapshot()",
                 "x-category": "12.8"
               },
               "leak_state": {
                 "type": "boolean",
-                "description": "Leak flag. DERIVED WITH A DIFFERENT TEST from the leak event: the snapshot uses leak_status == 1 while the event uses leak_status != 0, so a sensor reporting 2 would auto-close the valve yet read leak_state:false in every snapshot. Range/enum: true | false. Presence: always present; hard-coded false (NOT null) when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:500-501 (== 1) vs main/iothub/app_iothub.c:1750 (!= 0); no-cache placeholder main/telemetry/telemetry_v2.c:506",
+                "description": "The health engine's wet/dry for this sensor, connected or not: an offline sensor that was last wet stays true, matching system_health.reason. Range/enum: true | false. Presence: always present.",
+                "x-source": "health[i].leaking in telemetry_v2_publish_snapshot()",
                 "x-category": "12.5"
               },
               "rssi": {
@@ -269,8 +337,8 @@
                   "number",
                   "null"
                 ],
-                "description": "Received signal strength of the last LoRa frame. Can be POSITIVE (67..127) because the SX127x driver's int result is narrowed to int8_t, wrapping any true RSSI below -128 dBm. Units: dBm. Range/enum: int8_t: -128..127 (negative is normal; 67..127 indicates a wrapped value). Presence: always present; explicit null when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:502 (value), :507 (null); narrowing main/app_lora/app_lora.cpp:274; computation main/app_lora/lora.cpp:387-412",
+                "description": "RSSI of the last check-in, from the HEALTH table. Units: dBm. Presence: always present; explicit null until the first check-in since the device was added (0). LoRa values can wrap positive (int8_t narrowing in the SX127x driver).",
+                "x-source": "health[i].last_rssi in telemetry_v2_publish_snapshot()",
                 "x-category": "12.2"
               },
               "snr": {
@@ -278,7 +346,7 @@
                   "number",
                   "null"
                 ],
-                "description": "LoRa signal-to-noise ratio. The ONLY non-integer number on the whole wire: quarter-dB steps, serialized bare (e.g. 9) when integral and as 9.25 / 9.5 / 9.75 otherwise. Units: dB. Range/enum: -32.00..+31.75 in 0.25 steps. Presence: always present; explicit null when there is no live cache entry.",
+                "description": "LoRa SNR of the last cached D2C event, merged only while connected. Quarter-dB steps (the only non-integer number on the wire). Units: dB. Presence: always present; null when not connected or no cache entry.",
                 "x-source": "main/telemetry/telemetry_v2.c:503 (value), :508 (null); source main/app_lora/lora.cpp:417-422; encoding [EXTERNAL] $IDF_PATH/components/json/cJSON/cJSON.c:611-625",
                 "x-category": "12.5"
               },
@@ -287,8 +355,8 @@
                 "properties": {
                   "code": {
                     "type": "string",
-                    "description": "Machine-readable room code from the sensor_meta table; \"unknown\" when no metadata is stored. Range/enum: enum, 13 values: unknown | bathroom | kitchen | laundry | garage | garden | basement | utility | hallway | bedroom | living_room | attic | outdoor. Presence: always for each element.",
-                    "x-source": "main/telemetry/telemetry_v2.c:148; table main/sensor_meta/sensor_meta.c:23-27",
+                    "description": "Machine-readable room code from the sensor_meta table; \"unknown\" when no metadata is stored. Range/enum: enum, 13 values.",
+                    "x-source": "sensor_meta_location_code_to_str() main/sensor_meta/sensor_meta.c",
                     "x-category": "12.5",
                     "enum": [
                       "unknown",
@@ -308,20 +376,35 @@
                   },
                   "label": {
                     "type": "string",
-                    "description": "User-entered free-text location label. Range/enum: free text, max 31 chars. Presence: always for each element; \"\" when no metadata is stored.",
-                    "x-source": "main/telemetry/telemetry_v2.c:151; max main/sensor_meta/sensor_meta.h:12",
+                    "description": "User-entered free-text location label. Range/enum: free text, max 31 chars; \"\" when no metadata is stored.",
+                    "x-source": "sensor_meta_entry_t.label main/sensor_meta/sensor_meta.h",
                     "x-category": "12.5"
                   }
                 },
+                "required": [
+                  "code",
+                  "label"
+                ],
                 "additionalProperties": false,
-                "description": "Installed-location metadata container. ALWAYS emitted here, unlike the omit-when-unknown convention used by the rules engine's auto_close event. Presence: always for each element (never omitted).",
-                "x-source": "main/telemetry/telemetry_v2.c:511 -> builder :143-153",
+                "description": "Installed-location metadata. Presence: always for each element (never omitted).",
+                "x-source": "add_location_obj() main/telemetry/telemetry_v2.c",
                 "x-category": "12.5"
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "required": [
+              "sensor_id",
+              "connected",
+              "rating",
+              "last_seen_age_s",
+              "battery",
+              "leak_state",
+              "rssi",
+              "snr",
+              "location"
+            ]
           },
-          "description": "One entry per COMMISSIONED LoRa leak sensor, driven by the health table (not the radio cache). Range/enum: array of objects. Presence: always (snapshot only); empty array when no LoRa sensors or health is unavailable.",
+          "description": "One entry per PROVISIONED LoRa leak sensor, driven by the health table (not the radio cache). Every key is always present; unknown values are null. Presence: always; [] when none (2.1.4: an empty hub publishes [] for both arrays).",
           "x-source": "main/telemetry/telemetry_v2.c:461, :515; iteration :463-514",
           "x-category": "12.5"
         },
@@ -338,7 +421,7 @@
               },
               "connected": {
                 "type": "boolean",
-                "description": "Heard within the BLE-leak health timeout. Also gates the cache merge below. Range/enum: true | false. Presence: always for each element.",
+                "description": "Heard within the health timeout. Also gates the telemetry-cache merge (fw_version). Presence: always.",
                 "x-source": "main/telemetry/telemetry_v2.c:526; merge gate :541",
                 "x-category": "12.2"
               },
@@ -369,14 +452,14 @@
                   "number",
                   "null"
                 ],
-                "description": "Battery from manufacturer-data byte 3 of the eleak advertisement. Units: percent. Range/enum: 0..255 as emitted; header intent 0..100. Presence: always present; explicit null when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:553 (value), :561 (null); parse main/ble_leak_scanner/app_ble_leak.c:177",
+                "description": "Battery from the HEALTH table, updated on every check-in. Units: percent. Range/enum: 0..100 when a number. Presence: always present; explicit null until the device's first reading since it was added (0xFF).",
+                "x-source": "health[i].last_battery in telemetry_v2_publish_snapshot()",
                 "x-category": "12.8"
               },
               "leak_state": {
                 "type": "boolean",
-                "description": "Leak flag from manufacturer-data byte 2, tested != 0 (consistent with the BLE leak event, unlike the LoRa path). Range/enum: true | false. Presence: always present; hard-coded false (NOT null) when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:554 (value), :562 (placeholder false); parse main/ble_leak_scanner/app_ble_leak.c:176-178",
+                "description": "The health engine's wet/dry for this sensor, connected or not: an offline sensor that was last wet stays true, matching system_health.reason. Range/enum: true | false. Presence: always present.",
+                "x-source": "health[i].leaking in telemetry_v2_publish_snapshot()",
                 "x-category": "12.5"
               },
               "rssi": {
@@ -384,8 +467,8 @@
                   "number",
                   "null"
                 ],
-                "description": "Advertisement RSSI as reported by NimBLE (no narrowing bug on this path). Units: dBm. Range/enum: int8_t, typically -100..-20. Presence: always present; explicit null when there is no live cache entry.",
-                "x-source": "main/telemetry/telemetry_v2.c:555 (value), :563 (null)",
+                "description": "RSSI of the last check-in, from the HEALTH table. Units: dBm. Presence: always present; explicit null until the first check-in since the device was added (0).",
+                "x-source": "health[i].last_rssi in telemetry_v2_publish_snapshot()",
                 "x-category": "12.2"
               },
               "fw_version": {
@@ -393,7 +476,7 @@
                   "string",
                   "null"
                 ],
-                "description": "Sensor firmware version, built ONLY when the advertisement carries >= 7 bytes of manufacturer data. A 4-byte (older) payload leaves this permanently null. Range/enum: \"M.m.p\", max 11 chars. Presence: always present; explicit null when the cache has no version OR there is no cache entry.",
+                "description": "Sensor firmware version from the telemetry cache, merged only while connected. Range/enum: \"M.m.p\". Presence: always present; null when not connected, no cache entry, or the advertisement carries no version.",
                 "x-source": "main/telemetry/telemetry_v2.c:556-559 (string or null), :564 (null); parse gate main/ble_leak_scanner/app_ble_leak.c:180-185",
                 "x-category": "12.4"
               },
@@ -402,8 +485,8 @@
                 "properties": {
                   "code": {
                     "type": "string",
-                    "description": "Machine-readable room code; \"unknown\" when no metadata is stored. Range/enum: enum, 13 values: unknown | bathroom | kitchen | laundry | garage | garden | basement | utility | hallway | bedroom | living_room | attic | outdoor. Presence: always for each element.",
-                    "x-source": "main/telemetry/telemetry_v2.c:148; table main/sensor_meta/sensor_meta.c:23-27",
+                    "description": "Machine-readable room code from the sensor_meta table; \"unknown\" when no metadata is stored. Range/enum: enum, 13 values.",
+                    "x-source": "sensor_meta_location_code_to_str() main/sensor_meta/sensor_meta.c",
                     "x-category": "12.5",
                     "enum": [
                       "unknown",
@@ -423,20 +506,35 @@
                   },
                   "label": {
                     "type": "string",
-                    "description": "User-entered free-text location label. Range/enum: free text, max 31 chars. Presence: always for each element; \"\" when no metadata is stored.",
-                    "x-source": "main/telemetry/telemetry_v2.c:151",
+                    "description": "User-entered free-text location label. Range/enum: free text, max 31 chars; \"\" when no metadata is stored.",
+                    "x-source": "sensor_meta_entry_t.label main/sensor_meta/sensor_meta.h",
                     "x-category": "12.5"
                   }
                 },
+                "required": [
+                  "code",
+                  "label"
+                ],
                 "additionalProperties": false,
-                "description": "Installed-location metadata container. Presence: always for each element (never omitted).",
-                "x-source": "main/telemetry/telemetry_v2.c:567 -> builder :143-153",
+                "description": "Installed-location metadata. Presence: always for each element (never omitted).",
+                "x-source": "add_location_obj() main/telemetry/telemetry_v2.c",
                 "x-category": "12.5"
               }
             },
-            "additionalProperties": false
+            "additionalProperties": false,
+            "required": [
+              "sensor_id",
+              "connected",
+              "rating",
+              "last_seen_age_s",
+              "battery",
+              "leak_state",
+              "rssi",
+              "fw_version",
+              "location"
+            ]
           },
-          "description": "One entry per COMMISSIONED BLE leak sensor, driven by the health table. Range/enum: array of objects. Presence: always (snapshot only); empty array when none or health is unavailable.",
+          "description": "One entry per PROVISIONED BLE leak sensor, driven by the health table (not the radio cache). Every key is always present; unknown values are null. Presence: always; [] when none (2.1.4: an empty hub publishes [] for both arrays).",
           "x-source": "main/telemetry/telemetry_v2.c:518, :571; iteration :520-570",
           "x-category": "12.5"
         },
@@ -489,8 +587,8 @@
         "override_active"
       ],
       "additionalProperties": false,
-      "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
-      "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
+      "description": "Type-specific payload container. Since 2.1.4 every container is attached on creation and NULL-checked: on an allocation failure, or when the health table is busy, the snapshot is not published at all (no partial snapshot). Presence: always.",
+      "x-source": "telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
       "x-category": "12.1"
     }
   },

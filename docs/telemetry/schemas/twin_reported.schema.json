@@ -2,73 +2,91 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://eflostop.local/schemas/twin_reported.schema.json",
   "title": "Device twin — reported properties",
-  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0, which is the WORKING TREE and is not committed. The nearest commit is dcdd0dc, which is a different firmware version - do not read x-commit as containing this behaviour. This is not a specification and not a proposal; it records what the device emits today. Plane: Device twin (NOT D2C telemetry). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
+  "description": "DESCRIPTIVE, NOT NORMATIVE. Generated from firmware source at FW 1.8.0 and re-verified field by field against FW 2.1.4 (branch fix/2.1.4, release commit \"chore(release): 2.1.4\", whose parent is x-nearest-commit). x-source line numbers are from the 1.8.0 generation and are STALE; fields added or changed for 2.1.4 cite functions instead. This is not a specification and not a proposal; it records what the device emits today. Plane: Device twin (NOT D2C telemetry). `required` lists only keys present in the minimal payload, i.e. those always emitted for this message type.",
   "x-plane": "Device twin (NOT D2C telemetry)",
-  "x-firmware-version": "1.8.0",
+  "x-firmware-version": "2.1.4",
   "x-firmware-version-source": "CMakeLists.txt:12",
-  "x-tree-state": "working tree, uncommitted",
-  "x-nearest-commit": "dcdd0dc9b643c6d3e8c2c598671759b2ee340535",
+  "x-tree-state": "committed on branch fix/2.1.4 (release commit \"chore(release): 2.1.4\")",
+  "x-nearest-commit": "d76241d86894f146f0e336b825cf921d3357cbbd",
   "type": "object",
   "properties": {
     "fw_version": {
       "type": "string",
       "description": "Hub firmware version, from the build-time PROJECT_VER.",
-      "x-source": "main/iothub/app_iothub.c:953"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "gateway_id": {
       "type": "string",
       "description": "GW- prefixed hub identity. Same value as telemetry gateway.id, different key name.",
-      "x-source": "main/iothub/app_iothub.c:954"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "short_id": {
       "type": "string",
       "description": "Last 4 hex of the gateway id.",
-      "x-source": "main/iothub/app_iothub.c:955"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "hub_name": {
       "type": "string",
       "description": "User-assigned hub name. NOTE: telemetry omits gateway.name when empty; the twin always emits the key.",
-      "x-source": "main/iothub/app_iothub.c:956"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "provisioned": {
       "type": "boolean",
-      "description": "Whether the hub has completed commissioning.",
-      "x-source": "main/iothub/app_iothub.c:957"
+      "description": "The hub's provisioning state; false on a hub with no devices (the twin is published for it too since 2.1.4).",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "valve_mac": {
-      "type": "string",
-      "description": "The provisioned valve MAC.",
-      "x-source": "main/iothub/app_iothub.c:961"
+      "type": "null",
+      "description": "ALWAYS null. Deletes the pre-1.8.0 spelling from the twin (a reported PATCH merges).",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
+    },
+    "valve_device_id": {
+      "type": "null",
+      "description": "ALWAYS null. Deletes the 1.8.0-1.9.0 spelling.",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
+    },
+    "valve_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "The provisioned valve MAC; null when no valve is provisioned (never omitted, so a removed valve is deleted from the twin). Read this key and nothing else.",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "lora_sensor_count": {
       "type": "number",
       "description": "How many LoRa sensors are commissioned.",
-      "x-source": "main/iothub/app_iothub.c:966"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "ble_leak_sensor_count": {
       "type": "number",
       "description": "How many BLE leak sensors are commissioned.",
-      "x-source": "main/iothub/app_iothub.c:971"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "auto_close_enabled": {
       "type": "boolean",
-      "description": "Whether the hub will close the valve automatically on a leak.",
-      "x-source": "main/iothub/app_iothub.c:975"
+      "description": "Whether the hub will close the valve automatically on a leak. OMITTED when the rules config cannot be read.",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "trigger_mask": {
       "type": "number",
-      "description": "Bitmask of which leak sources may trigger auto-close. bit0=BLE, bit1=LoRa, bit2=valve flood.",
-      "x-source": "main/iothub/app_iothub.c:976"
+      "description": "Bitmask of which leak sources may trigger auto-close. bit0=BLE, bit1=LoRa, bit2=valve flood. OMITTED when the rules config cannot be read.",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "uptime_s": {
       "type": "number",
-      "description": "Seconds since boot AT THE MOMENT THE TWIN WAS PATCHED. Only three triggers write the twin, so this can be arbitrarily stale — it is not a live value.",
-      "x-source": "main/iothub/app_iothub.c:979"
+      "description": "Seconds since boot AT THE MOMENT THE TWIN WAS PATCHED (on connect, on every device-set change, rules_config, set_hub_name and every desired-property delivery). Not a live value.",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
+    },
+    "snapshot_interval_s": {
+      "type": "number",
+      "description": "The heartbeat interval IN FORCE (60-3600 s). Compare with desired.snapshot_interval_s to confirm a write was accepted (since 2.0.2).",
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "free_heap": {
       "type": "number",
       "description": "Free heap in bytes. The ONLY hub diagnostic that exists on the twin and nowhere in telemetry.",
-      "x-source": "main/iothub/app_iothub.c:981"
+      "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     }
   },
   "required": [
@@ -77,9 +95,13 @@
     "short_id",
     "hub_name",
     "provisioned",
+    "valve_mac",
+    "valve_device_id",
+    "valve_id",
     "lora_sensor_count",
     "ble_leak_sensor_count",
     "uptime_s",
+    "snapshot_interval_s",
     "free_heap"
   ],
   "additionalProperties": false

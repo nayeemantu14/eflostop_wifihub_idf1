@@ -18,7 +18,7 @@ key sets are exact.
 GW_ID = "GW-A0B7651C2D3E"          # from Wi-Fi STA MAC A0:B7:65:1C:2D:3E
 GW_SHORT = "2D3E"                  # last two MAC bytes
 HUB_NAME = "Main House"
-FW = "2.1.0"
+FW = "2.1.4"
 VALVE_MAC = "C4:19:D1:88:2A:7F"
 VALVE_FW = "2.2.0"
 SENSOR_A = "00:80:E1:27:9A:E6"     # BLE leak sensor, under the kitchen sink
@@ -40,20 +40,20 @@ def env(ts, uptime, type_, data, name=True):
 
 def ble_sensor(mac, label, code, connected=True, battery=87, rssi=-64, leak=False,
                age=12, fw=SENSOR_FW):
-    """Snapshot element, BLE leak sensor. Emission order is fixed."""
-    s = {"sensor_id": mac, "connected": connected, "rating": "excellent" if connected else "critical",
-         "last_seen_age_s": age}
-    if connected:
-        s["battery"] = battery
-        s["leak_state"] = leak
-        s["rssi"] = rssi
-        s["fw_version"] = fw
-    else:
-        # Cache merge skipped: three nulls and a hard-coded false. See F-01.
-        s["battery"] = None
-        s["leak_state"] = False
-        s["rssi"] = None
-        s["fw_version"] = None
+    """Snapshot element, BLE leak sensor. Emission order is fixed:
+    sensor_id, connected, rating, last_seen_age_s, battery, rssi, leak_state, fw_version, location.
+
+    battery / rssi / leak_state come from the HEALTH table, connected or not: a sensor that
+    went silent keeps its last values (age tells you how old they are), and one never heard
+    since it was added has null / null / false. Only fw_version is cache-merged, and only
+    while connected."""
+    heard = age is not None
+    s = {"sensor_id": mac, "connected": connected,
+         "rating": "excellent" if connected else "critical", "last_seen_age_s": age}
+    s["battery"] = battery if heard else None
+    s["rssi"] = rssi if heard else None
+    s["leak_state"] = leak if heard else False
+    s["fw_version"] = fw if connected else None
     s["location"] = {"code": code, "label": label}
     return s
 
@@ -64,7 +64,16 @@ VALVE_OK = {"valve_id": VALVE_MAC, "state": "open", "battery": 92, "leak_state":
 VALVE_CLOSED = dict(VALVE_OK, state="closed", rmleak=True)
 VALVE_GONE = {"valve_id": VALVE_MAC, "state": "disconnected", "connected": False,
               "rating": "critical", "last_seen_age_s": 245}
+# 2.1.4: the link to the provisioned valve is up, but its characteristics have not been read
+# yet. state "unknown" and battery null rather than defaults that read as closed / 0 %.
+VALVE_NOT_READY = {"valve_id": VALVE_MAC, "state": "unknown", "battery": None,
+                   "leak_state": False, "rmleak": False, "connected": True, "fw_version": None,
+                   "rating": "critical", "last_seen_age_s": None}
+# 2.1.4: at or below 10 % the valve is rated critical (valve only; 11-20 % is warning).
+VALVE_BATT_CRIT = dict(VALVE_OK, battery=8, rating="critical", last_seen_age_s=3)
+NO_VALVE = {}                      # 2.1.4: no valve provisioned
 HEALTH_OK = {"rating": "excellent", "reason": "All devices healthy"}
+HEALTH_EMPTY = {"rating": "excellent", "reason": "No devices provisioned"}
 RULES = {"auto_close_enabled": True, "trigger_mask": 7}
 
 S_A = ble_sensor(SENSOR_A, "Under sink", "kitchen")
@@ -97,8 +106,8 @@ MESSAGES = [
              "valve_id": VALVE_MAC, "lora_sensor_count": 0, "ble_leak_sensor_count": 2,
              "rules": RULES})),
     dict(group="Lifecycle", id="L2", title="Hub commissioned, but with no devices",
-         when="Provisioned but with no valve and no sensors. A hub that was never provisioned publishes nothing at all, so data.provisioned is true on every lifecycle you receive.",
-         cite="omissions build_envelope() main/telemetry/telemetry_v2.c:69-102 and telemetry_v2_publish_lifecycle() :482-516; unprovisioned/offline snapshot gate iothub_task() main/iothub/app_iothub.c:1983-1997",
+         when="A provision that carried only rules (no valve, no sensors) leaves the hub provisioned with zero devices. Rare; treat it exactly like L4.",
+         cite="omissions build_envelope() and telemetry_v2_publish_lifecycle() main/telemetry/telemetry_v2.c",
          msg=env(TS, 18, "lifecycle", {
              "event": "online", "reset_reason": "power_on", "provisioned": True,
              "lora_sensor_count": 0, "ble_leak_sensor_count": 0,
@@ -109,6 +118,13 @@ MESSAGES = [
          msg=env(TS, 7, "lifecycle", {
              "event": "online", "reset_reason": "panic", "provisioned": True,
              "valve_id": VALVE_MAC, "lora_sensor_count": 0, "ble_leak_sensor_count": 2,
+             "rules": RULES})),
+    dict(group="Lifecycle", id="L4", title="Hub with no devices (never provisioned, or every device removed)",
+         when="New in 2.1.4. A hub with nothing provisioned used to publish nothing at all (BUG-6). It now publishes lifecycle, twin and snapshots (S8) like any other hub, with provisioned false and no valve_id. rules is back at the defaults: a hub that becomes empty resets it to true / 7.",
+         cite="telemetry_v2_publish_lifecycle() main/telemetry/telemetry_v2.c; no provisioned gate on Phase 3 of iothub_task() and on_hub_emptied() main/iothub/app_iothub.c",
+         msg=env(TS, 40, "lifecycle", {
+             "event": "online", "reset_reason": "software", "provisioned": False,
+             "lora_sensor_count": 0, "ble_leak_sensor_count": 0,
              "rules": RULES})),
 
     # ---------------- snapshot ----------------
@@ -122,9 +138,9 @@ MESSAGES = [
          msg=env(TS, 5400, "snapshot",
                  snap("heartbeat", VALVE_GONE, [S_A, S_B],
                       health={"rating": "critical", "reason": "Valve offline"}))),
-    dict(group="Snapshot", id="S3", title="Heartbeat with a sensor gone silent — read this one carefully",
-         when="Sensor unheard for 10 minutes. battery, rssi and fw_version go null but leak_state is hard-coded false — a sensor that was wet when it went silent reads dry here, and the earlier leak_detected is never retracted. last_seen_age_s is the only field that contradicts it.",
-         cite="sensor-array builder in telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c:520-757; F-01",
+    dict(group="Snapshot", id="S3", title="Heartbeat with a sensor gone silent",
+         when="Sensor unheard for 10 minutes. connected goes false and the rating critical. battery, rssi and leak_state keep the sensor's LAST reported values, and last_seen_age_s says how old they are. A sensor that was wet when it went silent therefore still reads leak_state true, and system_health names the leak. fw_version goes null, because it is merged only while connected.",
+         cite="sensor-array builder in telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c (battery / rssi / leak_state from the health table)",
          msg=env(TS, 9000, "snapshot",
                  snap("heartbeat", VALVE_OK,
                       [S_A, ble_sensor(SENSOR_B, "Behind machine", "laundry",
@@ -140,23 +156,41 @@ MESSAGES = [
          cite="snap_reason_str() main/iothub/app_iothub.c:597-607; decommission reboot path iothub_task() main/iothub/app_iothub.c:1778",
          msg=env(TS, 12, "snapshot", snap("boot", VALVE_OK, [S_A, S_B]))),
     dict(group="Snapshot", id="S6", title="Early snapshot as soon as the valve is ready",
-         when="Fires the moment the valve's BLE setup completes, before the sensors have beaconed. Array membership comes from the provisioned list, not from who has checked in, so an unheard sensor still appears with nulls.",
-         cite="snap_reason_str() main/iothub/app_iothub.c:597-607; membership health_engine_reload_devices() main/health_engine/health_engine.c:453-526",
+         when="Fires the moment the valve's BLE setup completes, before the sensors have beaconed. Array membership comes from the provisioned list, not from who has checked in, so an unheard sensor still appears, with nulls. A device not yet heard since it was added is kept out of the roll-up during its sync window, so the hub reads excellent and says what it is waiting for rather than \"2 sensors offline\".",
+         cite="snap_reason_str() main/iothub/app_iothub.c; membership health_engine_reconcile_devices(), roll-up excuse rollup_unheard_locked() main/health_engine/health_engine.c",
          msg=env(TS, 25, "snapshot",
                  snap("fast", VALVE_OK,
                       [ble_sensor(SENSOR_A, "Under sink", "kitchen",
                                   connected=False, age=None),
                        ble_sensor(SENSOR_B, "Behind machine", "laundry",
                                   connected=False, age=None)],
-                      health={"rating": "critical", "reason": "2 sensors offline"}))),
+                      health={"rating": "excellent", "reason": "Syncing - waiting for 2 devices"}))),
     dict(group="Snapshot", id="S7", title="Final snapshot before decommissioning",
-         when="The last message from this identity. It pictures the CLEARED hub, not the installation — config, name, valve link and health table are already wiped when it is built.",
-         cite="decommission branch of handle_c2d_command() main/iothub/app_iothub.c:671-1011; final publish iothub_task() main/iothub/app_iothub.c:1775",
+         when="The last message from this identity before the decommission-all reboot. It pictures the CLEARED hub, not the installation: config, name, valve link and health table are already wiped when it is built. Since 2.1.4 that means valve {} and \"No devices provisioned\" (it used to report a disconnected valve).",
+         cite="decommission branch of handle_c2d_command(); final publish in the g_decommission_reboot block of iothub_task() main/iothub/app_iothub.c",
          msg=env(TS, 60000, "snapshot",
-                 snap("decommission",
-                      {"state": "disconnected", "connected": False},
-                      []),
+                 snap("decommission", NO_VALVE, [], health=HEALTH_EMPTY),
                  name=False)),
+    dict(group="Snapshot", id="S8", title="Hub with no devices",
+         when="New in 2.1.4 (BUG-3/5/6). The snapshot that follows the removal of the last device: reason \"event\", valve {}, both arrays [], and system_health excellent / \"No devices provisioned\". The hub then keeps publishing: \"heartbeat\" at the interval, and one \"boot\" after every boot or MQTT (re)connect. Up to 2.1.3 an emptied hub sent one stale snapshot (the removed valve, still open) and then went silent.",
+         cite="on_hub_emptied() and apply_device_set_change() main/iothub/app_iothub.c; empty-table reason in telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
+         msg=env(TS, 70000, "snapshot", snap("event", NO_VALVE, [], health=HEALTH_EMPTY))),
+    dict(group="Snapshot", id="S9", title="Hub with sensors and no valve",
+         when="New in 2.1.4 (BUG-5). A sensors-only hub reports valve {} — no valve_id, no state. Up to 2.1.3 it reported {\"state\":\"disconnected\",\"connected\":false}, indistinguishable from a real valve that had dropped off.",
+         cite="valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
+         msg=env(TS, 3600, "snapshot", snap("heartbeat", NO_VALVE, [S_A, S_B]))),
+    dict(group="Snapshot", id="S10", title="Valve linked, but its readings not in yet",
+         when="New in 2.1.4 (BUG-1). The BLE link to the provisioned valve is up but its characteristics have not been read yet — a few seconds after every connect. state is \"unknown\", battery and fw_version are null, and leak_state / rmleak are the defaults. Up to 2.1.3 this window published battery 0, which read as an empty battery. Here the valve has not been heard since boot, so it is still in its sync window.",
+         cite="ready / live branch of the valve block in telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
+         msg=env(TS, 20, "snapshot",
+                 snap("event", VALVE_NOT_READY, [S_A, S_B],
+                      health={"rating": "excellent", "reason": "Syncing - waiting for 1 device"}))),
+    dict(group="Snapshot", id="S11", title="Valve battery critical",
+         when="New in 2.1.4 (BUG-1). The valve's battery is at or below 10 %, so the valve is rated critical and the hub RED, reason \"Valve battery critical\". At 11-20 % it is warning / \"Valve battery low\". This is a valve-only band: a sensor's low battery never reaches critical. No health alert is sent for it; this snapshot follows within seconds. valve_open is refused while it lasts (C6).",
+         cite="compute_valve_rating() main/health_engine/health_engine.c; build_system_health_reason() main/telemetry/telemetry_v2.c",
+         msg=env(TS, 90000, "snapshot",
+                 snap("event", VALVE_BATT_CRIT, [S_A, S_B],
+                      health={"rating": "critical", "reason": "Valve battery critical"}))),
 
     # ---------------- valve events ----------------
     dict(group="Valve events", id="V1", title="Valve opened",
@@ -180,6 +214,13 @@ MESSAGES = [
          msg=env(TS, 4700, "event", {"event": "valve_state_changed", "source_type": "valve",
                                      "valve_id": VALVE_MAC, "valve_state": "open",
                                      "battery": 92, "leak_state": False, "rmleak": False})),
+    dict(group="Valve events", id="V6", title="Valve moved before its battery was read",
+         when="New in 2.1.4 (BUG-1). V1 with battery null: there is no real battery reading on this link yet (the characteristic is missing, its read failed, or setup has not finished). Up to 2.1.3 this was 0, which reads as an empty battery.",
+         cite="0xFF -> null in telemetry_v2_publish_valve_event() main/telemetry/telemetry_v2.c",
+         msg=env(TS, 4800, "event", {"event": "valve_state_changed", "source_type": "valve",
+                                     "valve_id": VALVE_MAC, "valve_state": "closed",
+                                     "battery": None, "leak_state": False, "rmleak": False,
+                                     "fw_version": VALVE_FW})),
 
     # ---------------- leak events ----------------
     # ONE family for "water was detected somewhere", from every source. Since 1.9.0 the
@@ -234,6 +275,14 @@ MESSAGES = [
                                      "valve_id": VALVE_MAC, "leak_state": False, "battery": 92,
                                      "location": {"code": "unknown", "label": ""},
                                      "valve_state": "closed", "rmleak": True,
+                                     "fw_version": VALVE_FW})),
+    dict(group="Leak events", id="K7", title="The valve's flood probe went wet, battery not read",
+         when="New in 2.1.4. K5 with battery null: the valve has no real battery reading on this link. battery is null, never 0, for an unknown reading from ANY source. It stays in the required core, so the key is always present.",
+         cite="0xFF -> null in telemetry_v2_publish_leak_event() main/telemetry/telemetry_v2.c",
+         msg=env(TS, 4150, "event", {"event": "leak_detected", "source_type": "valve",
+                                     "valve_id": VALVE_MAC, "leak_state": True, "battery": None,
+                                     "location": {"code": "unknown", "label": ""},
+                                     "valve_state": "open", "rmleak": False,
                                      "fw_version": VALVE_FW})),
 
     # ---------------- rules events ----------------
@@ -291,26 +340,33 @@ MESSAGES = [
 
     # ---------------- health events ----------------
     dict(group="Health events", id="H1", title="A device stopped responding",
-         when="A peer crossed into the critical rating. data.category \"health\" is how you recognise these. Critical is reached for connectivity only; a low battery gives warning.",
-         cite="health_alert_to_json() main/health_engine/health_engine.c:588-625; compute_sensor_rating() main/health_engine/health_engine.c:126-154",
+         when="A device that had been heard became unreachable. data.category \"health\" is how you recognise these. Since 2.1.4 these events report REACHABILITY only: device_offline is always critical-because-unreachable. A device that is critical for another reason raises no health event, whether it is wet (see the leak events) or a valve at <= 10 % battery (see S11). A debounced alert is no longer dropped: it is sent once the debounce has passed.",
+         cite="health_alert_to_json(), is_offline_state(), apply_rating() main/health_engine/health_engine.c",
          msg=env(TS, 9100, "event", {"category": "health", "event": "device_offline",
                                      "source_type": "ble_leak_sensor", "sensor_id": SENSOR_B,
                                      "rating": "critical", "prev_rating": "excellent",
                                      "battery": 64, "rssi": -78, "offline_duration_s": 600})),
     dict(group="Health events", id="H2", title="A device came back",
-         when="The recovery counterpart of H1.",
-         cite="health_alert_to_json() main/health_engine/health_engine.c:588-625",
+         when="The recovery counterpart of H1, sent only if the device_offline was. Never carries offline_duration_s.",
+         cite="health_alert_to_json() main/health_engine/health_engine.c",
          msg=env(TS, 9700, "event", {"category": "health", "event": "device_recovered",
                                      "source_type": "ble_leak_sensor", "sensor_id": SENSOR_B,
                                      "rating": "excellent", "prev_rating": "critical",
                                      "battery": 64, "rssi": -75})),
     dict(group="Health events", id="H3", title="The valve stopped responding",
-         when="H1 for the valve. rssi is ALWAYS absent, offline_duration_s is omitted when it would be zero, and prev_rating is ALWAYS \"warning\" — a valve gets a 3-minute grace before promotion to critical. Only sensors jump straight there.",
-         cite="rssi writers handle_lora_checkin() main/health_engine/health_engine.c:249-268 and handle_ble_leak_checkin() main/health_engine/health_engine.c:270-286; omit-on-zero health_alert_to_json() main/health_engine/health_engine.c:588-625; compute_valve_rating() main/health_engine/health_engine.c:156-179; promotion :341-349",
+         when="H1 for the valve. rssi is ALWAYS absent and offline_duration_s is omitted when it would be zero. prev_rating is normally \"warning\", because a valve gets a 3-minute grace before promotion to critical; only sensors jump straight there. battery is omitted, not null, when the valve has never reported one.",
+         cite="rssi writers handle_lora_checkin() / handle_ble_leak_checkin(), omit-on-unknown health_alert_to_json(), compute_valve_rating() main/health_engine/health_engine.c",
          msg=env(TS, 5500, "event", {"category": "health", "event": "device_offline",
                                      "source_type": "valve", "valve_id": VALVE_MAC,
                                      "rating": "critical", "prev_rating": "warning",
                                      "battery": 92, "offline_duration_s": 180})),
+    dict(group="Health events", id="H4", title="A sensor came back wet",
+         when="New in 2.1.4. H2 where the device returns INTO a leak: it is reachable again, so device_recovered is sent, but it is still critical, now because it is wet. rating and prev_rating are then both \"critical\". The two can also be equal on a trailing-edge alert (one sent after its debounce), where both carry the current rating. Read the event name, not a rating comparison, to tell offline from recovered.",
+         cite="is_offline_state(), apply_rating(), trailing edge in evaluate_timeouts() main/health_engine/health_engine.c",
+         msg=env(TS, 9800, "event", {"category": "health", "event": "device_recovered",
+                                     "source_type": "ble_leak_sensor", "sensor_id": SENSOR_B,
+                                     "rating": "critical", "prev_rating": "critical",
+                                     "battery": 64, "rssi": -76})),
 
     # ---------------- command acks ----------------
     dict(group="Command acknowledgements", id="C1", title="A command succeeded",
@@ -335,6 +391,19 @@ MESSAGES = [
          msg=env(TS, 30300, "event", {
              "event": "cmd_ack", "id": "req-8f23", "cmd": "reboot_hub", "status": "error",
              "error": {"code": "reboot_hub", "detail": "unknown command"}})),
+    dict(group="Command acknowledgements", id="C5", title="A valve command on a hub with no valve",
+         when="New in 2.1.4 (P0-a/c). valve_open, valve_close and valve_set_state are refused when no valve is provisioned. Up to 2.1.3 they acked ok, and the hub then connected to any nearby eFloStop valve and drove it. \"The valve command could not be queued. Try again.\" is the sibling refusal when the hub's valve command queue is full.",
+         cite="c2d_valve_command() main/iothub/app_iothub.c",
+         msg=env(TS, 30400, "event", {
+             "event": "cmd_ack", "id": "req-8f24", "cmd": "valve_close", "status": "error",
+             "error": {"code": "valve_close", "detail": "No valve is set up for this hub."}})),
+    dict(group="Command acknowledgements", id="C6", title="valve_open refused: valve battery critical",
+         when="New in 2.1.4 (BUG-1). valve_open, or valve_set_state open, while the valve's last real battery reading is at or below 10 %. The valve would refuse to open anyway, and up to 2.1.3 the hub acked ok for a valve that stayed shut. Closing is never refused for battery.",
+         cite="valve_open_reject_reason() main/iothub/app_iothub.c",
+         msg=env(TS, 30500, "event", {
+             "event": "cmd_ack", "id": "req-8f25", "cmd": "valve_open", "status": "error",
+             "error": {"code": "valve_open",
+                       "detail": "Valve battery critical (≤10 %): the valve will not open. Replace the batteries."}})),
 
     # ---------------- fallback ----------------
     dict(group="Fallback messages", id="F1", title="A rules payload could not be re-parsed",
@@ -393,8 +462,8 @@ GROUP_NOTES = {
 
 # Side-by-side map for anyone diffing this against document v2.0 (firmware 1.9.0).
 # Cumulative: each "new" cell is annotated with the firmware release that
-# introduced it, so a reader on either earlier revision can use one table.
-# (what, v2.0 / FW 1.9.0, v4.0 / FW 2.1.0)
+# introduced it, so a reader on any earlier revision can use one table.
+# (what, v2.0 / FW 1.9.0, v5.0 / FW 2.1.4)
 CHANGES = [
     ("Identity key, snapshot valve object",
      "data.valve.device_id",
@@ -458,9 +527,33 @@ CHANGES = [
     ("Generic device_id, anywhere on the wire",
      "the only identity key — every message used it",
      "GONE. Every outbound message names its device with valve_id or sensor_id  (2.1.0)"),
+    ("Snapshot valve object, no valve provisioned",
+     "{\"state\":\"disconnected\",\"connected\":false} — looked like a real valve that dropped off",
+     "{} (empty object)  (2.1.4)"),
+    ("Snapshot valve object, which valve",
+     "whatever valve the hub was linked to, even one being removed or a neighbour's",
+     "the PROVISIONED valve only: valve_id is its MAC; live data only from a link to that MAC  (2.1.4)"),
+    ("Valve battery when unknown (snapshot, valve_state_changed, leak events)",
+     "0 — indistinguishable from an empty battery",
+     "null  (2.1.4)"),
+    ("Snapshot valve before its readings are in",
+     "the link's defaults: battery 0 and whatever state byte was cached",
+     "state \"unknown\", battery null, fw_version null  (2.1.4)"),
+    ("Valve battery rating",
+     "shared sensor bands: <= 20 % warning, no critical band at all",
+     "<= 10 % critical (\"Valve battery critical\"), 11-20 % warning — valve only  (2.1.4)"),
+    ("Hub with no devices",
+     "one stale snapshot, then silence: no lifecycle, twin, snapshot or events",
+     "lifecycle (provisioned:false), twin, and snapshots with valve {}, [] arrays and \"No devices provisioned\"  (2.1.4)"),
+    ("Health alerts (device_offline / device_recovered)",
+     "any non-leak critical, battery included; a debounced alert was dropped",
+     "reachability only; a debounced alert is sent late (prev_rating may equal rating); device_recovered may be critical  (2.1.4)"),
+    ("valve_open / valve_close / valve_set_state acks",
+     "ok unless RMLEAK — even with no valve, at a critical battery, or when nothing was queued",
+     "error: \"No valve is set up for this hub.\", battery critical (open), \"The valve command could not be queued. Try again.\"  (2.1.4)"),
     ("Firmware version",
      "1.9.0",
-     "2.1.0 — breaking changes on both the telemetry and command planes"),
+     "2.1.4 — breaking changes on both the telemetry and command planes"),
 ]
 
 INTRO = """This document lists every real telemetry message the eFloStop II Wi-Fi Hub can publish to Azure
@@ -476,10 +569,12 @@ All of these arrive on one topic, `devices/<device_id>/messages/events/`, at QoS
 values carry everything: `lifecycle`, `snapshot` and `event`. Within `event`, the `data.event` field tells you
 which of the shapes below you have received.
 
-Two things to know before you build a parser. **A conditional key is omitted, not sent as null** — except
-inside the two sensor arrays, where every key is always present and unknown values are `null`. And in a
-snapshot, a sensor that has gone silent reports `"leak_state": false`, which is indistinguishable from a
-genuine dry reading; see message S3.
+Three things to know before you build a parser. **A conditional key is omitted, not sent as null** — except
+inside the two sensor arrays, where every key is always present and unknown values are `null`, and for
+`battery` on the snapshot valve, `valve_state_changed` and the leak events, which is `null` when unknown.
+**`data.valve` can be `{}`**: a hub with no valve provisioned sends an empty object, not a disconnected valve.
+And in a snapshot, a sensor that has gone silent keeps its last `battery`, `rssi` and `leak_state`;
+`connected` and `last_seen_age_s` tell you they are stale (S3).
 
 **Changes in firmware 2.0.0.** Firmware 1.9.0 made water detection a single event family; 2.0.0 finishes the
 job on naming. Two things changed, and there is no compatibility shim on the telemetry plane — every hub runs
@@ -531,6 +626,35 @@ latched by a sensor while the interlock itself is always the valve's. That costs
 On a hub provisioned with sensors but **no valve**, the two RMLEAK events omit `valve_id` entirely rather than
 naming a valve that does not exist — so treat it as optional there. The same applies to `auto_close`: rather than
 emit a placeholder, the hub omits the key when no MAC resolves.
+
+**Changes in firmware 2.1.4 — the empty hub, the missing valve and the unknown battery.** A bug-fix release
+for defects found in the field on 2.1.3. Nothing is renamed; four shapes you may not have seen before now
+appear, and every one of them replaces a message that stated something false.
+
+1. **A hub with no devices keeps talking.** Up to 2.1.3 a hub whose last device was removed sent one
+   snapshot that still showed the removed valve, then went silent. It now publishes lifecycle (L4,
+   `provisioned:false`), twin and snapshots (S8): `data.valve` is `{}`, both sensor arrays are `[]`, and
+   `system_health` is `excellent` / `"No devices provisioned"`.
+
+2. **`data.valve` is the provisioned valve, or `{}`.** A hub with sensors and no valve sends `{}` (S9). It
+   used to send `{"state":"disconnected","connected":false}`, which looked like a real valve that had dropped
+   off. When a valve is provisioned, `valve_id` is always its MAC, and live readings come only from a link
+   to that exact valve.
+
+3. **An unknown battery is `null`, never 0.** On the snapshot valve, `valve_state_changed` and every leak
+   event (S10, V6, K7). During the seconds between the valve's link coming up and its readings arriving,
+   the snapshot says `state:"unknown"` and `battery:null` rather than a default that reads as an empty
+   battery.
+
+4. **The valve's battery can make it critical.** At or below 10 % the valve is rated `critical` with the
+   reason `"Valve battery critical"` (S11); 11–20 % is `warning` / `"Valve battery low"`. This band is the
+   valve's only: a sensor's low battery never reaches critical. No health event is sent for it; the
+   snapshot that carries it follows within seconds. `valve_open` is refused while it lasts (C6).
+
+Health events now report reachability only: `device_offline` is always a lost link, a debounced alert is
+sent late instead of dropped, and `device_recovered` can carry `rating:"critical"` when the device came back
+wet (H4). On the command plane, `valve_open` / `valve_close` / `valve_set_state` now ack `error` when there
+is no valve (C5), at a critical battery (C6), or when the command could not be queued — see `C2D_COMMANDS.md`.
 
 **Identifiers are always UPPERCASE.** A BLE MAC is rendered `AA:BB:CC:DD:EE:FF` — colon-separated, upper
 case — and a LoRa id `0x1A2B3C4D`, on every message and every plane, regardless of the case the device was
