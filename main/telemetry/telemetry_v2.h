@@ -111,6 +111,11 @@ void telemetry_v2_start_snapshot_timer(void);
 
 // ---------------------------------------------------------------------------
 // Publishers — all run in iothub_task context, non-blocking
+//
+// Before the first clock sync the lifecycle and the snapshot are suppressed, but an
+// event (type="event") is built around the unsynced ts and held in the offline buffer,
+// never published directly. It gets its real time when the clock syncs
+// (offline_buffer_stamp_presync()), or at the latest from telemetry_v2_drain_offline().
 // ---------------------------------------------------------------------------
 
 /** Publish type="lifecycle" birth message (online, reset_reason, config). */

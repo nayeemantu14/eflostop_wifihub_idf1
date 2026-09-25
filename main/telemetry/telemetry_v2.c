@@ -76,13 +76,27 @@ static cJSON *build_envelope(const char *type)
     time_t now;
     time(&now);
 
-    /* Suppress telemetry if SNTP has not synced yet */
+    /* Before the first clock sync. A snapshot, the lifecycle or anything else that is not
+     * an event is suppressed, as always: it is regenerated after connect, and the snapshot
+     * scheduler relies on this NULL. An EVENT is built as normal around the unsynced ts
+     * and held in the offline buffer (publish_json); the drain stamps it with the real
+     * time once the clock has synced. Leak protection now runs before Wi-Fi (N1), so a
+     * leak_detected / auto_close raised while the router is still down used to be lost
+     * here for good - the leak delta caches had already recorded the wet state. */
     if (now < EPOCH_VALID_THRESHOLD_TELEM) {
-        ESP_LOGW(TELEM_TAG, "Time not synced (ts=%ld) — suppressing %s", (long)now, type);
-        cJSON_Delete(root);
-        return NULL;
+        if (strcmp(type, "event") != 0) {
+            ESP_LOGW(TELEM_TAG, "Time not synced (ts=%ld) — suppressing %s", (long)now, type);
+            cJSON_Delete(root);
+            return NULL;
+        }
+        ESP_LOGW(TELEM_TAG,
+                 "Time not synced (ts=%ld) - holding %s for replay; stamped when the clock syncs",
+                 (long)now, type);
     }
 
+    // "ts" stays the SECOND key, right after "schema": the offline buffer finds it by text
+    // scan (the first "ts": in the message) when it stamps a pre-sync event, and reads
+    // gateway.uptime_s, below, the same way.
     cJSON_AddNumberToObject(root, "ts", (double)now);
 
     cJSON *gw = cJSON_CreateObject();
@@ -105,17 +119,25 @@ static cJSON *build_envelope(const char *type)
 // taken AND esp_mqtt_client_publish accepted it, msg_id >= 0). Returns false on
 // a NULL root, offline (buffered or dropped), or a negative msg_id (e.g. outbox
 // saturated). The snapshot scheduler re-arms the heartbeat only on a true return,
-// so an offline/pre-SNTP/outbox-full drop never counts as "sent".
+// so an offline/pre-SNTP/outbox-full drop never counts as "sent". A pre-sync event
+// is always buffered, never sent, so it returns false too.
 static bool publish_json(cJSON *root, const char *type_hint)
 {
     if (!root) return false;
+
+    // An event built before the first clock sync carries the unsynced time() in "ts"
+    // (build_envelope). Decided from the envelope's own number, never a fresh time(): a
+    // sync landing between the build and here must not let that ts onto the wire.
+    const cJSON *ts = cJSON_GetObjectItemCaseSensitive(root, "ts");
+    bool presync = cJSON_IsNumber(ts) &&
+                   ts->valuedouble < (double)EPOCH_VALID_THRESHOLD_TELEM;
 
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json_str) return false;
 
     bool sent = false;
-    if (s_mqtt && s_connected) {
+    if (s_mqtt && s_connected && !presync) {
         // Online: publish directly
         ESP_LOGI(TELEM_TAG, "Pub %s: %s", type_hint, json_str);
         int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
@@ -123,9 +145,16 @@ static bool publish_json(cJSON *root, const char *type_hint)
         if (!sent)
             ESP_LOGW(TELEM_TAG, "Pub %s failed (msg_id=%d)", type_hint, msg_id);
     } else if (strcmp(type_hint, "event") == 0) {
-        // Offline: buffer critical events for replay on reconnect
-        ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
-        offline_buffer_store(json_str, strlen(json_str));
+        if (presync) {
+            // Built before the first clock sync (build_envelope() has logged it). Buffered
+            // even when online - MQTT cannot normally connect before the clock syncs - so
+            // the drain stamps it with the real time before it reaches the cloud.
+            offline_buffer_store_presync(json_str, strlen(json_str));
+        } else {
+            // Offline: buffer critical events for replay on reconnect
+            ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
+            offline_buffer_store(json_str, strlen(json_str));
+        }
     } else {
         // Offline: drop lifecycle/snapshot (regenerated on reconnect)
         ESP_LOGD(TELEM_TAG, "Offline — dropping %s (regenerated)", type_hint);

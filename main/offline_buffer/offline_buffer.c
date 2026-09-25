@@ -1,10 +1,13 @@
 #include "offline_buffer.h"
+#include <stdint.h>
 #include <string.h>
+#include <time.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #define OB_TAG       "OFFLINE_BUF"
 #define OB_NAMESPACE "offline_buf"
@@ -14,10 +17,27 @@
 
 #define OB_LOCK_TIMEOUT_MS 1000
 
+// Minimum epoch that counts as a synced clock (2024-01-01 00:00:00 UTC). Must match
+// EPOCH_VALID_THRESHOLD_TELEM in telemetry_v2.c, which decides what is a pre-sync event.
+#define OB_EPOCH_VALID_THRESHOLD 1704067200
+
+// Room for a pre-sync event's "ts" to grow when the drain stamps it: a few digits of
+// unsynced time() become a 10-digit epoch.
+#define OB_STAMP_MARGIN 16
+
 static uint8_t s_head  = 0;   // Next write index
 static uint8_t s_tail  = 0;   // Next read index
 static uint8_t s_count = 0;   // Number of valid entries
 static bool    s_ready = false;
+
+// One bit per ring slot, RAM only: set = the slot holds a pre-sync event stored THIS boot,
+// whose gateway.uptime_s is on this boot's esp_timer, so the drain can work out its real
+// time once the clock has synced. 0 at every boot, so a pre-sync event left in NVS by an
+// earlier power cycle reads as clear: its real time can never be known and it is dropped.
+// Indexed by slot, not by position from the tail, so it stays aligned when a drain stops
+// part-way. Every update is made with s_lock held.
+_Static_assert(OFFLINE_BUF_MAX_ENTRIES <= 16, "s_presync_mask has one bit per ring slot");
+static uint16_t s_presync_mask = 0;
 
 // store() runs on whichever task publishes an event while offline (iothub_task, or the
 // esp-mqtt task for a cmd_ack); drain and clear run on iothub_task. head/tail/count and
@@ -107,7 +127,7 @@ void offline_buffer_init(void)
 }
 
 // Call with s_lock held.
-static bool store_locked(const char *json, size_t len)
+static bool store_locked(const char *json, size_t len, bool presync)
 {
     nvs_handle_t h;
     if (nvs_open(OB_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
@@ -124,6 +144,12 @@ static bool store_locked(const char *json, size_t len)
         nvs_close(h);
         return false;
     }
+
+    // The slot now holds THIS entry, whatever it held before - including the oldest entry
+    // when the ring is full and is being overwritten below - so its bit follows the new one.
+    uint16_t bit = (uint16_t)(1u << s_head);
+    if (presync) s_presync_mask |= bit;
+    else         s_presync_mask &= (uint16_t)~bit;
 
     // Advance head
     s_head = (s_head + 1) % OFFLINE_BUF_MAX_ENTRIES;
@@ -148,7 +174,7 @@ static bool store_locked(const char *json, size_t len)
     return true;
 }
 
-bool offline_buffer_store(const char *json, size_t len)
+static bool store_common(const char *json, size_t len, bool presync)
 {
     if (!s_ready || !json || len == 0) return false;
 
@@ -161,9 +187,154 @@ bool offline_buffer_store(const char *json, size_t len)
     }
 
     if (!ob_lock("store")) return false;
-    bool ok = store_locked(json, len);
+    bool ok = store_locked(json, len, presync);
     ob_unlock();
     return ok;
+}
+
+bool offline_buffer_store(const char *json, size_t len)
+{
+    return store_common(json, len, false);
+}
+
+bool offline_buffer_store_presync(const char *json, size_t len)
+{
+    return store_common(json, len, true);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-sync replay: text scanning only. No cJSON here - the drain runs straight after the
+// MQTT/TLS connect, when the heap is at its tightest - and no heap at all.
+// ---------------------------------------------------------------------------
+
+// The integer after the FIRST occurrence of `key` (a quoted key with its colon, e.g.
+// "\"ts\":") in the NUL-terminated json. The first occurrence is the envelope's own:
+// build_envelope() writes "schema", then "ts", then "gateway" (with "uptime_s") before
+// "data", and JSON string escaping means a quoted key can never appear inside a string
+// value. Only an optional '-' and up to 18 digits are accepted - how cJSON prints the
+// whole seconds these keys carry. Returns the start of the number and sets *num_end just
+// past it, or NULL when the key is absent or no plain integer follows it.
+static char *ob_find_int(char *json, const char *key, int64_t *out, char **num_end)
+{
+    char *p = strstr(json, key);
+    if (!p) return NULL;
+
+    char *num = p + strlen(key);
+    char *q = num;
+    bool neg = (*q == '-');
+    if (neg) q++;
+
+    int64_t v = 0;
+    int digits = 0;
+    while (*q >= '0' && *q <= '9') {
+        if (++digits > 18) return NULL;
+        v = v * 10 + (*q - '0');
+        q++;
+    }
+    if (digits == 0 || *q == '.' || *q == 'e' || *q == 'E') return NULL;
+
+    *out = neg ? -v : v;
+    if (num_end) *num_end = q;
+    return num;
+}
+
+// Replaces the number text [num, num_end) inside buf (NUL-terminated, length *len, `cap`
+// bytes including the NUL) with `value`, moving the tail. false = the result would not
+// fit; buf is then untouched.
+static bool ob_rewrite_int(char *buf, size_t *len, size_t cap,
+                           char *num, char *num_end, int64_t value)
+{
+    char digits[24];
+    int n = snprintf(digits, sizeof(digits), "%lld", (long long)value);
+    if (n <= 0 || (size_t)n >= sizeof(digits)) return false;
+
+    size_t new_len = *len - (size_t)(num_end - num) + (size_t)n;
+    if (new_len + 1 > cap) return false;
+
+    memmove(num + n, num_end, (size_t)(buf + *len - num_end) + 1);   // tail + its NUL
+    memcpy(num, digits, (size_t)n);
+    *len = new_len;
+    return true;
+}
+
+typedef enum {
+    OB_STAMP_OK,         // "ts" rewritten in buf
+    OB_STAMP_UNFIXABLE,  // no usable uptime_s, or the result is not a synced time
+    OB_STAMP_TOO_LONG,   // the stamped text would not fit in buf
+} ob_stamp_t;
+
+// Stamps a pre-sync event of THIS boot (the caller has checked its mask bit): rewrites its
+// "ts" number [ts_num, ts_end) in buf to now - (uptime now - its gateway.uptime_s), the
+// same uptime basis build_envelope() uses. `now` must be a synced time. buf is untouched
+// unless OB_STAMP_OK.
+static ob_stamp_t ob_stamp(char *buf, size_t *len, size_t cap, char *ts_num, char *ts_end,
+                           time_t now, int64_t *stamped_out, int64_t *age_out)
+{
+    int64_t uptime_now_s = esp_timer_get_time() / 1000000;
+    int64_t uptime_s = 0;
+    if (!ob_find_int(buf, "\"uptime_s\":", &uptime_s, NULL) ||
+        uptime_s < 0 || uptime_s > uptime_now_s) {
+        return OB_STAMP_UNFIXABLE;
+    }
+    int64_t stamped = (int64_t)now - (uptime_now_s - uptime_s);
+    if (stamped < OB_EPOCH_VALID_THRESHOLD) return OB_STAMP_UNFIXABLE;
+    if (!ob_rewrite_int(buf, len, cap, ts_num, ts_end, stamped)) return OB_STAMP_TOO_LONG;
+
+    *stamped_out = stamped;
+    *age_out = uptime_now_s - uptime_s;
+    return OB_STAMP_OK;
+}
+
+typedef enum {
+    OB_REPLAY_PUBLISH,   // publish buf as it now stands (stamped, if it was pre-sync)
+    OB_REPLAY_DROP,      // erase without publishing (logged); advances like a publish
+    OB_REPLAY_HOLD,      // stop the drain here, keeping this entry and the rest
+} ob_replay_t;
+
+// Decides what the drain does with the entry just read from `slot` into buf, stamping a
+// pre-sync event's "ts" in place. Call with s_lock held (reads s_presync_mask).
+static ob_replay_t ob_prepare_replay_locked(uint8_t slot, const char *key,
+                                            char *buf, size_t *len, size_t cap)
+{
+    int64_t ts = 0;
+    char *ts_end = NULL;
+    char *ts_num = ob_find_int(buf, "\"ts\":", &ts, &ts_end);
+    if (!ts_num || ts >= OB_EPOCH_VALID_THRESHOLD) {
+        return OB_REPLAY_PUBLISH;   // stamped when it was built: unchanged, as always
+    }
+
+    if ((s_presync_mask & (1u << slot)) == 0) {
+        ESP_LOGW(OB_TAG, "Dropped a buffered event from an earlier power cycle that was never time-stamped [%s]",
+                 key);
+        return OB_REPLAY_DROP;
+    }
+
+    time_t now = time(NULL);
+    if (now < OB_EPOCH_VALID_THRESHOLD) {
+        // Should not happen: the drain runs after the MQTT connect, which needs the clock.
+        ESP_LOGW(OB_TAG, "Clock not synced - pre-sync event [%s] and %d after it kept for the next drain",
+                 key, s_count - 1);
+        return OB_REPLAY_HOLD;
+    }
+
+    int64_t stamped = 0;
+    int64_t age_s = 0;
+    switch (ob_stamp(buf, len, cap, ts_num, ts_end, now, &stamped, &age_s)) {
+    case OB_STAMP_OK:
+        break;
+    case OB_STAMP_TOO_LONG:
+        ESP_LOGW(OB_TAG, "Dropped a buffered pre-sync event [%s] - too long once time-stamped",
+                 key);
+        return OB_REPLAY_DROP;
+    default:
+        ESP_LOGW(OB_TAG, "Dropped a buffered pre-sync event [%s] - cannot be time-stamped from its uptime_s",
+                 key);
+        return OB_REPLAY_DROP;
+    }
+
+    ESP_LOGI(OB_TAG, "Stamped pre-sync event [%s]: ts=%lld (%lld s before this replay)",
+             key, (long long)stamped, (long long)age_s);
+    return OB_REPLAY_PUBLISH;
 }
 
 // Call with s_lock held and s_count > 0.
@@ -178,31 +349,40 @@ static int drain_locked(esp_mqtt_client_handle_t client, const char *topic)
     }
 
     int published = 0;
-    char buf[OFFLINE_BUF_MAX_JSON_LEN + 1];
+    char buf[OFFLINE_BUF_MAX_JSON_LEN + OB_STAMP_MARGIN + 1];
 
     while (s_count > 0) {
         char key[8];
         make_key(s_tail, key, sizeof(key));
 
-        size_t len = OFFLINE_BUF_MAX_JSON_LEN;
+        // A slot stamped at the clock sync can hold up to OB_STAMP_MARGIN bytes more
+        // than the store limit.
+        size_t len = sizeof(buf) - 1;
         esp_err_t err = nvs_get_blob(h, key, buf, &len);
         if (err != ESP_OK) {
             ESP_LOGW(OB_TAG, "Read '%s' failed: %s, skipping",
                      key, esp_err_to_name(err));
         } else {
             buf[len] = '\0';
-            int msg_id = esp_mqtt_client_publish(client, topic, buf, (int)len, 1, 0);
-            if (msg_id >= 0) {
-                published++;
-                ESP_LOGI(OB_TAG, "Replayed [%s] (%u bytes)", key, (unsigned)len);
-            } else {
-                ESP_LOGW(OB_TAG, "MQTT publish failed for [%s], stopping drain", key);
-                break;
+            ob_replay_t action = ob_prepare_replay_locked(s_tail, key, buf, &len, sizeof(buf));
+            if (action == OB_REPLAY_HOLD) break;
+            if (action == OB_REPLAY_PUBLISH) {
+                int msg_id = esp_mqtt_client_publish(client, topic, buf, (int)len, 1, 0);
+                if (msg_id >= 0) {
+                    published++;
+                    ESP_LOGI(OB_TAG, "Replayed [%s] (%u bytes)", key, (unsigned)len);
+                } else {
+                    // A stamped entry is not written back: its bit stays set, so the next
+                    // drain stamps it again from the same uptime_s.
+                    ESP_LOGW(OB_TAG, "MQTT publish failed for [%s], stopping drain", key);
+                    break;
+                }
             }
         }
 
         // Erase this slot and advance tail
         nvs_erase_key(h, key);
+        s_presync_mask &= (uint16_t)~(1u << s_tail);
         s_tail = (s_tail + 1) % OFFLINE_BUF_MAX_ENTRIES;
         s_count--;
     }
@@ -231,6 +411,64 @@ int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic)
     return published;
 }
 
+void offline_buffer_stamp_presync(void)
+{
+    if (!s_ready) return;
+    time_t now = time(NULL);
+    if (now < OB_EPOCH_VALID_THRESHOLD) return;
+    if (!ob_lock("stamp")) return;   // the drain stamps them instead
+    if (s_presync_mask == 0 || s_count == 0) {
+        ob_unlock();
+        return;
+    }
+
+    nvs_handle_t h;
+    if (nvs_open(OB_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        ESP_LOGE(OB_TAG, "NVS open failed for pre-sync stamping");
+        ob_unlock();
+        return;
+    }
+
+    int stamped_n = 0;
+    char buf[OFFLINE_BUF_MAX_JSON_LEN + OB_STAMP_MARGIN + 1];
+    uint8_t slot = s_tail;
+    for (uint8_t i = 0; i < s_count; i++, slot = (uint8_t)((slot + 1) % OFFLINE_BUF_MAX_ENTRIES)) {
+        uint16_t bit = (uint16_t)(1u << slot);
+        if ((s_presync_mask & bit) == 0) continue;
+
+        char key[8];
+        make_key(slot, key, sizeof(key));
+        size_t len = sizeof(buf) - 1;
+        if (nvs_get_blob(h, key, buf, &len) != ESP_OK) continue;   // the drain retries
+        buf[len] = '\0';
+
+        int64_t ts = 0;
+        char *ts_end = NULL;
+        char *ts_num = ob_find_int(buf, "\"ts\":", &ts, &ts_end);
+        if (!ts_num || ts >= OB_EPOCH_VALID_THRESHOLD) {
+            s_presync_mask &= (uint16_t)~bit;   // nothing to stamp: replayed as it is
+            continue;
+        }
+
+        int64_t stamped = 0;
+        int64_t age_s = 0;
+        // Not stampable, or the rewrite fails: the bit stays, and the drain drops it
+        // with its own log line.
+        if (ob_stamp(buf, &len, sizeof(buf), ts_num, ts_end, now, &stamped, &age_s) != OB_STAMP_OK)
+            continue;
+        if (nvs_set_blob(h, key, buf, len) != ESP_OK) continue;
+
+        s_presync_mask &= (uint16_t)~bit;
+        stamped_n++;
+        ESP_LOGI(OB_TAG, "Stamped pre-sync event [%s] at clock sync: ts=%lld (%lld s ago)",
+                 key, (long long)stamped, (long long)age_s);
+    }
+
+    if (stamped_n > 0) nvs_commit(h);
+    nvs_close(h);
+    ob_unlock();
+}
+
 int offline_buffer_count(void)
 {
     if (!s_ready) return 0;
@@ -254,6 +492,7 @@ static void clear_locked(void)
     }
 
     s_head = s_tail = s_count = 0;
+    s_presync_mask = 0;
     nvs_set_u8(h, OB_KEY_HEAD,  0);
     nvs_set_u8(h, OB_KEY_TAIL,  0);
     nvs_set_u8(h, OB_KEY_COUNT, 0);
