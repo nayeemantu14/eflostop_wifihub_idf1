@@ -91,16 +91,43 @@ static portMUX_TYPE s_wl_lock = portMUX_INITIALIZER_UNLOCKED;
  * NimBLE stores addresses LSB-first, so we reverse the byte order.
  * "00:80:E1:27:9A:E6" → [0xE6, 0x9A, 0x27, 0xE1, 0x80, 0x00]
  * Returns false (out untouched) unless all six fields parsed.
+ *
+ * Hand-parsed for the one format provisioning stores (validate_mac_string(), upper-cased
+ * by provisioning_get_device_set()): sscanf costs several hundred bytes of stack on the
+ * 3072 B scan task. sscanf stays as the fallback for anything else, so nothing the old
+ * parser accepted is newly rejected — a rejected MAC is a sensor the hub stops hearing.
  * --------------------------------------------------------- */
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
 static bool mac_str_to_bytes(const char *str, uint8_t *out)
 {
-    unsigned int b[6];
-    if (sscanf(str, "%02X:%02X:%02X:%02X:%02X:%02X",
-               &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]) != 6) {
-        return false;
+    uint8_t b[6] = {0};
+    bool ok = (strlen(str) == 17);
+    for (int i = 0; ok && i < 6; i++) {
+        int hi = hex_nibble(str[3 * i]);
+        int lo = hex_nibble(str[3 * i + 1]);
+        if (hi < 0 || lo < 0 || (i < 5 && str[3 * i + 2] != ':')) {
+            ok = false;
+        } else {
+            b[i] = (uint8_t)((hi << 4) | lo);
+        }
+    }
+    if (!ok) {
+        unsigned int u[6];
+        if (sscanf(str, "%02X:%02X:%02X:%02X:%02X:%02X",
+                   &u[0], &u[1], &u[2], &u[3], &u[4], &u[5]) != 6) {
+            return false;
+        }
+        for (int i = 0; i < 6; i++) b[i] = (uint8_t)u[i];
     }
     for (int i = 0; i < 6; i++) {
-        out[i] = (uint8_t)b[5 - i];
+        out[i] = b[5 - i];
     }
     return true;
 }
@@ -160,32 +187,48 @@ static int sensor_alloc_locked(const uint8_t *mac)
 /* ---------------------------------------------------------
  * Reload whitelist from provisioning manager
  * --------------------------------------------------------- */
-static void reload_whitelist(void)
+/* Read the provisioned BLE MACs and convert them, in a frame of its OWN (noinline), so the
+ * ~376 B device set is dead before reload_whitelist() logs anything. Logging is the deep
+ * call on the 3072 B scan task, and 2.1.3 logged with its 288 B string copy still live.
+ * Not static either: a static would take the same bytes out of the heap for good, and the
+ * field's lowest free heap was 2972 B. No logging and no locks in here.
+ * Returns false only when provisioning could not be read. */
+static __attribute__((noinline)) bool read_whitelist(uint8_t wl[][6], uint8_t *count,
+                                                     uint8_t *invalid)
 {
     /* The atomic device-set read, not provisioning_get_ble_leak_sensors(): that getter
      * returns false for BOTH "no sensors" and "mutex busy", and the old code treated
      * false as "no sensors" — one busy mutex blanked the whitelist and deafened the hub
-     * to every leak sensor for up to 10 s. A failed read now keeps the current list.
-     *
-     * static (~376 B) keeps it off ble_leak_scan_task's 3072 B stack. Only that task calls
-     * this function (at task start and from its loop), so it is never re-entered. */
-    static prov_device_set_t set;
-    if (!provisioning_get_device_set(&set)) {
+     * to every leak sensor for up to 10 s. */
+    prov_device_set_t set;
+    if (!provisioning_get_device_set(&set)) return false;
+
+    *count = 0;
+    *invalid = 0;
+    for (int i = 0; i < set.ble_count && *count < MAX_TRACKED_SENSORS; i++) {
+        if (mac_str_to_bytes(set.ble_macs[i], wl[*count])) {
+            (*count)++;
+        } else {
+            (*invalid)++;
+        }
+    }
+    return true;
+}
+
+static void reload_whitelist(void)
+{
+    // Converted OUTSIDE the lock (the parser is not a critical-section call).
+    uint8_t wl[MAX_TRACKED_SENSORS][6];
+    memset(wl, 0, sizeof(wl));
+    uint8_t count = 0, invalid = 0;
+    if (!read_whitelist(wl, &count, &invalid)) {
+        // A failed read keeps the current list.
         ESP_LOGW(BLE_LEAK_TAG, "Whitelist reload skipped (provisioning busy) - keeping %d sensor(s)",
                  (int)s_whitelist_count);
         return;
     }
-
-    // Convert OUTSIDE the lock (sscanf is not a critical-section call).
-    uint8_t wl[MAX_TRACKED_SENSORS][6];
-    memset(wl, 0, sizeof(wl));
-    uint8_t count = 0;
-    for (int i = 0; i < set.ble_count && count < MAX_TRACKED_SENSORS; i++) {
-        if (!mac_str_to_bytes(set.ble_macs[i], wl[count])) {
-            ESP_LOGW(BLE_LEAK_TAG, "Whitelist: invalid MAC '%s' skipped", set.ble_macs[i]);
-            continue;
-        }
-        count++;
+    if (invalid > 0) {
+        ESP_LOGW(BLE_LEAK_TAG, "Whitelist: %u invalid MAC(s) skipped", (unsigned)invalid);
     }
 
     uint32_t sum = count;
