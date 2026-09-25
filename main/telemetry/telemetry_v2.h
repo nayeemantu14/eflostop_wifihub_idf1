@@ -166,7 +166,7 @@ typedef struct {
                                  // message has carried a literal device_id since
                                  // 2.1.0.
     bool          leak_state;    // the value that selected `event`, not a re-read
-    uint8_t       battery;       // percent, 0-100
+    uint8_t       battery;       // percent 0-100, 0xFF = unknown (published as null)
 
     bool          has_rssi;      // sensors only — the valve link has no cached RSSI
     int8_t        rssi;          // dBm, as heard at the hub

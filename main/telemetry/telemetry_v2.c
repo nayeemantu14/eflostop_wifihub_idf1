@@ -684,10 +684,13 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     if (!sys_health) goto fail;
     cJSON_AddStringToObject(sys_health, "rating",
         health_rating_to_str(sys_rating));
-    // 192, not 128: the builder can now emit up to 8 comma-joined parts (leak, the
-    // interlock, three valve causes, three sensor causes, syncing), and a leak part
-    // carries a user-supplied label. At 128 the last cause truncated mid-word once six
-    // parts were present. strncat is bounded either way, so this only buys fidelity.
+    // 192, not 128: the builder can now emit up to 7 comma-joined parts (leak, the
+    // interlock, one valve cause, three sensor causes, syncing), and a leak part carries
+    // a user-supplied label. The valve causes (offline / disconnected / battery critical /
+    // battery low) are mutually exclusive for the one valve, so at most one valve part is
+    // emitted and 192 still holds the longest combination. At 128 the last cause truncated
+    // mid-word once six parts were present. strncat is bounded either way, so this only
+    // buys fidelity.
     char reason[192];
     if (health_count == 0) {
         // Empty hub (nothing provisioned, or a rules-only provision). "All devices

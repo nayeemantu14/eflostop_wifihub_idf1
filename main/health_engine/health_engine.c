@@ -76,6 +76,13 @@ static volatile uint32_t s_checkin_seq = 0;
  * state. Every write happens under s_mutex; read lock-free by iothub_task via
  * health_get_rating_seq(). See that declaration for why this exists. */
 static volatile uint32_t s_rating_seq = 0;
+/* The provisioned valve's last REAL battery reading is <= HEALTH_VALVE_BATTERY_CRIT_PCT.
+ * Written ONLY under s_mutex, by recalc_system_rating() — which every path that changes a
+ * valve's battery or the valve's presence in the table reaches before the give (the task
+ * loop tail after every event, the reconcile's step 5). Read lock-free by
+ * health_is_valve_battery_critical(), so the esp-mqtt task's open guard never takes
+ * s_mutex. */
+static volatile bool s_valve_batt_crit = false;
 // True while the hub is holding the valve shut on a latched leak incident. Written
 // lock-free by health_set_interlock_held() from the rules engine; read by
 // recalc_system_rating() (where it raises a WARNING floor) and by
@@ -377,11 +384,22 @@ static void recalc_system_rating(void)
 
     /* A roll-up change is itself news: a grace expiry, for one, changes it with no device
      * edge and no alert, and the 2.1.3 field log sat RED from 678 s with nothing published
-     * until the 969 s heartbeat (N10). Every caller holds s_mutex. */
+     * until the 969 s heartbeat (N10). Every caller holds s_mutex.
+     *
+     * Wake iothub_task too: a change latched off the health task — e.g. the grace expiry
+     * the fleet LED's 250 ms poll latches via check_boot_sync_locked() — would otherwise
+     * wait for that loop's 30 s idle cap. Non-blocking and NULL-guarded (enqueue_alert()
+     * already calls it under s_mutex), so safe before telemetry is up. */
     if (worst != s_system_rating) {
         s_system_rating = worst;
         s_rating_seq++;
+        telemetry_v2_wake_snapshot();
     }
+
+    // Mirror for health_is_valve_battery_critical(); see s_valve_batt_crit.
+    const health_device_t *v = find_valve();
+    s_valve_batt_crit = v && v->last_battery != 0xFF &&
+                        v->last_battery <= HEALTH_VALVE_BATTERY_CRIT_PCT;
 }
 
 // ---------------------------------------------------------------------------
@@ -493,7 +511,10 @@ static void apply_rating(health_device_t *dev, health_rating_t new_rating,
 
     dev->rating = new_rating;
     dev->cause  = (uint8_t)new_cause;
-    if (valve_batt_edge) s_rating_seq++;
+    if (valve_batt_edge) {
+        s_rating_seq++;
+        telemetry_v2_wake_snapshot();   // see recalc_system_rating()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1373,14 +1394,9 @@ uint32_t health_get_rating_seq(void)
 
 bool health_is_valve_battery_critical(void)
 {
-    if (!s_mutex) return false;
-    if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
-
-    const health_device_t *v = find_valve();
-    bool crit = v && v->last_battery != 0xFF &&
-                v->last_battery <= HEALTH_VALVE_BATTERY_CRIT_PCT;
-    xSemaphoreGive(s_mutex);
-    return crit;
+    /* Lock-free: called on the esp-mqtt task (valve_open_reject_reason()), which must not
+     * take s_mutex. The mirror is refreshed under the lock by recalc_system_rating(). */
+    return s_valve_batt_crit;
 }
 
 bool health_get_sync_counts(uint8_t *seen, uint8_t *total)

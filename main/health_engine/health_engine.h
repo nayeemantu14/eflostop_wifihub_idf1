@@ -334,7 +334,8 @@ uint32_t health_get_checkin_seq(void);
  * @brief Monotonic counter of rating changes the cloud must see promptly.
  *
  * Bumped when the system roll-up rating changes, and when the valve's rating changes to
- * or from a battery-driven state. iothub_task polls it and requests an EVENT snapshot, so
+ * or from a battery-driven state; each bump also wakes iothub_task
+ * (telemetry_v2_wake_snapshot()). iothub_task polls it and requests an EVENT snapshot, so
  * a rating change that raises no alert (valve battery-critical is deliberately silent,
  * and a roll-up grace expiry has no device edge at all) reaches the cloud within seconds
  * instead of at the next heartbeat.
@@ -348,10 +349,12 @@ uint32_t health_get_rating_seq(void);
  * @brief Whether the provisioned valve's last REAL battery reading is at or below
  *        HEALTH_VALVE_BATTERY_CRIT_PCT (the level at which the valve refuses to open).
  *
- * The reading is kept across reconnects: a valve that dropped at 8 % is still at 8 %.
- * Returns false when no valve is provisioned, the battery is unknown, or the engine's
- * mutex is busy (100 ms) — the valve itself still refuses the open, so failing open here
- * costs only the explanatory error ack.
+ * Lock-free (volatile read), safe from any task — the esp-mqtt task's open guard must not
+ * take the health mutex. It mirrors the provisioned valve's entry, refreshed under the
+ * engine's mutex on every re-roll, and the reading is kept across reconnects: a valve that
+ * dropped at 8 % is still at 8 %. Returns false when no valve is in the table or its
+ * battery is unknown (0xFF) — the valve itself still refuses the open, so failing open
+ * here costs only the explanatory error ack.
  */
 bool health_is_valve_battery_critical(void);
 
