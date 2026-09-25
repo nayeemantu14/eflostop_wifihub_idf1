@@ -165,8 +165,11 @@ static void reload_whitelist(void)
     /* The atomic device-set read, not provisioning_get_ble_leak_sensors(): that getter
      * returns false for BOTH "no sensors" and "mutex busy", and the old code treated
      * false as "no sensors" — one busy mutex blanked the whitelist and deafened the hub
-     * to every leak sensor for up to 10 s. A failed read now keeps the current list. */
-    prov_device_set_t set;
+     * to every leak sensor for up to 10 s. A failed read now keeps the current list.
+     *
+     * static (~376 B) keeps it off ble_leak_scan_task's 3072 B stack. Only that task calls
+     * this function (at task start and from its loop), so it is never re-entered. */
+    static prov_device_set_t set;
     if (!provisioning_get_device_set(&set)) {
         ESP_LOGW(BLE_LEAK_TAG, "Whitelist reload skipped (provisioning busy) - keeping %d sensor(s)",
                  (int)s_whitelist_count);

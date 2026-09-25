@@ -153,13 +153,19 @@ static void fleet_led_task(void *param)
          * unprovisioned test) and as the health-engine-is-up probe. */
         if (health_get_sync_counts(NULL, &total)) {
             initialized = true;
-            /* Sample the sync flag BEFORE the rating, matching the same ordering in
-             * telemetry_v2_publish_snapshot(). health_is_rollup_syncing() evaluates the
-             * window deadlines on read, and the grace expiring re-rolls the roll-up
+            /* Sample the sync flag BEFORE the rating. health_is_rollup_syncing() evaluates
+             * the window deadlines on read, and the grace expiring re-rolls the roll-up
              * (devices never heard from stop being excluded). Reading the rating first
              * would use the pre-expiry value while branching on the post-expiry flag —
              * one GREEN frame, and a spurious GREEN transition logged, for a hub that had
              * just become CRITICAL over a missing device.
+             *
+             * These remain two separate reads (a short-lock one, then a lock-free one).
+             * telemetry_v2_publish_snapshot() no longer reads this way: it samples the
+             * table, the rating and the syncing flag under ONE lock via
+             * health_get_device_status_all(). Here a change landing between the two reads
+             * can make them disagree for at most one FLEET_POLL_MS (250 ms) frame; the
+             * next poll converges.
              *
              * NOT health_is_boot_sync_complete(): that is the SNAPSHOT gate, on the short
              * 180 s clock. Asking it here is what produced the 2026-09-17 capture's 81 s

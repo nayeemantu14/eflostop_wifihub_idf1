@@ -773,6 +773,13 @@ static void apply_device_set_change(void)
         return;
     }
 
+    // Only an ADDED valve can have missed its CONNECTED: the provision handler starts the
+    // link on the esp-mqtt task before this reconcile appends the entry. The engine reads
+    // the live link itself and ignores the request otherwise (e.g. sensors-only additions).
+    if (r.added > 0 && !health_request_valve_resync()) {
+        ESP_LOGW(IOTHUB_TAG, "Device-set change: valve link resync not queued (health queue full)");
+    }
+
     purge_telemetry_caches();
 
     if (!rules_engine_forget_unprovisioned()) {
@@ -788,8 +795,23 @@ static void apply_device_set_change(void)
         on_hub_emptied();
     } else if (r.added > 0) {
         arm_commission_snapshot(true);
+        ESP_LOGI(IOTHUB_TAG,
+                 "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
+                 HEALTH_COMMISSION_SYNC_TIMEOUT_MS / 1000);
     }
     s_hub_empty = now_empty;
+
+    // A HEARD device removed inside the refresh grace lowers the seen-count below the one
+    // the last commission snapshot recorded, and the refresh fires only on seen >
+    // g_commission_pub_seen — so a late device's first contact would merely restore the old
+    // count and publish nothing. Clamp only: an open window keeps running unchanged, and a
+    // closed one stays closed. (snap_now_ms() is defined below this function.)
+    if (r.removed > 0 && (esp_timer_get_time() / 1000) < g_commission_until_ms) {
+        uint8_t seen = 0, total = 0;
+        if (health_get_sync_counts(&seen, &total) && seen < g_commission_pub_seen) {
+            g_commission_pub_seen = seen;
+        }
+    }
 
     sync_valve_detectors();
 
@@ -1189,9 +1211,6 @@ static void handle_c2d_command(const char *data, size_t data_len)
             // valve_id) into twin reported, so an app confirming setup via the twin does
             // not have to wait for a reconnect.
             g_devset_changed = true;
-            ESP_LOGI(IOTHUB_TAG,
-                     "Commission: fast snapshot armed (all-devices-seen, else <=%ds; refreshes on late devices)",
-                     HEALTH_COMMISSION_SYNC_TIMEOUT_MS / 1000);
         } else {
             success = false;
             error_msg = "provisioning failed";

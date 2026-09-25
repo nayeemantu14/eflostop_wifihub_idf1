@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "cJSON.h"
 #include "provisioning_manager.h"
+#include "app_ble_valve.h"  // ble_valve_is_ready() / ble_valve_get_mac() — valve link resync
 #include "rules_engine.h"   // leak_source_to_str() / leak_identity_key() — shared wire vocabulary
 #include "telemetry/telemetry_v2.h"   // telemetry_v2_wake_snapshot() — wake the publisher on alert
 
@@ -614,6 +615,42 @@ static void handle_valve_leak(bool leaking)
     apply_rating(dev, new_rating, cause, now);
 }
 
+/* A valve whose link came up BEFORE its table entry existed (health_request_valve_resync()).
+ * The C2D provision handler sets the BLE target and connects on the esp-mqtt task, but the
+ * entry is appended later, by the reconcile on iothub_task. A CONNECTED processed in between
+ * found no entry and was dropped, and the next one is posted only by a valve notify that
+ * CHANGES a value — so the valve sat CRITICAL "never connected" and, once its excuse ran
+ * out, turned the hub RED "Valve offline" while it was connected.
+ *
+ * The live link state is read HERE, on this task, when the event is processed. Events are
+ * processed FIFO and the valve module clears its ready bits before posting DISCONNECTED: a
+ * DISCONNECTED posted before this event has already been applied, and one posted after it
+ * is applied after it. Reading is_ready on iothub_task and posting a CONNECTED from there
+ * could land a stale CONNECTED after a DISCONNECTED.
+ *
+ * Only the link is resynced; the battery is NOT re-fed. The deleted
+ * reseed_valve_health_if_connected() fed the unknown battery as 0 % (the BUG-1 trap), and
+ * the valve's battery reaches this engine by itself from on_notify() on every read/notify,
+ * with 0xFF ignored by handle_valve_battery(). Call with s_mutex held. */
+static void handle_valve_resync(void)
+{
+    if (!ble_valve_is_ready()) return;
+
+    health_device_t *dev = find_valve();
+    if (!dev) return;
+
+    // The entry already reflects a live link: nothing was lost.
+    if (dev->last_seen_ms != 0 && dev->disconnect_ms == 0) return;
+
+    // Only a link to THIS valve: the valve module can still hold a link to another one
+    // (it can relink a valve by name), and this handler asserts the provisioned one is up.
+    char live_mac[18];
+    if (!ble_valve_get_mac(live_mac) || strcasecmp(live_mac, dev->dev_id) != 0) return;
+
+    ESP_LOGI(HEALTH_TAG, "Valve link resync: link was already up when its table entry was added");
+    handle_valve_event(true);
+}
+
 static void evaluate_timeouts(void)
 {
     int64_t now = now_ms();
@@ -850,6 +887,9 @@ static void health_engine_task(void *param)
                 break;
             case HEALTH_EVT_TICK:
                 evaluate_timeouts();
+                break;
+            case HEALTH_EVT_VALVE_RESYNC:
+                handle_valve_resync();
                 break;
         }
 
@@ -1117,6 +1157,14 @@ bool health_post_event(const health_event_t *evt)
 {
     if (!s_health_queue || !evt) return false;
     return xQueueSend(s_health_queue, evt, 0) == pdTRUE;
+}
+
+bool health_request_valve_resync(void)
+{
+    health_event_t evt;
+    memset(&evt, 0, sizeof(evt));
+    evt.type = HEALTH_EVT_VALVE_RESYNC;
+    return health_post_event(&evt);
 }
 
 health_rating_t health_get_system_rating(void)

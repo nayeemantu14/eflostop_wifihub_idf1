@@ -791,9 +791,11 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         }
 
         // Merge telemetry data from cache — only when the device is currently
-        // connected. A reload (provision/decommission) wipes health seen-state
-        // but not this cache, so without the connected gate a just-reloaded
-        // sensor would emit connected:false yet carry stale battery/rssi/fw.
+        // connected. A provision/decommission no longer wipes health seen-state: only a
+        // newly ADDED device is seeded unheard, survivors keep theirs. The cache follows
+        // neither (it keeps a device's last values across a disconnect), so the connected
+        // gate is still what stops it resurrecting pre-disconnect data (here snr) beside
+        // connected:false.
         const telem_lora_cache_t *cached = NULL;
         if (health[i].connected && s_lora_cache) {
             for (int j = 0; j < TELEM_MAX_LORA_CACHE; j++) {
@@ -866,8 +868,9 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         }
 
         // Merge telemetry data from cache — only when the device is currently
-        // connected (see LoRa note): prevents emitting connected:false with
-        // stale battery/rssi/fw after a reload wipes health seen-state.
+        // connected (see LoRa note): the cache keeps a device's last values across a
+        // disconnect, so without the gate connected:false would ship with its
+        // pre-disconnect fw_version.
         const telem_ble_leak_cache_t *cached = NULL;
         if (health[i].connected && s_ble_cache) {
             for (int j = 0; j < TELEM_MAX_BLE_LEAK_CACHE; j++) {
