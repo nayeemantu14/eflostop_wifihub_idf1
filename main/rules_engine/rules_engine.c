@@ -4,6 +4,7 @@
 #include <strings.h>
 #include <time.h>
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "cJSON.h"
 #include "nvs.h"
 #include "nvs_store/nvs_store.h"
@@ -75,6 +76,13 @@ static SemaphoreHandle_t g_mutex = NULL;
 static override_state_t g_override_state = OVERRIDE_STATE_INACTIVE;
 static time_t g_override_window_expiry = 0;  // Unix epoch when window expires (0 = inactive)
 static TickType_t g_last_blocked_event_tick = 0;
+/* Uptime basis for a window stamped while the wall clock was not yet synced. RAM only:
+ * ovr_state / ovr_expiry keep their exact meaning, so a rollback reads them as before.
+ * Set = this boot started (or refreshed) the window from an unsynced clock, so
+ * g_override_start_uptime_s is exact and the tick re-bases the window at the first
+ * valid clock. A window restored unsynced from NVS leaves it clear, start uptime 0. */
+static bool g_override_unsynced_this_boot = false;
+static uint32_t g_override_start_uptime_s = 0;  // esp_timer seconds at window start
 
 // Tracks valve ready-state transitions to detect reconnect in tick()
 static bool g_valve_was_ready = false;
@@ -87,6 +95,54 @@ static char *g_pending_telemetry = NULL;
 static char g_active_leak_ids[MAX_ACTIVE_LEAK_SOURCES][18];
 static uint8_t g_active_leak_count = 0;
 static TickType_t g_all_clear_since = 0;  // 0 = not yet all clear
+
+// ─── Override Window Time Basis ──────────────────────────────────────────────
+// Before the first SNTP sync after a power-on, time() is roughly seconds since boot,
+// so a window started then is stamped with an expiry in 1970. Against a synced clock
+// that expiry has long passed (the window ended the moment SNTP landed), and with no
+// internet the tick never saw a valid clock to expire it at all. Such a window is
+// timed on esp_timer uptime instead, until the tick re-bases it to the synced clock.
+
+static uint32_t uptime_s(void)
+{
+    return (uint32_t)(esp_timer_get_time() / 1000000);
+}
+
+// True while the ACTIVE window's expiry was stamped from an unsynced clock and has not
+// been re-based yet. A real-epoch expiry never is. Must be called with g_mutex held
+// (or from init).
+static bool override_on_uptime_basis(void)
+{
+    return g_override_state == OVERRIDE_STATE_ACTIVE &&
+           g_override_window_expiry < EPOCH_VALID_THRESHOLD;
+}
+
+// Remaining seconds of an uptime-basis window, clamped at 0. Must be called with
+// g_mutex held (or from init), and only when override_on_uptime_basis().
+//  - Started this boot: exact, from the start uptime.
+//  - Restored from NVS: its elapsed time is unknown, so it counts from this boot's
+//    power-on (start uptime 0), capped by the unsynced clock itself. That clock
+//    survives a software reset (expiry - now is exact across one) and only overstates
+//    after a power-on; without the cap a hub with no internet that restarted more often
+//    than every 24h would hold the window open forever.
+//  - Restored, once the clock is valid: 0. The next tick expires it, which fails toward
+//    auto-close exactly as 2.1.3 did.
+static int32_t override_uptime_remaining_s(time_t now)
+{
+    if (!g_override_unsynced_this_boot && now >= EPOCH_VALID_THRESHOLD) {
+        return 0;
+    }
+    uint32_t elapsed = uptime_s() - g_override_start_uptime_s;
+    int32_t remaining = (elapsed >= (uint32_t)OVERRIDE_WINDOW_DURATION_S)
+        ? 0 : (int32_t)((uint32_t)OVERRIDE_WINDOW_DURATION_S - elapsed);
+    if (!g_override_unsynced_this_boot) {
+        time_t left = g_override_window_expiry - now;
+        if (left < remaining) {
+            remaining = (left > 0) ? (int32_t)left : 0;
+        }
+    }
+    return remaining;
+}
 
 // ─── NVS Persistence for Override Window ─────────────────────────────────────
 
@@ -224,6 +280,9 @@ static void override_load_from_nvs(void)
             // Window already expired — clear it
             ESP_LOGW(RULES_TAG, "NVS: override window expired during power-off (expiry=%lu, now=%ld)",
                      (unsigned long)expiry, (long)now);
+            if ((time_t)expiry < EPOCH_VALID_THRESHOLD) {
+                ESP_LOGW(RULES_TAG, "NVS: that window was stamped before a clock sync - elapsed time unknown, not restored");
+            }
             g_override_state = OVERRIDE_STATE_INACTIVE;
             g_override_window_expiry = 0;
             override_clear_nvs();
@@ -231,8 +290,15 @@ static void override_load_from_nvs(void)
             // Window still active (or time not synced yet — defer check to tick)
             g_override_state = OVERRIDE_STATE_ACTIVE;
             g_override_window_expiry = (time_t)expiry;
+            // Stamped unsynced in an earlier boot (expiry below the threshold): not this
+            // boot's, so it is timed from this boot's power-on (start uptime 0).
+            g_override_unsynced_this_boot = false;
+            g_override_start_uptime_s = 0;
             int32_t remaining = (now >= EPOCH_VALID_THRESHOLD)
                 ? (int32_t)(g_override_window_expiry - now) : -1;
+            if (override_on_uptime_basis()) {
+                remaining = override_uptime_remaining_s(now);
+            }
             ESP_LOGW(RULES_TAG, "NVS: restored override window (expiry=%lu, remaining=%lds)",
                      (unsigned long)expiry, (long)remaining);
         }
@@ -250,10 +316,15 @@ static void start_override_window(const char *trigger)
 {
     time_t now;
     time(&now);
+    bool synced = (now >= EPOCH_VALID_THRESHOLD);
 
     override_state_t prev_state = g_override_state;
     g_override_state = OVERRIDE_STATE_ACTIVE;
     g_override_window_expiry = now + OVERRIDE_WINDOW_DURATION_S;
+    // Unsynced clock: the expiry above is seconds-since-boot based, so also time the
+    // window on uptime. The tick re-bases it at the first valid clock (RAM only).
+    g_override_unsynced_this_boot = !synced;
+    g_override_start_uptime_s = synced ? 0 : uptime_s();
 
     override_save_to_nvs();
 
@@ -264,13 +335,21 @@ static void start_override_window(const char *trigger)
         ESP_LOGW(RULES_TAG, "OVERRIDE WINDOW REFRESHED: timer reset to 24h (expiry=%ld)",
                  (long)g_override_window_expiry);
     }
+    if (!synced) {
+        ESP_LOGW(RULES_TAG, "Override window stamped before clock sync - timed on uptime (start=%lus) until the clock syncs",
+                 (unsigned long)g_override_start_uptime_s);
+    }
 
     // Build telemetry event
     cJSON *root = cJSON_CreateObject();
     if (root) {
         cJSON_AddStringToObject(root, "event", "water_access_override_enabled");
         cJSON_AddStringToObject(root, "trigger", trigger ? trigger : "button");
-        cJSON_AddNumberToObject(root, "expires_ts", (double)g_override_window_expiry);
+        // expires_ts is an absolute epoch: never from an unsynced clock, where it would
+        // name an instant in 1970. remaining_s still carries the duration.
+        if (synced) {
+            cJSON_AddNumberToObject(root, "expires_ts", (double)g_override_window_expiry);
+        }
         cJSON_AddNumberToObject(root, "remaining_s", (double)OVERRIDE_WINDOW_DURATION_S);
         if (g_pending_telemetry) free(g_pending_telemetry);
         g_pending_telemetry = cJSON_PrintUnformatted(root);
@@ -286,13 +365,16 @@ static int32_t cancel_override_window(void)
     if (g_override_state == OVERRIDE_STATE_ACTIVE) {
         time_t now;
         time(&now);
-        if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
+        if (override_on_uptime_basis()) {
+            remaining = override_uptime_remaining_s(now);
+        } else if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
             remaining = (int32_t)(g_override_window_expiry - now);
         }
     }
 
     g_override_state = OVERRIDE_STATE_INACTIVE;
     g_override_window_expiry = 0;
+    g_override_unsynced_this_boot = false;
     override_clear_nvs();
 
     ESP_LOGW(RULES_TAG, "OVERRIDE WINDOW CANCELLED (remaining_s=%ld)",
@@ -632,6 +714,9 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
             time(&now_epoch);
             int32_t remaining = (now_epoch >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now_epoch)
                 ? (int32_t)(g_override_window_expiry - now_epoch) : -1;
+            if (override_on_uptime_basis()) {
+                remaining = override_uptime_remaining_s(now_epoch);  // stamped before clock sync
+            }
 
             ESP_LOGI(RULES_TAG, "Override active — auto-close BLOCKED for %s sensor %s (remaining=%lds)",
                      leak_source_to_str(source), source_id ? source_id : "unknown", (long)remaining);
@@ -1104,6 +1189,9 @@ void rules_engine_on_valve_connected(void)
         time(&now);
         int32_t remaining = (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now)
             ? (int32_t)(g_override_window_expiry - now) : -1;
+        if (override_on_uptime_basis()) {
+            remaining = override_uptime_remaining_s(now);  // stamped before clock sync
+        }
         ESP_LOGI(RULES_TAG, "║ Override window: remaining=%lds", (long)remaining);
     }
     ESP_LOGI(RULES_TAG, "╚════════════════════════════════════╝");
@@ -1319,11 +1407,43 @@ void rules_engine_tick(void)
     if (g_override_state == OVERRIDE_STATE_ACTIVE) {
         time_t now_epoch;
         time(&now_epoch);
-        // Only check expiry when time is synced (valid epoch)
-        if (now_epoch >= EPOCH_VALID_THRESHOLD && now_epoch >= g_override_window_expiry) {
+        bool synced = (now_epoch >= EPOCH_VALID_THRESHOLD);
+
+        // First valid clock for a window stamped before the sync (expiry in 1970).
+        if (synced && g_override_window_expiry < EPOCH_VALID_THRESHOLD) {
+            if (g_override_unsynced_this_boot) {
+                // Started this boot: its elapsed uptime is exact, so carry the window
+                // over to the synced clock instead of ending it the moment SNTP lands.
+                uint32_t elapsed = uptime_s() - g_override_start_uptime_s;
+                g_override_window_expiry = now_epoch - (time_t)elapsed + OVERRIDE_WINDOW_DURATION_S;
+                g_override_unsynced_this_boot = false;
+                if (g_override_window_expiry > now_epoch) {
+                    ESP_LOGW(RULES_TAG, "Override window re-based to the synced clock (expiry=%ld, remaining=%lds)",
+                             (long)g_override_window_expiry, (long)(g_override_window_expiry - now_epoch));
+                    override_save_to_nvs();
+                } else {
+                    // Already past: the expiry check below ends it and clears NVS.
+                    ESP_LOGW(RULES_TAG, "Override window ran its full duration before the clock synced (elapsed=%lus) - expiring it now",
+                             (unsigned long)elapsed);
+                }
+            } else {
+                // Restored from an earlier boot: how long it already ran is unknown, so
+                // it ends here through the normal expiry below (2.1.3's behaviour, which
+                // fails toward auto-close).
+                ESP_LOGW(RULES_TAG, "Override window was stamped before a clock sync in an earlier boot - elapsed time unknown, expiring it now");
+            }
+        }
+
+        // Synced: the real-epoch expiry decides. Not synced: only a window stamped that
+        // way can be timed (on uptime); a real-epoch window waits for the sync as before.
+        bool expired = synced
+            ? (now_epoch >= g_override_window_expiry)
+            : (override_on_uptime_basis() && override_uptime_remaining_s(now_epoch) == 0);
+        if (expired) {
             ESP_LOGW(RULES_TAG, "OVERRIDE WINDOW EXPIRED: auto-close re-enabled");
             g_override_state = OVERRIDE_STATE_INACTIVE;
             g_override_window_expiry = 0;
+            g_override_unsynced_this_boot = false;
             override_clear_nvs();
 
             // Build expiry telemetry
@@ -1474,7 +1594,9 @@ int32_t rules_engine_get_override_remaining_s(void)
         if (g_override_state == OVERRIDE_STATE_ACTIVE) {
             time_t now;
             time(&now);
-            if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
+            if (override_on_uptime_basis()) {
+                remaining = override_uptime_remaining_s(now);  // stamped before clock sync
+            } else if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
                 remaining = (int32_t)(g_override_window_expiry - now);
             } else if (now < EPOCH_VALID_THRESHOLD) {
                 remaining = OVERRIDE_WINDOW_DURATION_S;  // Time not synced, report full duration
@@ -1504,7 +1626,9 @@ void rules_engine_get_override_status(bool *active, int32_t *remaining_s,
             a = true;
             time_t now;
             time(&now);
-            if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
+            if (override_on_uptime_basis()) {
+                rem = override_uptime_remaining_s(now);  // stamped before clock sync — omit expires_ts
+            } else if (now >= EPOCH_VALID_THRESHOLD && g_override_window_expiry > now) {
                 rem = (int32_t)(g_override_window_expiry - now);
                 exp = (uint32_t)g_override_window_expiry;   // absolute epoch (matches event field)
             } else if (now < EPOCH_VALID_THRESHOLD) {
@@ -1541,6 +1665,7 @@ bool rules_engine_reset_all(void)
         g_active_leak_count         = 0;
         g_override_state            = OVERRIDE_STATE_INACTIVE;
         g_override_window_expiry    = 0;
+        g_override_unsynced_this_boot = false;
         g_last_blocked_event_tick   = 0;
         // g_pending_telemetry is kept: an already-built event describes something that
         // really happened, and iothub_task still publishes it.

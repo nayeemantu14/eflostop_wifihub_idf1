@@ -148,6 +148,9 @@ void rules_engine_on_valve_connected(void);
 /**
  * @brief Periodic tick — call from event loop (every ~30s).
  *        Checks override window expiry, auto-clear timeout, and valve-side override.
+ *        A window stamped before the clock synced is timed on uptime until the first
+ *        valid clock, then re-based to it (started this boot) or expired (restored
+ *        from an earlier boot, whose elapsed time is unknown).
  */
 void rules_engine_tick(void);
 
@@ -160,6 +163,8 @@ bool rules_engine_is_override_window_active(void);
 
 /**
  * @brief Get remaining seconds in the override window.
+ *        Before the clock syncs, a window stamped from the unsynced clock is measured
+ *        on uptime; a window with a real-epoch expiry reports the full duration.
  * @return Seconds remaining (>=0), or -1 if no override window active.
  */
 int32_t rules_engine_get_override_remaining_s(void);
@@ -171,7 +176,8 @@ int32_t rules_engine_get_override_remaining_s(void);
  * @param remaining_s [out] seconds remaining (>=0) or -1 if inactive; identical
  *                    semantics to rules_engine_get_override_remaining_s (may be NULL)
  * @param expires_ts  [out] absolute Unix epoch expiry, or 0 when inactive / time
- *                    not yet synced (caller should omit the field when 0) (may be NULL)
+ *                    not yet synced / window still timed on uptime (caller should
+ *                    omit the field when 0) (may be NULL)
  */
 void rules_engine_get_override_status(bool *active, int32_t *remaining_s,
                                       uint32_t *expires_ts);
