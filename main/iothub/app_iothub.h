@@ -59,7 +59,9 @@ void initialize_iothub(void);
 void iothub_on_wifi_connected(void);
 
 // Apply the provisioned device set to BLE: the valve target becomes the provisioned valve
-// (or none), and BLE starts when there is a valve or a BLE leak sensor to serve.
+// (or none), and BLE starts when there is a valve or a BLE leak sensor to serve. The target
+// is read and set in one provisioning mutex hold, so it is never a valve that a concurrent
+// provisioning change has already removed or replaced.
 // Returns false when provisioning could not be read (busy): NOTHING was applied, and the
 // caller must hand the retry to iothub_task (it retries every pass until one succeeds).
 bool iothub_apply_provisioned_mac(void);

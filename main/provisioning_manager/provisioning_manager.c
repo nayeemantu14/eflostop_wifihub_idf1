@@ -167,6 +167,13 @@ bool provisioning_load_from_nvs(provisioning_config_t *config)
     if (err != ESP_OK) {
         config->lora_sensor_count = 0;
     }
+    // A corrupt count past the array would overrun every loop over the list (load, remove,
+    // rollback). Clamped, never reset: the ids that do fit still load.
+    if (config->lora_sensor_count > MAX_LORA_SENSORS) {
+        ESP_LOGE(PROV_TAG, "LoRa sensor count %u in NVS exceeds %d - clamped",
+                 (unsigned)config->lora_sensor_count, MAX_LORA_SENSORS);
+        config->lora_sensor_count = MAX_LORA_SENSORS;
+    }
 
     // Load LoRa sensor IDs
     if (config->lora_sensor_count > 0) {
@@ -182,6 +189,12 @@ bool provisioning_load_from_nvs(provisioning_config_t *config)
     err = nvs_get_u8(nvs_handle, NVS_KEY_LEAK_COUNT, &config->ble_leak_sensor_count);
     if (err != ESP_OK) {
         config->ble_leak_sensor_count = 0;
+    }
+    // Same clamp as the LoRa count above.
+    if (config->ble_leak_sensor_count > MAX_BLE_LEAK_SENSORS) {
+        ESP_LOGE(PROV_TAG, "BLE leak sensor count %u in NVS exceeds %d - clamped",
+                 (unsigned)config->ble_leak_sensor_count, MAX_BLE_LEAK_SENSORS);
+        config->ble_leak_sensor_count = MAX_BLE_LEAK_SENSORS;
     }
 
     // Load BLE leak sensor MACs
@@ -206,6 +219,12 @@ bool provisioning_load_from_nvs(provisioning_config_t *config)
     }
 
 cleanup:
+    // Every loaded string ends inside its buffer, on every exit path (a failed load keeps
+    // what was read). A valid MAC is 17 chars, so this never shortens one.
+    config->valve_mac[sizeof(config->valve_mac) - 1] = '\0';
+    for (int i = 0; i < MAX_BLE_LEAK_SENSORS; i++) {
+        config->ble_leak_sensors[i][sizeof(config->ble_leak_sensors[i]) - 1] = '\0';
+    }
     nvs_close(nvs_handle);
     return success;
 }
@@ -892,6 +911,40 @@ bool provisioning_get_device_set(prov_device_set_t *out)
         }
         out->ble_count = bc;
     }
+
+    xSemaphoreGive(g_prov_mutex);
+    return true;
+}
+
+bool provisioning_with_valve_target(prov_valve_target_cb_t cb, void *ctx)
+{
+    if (!cb || !g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(PROV_TAG, "Failed to take mutex in with_valve_target");
+        return false;
+    }
+
+    // Read as provisioning_get_device_set() does, trimmed to what the BLE target needs
+    // (18 B on the caller's stack instead of the ~376 B set).
+    char    mac[sizeof(g_config.valve_mac)] = {0};
+    bool    has_valve = false;
+    uint8_t bc = 0;
+    if (g_config.state == PROV_STATE_PROVISIONED) {
+        if (g_config.valve_mac[0] != '\0') {
+            memcpy(mac, g_config.valve_mac, sizeof(mac));
+            mac[sizeof(mac) - 1] = '\0';
+            mac_normalize_upper(mac);
+            has_valve = true;
+        }
+        bc = g_config.ble_leak_sensor_count;
+        if (bc > MAX_BLE_LEAK_SENSORS) bc = MAX_BLE_LEAK_SENSORS;
+    }
+
+    // Still inside the hold: this is what makes the read and whatever cb applies one step.
+    cb(has_valve ? mac : NULL, bc, ctx);
 
     xSemaphoreGive(g_prov_mutex);
     return true;

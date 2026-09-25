@@ -128,14 +128,10 @@ static volatile bool g_devset_changed = false;
 // iothub_apply_provisioned_mac() found provisioning busy (at boot, or for a `provision` on
 // the esp-mqtt task), so the BLE target and the BLE start are still owed. iothub_task
 // retries at the top of every pass until one succeeds: a busy mutex must never leave BLE
-// unstarted or the valve target stale.
+// unstarted or the valve target stale. The retry can never re-target a valve that a C2D
+// change removed or replaced meanwhile: it reads and sets the target in one provisioning
+// mutex hold (see iothub_apply_provisioned_mac()).
 static volatile bool s_ble_apply_owed = false;
-
-// Bumped by the esp-mqtt task BEFORE it changes the valve target (provision, valve or full
-// decommission). An owed retry that read the device set just before such a change could
-// apply that OLDER set after it - re-targeting a removed valve. The retry compares this
-// across its apply and, if it moved, runs again on the next pass from the newest set.
-static volatile uint32_t s_ble_target_gen = 0;
 
 // True while the health table holds no device (nothing provisioned, or a rules-only
 // provision). iothub_task ONLY: seeded after health_engine_init() and updated by
@@ -1132,8 +1128,8 @@ static void handle_c2d_command(const char *data, size_t data_len)
         else if (strcasecmp(target, "valve") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_VALVE !!!");
             if (provisioning_remove_valve()) {
-                // The BLE target change stays here, synchronous: it is the safety half.
-                s_ble_target_gen++;   // an owed BLE-apply retry must not re-target this valve
+                // The BLE target change stays here, synchronous: it is the safety half. An
+                // owed BLE-apply retry cannot undo it (see iothub_apply_provisioned_mac()).
                 ble_valve_set_target_mac(NULL);
                 ble_valve_disconnect();
                 // Health reconcile, purges and twin run on iothub_task (D0). No snapshot
@@ -1183,6 +1179,11 @@ static void handle_c2d_command(const char *data, size_t data_len)
         else if (strcasecmp(target, "all") == 0) {
             ESP_LOGW(IOTHUB_TAG, "!!! DECOMMISSION_ALL !!!");
             if (provisioning_decommission()) {
+                // The safety half first: nothing below needs a BLE target, and
+                // rules_engine_reset_all() can wait on the rules mutex for seconds, during
+                // which a leak or a valve reconnect must not command the removed valve.
+                ble_valve_set_target_mac(NULL);
+                ble_valve_disconnect();
                 sensor_meta_clear_all();
                 hub_identity_clear();
                 dps_clear_cache();
@@ -1190,9 +1191,6 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 // reboots, and the boot-time empty-hub reset runs again on a clean mutex.
                 (void)rules_engine_reset_all();
                 telemetry_v2_clear_settings();   // heartbeat cadence back to default
-                s_ble_target_gen++;   // see s_ble_target_gen
-                ble_valve_set_target_mac(NULL);
-                ble_valve_disconnect();
 
                 // The health table is emptied by iothub_task (apply_device_set_change in
                 // the g_decommission_reboot block) before the final snapshot, so that
@@ -1296,9 +1294,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             provisioning_handle_azure_payload_json(
                 cmd.payload_json, strlen(cmd.payload_json))) {
             // The BLE target stays synchronous here (the safety half). A busy provisioning
-            // read applies nothing: the retry goes to iothub_task. Bumped first - see
-            // s_ble_target_gen.
-            s_ble_target_gen++;
+            // read applies nothing: the retry goes to iothub_task.
             if (!iothub_apply_provisioned_mac()) {
                 s_ble_apply_owed = true;
             }
@@ -1975,42 +1971,68 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     }
 }
 
+// What one apply read from provisioning, recorded under the provisioning mutex by
+// apply_valve_target_locked() and acted on by iothub_apply_provisioned_mac() after it.
+typedef struct {
+    bool    has_valve;
+    char    valve_mac[18];
+    uint8_t ble_count;
+} ble_apply_t;
+
+// provisioning_with_valve_target() callback: runs with the provisioning mutex HELD, so it
+// only records the read and sets the valve target (plus the log line that always preceded
+// it). ble_valve_set_target_mac() takes nothing that can wait on provisioning: s_mac_lock
+// sections, the command queue's reset and at most one 10 ms send, and logging.
+static void apply_valve_target_locked(const char *valve_mac, uint8_t ble_count, void *ctx)
+{
+    ble_apply_t *a = (ble_apply_t *)ctx;
+    a->has_valve = (valve_mac != NULL);
+    a->ble_count = ble_count;
+    if (valve_mac) {
+        snprintf(a->valve_mac, sizeof(a->valve_mac), "%s", valve_mac);
+        ESP_LOGI(IOTHUB_TAG, "Applying provisioned valve MAC: %s", a->valve_mac);
+    }
+    ble_valve_set_target_mac(valve_mac);
+}
+
 // Apply the provisioned device set to BLE (boot, every `provision`, and iothub_task's retry
 // of an owed apply; runs on iothub_task or the esp-mqtt task). The valve module's target IS
 // the provisioned valve, or none, so it can never link or command another one (P0-a). BLE
 // starts for a valve OR a BLE sensor: the leak scanner starts with the BLE stack, and a
 // sensors-only hub used to never scan (P0-b). False = provisioning busy, nothing applied.
+//
+// The target is read and set in ONE provisioning mutex hold. Every provisioning change takes
+// that mutex, and the C2D valve/full decommissions clear the target only after their change,
+// so an apply can never set a valve a concurrent change has already removed or replaced: it
+// runs wholly before the change (whose own target update then overwrites it) or reads the
+// result. BLE start and the connect request follow the release; a CONNECT always scans for
+// the target current when it runs, and a later target change flushes it.
 bool iothub_apply_provisioned_mac(void)
 {
-    prov_device_set_t set;   // ~376 B, on whichever task calls this
-    if (!provisioning_get_device_set(&set)) {
+    ble_apply_t a = {0};
+    if (!provisioning_with_valve_target(apply_valve_target_locked, &a)) {
         // Unknown is not "no valve": leave the current target alone. The caller owes a retry.
         ESP_LOGW(IOTHUB_TAG, "Apply provisioned devices: provisioning busy - BLE target unchanged");
         return false;
     }
 
-    if (set.has_valve) {
-        ESP_LOGI(IOTHUB_TAG, "Applying provisioned valve MAC: %s", set.valve_mac);
-    }
-    ble_valve_set_target_mac(set.has_valve ? set.valve_mac : NULL);
-
-    if (set.has_valve || set.ble_count > 0) {
+    if (a.has_valve || a.ble_count > 0) {
         ESP_LOGI(IOTHUB_TAG, "Starting BLE (valve=%s, BLE sensors=%u)",
-                 set.has_valve ? set.valve_mac : "none", (unsigned)set.ble_count);
+                 a.has_valve ? a.valve_mac : "none", (unsigned)a.ble_count);
         app_ble_valve_signal_start();
     }
 
-    if (set.has_valve) {
+    if (a.has_valve) {
         // A link to another valve is dropped by ble_valve_set_target_mac() itself; this
         // (re)starts the search for the provisioned one.
         char current_mac[18];
         if (ble_valve_get_mac(current_mac)) {
-            if (strcasecmp(current_mac, set.valve_mac) != 0) {
-                ESP_LOGW(IOTHUB_TAG, "Connected to wrong MAC, will reconnect to: %s", set.valve_mac);
+            if (strcasecmp(current_mac, a.valve_mac) != 0) {
+                ESP_LOGW(IOTHUB_TAG, "Connected to wrong MAC, will reconnect to: %s", a.valve_mac);
                 ble_valve_connect();
             }
         } else {
-            ESP_LOGI(IOTHUB_TAG, "Not connected, triggering connection to: %s", set.valve_mac);
+            ESP_LOGI(IOTHUB_TAG, "Not connected, triggering connection to: %s", a.valve_mac);
             ble_valve_connect();
         }
     }
@@ -2069,6 +2091,9 @@ static void net_maintain(void)
         struct tm timeinfo = {0};
         localtime_r(&now, &timeinfo);
         ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
+        // Give events held from before the sync their real time now, in NVS, so a
+        // restart before the next connect's drain cannot lose them.
+        offline_buffer_stamp_presync();
         return;
     }
 
@@ -2498,8 +2523,9 @@ void iothub_task(void *param)
     // client yet. publish_json() gates on a non-NULL client, so until the cloud path
     // is up every event — including a leak — takes the offline-buffer branch instead
     // of being dropped. cloud_bringup() attaches the client and corrects the topic.
-    // (Before the FIRST clock sync, build_envelope() suppresses every message, events
-    // included, so nothing is buffered then.)
+    // (Before the FIRST clock sync, snapshot and lifecycle are suppressed; events are
+    // built with the unsynced ts, held in the offline buffer as pre-sync entries and
+    // time-stamped when the clock syncs - see offline_buffer_stamp_presync().)
     telemetry_v2_init(NULL, hub_identity_get_gateway_id(),
                       hub_identity_get_gateway_id(),
                       g_telem_lora_cache, g_telem_ble_cache);
@@ -2600,12 +2626,12 @@ void iothub_task(void *param)
         // A BLE apply that found provisioning busy (boot, or a `provision`). Before the
         // device-set change below, so its valve resync already sees the right target.
         // Clear-then-apply, like g_devset_changed: a failure raised while this runs is
-        // never lost.
+        // never lost. A C2D provision/decommission racing it cannot be undone by it: the
+        // apply reads and sets the target in one provisioning hold.
         if (s_ble_apply_owed) {
             s_ble_apply_owed = false;
-            uint32_t gen = s_ble_target_gen;
-            if (!iothub_apply_provisioned_mac() || gen != s_ble_target_gen) {
-                s_ble_apply_owed = true;   // still busy, or a C2D target change raced it
+            if (!iothub_apply_provisioned_mac()) {
+                s_ble_apply_owed = true;   // still busy
             }
         }
 
@@ -2697,10 +2723,14 @@ void iothub_task(void *param)
         // Cloud bring-up in progress, which used to be a blocking boot sequence: poll at 2 s
         // so the first clock sync, the boot DPS backoff and the first SAS mint are acted on
         // promptly. The clock wait is bounded to the initial sync window; after it the 60 s
-        // re-poll timer owns SNTP and the normal cadence is plenty.
+        // re-poll timer owns SNTP and the normal cadence is plenty. The DPS clause counts
+        // only with a valid clock, dps_maintain()'s own gate: without one it neither tries
+        // nor counts an attempt, so with NTP blocked that clause alone held the 2 s poll
+        // for good.
         bool cloud_pending = s_wifi_up &&
             ((!s_time_ok && !s_sntp_fallback) ||
-             (!g_cloud_ready && s_dps_attempts < DPS_BOOT_ATTEMPTS) ||
+             (!g_cloud_ready && s_dps_attempts < DPS_BOOT_ATTEMPTS &&
+              time(NULL) >= SNTP_EPOCH_VALID) ||
              (g_cloud_ready && s_sas_expiry == 0));
 
         // Flush trigger = derive the select timeout from the snapshot deadline so

@@ -83,6 +83,9 @@ provisioning_state_t provisioning_get_state(void);
 /**
  * @brief Load provisioning config from NVS
  * 
+ * A sensor count past its array capacity (corrupt NVS) is clamped and logged, and every
+ * loaded MAC string is NUL-terminated within its buffer, on every exit path.
+ *
  * @param config Pointer to config structure to populate
  * @return true if config loaded successfully
  */
@@ -228,6 +231,32 @@ bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out);
  * @return true if *out is a valid snapshot of the provisioned set
  */
 bool provisioning_get_device_set(prov_device_set_t *out);
+
+/**
+ * @brief Callback for provisioning_with_valve_target(). It runs with the provisioning
+ *        mutex HELD: keep it short and non-blocking, never call back into this module
+ *        (the mutex is not recursive), and never take a lock ordered before it (the
+ *        rules engine mutex).
+ *
+ * @param valve_mac Provisioned valve MAC, upper-cased; NULL when no valve is provisioned
+ * @param ble_count Number of provisioned BLE leak sensors
+ * @param ctx       The caller's context pointer, passed through
+ */
+typedef void (*prov_valve_target_cb_t)(const char *valve_mac, uint8_t ble_count, void *ctx);
+
+/**
+ * @brief Read the provisioned valve MAC and BLE leak sensor count and hand them to `cb`
+ *        within ONE mutex hold. Every provisioning change takes the same mutex, so what
+ *        `cb` applies (the BLE valve target) is never a value a change has already
+ *        replaced: the change lands wholly before the read, or only after `cb` returned.
+ *
+ * Returns false WITHOUT calling `cb` only when `cb` is NULL, the manager is not
+ * initialised or the mutex (1000 ms) timed out. Treat that as "unknown" and retry, never
+ * as "no valve". An unprovisioned hub calls cb(NULL, 0, ctx) and returns true.
+ *
+ * @return true if `cb` was called
+ */
+bool provisioning_with_valve_target(prov_valve_target_cb_t cb, void *ctx);
 
 /**
  * @brief Check if a BLE leak sensor MAC is provisioned (case-insensitive)
