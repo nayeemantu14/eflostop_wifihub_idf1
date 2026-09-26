@@ -355,8 +355,9 @@ static int drain_locked(esp_mqtt_client_handle_t client, const char *topic)
         char key[8];
         make_key(s_tail, key, sizeof(key));
 
-        // A slot stamped at the clock sync can hold up to OB_STAMP_MARGIN bytes more
-        // than the store limit.
+        // buf has OB_STAMP_MARGIN beyond the store limit, to stamp a pre-sync event here.
+        // The whole of it is offered to the read: an earlier 2.1.4 build could leave a
+        // slot stamped at the clock sync up to that much longer than the limit.
         size_t len = sizeof(buf) - 1;
         esp_err_t err = nvs_get_blob(h, key, buf, &len);
         if (err != ESP_OK) {
@@ -430,7 +431,11 @@ void offline_buffer_stamp_presync(void)
     }
 
     int stamped_n = 0;
-    char buf[OFFLINE_BUF_MAX_JSON_LEN + OB_STAMP_MARGIN + 1];
+    // Only an entry stored this boot has its bit set, and store refuses anything longer
+    // than OFFLINE_BUF_MAX_JSON_LEN, so this reads every one. The same limit caps what is
+    // written back: an older build reads a slot with it, and a rollback to 2.1.3 skips and
+    // erases a longer one, losing the event.
+    char buf[OFFLINE_BUF_MAX_JSON_LEN + 1];
     uint8_t slot = s_tail;
     for (uint8_t i = 0; i < s_count; i++, slot = (uint8_t)((slot + 1) % OFFLINE_BUF_MAX_ENTRIES)) {
         uint16_t bit = (uint16_t)(1u << slot);
@@ -452,8 +457,9 @@ void offline_buffer_stamp_presync(void)
 
         int64_t stamped = 0;
         int64_t age_s = 0;
-        // Not stampable, or the rewrite fails: the bit stays, and the drain drops it
-        // with its own log line.
+        // Not stampable: the bit stays, and the drain drops it with its own log line. Too
+        // long for buf once stamped: the bit stays, and the drain stamps it in RAM, where
+        // it has OB_STAMP_MARGIN to spare.
         if (ob_stamp(buf, &len, sizeof(buf), ts_num, ts_end, now, &stamped, &age_s) != OB_STAMP_OK)
             continue;
         if (nvs_set_blob(h, key, buf, len) != ESP_OK) continue;

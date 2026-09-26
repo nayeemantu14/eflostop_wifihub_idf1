@@ -66,7 +66,9 @@ int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic);
  *        clock has synced (same rewrite as the drain). Call once, when the clock first
  *        syncs: the proof that an entry belongs to this boot is RAM only, so without this a
  *        restart between the sync and the next drain would lose those events. Entries it
- *        cannot stamp are left for the drain. No-op while the clock is unsynced.
+ *        cannot stamp are left for the drain, and so is one that would then be longer than
+ *        OFFLINE_BUF_MAX_JSON_LEN: no slot is written back longer than an older build can
+ *        read after a rollback. No-op while the clock is unsynced.
  */
 void offline_buffer_stamp_presync(void);
 
