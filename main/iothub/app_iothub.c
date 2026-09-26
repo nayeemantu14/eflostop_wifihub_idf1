@@ -665,9 +665,16 @@ static void mark_mqtt_disconnected(void);  // forward declaration (used by iothu
 // or open during a leak via override_enable (which clears RMLEAK as part of the
 // guarded 24h window and so does not go through this handler). Returns the
 // cmd_ack error detail when the open must be refused, or NULL when it may proceed.
+//
+// A latched leak incident with no override window refuses it too, with the SAME message,
+// whether or not the valve is linked (E-06): the disconnect clears the RMLEAK cache, so an
+// open sent while the valve was out of range was accepted, pended, and written at the
+// reconnect ahead of the close the leak was owed. The rules getters take only the rules
+// mutex, and nothing else is held here (esp-mqtt task).
 static const char *valve_open_reject_reason(void)
 {
-    if (ble_valve_get_rmleak_state()) {
+    if (ble_valve_get_rmleak_state() ||
+        (rules_engine_is_leak_incident_active() && !rules_engine_is_override_window_active())) {
         return "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, "
                "or use override to open the valve during a leak.";
     }
