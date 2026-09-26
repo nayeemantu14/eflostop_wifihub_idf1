@@ -373,7 +373,7 @@ bool health_is_valve_battery_critical(void);
  * Raises a WARNING floor on the system rating for as long as it is true, so the
  * roll-up (and therefore the fleet LED) reads amber rather than green while the
  * water is still shut off — even once every sensor reports dry and every device is
- * individually healthy. Cleared when the incident clears (30 s all-dry auto-clear,
+ * individually healthy. Cleared when the incident clears (10 s all-dry auto-clear,
  * LEAK_RESET, or a physical override). The floor applies only while at least one
  * device is in the table: an empty hub has nothing to hold closed (F4).
  *

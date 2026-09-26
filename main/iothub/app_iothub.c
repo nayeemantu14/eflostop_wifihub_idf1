@@ -2833,8 +2833,11 @@ void iothub_task(void *param)
         if (delta < 0) delta = 0;
         bool can_pub = mqtt_up;
         if (delta <= 0 && !can_pub) delta = SNAP_OFFLINE_FLOOR_MS;
+        // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
+        // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
+        // report instead of 10-12 s.
         int64_t base = (commission_pending || cloud_pending || s_ble_apply_owed ||
-                        g_devset_changed) ? 2000 : 30000;
+                        g_devset_changed || rules_engine_auto_clear_pending()) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);

@@ -112,6 +112,16 @@ char *rules_engine_take_pending_telemetry(void);
 bool rules_engine_is_leak_incident_active(void);
 
 /**
+ * @brief True while a latched incident is waiting out the all-clear timer (every source
+ *        dry, RMLEAK not yet auto-cleared).
+ *
+ * Lock-free wake hint for iothub_task: while it is true the loop idles at 2 s instead of
+ * 30 s, so the auto-clear lands within ~2 s of AUTO_CLEAR_TIMEOUT_MS rather than up to one
+ * full idle wait later. The clear itself is still decided in rules_engine_tick().
+ */
+bool rules_engine_auto_clear_pending(void);
+
+/**
  * @brief Reset the leak incident latch and clear RMLEAK on the valve.
  *        Also cancels any active 24h override window.
  *        Does NOT open the valve — opening requires a separate command.
@@ -121,7 +131,7 @@ bool rules_engine_is_leak_incident_active(void);
  * valve_open restore water during a live leak with NO override window and no
  * protection. The sanctioned during-leak water path is
  * rules_engine_enable_override_remote() (which starts the guarded 24h window).
- * Mirrors the 30s auto-clear, which likewise requires all sensors clear.
+ * Mirrors the 10 s auto-clear, which likewise requires all sensors clear.
  *
  * @return true if the incident was cleared (or there was nothing to clear);
  *         false if refused because a leak is still active (or on error).
@@ -257,22 +267,23 @@ bool rules_engine_reset_all(void);
 bool rules_engine_forget_unprovisioned(void);
 
 /**
- * @brief The provisioned valve was replaced by a DIFFERENT valve: drop the old valve's
- *        rules state that would otherwise act on the new one.
+ * @brief The provisioned valve was replaced by a DIFFERENT valve, or removed: drop the
+ *        old valve's rules state that would otherwise act on the next one.
  *
  * The valve's leak source (VALVE_SOURCE_ID) is MAC-less, so a flood reading from the old
  * valve survived the swap and auto-closed the new, dry valve on its first link. This
  * drops it through the normal "leak cleared" path. If no other source is then wet, a
  * latched incident is released at once (NVS and the health floor with it): left to the
- * 30 s all-clear, the new valve's first link (open, RMLEAK clear) would read as a
+ * all-clear timer, the new valve's first link (open, RMLEAK clear) would read as a
  * physical override and start a 24 h window. Nothing is written to either valve. If
  * another source is still wet, the latch and count stay, so the new valve is closed on
  * its first link. The override window is not touched. A wet new valve re-adds the source
  * with its own link-up leak report.
  *
- * Call from iothub_task when the provisioned valve MAC changes from one valve to another
- * (not on a first provision or a removal: forget_unprovisioned() covers a removal). Takes
- * the rules mutex (1 s); on a timeout it logs and changes nothing.
+ * Call from iothub_task when the provisioned valve MAC changes from one valve to another,
+ * or when the valve is removed (not on a first provision): forget_unprovisioned() drops
+ * the source on a removal but leaves the latch to the all-clear timer. Takes the rules
+ * mutex (1 s); on a timeout it logs and changes nothing.
  */
 void rules_engine_on_valve_replaced(void);
 

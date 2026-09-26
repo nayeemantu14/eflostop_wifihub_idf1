@@ -17,7 +17,7 @@
 
 #define RULES_TAG "RULES_ENGINE"
 #define AUTO_CLOSE_COOLDOWN_MS 10000   // 10s cooldown between auto-closes
-#define AUTO_CLEAR_TIMEOUT_MS  (30 * 1000)  // 30s all-clear before RMLEAK auto-reset
+#define AUTO_CLEAR_TIMEOUT_MS  (10 * 1000)  // 10s all-clear before RMLEAK auto-reset (30s before 2.1.4)
 #define RMLEAK_GRACE_PERIOD_MS 5000    // 5s grace after RMLEAK write before checking valve state
 
 // ─── 24-Hour Water Access Override Window ────────────────────────────────────
@@ -969,6 +969,14 @@ char *rules_engine_take_pending_telemetry(void)
     return result;
 }
 
+bool rules_engine_auto_clear_pending(void)
+{
+    /* Lock-free on purpose: iothub_task polls this every loop pass to choose its idle
+     * wait. A stale read costs at most one extra 2 s poll, or one pass of delay on the
+     * clear itself; the clear is still decided under g_mutex in rules_engine_tick(). */
+    return g_initialized && g_leak_incident_active && g_all_clear_since != 0;
+}
+
 bool rules_engine_is_leak_incident_active(void)
 {
     if (!g_initialized) return false;
@@ -993,7 +1001,7 @@ bool rules_engine_reset_leak_incident(void)
     /* Guard: refuse to clear the interlock while any leak source is still wet.
      * Otherwise a follow-up valve_open would restore water during an active leak
      * with NO override window and no protection. During-leak water must go
-     * through override_enable (the guarded 24h window). Mirrors the 30s
+     * through override_enable (the guarded 24h window). Mirrors the 10s
      * auto-clear, which likewise requires all sensors clear. */
     if (g_active_leak_count > 0) {
         ESP_LOGW(RULES_TAG, "LEAK_RESET refused — %u leak source(s) still active (use override to open during a leak)",
@@ -1885,7 +1893,7 @@ void rules_engine_on_valve_replaced(void)
     track_leak_source(VALVE_SOURCE_ID, false);
     bool dropped = (g_active_leak_count < before);
 
-    /* Nothing else wet: release the latch now, not on the 30 s all-clear. The new valve
+    /* Nothing else wet: release the latch now, not on the 10 s all-clear. The new valve
      * usually links sooner, and on_valve_connected() would read a latched incident with
      * an open valve and RMLEAK clear as a physical override (Priority 2) and block
      * auto-close for 24 h. Nothing is written to the valve: the old valve's RMLEAK left
