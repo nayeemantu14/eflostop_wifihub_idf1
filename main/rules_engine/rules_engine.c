@@ -804,9 +804,14 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
 
     xSemaphoreGive(g_mutex);
 
-    // Issue valve commands only if connected — avoids stale pending commands
-    // that would fire on reconnect even if the leak has since cleared.
-    // If disconnected, the reconciliation (on_valve_connected) handles it.
+    // With a provisioned valve the RMLEAK + close are issued whether or not it is linked.
+    // Unlinked, the valve module pends both (RMLEAK first) and applies them at the next
+    // setup completion, ahead of anything else. Without that, an OPEN pended while the
+    // valve was away (a C2D open, or a failed write) was written at reconnect BEFORE the
+    // reconciliation (on_valve_connected) closed the valve again: the pended CLOSE now
+    // overwrites it. Pended commands cannot fire after the leak has cleared:
+    // g_auto_close_triggered is set above, so track_leak_source() cancels them when the
+    // last source dries. The reconciliation still closes on connect as before.
     //
     // Both calls are QUEUE POSTS ONLY — neither writes the cached valve state.
     // The cache is written later, on the ble_valve task, inside
@@ -833,7 +838,11 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     } else {
         ESP_LOGW(RULES_TAG, "AUTO-CLOSE: valve not connected — scanning; "
                             "close deferred to reconnect reconciliation");
-        // Trigger scan; reconciliation closes on connect
+        // Pend the interlock, then the close (see above), then trigger the scan.
+        if (!ble_valve_set_rmleak(true))
+            valve_cmd_not_sent("AUTO-CLOSE: RMLEAK", "interlock not applied");
+        if (!ble_valve_close())
+            valve_cmd_not_sent("AUTO-CLOSE: close", "valve NOT closed");
         if (!ble_valve_connect())
             valve_cmd_not_sent("AUTO-CLOSE: connect", "no reconnect scan requested");
     }
@@ -1077,8 +1086,17 @@ bool rules_engine_cancel_override(void)
                     valve_cmd_not_sent("OVERRIDE CANCEL: RMLEAK", "interlock not applied");
                 if (!ble_valve_close())
                     valve_cmd_not_sent("OVERRIDE CANCEL: close", "valve NOT closed");
-            } else if (!ble_valve_connect()) {
-                valve_cmd_not_sent("OVERRIDE CANCEL: connect", "no reconnect scan requested");
+            } else {
+                /* Unreachable: pend RMLEAK then CLOSE for the next link, so they overwrite
+                 * an OPEN pended meanwhile (see rules_engine_evaluate_leak), then scan. */
+                if (ble_valve_has_target_mac()) {
+                    if (!ble_valve_set_rmleak(true))
+                        valve_cmd_not_sent("OVERRIDE CANCEL: RMLEAK", "interlock not applied");
+                    if (!ble_valve_close())
+                        valve_cmd_not_sent("OVERRIDE CANCEL: close", "valve NOT closed");
+                }
+                if (!ble_valve_connect())
+                    valve_cmd_not_sent("OVERRIDE CANCEL: connect", "no reconnect scan requested");
             }
             return true;
         }
@@ -1520,8 +1538,18 @@ void rules_engine_tick(void)
                             valve_cmd_not_sent("OVERRIDE EXPIRED: RMLEAK", "interlock not applied");
                         if (!ble_valve_close())
                             valve_cmd_not_sent("OVERRIDE EXPIRED: close", "valve NOT closed");
-                    } else if (!ble_valve_connect()) {
-                        valve_cmd_not_sent("OVERRIDE EXPIRED: connect", "no reconnect scan requested");
+                    } else {
+                        /* Unreachable: pend RMLEAK then CLOSE for the next link, so they
+                         * overwrite an OPEN pended meanwhile (see rules_engine_evaluate_leak),
+                         * then scan. */
+                        if (ble_valve_has_target_mac()) {
+                            if (!ble_valve_set_rmleak(true))
+                                valve_cmd_not_sent("OVERRIDE EXPIRED: RMLEAK", "interlock not applied");
+                            if (!ble_valve_close())
+                                valve_cmd_not_sent("OVERRIDE EXPIRED: close", "valve NOT closed");
+                        }
+                        if (!ble_valve_connect())
+                            valve_cmd_not_sent("OVERRIDE EXPIRED: connect", "no reconnect scan requested");
                     }
                     return;
                 }
