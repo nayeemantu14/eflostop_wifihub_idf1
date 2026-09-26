@@ -2699,6 +2699,10 @@ void iothub_task(void *param)
             g_devset_changed = false;
             apply_device_set_change();
         }
+        // Set now only if that apply failed and re-raised the flag (or a change landed this
+        // instant). The flush below defers for a change this loop top has NOT seen, never for
+        // a retry, so a provisioning mutex that stays busy cannot starve snapshots (E-10).
+        bool devset_retry = g_devset_changed;
 
         // A standalone sensor_meta rename (from the C2D task) asked for a prompt
         // snapshot so the app reflects the new label/location without waiting for
@@ -3322,8 +3326,16 @@ void iothub_task(void *param)
         // Runs after all event/cache updates and the boot/commission arming, so
         // the snapshot always reflects post-burst state (ordering invariant).
         // Re-arms the heartbeat ONLY on a snapshot that actually reached esp-mqtt.
+        //
+        // Skipped for ONE pass while a C2D provision/decommission that landed on the esp-mqtt
+        // task during this pass is still unreconciled (E-10): its ok ack precedes this
+        // snapshot, and the health table would still show the pre-change set (e.g. a removed
+        // valve). The next loop top reconciles it; the deadline stays due, so that pass's
+        // select waits one tick and this block then publishes the reconciled table. Not for
+        // a failed apply's retry (devset_retry above).
         // =================================================================
-        if (telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
+        bool devset_unseen = g_devset_changed && !devset_retry;
+        if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
             int64_t flush_now = snap_now_ms();
             snap_reason_t reason = s_snap_reason;
             // Gate: while a boot/commission (re)sync window is OPEN (g_boot_snapshot_sent
