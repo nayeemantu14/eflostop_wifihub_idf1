@@ -2228,7 +2228,9 @@ static void read_back_when_free(uint16_t conn, const uint16_t *handle, uint32_t 
 // command of its kind is still pended once the host accepts it: replayed later, that one
 // would undo it.
 // A `replay` (of the command pended in *slot) is written only while the slot still holds it,
-// re-checked before every attempt, and leaves the slot once the host accepts it.
+// re-checked before every attempt, and leaves the slot once the host accepts it. A live valve
+// command finding an RMLEAK command pended on its ready link returns CMD_WR_RELINK, so it is
+// pended and replayed after that RMLEAK command.
 // *conn_out = the link the last write went to (NONE when no attempt got that far).
 // Returns 0 once the host accepted the write, CMD_WR_STALE, CMD_WR_RELINK, CMD_WR_MOVED
 // (replay cancelled or superseded meanwhile), or the last failure (a NimBLE rc, or
@@ -2272,6 +2274,20 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
         }
         else if (!cmd_link_ready(*handle))
         {
+            rc = CMD_WR_RELINK;
+        }
+        else if (!replay && slot == &g_pending_valve_cmd && cmd_link_ready(h_rmleak_char) &&
+                 pending_get(&g_pending_rmleak_cmd, gen) >= 0)
+        {
+            // RMLEAK before the valve command (Phase F, F4): an RMLEAK command is still pended
+            // on this ready link. Typically it was pended while the link was in setup, and this
+            // command passed write_valve_command()'s RMLEAK check before setup completed, so
+            // written now it would land ahead of the RMLEAK command. Pend it too:
+            // finish_cmd_write() queues the replay token, and replay_pending_cmds() writes the
+            // RMLEAK command first. That replay writes this one as a replay, never held here
+            // again: a CLOSE still goes if the RMLEAK write fails there (also when that check
+            // had just tried it and failed: it is then tried once more first), an OPEN waits.
+            ESP_LOGW(BLE_TAG, "[CMD] %s=%u held behind the pending RMLEAK command", what, val);
             rc = CMD_WR_RELINK;
         }
         else
