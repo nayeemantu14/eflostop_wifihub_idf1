@@ -2,13 +2,15 @@
 
 Written for the user and for the next Claude Code session. It records where the 2.1.4 fix job stands and how to pick it up again.
 
-> **Resume here.** Read §1 and §7 first.
+> **Resume here.** Read §1, §7 and §10 first.
 >
-> **Update, Friday evening (after the 20:42 resume).** **Phase D is complete.** G4a was reviewed, and G4b, G4c, G4d and G5 are implemented and reviewed. A review-fix round is committed (`6e496f5` … `00beb81`, see §2). The working tree is clean apart from the user's own paths.
-> - **Next: 🔨 Build checkpoint 2** (§7). Nothing on the branch has been compiled since `84a5d6a`.
-> - Still open with the user: the product question in §6 (the `auto_close` event on a sensors-only hub).
+> **Update, Saturday 2026-09-26.**
+> - **Build checkpoint 2 passed.** The user built `00beb81` at 07:20 (§4a).
+> - **Phase E (adversarial review) is done, and its fixes are committed.** Findings, decisions and commits are in §10.
+> - **The user asked for a new change: the RMLEAK auto-clear is now 10 s** (`75a4a59`).
+> - **Next: 🔨 Build checkpoint 3** (§7). The last firmware commit is `b245d94`; everything after it is docs only. After Build checkpoint 3 come Phase F (the council) and Phase G.
 >
-> *(Earlier, 17:15: workflow 2 was stopped after G4a at the user's request; §3 records how it was resumed.)*
+> *(Friday: Phase D completed after the 20:42 resume; §3 records how workflow 2 was resumed.)*
 
 ---
 
@@ -28,7 +30,8 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 
   At the user's request the workflow was stopped right after G4a committed (`2b16bdf`, 17:15). It was resumed at 20:42 as a new workflow. That workflow reviewed G4a and implemented and reviewed G4b → G5 (all committed by 21:58).
 - **Review-fix round (committed):** every confirmed finding from the G4b, G4c+G4d and G5 reviews was fixed in four code groups plus docs. Each group was adversarially reviewed, and fixed again where needed, before it was committed (§2).
-- **Still to do:** 🔨 Build checkpoint 2, Phase E (adversarial review), Phase F (council), and Phase G (test plan and summary). Nothing is pushed, and no PR has been opened.
+- **🔨 Build checkpoint 2 passed** (§4a). **Phase E is done**: 7 reviewers produced 16 verified findings plus 6 nits. Every one is fixed or documented, and the user made 4 decisions (§10).
+- **Still to do:** 🔨 Build checkpoint 3, Phase F (council), and Phase G (test plan and summary). Nothing is pushed, and no PR has been opened.
 
 | Phase | State |
 |---|---|
@@ -39,8 +42,9 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | D: G4a | committed `2b16bdf`; reviewed OK (nits, fixed in G4b/G4c or carried into the test plan) |
 | D: G4b–G4d + G5 | committed and reviewed (`2c012b7`, `e823c09`, `d76241d`, `0e7cd44`) |
 | D: review-fix round | committed (`6e496f5`, `7ae131d`, `abd7d9d`, `24782b5`, `00beb81`) |
-| 🔨 Build checkpoint 2 | **next**, waiting for the user (§7) |
-| E: adversarial review | not started |
+| 🔨 Build checkpoint 2 | **passed** (build of `00beb81`, §4a) |
+| E: adversarial review | **done**; fixes committed `095b5d6` … `b245d94` plus docs (§10) |
+| 🔨 Build checkpoint 3 | **next**, waiting for the user (§7) |
 | F: 5-specialist council | not started |
 | G: MANUAL_TEST_PLAN.md + summary | not started |
 
@@ -176,6 +180,20 @@ The build was verified by timestamps: the objects and the `.bin` date from 16:44
 
 The separate worktree baseline build is **no longer needed**.
 
+## 4a. Build checkpoint 2 result (build of `00beb81`, Saturday 07:20)
+
+The user ran an incremental build through the VS Code extension. The objects of every changed source file are dated 07:20, after the last commit (23:45).
+
+- **Warnings:** only the same four as on `master`. The `BLE_HS_ATT_ERR` warning moved from line 101 to line 105.
+- **Version:** `2.1.4`.
+
+| | 2.1.3 | CP2 | Change |
+|---|---|---|---|
+| App `.bin` | 1,502,240 | 1,524,016 (0x174130) | +21,776 B; 27 % of the partition free |
+| Flash `.text` / `.rodata` | 999,990 / 350,524 | 1,013,258 / 359,004 | +13,268 / +8,480 |
+| DIRAM `.bss` / `.data` | 36,120 / 21,556 | 36,280 / 21,572 | +160 / +16 |
+| DIRAM `.text`, IRAM | 113,387 / 100 % | same | 0 |
+
 ---
 
 ## 5. Bench results: CP1 image `84a5d6a` (UART + IoT Hub monitor logs, 16:45–17:06)
@@ -226,13 +244,12 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 - **All three log lines that printed the fixed BLE passkey were changed**, not just the INPUT line: `[SM] Fixed Passkey: configured (not logged)` also printed the passkey at every boot. None of these lines is in the production-tool contract.
 - **C2D decommission of `valve` on a hub with no valve now acks `error`** ("valve decommission failed"), per S12 in the plan. A cloud retry after a lost ack sees an error instead of an idempotent `ok`.
 
-**Open with the user:**
-- **Product question:** on a sensors-only hub, a leak still publishes an `auto_close` event with `rmleak_asserted:false`. Keep it, or suppress it? For now `CHANGELOG.md` lists it as unchanged in 2.1.4.
+**Open with the user:** nothing. The `auto_close` question was decided on 2026-09-26 (suppress it; see §10).
 
 **Follow-ups noted (not fixed):**
 - The superseded banner in `docs/telemetry/telemetry_catalogue.md` was added by hand to a generated file. `build_catalogue.py` must emit it before the next regeneration.
 - A live DPS registration still blocks `iothub_task` for up to 60 s per attempt (first boot, after decommission-all, or after an epoch change). Moving DPS to its own task is future work.
-- For a few ms between a valve target change and the old link's DISCONNECT, the valve getters return the old valve's cached state.
+- Between a valve target change and the old link's DISCONNECT, the valve getters return the old valve's cached state. The window is about 0.5 s on the bench and up to the 5 s supervision timeout (E-11 corrected the earlier "a few ms"). The auto_close sample is target-gated, so it no longer claims an interlock on a removed valve.
 - The NVS count clamp does not also clamp to the blob length, so a corrupt count above the real entries gives phantom zero ids. This needs a firmware bug to write such a count.
 
 **Deferred to 2.1.5:**
@@ -252,7 +269,21 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 ## 7. Remaining steps
 
 1. ~~Finish or resume workflow 2 (§3). Triage its reviews and commit the fixes.~~ Done: `2c012b7` … `00beb81`.
-2. **🔨 Build checkpoint 2 (user).** Full clean build of the branch at its final commit. That is the last commit **before** this handoff update; the handoff commit is docs only.
+1a. **🔨 Build checkpoint 3 (user), NEXT.** It is required because Phase E changed code (§10). Build the branch at its latest commit. The last firmware commit is `b245d94`; everything after it is docs. Use the same commands and paste-back as Build checkpoint 2 below, with `build_cp3.log`.
+   - **Compare against §4a (CP2):**
+     - no new warnings (only the four from `master`);
+     - IRAM unchanged;
+     - `.bss` and `.data` about the same as CP2 (36,280 / 21,572). The Phase E lanes added no statics, so a change of more than about ±40 B needs a look;
+     - flash grows a few KB.
+   - **Bench after flashing CP3.** Run the CP2 list below, plus:
+     - **Re-wet at the clear:** dry a sensor, then wet it again about 10–12 s later. You should see `rmleak_auto_cleared` then `auto_close`, the valve locked, and **no** "RMLEAK cleared externally (valve override)" line.
+     - **Auto-clear:** wet a sensor (auto-close), then dry it. You should see "All sensors clear — auto-clear timer started (10s)", then about 10–12 s later "AUTO-CLEAR: all sensors clear for 10s" and `rmleak_auto_cleared {clear_after_seconds:10}`. The LED goes RED → amber for about 10 s → GREEN, and the valve stays closed.
+     - **`valve_open` during a leak with the valve powered off:** the ack is `error` with "Valve is locked after a leak (RMLEAK)…".
+     - **Sensors-only hub leak:** you see `leak_detected` and **no** `auto_close`, plus the UART line "AUTO-CLOSE: no provisioned valve - auto_close event not published".
+     - **Connected valve:** `last_seen_age_s` stays 0 in snapshots.
+     - **Valve swap** (flooded valve A → dry valve B): B is not auto-closed.
+     - **Remove and re-add a wet sensor within 10 s:** `leak_detected` and `auto_close` arrive at once.
+2. ~~**🔨 Build checkpoint 2 (user).**~~ Passed (§4a). Full clean build of the branch at its final commit. That is the last commit **before** this handoff update; the handoff commit is docs only.
 
    ```powershell
    git log --oneline -1
@@ -283,7 +314,7 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
    - **Captive portal:** press the Wi-Fi reset button on a hub with a valve and 4 sensors, then set up Wi-Fi from a phone. The portal must load with no reboot. Record the heap `min_ever`; CP1 was 19,524 B.
    - **Serial log:** no "password" line anywhere, and the `[SM] Fixed Passkey` line prints "configured (not logged)".
    - **Validator:** `python docs/telemetry/validate_capture.py "<IoT Hub monitor capture>"` shows 0 FAIL.
-3. **Phase E (adversarial review).** Areas:
+3. ~~**Phase E (adversarial review).**~~ Done (§10). Areas:
    - decommission races;
    - the empty hub;
    - valve lifecycle and identity;
@@ -339,3 +370,67 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 | Bench logs of Build checkpoint 1 | `C:\Users\antun\Desktop\UART logs.txt`, `C:\Users\antun\Desktop\IoT hub monitor.txt` |
 
 (`…` = `C:\Users\antun\.claude\projects\C--Work-Projects-EfloStop-2-Firmware-Production-eFloStop-WiFiHub-idf1\ee520eed-0dc0-45ef-bdfe-91bf0b44762d`)
+
+Phase E material:
+- review run `wf_c8016931-1db`;
+- fix run `wf_3bda8ac7-2db`;
+- docs run `wf_4ad93e14-24d`;
+- all findings with evidence and refuter verdicts: the session scratchpad `phaseE.json` (copied from the review run's journal).
+
+---
+
+## 10. Phase E (adversarial review), Saturday 2026-09-26
+
+**How it ran.** Seven independent reviewers each attacked one area: decommission, the empty hub, valve lifecycle and identity, valve battery, concurrency, heap/NULL/stack, and boot/clock. They had the diff, the plan and the logs, but not the implementers' reasoning. Their 27 raw findings were merged into 22. Every non-nit was then checked by two refuters.
+- **Result:** 13 confirmed, 3 disputed, 0 refuted, 6 nits.
+- **Severity:** after verification every one is minor or lower. E-01 was filed as major, and both refuters rated it minor.
+
+**Fixes.** One `fix(review)` commit per finding. They ran in four parallel lanes on disjoint files; each lane was adversarially reviewed, and lane B was fixed again.
+
+| ID | Problem | Commit |
+|---|---|---|
+| E-02 | A wet sensor removed and re-added within the scanner's 10 s reload gave no event; the interlock auto-cleared while it was still wet | `03fc529` |
+| E-03 | A real-epoch override restored after a power cut with no internet never expired, so auto-close stayed blocked | `328d6af` |
+| E-04 | The old valve's leak source survived a valve swap and auto-closed the new dry valve. Follow-up `d37eb6c`: the latch is also released on a valve removal | `e2b8fb7`, `f3b65b0`, `d37eb6c` |
+| E-05 | The empty-hub rules reset raced a following provision. The reset now happens inside the removal or provision that empties the hub | `20b229b`, `ade686b` |
+| E-06 | An OPEN pended while the valve was away was applied before the leak's close. RMLEAK+CLOSE are now pended too; `valve_open` is refused while a leak is latched (user decision), failing closed | `fefe0da`, `2487ff5`, `c4b86e6` |
+| E-07a | A command pended just as setup completed was stranded | `1458125` |
+| E-08 | Valve health events had no identity across a valve swap | `c902a70` |
+| E-09 | A quick decommission and re-provision of the same valve never rescanned | `3f87132` |
+| E-10 | A snapshot flushed between a C2D change and the reconcile showed the old table | `9a8a4e5` |
+| E-11 | `auto_close` claimed `rmleak_asserted:true` for a just-removed valve | `898e607` |
+| E-12 | The valve resync could mark a wet valve dry | `daf670f` |
+| E-13 | cJSON children leaked when an attach failed | `095b5d6`, `b3d3fd3` |
+| E-14 | A partial snapshot counted as published. Follow-up `12a9b9e`: the hub name is checked too | `c277a4b`, `12a9b9e` |
+| E-15 | Every EXCELLENT↔GOOD flip caused a snapshot. Only changes involving WARNING or worse now do | `6b89ab7` |
+| E-16 | A connected valve's `last_seen_age_s` and its `offline_duration_s` were inflated (user decision: fix now) | `fe4d0b0` |
+| E-17 | A skipped cache purge was never retried, and owed changes polled only every 30 s | `cfbeeb3` |
+| E-18 | Unknown devices' check-ins drove pulse snapshots | `a55119f` |
+| E-21 | A stale Wi-Fi reset comment (the portal is not BLE-free any more) | `5788eaf` |
+| E-22 | A stamped offline event could be written back past 512 B | `307ed19` |
+| user | No `auto_close` on a hub with no valve (user decision) | `502178c` |
+| user | RMLEAK auto-clear changed from 30 s to 10 s, with a 2 s loop poll while pending (user request, approved) | `75a4a59` |
+| docs review | A sensor re-wetting just as the lock was released (auto-clear or `leak_reset`) was misread as a valve-button press: a false 24 h override and auto-close blocked while wet. A newly latched incident now always re-locks and re-closes. The race predates 2.1.4 | `b245d94` |
+
+**Documented, not fixed:**
+- **E-01:** a snapshot needs about twice its size in one heap block. With NimBLE running, hubs of about 20 or more devices may fail to publish snapshots, and NimBLE now also runs on sensors-only hubs with a BLE sensor. Heap tuning is 2.1.5; the test plan will include a hub with 20 or more devices.
+- **E-03 case B:** an unsynced override followed by a software reset ends at the first sync. This fails toward auto-close.
+- **E-07b:** after a TERM_FAILURE the command waits for the next link. This is by design.
+- **E-19:** a test-plan note only. At reconnect, `device_recovered` carries the fresh battery reading.
+- **E-20:** the heap budget. Static RAM is about +176 B against 2.1.3, plus about 50 B of permanent heap for two log-level tags.
+
+**User decisions, 2026-09-26:**
+1. Refuse `valve_open` while a leak incident is latched and no override is active, even with the valve disconnected. The refusal reuses the RMLEAK message.
+2. Fix the valve age now: `last_seen_age_s` is 0 while the valve is linked and counts from the drop; `offline_duration_s` is measured from the drop.
+3. Suppress `auto_close` on a hub with no valve. This answers the long-open product question.
+4. RMLEAK auto-clear is 10 s, with the 2 s poll.
+
+**Accepted deviations:**
+- E-03 times an unsynced window by max(uptime, unsynced clock), so a software reset cannot restart the count.
+- `d37eb6c` releases the latch on a valve removal as well as on a swap.
+- Five commit subjects are 73–79 characters. Reword them only if the branch is ever squashed.
+
+**Still to feed into Phase F and G:**
+- A bench check of the NimBLE host-task stack high-water mark. E-08 added about 54 B on the notify path, and the reviewer noted the DISC path too.
+- The plan text still says "rating seq bumped on any system-rating change"; E-15 narrowed that.
+- `validate_capture.py`'s new valve-less `auto_close` check can flag a leak that happens while provisioning is busy.
