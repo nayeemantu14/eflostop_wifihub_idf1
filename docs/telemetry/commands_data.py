@@ -294,7 +294,7 @@ COMMANDS = [
          ack_ok=ack("req-prov-001", "provision", uptime=95),
          ack_errs=[("provisioning failed",
                     "One string for every cause: no payload; payload not valid JSON; a valve key was offered but no spelling of it yielded a valid MAC; none of valve_id / valve_mac / lora_sensors / ble_leak_sensors / auto_close_enabled / rules present and well-typed; or the storage write failed.")],
-         notes="A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries. **A provision that changes the valve** (2.1.4) discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one."),
+         notes="A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries. **A provision that changes the valve** (2.1.4) discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one. **A provision that empties the hub** (2.1.4): when its sensor arrays leave the hub with no device, the hub resets auto_close_enabled / trigger_mask to true / 7 and clears the leak latch and any override window, before the ack. Rules keys in the same payload apply on top of those defaults."),
 
     dict(group="Commissioning", id="P2", name="decommission",
          title="Remove one device, or wipe the hub",
@@ -602,7 +602,7 @@ CHANGES = [
      "ok, and the hub then connected to any nearby eFloStop valve and drove it",
      "error: No valve is set up for this hub.  (2.1.4)"),
     ("valve_open / valve_set_state open — leak incident latched, no override window, valve disconnected or its RMLEAK clear",
-     "ok; the open was held and written at the reconnect, ahead of the close the leak was owed",
+     "ok; the open was written (held for the reconnect when the valve was disconnected)",
      "error: Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.  (2.1.4)"),
     ("valve_open / valve_set_state open — valve battery at or below 10 %",
      "ok, for a valve that refused to open",

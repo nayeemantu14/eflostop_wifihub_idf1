@@ -361,7 +361,7 @@ Enable all + all triggers:
 
 What happens: parsed and merged into the current config (defaults `auto_close_enabled=true`, `trigger_mask=7` if no prior value), persisted to NVS, takes effect on the next leak event. The new state shows up in the next snapshot's `data.rules` and in Twin reported (`auto_close_enabled`, `trigger_mask`). No dedicated rules event is emitted for a config change — only the `cmd_ack`.
 
-> **A hub with no valve publishes no `auto_close`** (2.1.4). With no valve provisioned there is nothing to close, so a leak sends `leak_detected` only, whatever this config says. Up to 2.1.3 it also sent `auto_close` with `rmleak_asserted:false`. The leak incident still latches, so `rmleak_auto_cleared` and `rmleak_cleared` are still sent there, without `valve_id`.
+> **A hub with no valve publishes no `auto_close`** (2.1.4). With no valve provisioned there is nothing to close, so a leak sends `leak_detected` only, whatever this config says. Up to 2.1.3 it also sent `auto_close` with `rmleak_asserted:false`. The leak incident still latches (when `auto_close_enabled` and the source's trigger bit are set), so `rmleak_auto_cleared` and `rmleak_cleared` are still sent there, without `valve_id`.
 
 > **Here `auto_close_enabled` is a pure master switch — it never touches `trigger_mask`.** That is the opposite of the same key at the top level of a `provision` payload (§4.9), where `true` also arms all three trigger bits. This command is for *editing settings*, so it changes exactly what you send; `provision` is for *answering a setup question*, so it does the obvious whole-system thing. Use this command for per-source tuning after commissioning.
 
@@ -510,6 +510,8 @@ At least one field is required. Each present array does a **full replace** of th
 > **This key does not mean quite the same thing in `rules_config`.** There it is a pure master switch and never touches the mask, because that caller is editing settings and says exactly what it wants. Here it is answering a setup question and gets the obvious whole-system behaviour. If you want an explicit mask during commissioning, send `rules` instead of (or as well as) this key.
 
 **Precedence when both are present.** The top-level flag is applied first, then `rules` is merged over it — specific beats shorthand. So `{"auto_close_enabled": true, "rules": {"trigger_mask": 3}}` ends up **enabled with only the two sensor bits armed**, the valve probe excluded.
+
+**A provision that empties the hub (2.1.4).** When the sensor arrays in a `provision` leave the hub with no device, the hub resets `auto_close_enabled` / `trigger_mask` to `true` / `7` and clears the leak latch and any override window, before the ack. Rules keys in the same payload (`auto_close_enabled`, `rules`) apply on top of those defaults.
 
 `auto_close_enabled` also satisfies the at-least-one-field requirement on its own — which means a payload whose only key is `auto_close_enabled` marks an unprovisioned hub as commissioned with no devices. Send it with the devices it describes, as the setup flow does.
 

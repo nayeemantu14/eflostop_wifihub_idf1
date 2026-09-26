@@ -27,9 +27,9 @@ So: **a leak is always reported; the valve is only closed when shutoff is enable
 
 ### Case matrix
 
-| # | Condition | Reported? | Valve | RMLEAK | Incident latched | 30 s auto-clear (`rmleak_auto_cleared`) | Events emitted |
+| # | Condition | Reported? | Valve | RMLEAK | Incident latched | 10 s auto-clear (`rmleak_auto_cleared`) | Events emitted |
 |---|---|---|---|---|---|---|---|
-| **A** | Auto-close **ON**, source in trigger mask, no override | ✅ | **Closes** | **Set** | Yes | ✅ fires 30 s after all sensors dry | `leak_detected` → `auto_close` → `valve_state_changed{closed,rmleak:true}` → (on dry, +30 s) `rmleak_auto_cleared` → `leak_cleared` |
+| **A** | Auto-close **ON**, source in trigger mask, no override | ✅ | **Closes** | **Set** | Yes | ✅ fires about 10–12 s after the last sensor reads dry | `leak_detected` → `auto_close` → `valve_state_changed{closed,rmleak:true}` → (on dry) `leak_cleared` → (about 10–12 s later) `rmleak_auto_cleared` |
 | **B** | Auto-close **OFF** (master disabled) | ✅ | **Stays open** | Not set | **No** | **No** | `leak_detected` … `leak_cleared` only |
 | **C** | Auto-close ON but **this source type not in trigger mask** | ✅ | **Stays open** | Not set | No | No | `leak_detected` … `leak_cleared` only |
 | **D** | **Override window active** (24 h water access) | ✅ | **Stays open** | Not set by this leak | Yes (latched, close blocked) | n/a while window open | `leak_detected` → `auto_close_blocked_override` (rate-limited) … `leak_cleared` |
@@ -56,13 +56,13 @@ So: **a leak is always reported; the valve is only closed when shutoff is enable
 physical button on the valve) **only closes the valve**. It does **not**:
 - assert RMLEAK (so there is **no interlock** — the valve can be reopened freely),
 - latch a leak incident,
-- start the 30 s timer,
+- start the 10 s auto-clear timer,
 - emit `auto_close` / `rmleak_auto_cleared`.
 
 It emits **only** `valve_state_changed{valve_state:"closed", rmleak:false}`. The sensor's
 `leak_detected`/`leak_cleared` reporting continues independently. 
 
-So the "regular flow for leak handling" (RMLEAK interlock + 30 s auto-clear) is entered **only** when the
+So the "regular flow for leak handling" (RMLEAK interlock + 10 s auto-clear) is entered **only** when the
 hub *auto-closes* (Case A). A manual close is just a plain close.
 
 - **Can the user also close physically via the valve button?** Yes. The hub observes the physical valve
@@ -76,16 +76,21 @@ hub *auto-closes* (Case A). A manual close is just a plain close.
 > It would need a new firmware command ("close + assert RMLEAK"). Worth a conversation if the UX calls
 > for it.
 
-### Q3. If the user doesn't close it and the leak is fixed (sensors dry), does it auto-clear after 30 s (`rmleak_auto_cleared`)?
-**Only in the auto-close flow (Case A) — not when auto-close is disabled (Case B).** The 30 s timer and
+### Q3. If the user doesn't close it and the leak is fixed (sensors dry), does it auto-clear after 10 s (`rmleak_auto_cleared`)?
+**Only in the auto-close flow (Case A) — not when auto-close is disabled (Case B).** The 10 s timer and
 the `rmleak_auto_cleared` event exist purely to lift the **RMLEAK interlock** that auto-close sets. If
 RMLEAK was never set (auto-close off, or a manual close), there is nothing to auto-clear, and **no
 `rmleak_auto_cleared` event is emitted** — the flow is simply `leak_detected` → `leak_cleared`.
 
-What the 30 s actually does (Case A): once **all** sources are dry for 30 continuous seconds, the hub
-clears RMLEAK (`rmleak_auto_cleared`) so the valve *can* be reopened again — **it does not reopen the
-valve**, it only removes the interlock. (`leak_reset` is the manual instant version of the same thing,
-and it is refused while any leak is still active.)
+What the 10 s timer actually does (Case A): once **all** sources are dry for 10 continuous seconds, the
+hub clears RMLEAK (`rmleak_auto_cleared`, `clear_after_seconds:10`) so the valve *can* be reopened again —
+**it does not reopen the valve**, it only removes the interlock. In practice the clear lands about 10–12 s
+after the last sensor reads dry. (`leak_reset` is the manual instant version of the same thing, and it is
+refused while any leak is still active.)
+
+> **Changed in firmware 2.1.4:** the dwell was 30 s, and the clear landed 30–60 s after the last sensor
+> read dry. A sensor that goes wet again 10–30 s after drying now gets a full clear and re-latch cycle
+> (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout.
 
 ---
 
@@ -140,7 +145,7 @@ sensor (or vice-versa) — the hub would accept it and simply never see the expe
 - ✅ Auto-close off → banner + which sensor + valve stays open — **correct**.
 - ⚠️ Manual close → "regular leak flow" — **no**; manual close has no RMLEAK interlock, no incident, no
   auto-clear. It's just a close.
-- ⚠️ "after 30 s of dry → `rmleak_auto_cleared`" — **only** in the auto-close flow; **not** when
+- ⚠️ "after 10 s of dry → `rmleak_auto_cleared`" — **only** in the auto-close flow; **not** when
   auto-close is disabled (no RMLEAK was ever set).
 - ✅ Provision = one command + ack — **yes**, but `ok` = *config stored*, not *device connected*; confirm
   via snapshot, and note invalid sensor MACs are skipped silently.

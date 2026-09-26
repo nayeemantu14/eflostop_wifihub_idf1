@@ -334,10 +334,10 @@ MESSAGES = [
          msg=env(TS, 26000, "event", {"event": "rmleak_cleared", "valve_id": VALVE_MAC,
                                       "override_cancelled": True})),
     dict(group="Rules events", id="R9", title="The leak interlock cleared itself",
-         when="Every source dry for 30 seconds, so the hub released the latch itself. Does NOT re-open the valve. Same identity rule as R8.",
-         cite="rules_engine_tick() main/rules_engine/rules_engine.c:1164-1303; AUTO_CLOSE_COOLDOWN_MS main/rules_engine/rules_engine.c:17",
+         when="Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout.",
+         cite="rules_engine_tick() main/rules_engine/rules_engine.c; AUTO_CLEAR_TIMEOUT_MS main/rules_engine/rules_engine.c",
          msg=env(TS, 8700, "event", {"event": "rmleak_auto_cleared", "valve_id": VALVE_MAC,
-                                     "clear_after_seconds": 30})),
+                                     "clear_after_seconds": 10})),
     dict(group="Rules events", id="R10", title="An override started before the hub's clock synced",
          when="New in 2.1.4. R5 from a hub that had no clock yet: it powered up with the router down, and the valve button was pressed 95 s after boot. expires_ts is omitted rather than naming an instant in 1970; the expiry is about ts + remaining_s. The event was held in the hub's offline buffer and sent after the first connect, with ts rewritten to the moment of the press, worked out from the hub uptime (gateway.uptime_s is the uptime at the press). Every event raised before the first clock sync arrives this way, late but correctly time-stamped; one left over from a restart before the clock synced is dropped. The window runs on the hub uptime until the clock syncs and is then re-based to it, so snapshots carry expires_ts from then on (S4).",
          cite="start_override_window() and rules_engine_tick() main/rules_engine/rules_engine.c; pre-sync hold publish_json() main/telemetry/telemetry_v2.c; stamping ob_prepare_replay_locked() main/offline_buffer/offline_buffer.c",
@@ -569,6 +569,9 @@ CHANGES = [
     ("Events raised before the hub's first clock sync",
      "destroyed: a leak_detected or auto_close raised while the router was still down never reached the cloud",
      "held in the offline buffer, ts worked out from the hub uptime when the clock first syncs, sent after the first connect; one left over from a restart before the sync is dropped  (2.1.4)"),
+    ("rmleak_auto_cleared clear_after_seconds (R9)",
+     "30: RMLEAK lifted 30-60 s after the last source read dry",
+     "10: RMLEAK lifted about 10-12 s after the last source reads dry; the valve still never reopens by itself  (2.1.4)"),
     ("water_access_override_enabled, override started before the clock synced (R10)",
      "expires_ts an instant in 1970, and the window ended the moment the clock synced",
      "expires_ts omitted; the window runs on the hub uptime until the clock syncs, then carries on  (2.1.4)"),
@@ -682,7 +685,9 @@ window, even with the valve disconnected (C3).
 
 A hub with no valve provisioned no longer sends `auto_close`: a leak there sends `leak_detected` only (R1). The
 valve's `last_seen_age_s` is `0` while its link is up and counts from the drop once it is disconnected (S1, S2),
-and a valve `device_offline` measures `offline_duration_s` from the drop (H3).
+and a valve `device_offline` measures `offline_duration_s` from the drop (H3). The RMLEAK interlock now
+auto-clears 10 s after every source is dry (it was 30 s), about 10-12 s after the last dry report, so
+`rmleak_auto_cleared` carries `clear_after_seconds:10` (R9).
 
 **Events raised before the hub's clock syncs now arrive, late.** Leak protection runs from power-up, before
 Wi-Fi. An event raised before the first clock sync (say a leak while the router is still coming back after a

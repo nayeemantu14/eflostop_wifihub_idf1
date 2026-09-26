@@ -127,9 +127,9 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
   later could be blocked from auto-closing for 24 h by an inferred override.
 - **A leak on a hub with no provisioned valve no longer publishes `auto_close`.** There is no valve to close,
   and the event reported a shut-off that never happened. `leak_detected` still goes out and the incident still
-  latches. If provisioning is busy at that moment, the hub assumes a valve is present and publishes it. After
-  a valve decommission, auto-close also no longer counts the old valve's link, still up until its DISCONNECT,
-  as a reachable valve.
+  latches (when `auto_close_enabled` and the source's trigger bit are set). If provisioning is busy at that
+  moment, the hub assumes a valve is present and publishes it. After a valve decommission, auto-close also no
+  longer counts the old valve's link, still up until its DISCONNECT, as a reachable valve.
 - **`valve_open` and `valve_set_state` open are refused while a leak incident is latched** and no override
   window is active, with the RMLEAK refusal, even when the valve is disconnected or its RMLEAK reads clear. An
   open sent while the valve was out of range used to be accepted, held, and written at the reconnect ahead of
@@ -147,6 +147,19 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
 - **A valve re-provisioned right after its decommission is always linked.** A `provision` naming a valve now
   always requests the valve link. One sent before the old link's DISCONNECT used to leave the hub not
   rescanning after the valve's next drop, so the valve went "Valve offline" until a leak or a valve command.
+
+### Changed
+
+- **The RMLEAK interlock auto-clears 10 s after every leak source is dry (it was 30 s).**
+  - `AUTO_CLEAR_TIMEOUT_MS` is 10 s. While an auto-clear is pending, `iothub_task` polls every 2 s instead of
+    idling for up to 30 s, so the interlock is released about 10–12 s after the last leak source reports dry.
+    It used to take 30–60 s: the 30 s dwell plus up to one 30 s idle wait.
+  - Only RMLEAK is lifted. The valve never reopens by itself; `valve_open` or the valve button opens it.
+  - `rmleak_auto_cleared` carries `clear_after_seconds:10`.
+  - The amber "Leak interlock latched" floor on the hub rating after a leak dries now lasts about 10 s.
+  - A sensor that goes wet again 10–30 s after drying now produces a full clear and re-latch cycle
+    (`rmleak_auto_cleared`, then `auto_close` again), where the 30 s dwell used to hold the interlock. The
+    valve stays closed throughout.
 
 ### Reliability
 
@@ -243,6 +256,7 @@ Telemetry (`eflostop.v2`):
 | snapshot `data.valve.last_seen_age_s` | seconds since the valve's last changed value or connect, so it grew for hours on a steady, connected valve | `0` while the valve's link is up; seconds since the link dropped once disconnected; `null` if never seen this uptime |
 | `device_offline.offline_duration_s`, valve | from the valve's last changed value, plus the 180 s grace: hours on a steady valve | from the link drop, so normally about 180 |
 | `auto_close` on a hub with no provisioned valve | sent, with `rmleak_asserted:false` | not sent; `leak_detected` still is |
+| `rmleak_auto_cleared.clear_after_seconds` | `30`; RMLEAK lifted 30–60 s after the last leak source read dry | `10`; RMLEAK lifted about 10–12 s after the last leak source reads dry |
 
 Commands (`C2D_COMMANDS.md` §4.1–4.3 and §6.1). The `detail` strings are exact:
 
@@ -252,7 +266,7 @@ Commands (`C2D_COMMANDS.md` §4.1–4.3 and §6.1). The `detail` strings are exa
 | `valve_open`, `valve_set_state` open, with the last real valve battery ≤ 10 % | `ok` (the valve stayed shut) | `error`, "Valve battery critical (≤10 %): the valve will not open. Replace the batteries." |
 | valve command when the valve command queue is full | `ok` | `error`, "The valve command could not be queued. Try again." |
 | `decommission` `{"target":"valve"}` on a hub with no valve | `ok` | `error`, "valve decommission failed" |
-| `valve_open`, `valve_set_state` open, while a leak incident is latched and no override window is active, with the valve disconnected or its RMLEAK clear | `ok`; the open was held and written at the reconnect | `error`, "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak." |
+| `valve_open`, `valve_set_state` open, while a leak incident is latched and no override window is active, with the valve disconnected or its RMLEAK clear | `ok`; the open was written (held for the reconnect when the valve was disconnected) | `error`, "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak." |
 
 The RMLEAK refusal's text is unchanged, and it is still sent while the valve's RMLEAK is asserted. The refusal
 checks run in this order: no valve, then RMLEAK asserted or an incident latched, then the battery, then the
@@ -266,7 +280,8 @@ next snapshot) confirms it.
   carry over.
 - **Rolling back to 2.1.3 keeps provisioning too,** for the same reason. The 2.1.3 behaviour returns with it,
   including P0-a. A pre-sync event still in the offline buffer at the rollback and not yet time-stamped (the
-  clock never synced) is replayed by 2.1.3 unchanged, with a `ts` in 1970; one already stamped keeps its real
+  clock never synced, the entry was too close to 512 B to be stamped in flash, or its stamp could not be
+  written) is replayed by 2.1.3 unchanged, with a `ts` in 1970; one already stamped keeps its real
   `ts`. 2.1.4 never writes a stamped entry back longer than 512 B, so 2.1.3 can read every entry. An override
   window re-based by 2.1.4 is stored with a real epoch, so 2.1.3 restores it with the right remaining time.
 - **A hub that boots with no devices** clears any persisted leak latch and override window on that boot.
@@ -344,6 +359,10 @@ next snapshot) confirms it.
     - `IOTHUB`: `Telemetry-cache purge: provisioning busy, retrying`
     - `PROVISIONING`: `Hub empty: rules config reset to defaults`, after the removal or `provision` that
       empties the hub
+  - Changed number, RMLEAK auto-clear (`RULES_ENGINE`): these print `10s` where they printed `30s`. The
+    production tool matches neither; `docs/health_leak_led/TEST_PLAN.md` still quotes the 30 s values.
+    - `All sensors clear — auto-clear timer started (%ds)`
+    - `AUTO-CLEAR: all sensors clear for %ds — clearing RMLEAK`
   - Same text, new triggers:
     - `TELEMETRY_V2` `Snapshot not built - out of memory`: also when a snapshot key could not be added.
     - `IOTHUB` `Hub empty: rules-engine RAM reset failed - retry owed`: also from the C2D command that empties
@@ -368,9 +387,10 @@ next snapshot) confirms it.
 - **The NimBLE bond store** may still hold a bond to a neighbour's valve made under 2.1.3's name match. It is no
   longer used, and 2.1.4 does not delete it.
 - **Not changed in 2.1.4:**
-  - On a hub with sensors and no valve, a leak still latches the leak incident, so `rmleak_auto_cleared` (30 s
-    after every sensor is dry) and `rmleak_cleared` (after `leak_reset`) are still sent, without `valve_id`,
-    although there is no valve interlock to clear.
+  - On a hub with sensors and no valve, a leak still latches the leak incident (when `auto_close_enabled` and
+    the source's trigger bit are set), so `rmleak_auto_cleared` (10 s after every sensor is dry) and
+    `rmleak_cleared` (after `leak_reset`) are still sent, without `valve_id`, although there is no valve
+    interlock to clear.
   - Deferred to a later release:
     - the legacy keyword scan of C2D payloads;
     - command-id de-duplication;

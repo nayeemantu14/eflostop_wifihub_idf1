@@ -130,7 +130,7 @@
         "rmleak_asserted": {
           "type": "boolean",
           "description": "Whether the RMLEAK + close writes were actually issued to a reachable provisioned valve. false when the valve was unreachable (since 2.0.2; it was hardcoded true); since 2.1.4 the writes are then held for its reconnect, RMLEAK first. A hub with no provisioned valve sends no auto_close at all since 2.1.4 (up to 2.1.3 it sent one with false). Presence: auto_close only.",
-          "x-source": "main/rules_engine/rules_engine.c:336, :938",
+          "x-source": "build_auto_close_telemetry() / rules_engine_on_valve_connected() main/rules_engine/rules_engine.c",
           "x-category": "12.10"
         },
         "location": {
@@ -239,8 +239,8 @@
         },
         "clear_after_seconds": {
           "type": "number",
-          "description": "The all-clear dwell time that had to elapse before the hub auto-cleared the RMLEAK interlock. Units: seconds. Range/enum: AUTO_CLEAR_TIMEOUT_MS / 1000. Presence: always (rmleak_auto_cleared only).",
-          "x-source": "main/rules_engine/rules_engine.c:1083; constant main/rules_engine/rules_engine.c:18",
+          "description": "The all-clear dwell time that had to elapse before the hub auto-cleared the RMLEAK interlock: 10 since 2.1.4, 30 before. The hub polls every 2 s while the clear is pending, so the interlock is released about 10-12 s after the last leak source reports dry (it was 30-60 s). The valve is not reopened. Units: seconds. Range/enum: AUTO_CLEAR_TIMEOUT_MS / 1000 (10 since 2.1.4, 30 before). Presence: always (rmleak_auto_cleared only).",
+          "x-source": "rules_engine_tick() main/rules_engine/rules_engine.c; constant AUTO_CLEAR_TIMEOUT_MS main/rules_engine/rules_engine.c",
           "x-category": "12.10"
         },
         "raw": {

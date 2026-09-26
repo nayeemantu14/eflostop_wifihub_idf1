@@ -8,7 +8,7 @@
 |---|---|
 | Document version | 5.0 (supersedes v2.0, which documented firmware 1.9.0) |
 | Firmware version | 2.1.4 — `CMakeLists.txt:12` |
-| Git commit | `ade686b615bf449a8c5dc93bc9c76b1af821ce01` |
+| Git commit | `12a9b9e9d40469e5773719e852c7a832609be7b6` |
 | Schema | `eflostop.v2` |
 | Topic | `devices/<device_id>/messages/events/` (QoS 1) |
 | Message count | 48 distinct messages across 8 families |
@@ -118,7 +118,9 @@ window, even with the valve disconnected (C3).
 
 A hub with no valve provisioned no longer sends `auto_close`: a leak there sends `leak_detected` only (R1). The
 valve's `last_seen_age_s` is `0` while its link is up and counts from the drop once it is disconnected (S1, S2),
-and a valve `device_offline` measures `offline_duration_s` from the drop (H3).
+and a valve `device_offline` measures `offline_duration_s` from the drop (H3). The RMLEAK interlock now
+auto-clears 10 s after every source is dry (it was 30 s), about 10-12 s after the last dry report, so
+`rmleak_auto_cleared` carries `clear_after_seconds:10` (R9).
 
 **Events raised before the hub's clock syncs now arrive, late.** Leak protection runs from power-up, before
 Wi-Fi. An event raised before the first clock sync (say a leak while the router is still coming back after a
@@ -180,6 +182,7 @@ The table is cumulative, so a reader holding any earlier revision can use it. Ro
 | Snapshot valve last_seen_age_s | `seconds since the valve's last changed value or connect: hundreds of seconds on a steady, connected valve` | `0 while the link is up; seconds since the drop once disconnected  (2.1.4)` |
 | Valve device_offline offline_duration_s | `from the valve's last changed value, plus the 180 s grace: hours on a steady valve` | `from the link drop, so normally about 180  (2.1.4)` |
 | Events raised before the hub's first clock sync | `destroyed: a leak_detected or auto_close raised while the router was still down never reached the cloud` | `held in the offline buffer, ts worked out from the hub uptime when the clock first syncs, sent after the first connect; one left over from a restart before the sync is dropped  (2.1.4)` |
+| rmleak_auto_cleared clear_after_seconds (R9) | `30: RMLEAK lifted 30-60 s after the last source read dry` | `10: RMLEAK lifted about 10-12 s after the last source reads dry; the valve still never reopens by itself  (2.1.4)` |
 | water_access_override_enabled, override started before the clock synced (R10) | `expires_ts an instant in 1970, and the window ended the moment the clock synced` | `expires_ts omitted; the window runs on the hub uptime until the clock syncs, then carries on  (2.1.4)` |
 | Firmware version | `1.9.0` | `2.1.4 — breaking changes on both the telemetry and command planes` |
 
@@ -1699,7 +1702,7 @@ Response to leak_reset. override_cancelled appears only if a window was open. De
 
 ### R9 — The leak interlock cleared itself
 
-Every source dry for 30 seconds, so the hub released the latch itself. Does NOT re-open the valve. Same identity rule as R8.
+Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout.
 
 ```json
 {
@@ -1716,12 +1719,12 @@ Every source dry for 30 seconds, so the hub released the latch itself. Does NOT 
   "data": {
     "event": "rmleak_auto_cleared",
     "valve_id": "C4:19:D1:88:2A:7F",
-    "clear_after_seconds": 30
+    "clear_after_seconds": 10
   }
 }
 ```
 
-*`rules_engine_tick() main/rules_engine/rules_engine.c:1164-1303; AUTO_CLOSE_COOLDOWN_MS main/rules_engine/rules_engine.c:17`*
+*`rules_engine_tick() main/rules_engine/rules_engine.c; AUTO_CLEAR_TIMEOUT_MS main/rules_engine/rules_engine.c`*
 
 ### R10 — An override started before the hub's clock synced
 
