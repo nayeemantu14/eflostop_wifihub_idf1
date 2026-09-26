@@ -121,7 +121,7 @@
             },
             "detail": {
               "type": "string",
-              "description": "Human-readable, end-user-facing failure reason; the only real discriminator. The valve commands (2.1.4) send exactly: \"No valve is set up for this hub.\" (no valve provisioned; valve_open, valve_close, valve_set_state), \"Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.\" (open), \"Valve battery critical (≤10 %): the valve will not open. Replace the batteries.\" (open, last real valve battery <= 10 %), \"The valve command could not be queued. Try again.\" (queue full). The full list per command is in C2D_COMMANDS.md §6.1. Presence: whenever data.error is present.",
+              "description": "Human-readable, end-user-facing failure reason; the only real discriminator. The valve commands (2.1.4) send exactly: \"No valve is set up for this hub.\" (no valve provisioned; valve_open, valve_close, valve_set_state), \"Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.\" (open: the valve's RMLEAK latch is asserted, or, since 2.1.4, a leak incident is latched with no override window, even with the valve disconnected), \"Valve battery critical (≤10 %): the valve will not open. Replace the batteries.\" (open, last real valve battery <= 10 %), \"The valve command could not be queued. Try again.\" (queue full). The full list per command is in C2D_COMMANDS.md §6.1. Presence: whenever data.error is present.",
               "x-source": "c2d_valve_command(), valve_open_reject_reason(), handle_c2d_command(), rx_reject() main/iothub/app_iothub.c",
               "x-category": "12.9"
             }

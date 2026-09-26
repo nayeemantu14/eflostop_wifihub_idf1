@@ -440,6 +440,37 @@ def check_ordering(msgs):
     return fails
 
 
+def check_valveless_auto_close(msgs):
+    """2.1.4: a hub with no provisioned valve publishes no auto_close.
+
+    Whether a hub has a valve is tracked per gateway from what the capture itself shows:
+    a snapshot's data.valve ({} = none) and a lifecycle's valve_id. A lifecycle without
+    valve_id is ambiguous (a busy provisioning read omits it too), and a successful
+    provision or decommission changes the answer before the next snapshot, so both make
+    it unknown and nothing is flagged until a snapshot settles it again. Checked across
+    the capture, like the ordering, because it is a property of a sequence of messages.
+    """
+    fails = []
+    has_valve = {}          # gateway id -> True / False / None (unknown)
+    for i, m in enumerate(msgs):
+        gw = (m.get("gateway") or {}).get("id")
+        d = m.get("data") or {}
+        ev = d.get("event")
+        if m.get("type") == "snapshot":
+            if isinstance(d.get("valve"), dict):
+                has_valve[gw] = bool(d["valve"])
+        elif m.get("type") == "lifecycle":
+            has_valve[gw] = True if "valve_id" in d else None
+        elif ev == "cmd_ack" and d.get("status") == "ok" \
+                and d.get("cmd") in {"provision", "decommission"}:
+            has_valve[gw] = None
+        elif ev == "auto_close" and has_valve.get(gw) is False:
+            fails.append(
+                f"message {i+1}: auto_close from hub {gw}, whose last snapshot had no "
+                f"valve (valve {{}}): a hub with no provisioned valve publishes none")
+    return fails
+
+
 def _at(d, path):
     cur = d
     for part in path.split(".")[1:]:
@@ -517,9 +548,16 @@ def main():
         for x in order_fails:
             print(f"    FAIL  {x}")
 
+    valveless_fails = check_valveless_auto_close(msgs)
+    if valveless_fails:
+        print("\n--- AUTO_CLOSE FROM A HUB WITH NO VALVE ---")
+        for x in valveless_fails:
+            print(f"    FAIL  {x}")
+
     print(f"\n{'=' * 70}")
     print(f"{len(msgs)} messages checked, {len(msgs) - bad} pass, {bad} fail"
-          f"{f', {len(order_fails)} ordering violation(s)' if order_fails else ''}")
+          f"{f', {len(order_fails)} ordering violation(s)' if order_fails else ''}"
+          f"{f', {len(valveless_fails)} auto_close with no valve' if valveless_fails else ''}")
     print("\nmessage mix:")
     for k in sorted(seen):
         print(f"    {seen[k]:4d}  {k}")
@@ -534,7 +572,7 @@ def main():
         print("\nnot exercised by this capture (cannot be validated from it):")
         for w in missing:
             print(f"    {w}")
-    return 1 if (bad or order_fails) else 0
+    return 1 if (bad or order_fails or valveless_fails) else 0
 
 
 if __name__ == "__main__":

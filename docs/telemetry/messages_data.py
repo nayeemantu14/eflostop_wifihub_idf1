@@ -58,9 +58,10 @@ def ble_sensor(mac, label, code, connected=True, battery=87, rssi=-64, leak=Fals
     return s
 
 
+# 2.1.4: a linked valve's last_seen_age_s is 0; once disconnected it counts from the drop.
 VALVE_OK = {"valve_id": VALVE_MAC, "state": "open", "battery": 92, "leak_state": False,
             "rmleak": False, "connected": True, "fw_version": VALVE_FW,
-            "rating": "excellent", "last_seen_age_s": 4}
+            "rating": "excellent", "last_seen_age_s": 0}
 VALVE_CLOSED = dict(VALVE_OK, state="closed", rmleak=True)
 VALVE_GONE = {"valve_id": VALVE_MAC, "state": "disconnected", "connected": False,
               "rating": "critical", "last_seen_age_s": 245}
@@ -70,7 +71,7 @@ VALVE_NOT_READY = {"valve_id": VALVE_MAC, "state": "unknown", "battery": None,
                    "leak_state": False, "rmleak": False, "connected": True, "fw_version": None,
                    "rating": "critical", "last_seen_age_s": None}
 # 2.1.4: at or below 10 % the valve is rated critical (valve only; 11-20 % is warning).
-VALVE_BATT_CRIT = dict(VALVE_OK, battery=8, rating="critical", last_seen_age_s=3)
+VALVE_BATT_CRIT = dict(VALVE_OK, battery=8, rating="critical")
 NO_VALVE = {}                      # 2.1.4: no valve provisioned
 HEALTH_OK = {"rating": "excellent", "reason": "All devices healthy"}
 HEALTH_EMPTY = {"rating": "excellent", "reason": "No devices provisioned"}
@@ -129,11 +130,11 @@ MESSAGES = [
 
     # ---------------- snapshot ----------------
     dict(group="Snapshot", id="S1", title="Routine heartbeat, everything healthy",
-         when="The heartbeat. Cadence defaults to 300 s but is tunable 60-3600 s per hub through the Device Twin and persists across reboots (2.0.2) — read reported.snapshot_interval_s rather than assuming 300.",
+         when="The heartbeat. Cadence defaults to 300 s but is tunable 60-3600 s per hub through the Device Twin and persists across reboots (2.0.2) — read reported.snapshot_interval_s rather than assuming 300. The valve's last_seen_age_s is 0 while its link is up (2.1.4): link supervision drops a link that stops answering, so a linked valve is being heard now. Up to 2.1.3 it counted from the valve's last changed value, and a steady valve read hundreds of seconds while connected.",
          cite="telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c:520-757; default interval main/telemetry/telemetry_v2.h:16, tunable range :22-23",
          msg=env(TS, 3600, "snapshot", snap("heartbeat", VALVE_OK, [S_A, S_B]))),
     dict(group="Snapshot", id="S2", title="Heartbeat with the valve disconnected",
-         when="The BLE link to the valve is down: battery, leak_state, rmleak and fw_version are omitted and state carries \"disconnected\".",
+         when="The BLE link to the valve is down: battery, leak_state, rmleak and fw_version are omitted and state carries \"disconnected\". last_seen_age_s counts from the moment the link dropped (2.1.4). Here that is 245 s, past the valve's 180 s grace, so the valve is critical.",
          cite="valve-disconnected branch of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c:520-757",
          msg=env(TS, 5400, "snapshot",
                  snap("heartbeat", VALVE_GONE, [S_A, S_B],
@@ -287,7 +288,7 @@ MESSAGES = [
 
     # ---------------- rules events ----------------
     dict(group="Rules events", id="R1", title="Hub closed the valve because a sensor reported a leak",
-         when="The automatic shut-off. rmleak_asserted says whether the interlock writes were ISSUED, not that they landed — false when the valve was unreachable (hardcoded true up to 2.0.1). location is present only when the source has a sensor_meta entry and OMITTED otherwise, the opposite of K1-K6.",
+         when="The automatic shut-off. rmleak_asserted says whether the interlock writes were ISSUED, not that they landed — false when the valve was unreachable (hardcoded true up to 2.0.1). location is present only when the source has a sensor_meta entry and OMITTED otherwise, the opposite of K1-K6. A hub with no valve provisioned sends no auto_close at all (2.1.4): a leak there sends leak_detected only. Up to 2.1.3 it also sent auto_close with rmleak_asserted false. When the valve is out of range, rmleak_asserted is false and the RMLEAK and close writes are held for its reconnect, RMLEAK first (2.1.4).",
          cite="build_auto_close_telemetry() main/rules_engine/rules_engine.c:428-459",
          msg=env(TS, 8005, "event", {"event": "auto_close", "source_type": "ble_leak_sensor",
                                      "sensor_id": SENSOR_A, "rmleak_asserted": True,
@@ -304,7 +305,7 @@ MESSAGES = [
                                     "sensor_id": SENSOR_A, "rmleak_asserted": True,
                                     "active_leak_count": 1})),
     dict(group="Rules events", id="R4", title="A leak occurred but auto-close was suppressed",
-         when="An override window is open, so the hub deliberately did not close. override_remaining_s is omitted when the remaining time is unknown: the window has just expired but the hub has not processed it yet, or a window restored after a reboot has a real expiry and the clock has not synced yet. Since 2.1.4 a window started before the clock synced is timed on the hub uptime, so it does carry override_remaining_s.",
+         when="An override window is open, so the hub deliberately did not close. override_remaining_s is omitted only when the window has just expired and the hub has not processed it yet. Since 2.1.4 a window started before the clock synced is timed on the hub uptime, and a window with a real expiry restored after a power-on that lost the clock counts down from that power-on, so both carry override_remaining_s (the second used to omit it).",
          cite="rules_engine_evaluate_leak() main/rules_engine/rules_engine.c:493-651",
          msg=env(TS, 20000, "event", {"event": "auto_close_blocked_override",
                                       "source_type": "ble_leak_sensor", "sensor_id": SENSOR_A,
@@ -316,7 +317,7 @@ MESSAGES = [
                                       "trigger": "button", "expires_ts": TS + 86400,
                                       "remaining_s": 86400})),
     dict(group="Rules events", id="R6", title="The override window elapsed",
-         when="auto_close_resumed is exactly active_leak_count > 0 sampled BEFORE any close is attempted — not a report of what happened. With auto-close disabled it still reads true and nothing closes. This message is the only trace of an expiry-driven closure.",
+         when="auto_close_resumed is exactly active_leak_count > 0 sampled BEFORE any close is attempted — not a report of what happened. With auto-close disabled it still reads true and nothing closes. This message is the only trace of an expiry-driven closure. Since 2.1.4 it can also come before the hub's clock has synced: a window restored after a power-on that lost the clock ends 24 h after that power-on if the clock has still not synced, and the event then arrives late, like any pre-sync event (R10).",
          cite="rules_engine_tick() main/rules_engine/rules_engine.c:1164-1303 (expiry + re-close)",
          msg=env(TS + 86400, 105400, "event", {"event": "water_access_override_expired",
                                                "auto_close_resumed": True,
@@ -359,7 +360,7 @@ MESSAGES = [
                                      "rating": "excellent", "prev_rating": "critical",
                                      "battery": 64, "rssi": -75})),
     dict(group="Health events", id="H3", title="The valve stopped responding",
-         when="H1 for the valve. rssi is ALWAYS absent and offline_duration_s is omitted when it would be zero. prev_rating is normally \"warning\", because a valve gets a 3-minute grace before promotion to critical; only sensors jump straight there. battery is omitted, not null, when the valve has never reported one.",
+         when="H1 for the valve. rssi is ALWAYS absent and offline_duration_s is omitted when it would be zero. offline_duration_s is measured from the link drop (2.1.4), so it is normally about 180, the grace; up to 2.1.3 it counted from the valve's last changed value and could read hours. prev_rating is normally \"warning\", because a valve gets a 3-minute grace before promotion to critical; only sensors jump straight there. battery is omitted, not null, when the valve has never reported one.",
          cite="rssi writers handle_lora_checkin() / handle_ble_leak_checkin(), omit-on-unknown health_alert_to_json(), compute_valve_rating() main/health_engine/health_engine.c",
          msg=env(TS, 5500, "event", {"category": "health", "event": "device_offline",
                                      "source_type": "valve", "valve_id": VALVE_MAC,
@@ -384,8 +385,8 @@ MESSAGES = [
          cite="id omission in telemetry_v2_publish_cmd_ack() main/telemetry/telemetry_v2.c:872-895",
          msg=env(TS, 30100, "event", {"event": "cmd_ack", "cmd": "valve_open", "status": "ok"})),
     dict(group="Command acknowledgements", id="C3", title="A command was refused",
-         when="error.code is not a code — it is the command name repeated. The free-text detail is the only real discriminator.",
-         cite="telemetry_v2_publish_cmd_ack() main/telemetry/telemetry_v2.c:872-895; message valve_open_reject_reason() main/iothub/app_iothub.c:552-559",
+         when="error.code is not a code — it is the command name repeated. The free-text detail is the only real discriminator. This detail answers valve_open, or valve_set_state open, while the valve's RMLEAK latch is asserted. Since 2.1.4 it is also sent while the hub has a leak incident latched and no override window, even with the valve disconnected; an open sent while the valve was out of range used to be accepted and written at the reconnect.",
+         cite="telemetry_v2_publish_cmd_ack() main/telemetry/telemetry_v2.c; message valve_open_reject_reason() main/iothub/app_iothub.c",
          msg=env(TS, 30200, "event", {
              "event": "cmd_ack", "id": "req-8f22", "cmd": "valve_open", "status": "error",
              "error": {"code": "valve_open",
@@ -555,7 +556,16 @@ CHANGES = [
      "reachability only; a debounced alert is sent late (prev_rating may equal rating); device_recovered may be critical  (2.1.4)"),
     ("valve_open / valve_close / valve_set_state acks",
      "ok unless RMLEAK — even with no valve, at a critical battery, or when nothing was queued",
-     "error: \"No valve is set up for this hub.\", battery critical (open), \"The valve command could not be queued. Try again.\"  (2.1.4)"),
+     "error: \"No valve is set up for this hub.\", battery critical (open), \"The valve command could not be queued. Try again.\"; the RMLEAK refusal (open) also while a leak incident is latched, valve disconnected or not  (2.1.4)"),
+    ("auto_close on a hub with no valve provisioned",
+     "sent, with rmleak_asserted false, for a valve that does not exist",
+     "not sent; leak_detected still is  (2.1.4)"),
+    ("Snapshot valve last_seen_age_s",
+     "seconds since the valve's last changed value or connect: hundreds of seconds on a steady, connected valve",
+     "0 while the link is up; seconds since the drop once disconnected  (2.1.4)"),
+    ("Valve device_offline offline_duration_s",
+     "from the valve's last changed value, plus the 180 s grace: hours on a steady valve",
+     "from the link drop, so normally about 180  (2.1.4)"),
     ("Events raised before the hub's first clock sync",
      "destroyed: a leak_detected or auto_close raised while the router was still down never reached the cloud",
      "held in the offline buffer, ts worked out from the hub uptime when the clock first syncs, sent after the first connect; one left over from a restart before the sync is dropped  (2.1.4)"),
@@ -635,8 +645,9 @@ latched by a sensor while the interlock itself is always the valve's. That costs
 `valve_id`, and the key names the device type on its own.
 
 On a hub provisioned with sensors but **no valve**, the two RMLEAK events omit `valve_id` entirely rather than
-naming a valve that does not exist — so treat it as optional there. The same applies to `auto_close`: rather than
-emit a placeholder, the hub omits the key when no MAC resolves.
+naming a valve that does not exist — so treat it as optional there. `auto_close` also omits `valve_id` rather than
+emit a placeholder when no MAC resolves, and since 2.1.4 a hub with no valve provisioned sends no `auto_close` at
+all.
 
 **Changes in firmware 2.1.4 — the empty hub, the missing valve and the unknown battery.** A bug-fix release
 for defects found in the field on 2.1.3. Nothing is renamed; several shapes you may not have seen before now
@@ -666,6 +677,12 @@ Health events now report reachability only: `device_offline` is always a lost li
 sent late instead of dropped, and `device_recovered` can carry `rating:"critical"` when the device came back
 wet (H4). On the command plane, `valve_open` / `valve_close` / `valve_set_state` now ack `error` when there
 is no valve (C5), at a critical battery (C6), or when the command could not be queued — see `C2D_COMMANDS.md`.
+`valve_open` is also refused with the RMLEAK detail while the hub has a leak incident latched and no override
+window, even with the valve disconnected (C3).
+
+A hub with no valve provisioned no longer sends `auto_close`: a leak there sends `leak_detected` only (R1). The
+valve's `last_seen_age_s` is `0` while its link is up and counts from the drop once it is disconnected (S1, S2),
+and a valve `device_offline` measures `offline_duration_s` from the drop (H3).
 
 **Events raised before the hub's clock syncs now arrive, late.** Leak protection runs from power-up, before
 Wi-Fi. An event raised before the first clock sync (say a leak while the router is still coming back after a

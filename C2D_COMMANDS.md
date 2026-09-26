@@ -159,19 +159,19 @@ Opens the water valve.
 What happens: the hub runs these checks in order, **before anything is sent to the valve**. The first one that fails is refused with a `cmd_ack` error, and nothing is queued:
 
 1. **No valve provisioned** → `No valve is set up for this hub.` The hub only ever connects to, and commands, the valve in its provisioning.
-2. **The valve's RMLEAK latch is asserted** (valve locked after an auto-close) → the RMLEAK error below. Forwarding the open would let the valve briefly honour it before its own RMLEAK interlock re-closes it, a sub-second water-on transient.
+2. **The valve is locked after a leak** → the RMLEAK error below. That is either the valve's RMLEAK latch being asserted (valve locked after an auto-close), or, since 2.1.4, the hub having a leak incident latched with no override window active. The incident check applies even while the valve is disconnected, when its RMLEAK cannot be read. Forwarding the open would let the valve briefly honour it before its own RMLEAK interlock re-closes it, a sub-second water-on transient.
 3. **The valve battery is at or below 10 %** → `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` The check uses the last real battery reading, which is kept while the valve is disconnected. An unknown battery (no reading yet) does not block the open. The valve itself refuses to open at that level.
 4. Otherwise the hub requests a connect and queues the open. If the valve command queue is full → `The valve command could not be queued. Try again.`
 
 An **`ok` ack means the open was queued, not that the valve opened**. GATT writes have no completion callback. The actual open is confirmed asynchronously by a `valve_state_changed` event (emitted when the valve reports its new state) and by the next snapshot, **not** by this command. To open during an active leak, use `override_enable`. It clears RMLEAK as part of the guarded 24 h window, so it bypasses check 2 by design.
 
-**Changed in 2.1.4.** Up to 2.1.3 checks 1, 3 and 4 did not exist, so `valve_open` acked `ok` with no valve provisioned, at a critical battery, and when the enqueue failed. With no valve provisioned, the hub also connected to *any* nearby eFloStop valve by name and applied the open to it.
+**Changed in 2.1.4.** Up to 2.1.3 checks 1, 3 and 4 did not exist, so `valve_open` acked `ok` with no valve provisioned, at a critical battery, and when the enqueue failed. With no valve provisioned, the hub also connected to *any* nearby eFloStop valve by name and applied the open to it. Check 2 looked only at the valve's RMLEAK, which reads clear while the valve is disconnected, so an open sent while the valve was out of range during a leak was accepted, held, and written at the reconnect ahead of the close the leak was owed.
 
 Errors (the `detail` strings are exact):
 | Detail | Why |
 |--------|-----|
 | `No valve is set up for this hub.` | No valve is provisioned on this hub (2.1.4) |
-| `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch is asserted — clear it via `leak_reset`, or open during a leak via `override_enable` |
+| `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch is asserted, or (2.1.4) a leak incident is latched with no override window, even with the valve disconnected — clear it via `leak_reset` once dry, or open during a leak via `override_enable` |
 | `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | Last real valve battery reading is ≤ 10 % (2.1.4) |
 | `The valve command could not be queued. Try again.` | The hub's valve command queue was full (2.1.4) |
 
@@ -231,7 +231,7 @@ Errors (the `detail` strings are exact):
 | `missing 'state' field (expected "open" or "closed")` | Payload missing or no `state` key |
 | `invalid state value (expected "open" or "closed")` | `state` is something other than `"open"`/`"closed"` |
 | `No valve is set up for this hub.` | Either state, no valve provisioned (2.1.4) |
-| `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | `state:"open"` while the valve RMLEAK latch is asserted (same guard as `valve_open`) |
+| `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | `state:"open"` while the valve RMLEAK latch is asserted, or (2.1.4) a leak incident is latched with no override window, even with the valve disconnected (same guard as `valve_open`) |
 | `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | `state:"open"` with the last real valve battery reading ≤ 10 % (2.1.4) |
 | `The valve command could not be queued. Try again.` | Either state, the hub's valve command queue was full (2.1.4) |
 
@@ -360,6 +360,8 @@ Enable all + all triggers:
 ```
 
 What happens: parsed and merged into the current config (defaults `auto_close_enabled=true`, `trigger_mask=7` if no prior value), persisted to NVS, takes effect on the next leak event. The new state shows up in the next snapshot's `data.rules` and in Twin reported (`auto_close_enabled`, `trigger_mask`). No dedicated rules event is emitted for a config change — only the `cmd_ack`.
+
+> **A hub with no valve publishes no `auto_close`** (2.1.4). With no valve provisioned there is nothing to close, so a leak sends `leak_detected` only, whatever this config says. Up to 2.1.3 it also sent `auto_close` with `rmleak_asserted:false`. The leak incident still latches, so `rmleak_auto_cleared` and `rmleak_cleared` are still sent there, without `valve_id`.
 
 > **Here `auto_close_enabled` is a pure master switch — it never touches `trigger_mask`.** That is the opposite of the same key at the top level of a `provision` payload (§4.9), where `true` also arms all three trigger bits. This command is for *editing settings*, so it changes exactly what you send; `provision` is for *answering a setup question*, so it does the obvious whole-system thing. Use this command for per-source tuning after commissioning.
 
@@ -620,6 +622,8 @@ Legacy: a **bare JSON object** (text starting with `{`) that does **not** match 
 
 Removes devices from the hub. The `target` field says what to remove.
 
+Since 2.1.4, a removal that leaves the hub with no device also puts the rules config back to `auto_close_enabled` true / `trigger_mask` 7 and clears the leak latch and any override window, before the ack. A `provision` or `rules_config` sent after it applies on top of that.
+
 | Field | Value |
 |-------|-------|
 | `cmd` | `"decommission"` |
@@ -627,7 +631,7 @@ Removes devices from the hub. The `target` field says what to remove.
 | `payload.sensor_id` | required for `"lora"` / `"ble_leak_sensor"` |
 
 ### 4.10.1 target: "valve"
-Removes the valve, clears its target MAC, and disconnects BLE. A connect in progress is cancelled, and any valve command still queued or waiting for a reconnect is discarded, so nothing sent for the removed valve reaches the next one. Since 2.1.4, sending it to a hub that has no valve acks `error` `valve decommission failed` (it used to ack `ok`).
+Removes the valve, clears its target MAC, and disconnects BLE. A connect in progress is cancelled, and any valve command still queued or waiting for a reconnect is discarded, so nothing sent for the removed valve reaches the next one. Since 2.1.4, sending it to a hub that has no valve acks `error` `valve decommission failed` (it used to ack `ok`). The removed valve's own leak reading is dropped with it: if no sensor is wet, the leak incident is released at once, with no `rmleak_auto_cleared` event. From then on a leak publishes no `auto_close` until a valve is provisioned again (§4.7).
 ```json
 { "schema": "eflostop.cmd", "ver": 1, "id": "decom-v-001", "cmd": "decommission", "payload": { "target": "valve" } }
 ```
@@ -731,7 +735,7 @@ Keyword detection is case-insensitive; JSON after a `:` keeps its original case.
 | Command | Error detail | What went wrong |
 |---------|-------------|-----------------|
 | `valve_open`, `valve_close`, `valve_set_state` | `No valve is set up for this hub.` | No valve provisioned (2.1.4) |
-| `valve_open`, `valve_set_state` (open) | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch asserted |
+| `valve_open`, `valve_set_state` (open) | `Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak.` | Valve RMLEAK latch asserted, or (2.1.4) a leak incident latched with no override window, even with the valve disconnected |
 | `valve_open`, `valve_set_state` (open) | `Valve battery critical (≤10 %): the valve will not open. Replace the batteries.` | Last real valve battery reading ≤ 10 % (2.1.4) |
 | `valve_open`, `valve_close`, `valve_set_state` | `The valve command could not be queued. Try again.` | Valve command queue full (2.1.4) |
 | `valve_set_state` | `missing 'state' field ...` | No `state` in payload |

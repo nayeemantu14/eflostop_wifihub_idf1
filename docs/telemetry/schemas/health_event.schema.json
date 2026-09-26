@@ -160,7 +160,7 @@
         },
         "offline_duration_s": {
           "type": "number",
-          "description": "Seconds since the device was last heard, at the moment it went offline. Units: seconds. Range/enum: >= 1. Presence: device_offline only; OMITTED when 0 or when the device was never heard.",
+          "description": "Seconds since the device was last heard, at the moment it went offline. For the valve (2.1.4) it is measured from the link drop, so it is normally about 180, the valve's grace before critical; up to 2.1.3 it counted from the valve's last changed value and could read hours. Units: seconds. Range/enum: >= 1. Presence: device_offline only; OMITTED when 0 or when the device was never heard.",
           "x-source": "main/health_engine/health_engine.c:601-603",
           "x-category": "12.3"
         },

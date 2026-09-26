@@ -200,7 +200,7 @@
                 "number",
                 "null"
               ],
-              "description": "Seconds since the valve was last heard from. Units: seconds. Presence: whenever valve_id is present; explicit null when never seen this uptime.",
+              "description": "The valve's link age. Since 2.1.4 it is 0 while the BLE link to the provisioned valve is up (link supervision drops a link that stops answering, so a linked valve is being heard now), and once disconnected the seconds since the link dropped. Up to 2.1.3 it was the seconds since the valve's last changed value or connect, which grew for hours on a steady, connected valve. Units: seconds. Range/enum: >= 0 when a number. Presence: whenever valve_id is present; explicit null when never seen this uptime.",
               "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.2"
             }
@@ -568,7 +568,7 @@
         },
         "override_remaining_s": {
           "type": "number",
-          "description": "Seconds left in the override window, and 0 when expired but not yet processed by the rules tick. A window started before the clock synced is measured on the hub uptime until the rules tick re-bases it to the synced clock, within about 30 s of the sync (2.1.4); a window restored from an earlier unsynced power cycle reads 0 until that tick ends it. Units: seconds. Range/enum: >= 0 when present. Presence: snapshot: OMITTED unless override_active AND remaining >= 0. auto_close_blocked_override event: OMITTED when remaining < 0.",
+          "description": "Seconds left in the override window, and 0 when expired but not yet processed by the rules tick. A window started before the clock synced is measured on the hub uptime until the rules tick re-bases it to the synced clock, within about 30 s of the sync (2.1.4); a window restored from an earlier unsynced power cycle reads 0 until that tick ends it. A window with a real expiry restored after a power-on that lost the clock counts down from that power-on until the clock syncs (2.1.4; it used to read the full duration), and expires_ts is omitted meanwhile. Units: seconds. Range/enum: >= 0 when present. Presence: snapshot: OMITTED unless override_active AND remaining >= 0. auto_close_blocked_override event: OMITTED when remaining < 0.",
           "x-source": "telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c; rules_engine_get_override_status() main/rules_engine/rules_engine.c",
           "x-category": "12.10",
           "minimum": 0

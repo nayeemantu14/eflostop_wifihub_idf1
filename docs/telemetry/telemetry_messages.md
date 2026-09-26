@@ -8,7 +8,7 @@
 |---|---|
 | Document version | 5.0 (supersedes v2.0, which documented firmware 1.9.0) |
 | Firmware version | 2.1.4 — `CMakeLists.txt:12` |
-| Git commit | `0e7cd44920486a3cc610d2eb1ee1bd00dc6ab313` |
+| Git commit | `ade686b615bf449a8c5dc93bc9c76b1af821ce01` |
 | Schema | `eflostop.v2` |
 | Topic | `devices/<device_id>/messages/events/` (QoS 1) |
 | Message count | 48 distinct messages across 8 families |
@@ -81,8 +81,9 @@ latched by a sensor while the interlock itself is always the valve's. That costs
 `valve_id`, and the key names the device type on its own.
 
 On a hub provisioned with sensors but **no valve**, the two RMLEAK events omit `valve_id` entirely rather than
-naming a valve that does not exist — so treat it as optional there. The same applies to `auto_close`: rather than
-emit a placeholder, the hub omits the key when no MAC resolves.
+naming a valve that does not exist — so treat it as optional there. `auto_close` also omits `valve_id` rather than
+emit a placeholder when no MAC resolves, and since 2.1.4 a hub with no valve provisioned sends no `auto_close` at
+all.
 
 **Changes in firmware 2.1.4 — the empty hub, the missing valve and the unknown battery.** A bug-fix release
 for defects found in the field on 2.1.3. Nothing is renamed; several shapes you may not have seen before now
@@ -112,6 +113,12 @@ Health events now report reachability only: `device_offline` is always a lost li
 sent late instead of dropped, and `device_recovered` can carry `rating:"critical"` when the device came back
 wet (H4). On the command plane, `valve_open` / `valve_close` / `valve_set_state` now ack `error` when there
 is no valve (C5), at a critical battery (C6), or when the command could not be queued — see `C2D_COMMANDS.md`.
+`valve_open` is also refused with the RMLEAK detail while the hub has a leak incident latched and no override
+window, even with the valve disconnected (C3).
+
+A hub with no valve provisioned no longer sends `auto_close`: a leak there sends `leak_detected` only (R1). The
+valve's `last_seen_age_s` is `0` while its link is up and counts from the drop once it is disconnected (S1, S2),
+and a valve `device_offline` measures `offline_duration_s` from the drop (H3).
 
 **Events raised before the hub's clock syncs now arrive, late.** Leak protection runs from power-up, before
 Wi-Fi. An event raised before the first clock sync (say a leak while the router is still coming back after a
@@ -168,7 +175,10 @@ The table is cumulative, so a reader holding any earlier revision can use it. Ro
 | Valve battery rating | `shared sensor bands: <= 20 % warning, no critical band at all` | `<= 10 % critical ("Valve battery critical"), 11-20 % warning — valve only  (2.1.4)` |
 | Hub with no devices | `one stale snapshot, then silence: no lifecycle, twin, snapshot or events` | `lifecycle (provisioned:false), twin, and snapshots with valve {}, [] arrays and "No devices provisioned"  (2.1.4)` |
 | Health alerts (device_offline / device_recovered) | `any non-leak critical, battery included; a debounced alert was dropped` | `reachability only; a debounced alert is sent late (prev_rating may equal rating); device_recovered may be critical  (2.1.4)` |
-| valve_open / valve_close / valve_set_state acks | `ok unless RMLEAK — even with no valve, at a critical battery, or when nothing was queued` | `error: "No valve is set up for this hub.", battery critical (open), "The valve command could not be queued. Try again."  (2.1.4)` |
+| valve_open / valve_close / valve_set_state acks | `ok unless RMLEAK — even with no valve, at a critical battery, or when nothing was queued` | `error: "No valve is set up for this hub.", battery critical (open), "The valve command could not be queued. Try again."; the RMLEAK refusal (open) also while a leak incident is latched, valve disconnected or not  (2.1.4)` |
+| auto_close on a hub with no valve provisioned | `sent, with rmleak_asserted false, for a valve that does not exist` | `not sent; leak_detected still is  (2.1.4)` |
+| Snapshot valve last_seen_age_s | `seconds since the valve's last changed value or connect: hundreds of seconds on a steady, connected valve` | `0 while the link is up; seconds since the drop once disconnected  (2.1.4)` |
+| Valve device_offline offline_duration_s | `from the valve's last changed value, plus the 180 s grace: hours on a steady valve` | `from the link drop, so normally about 180  (2.1.4)` |
 | Events raised before the hub's first clock sync | `destroyed: a leak_detected or auto_close raised while the router was still down never reached the cloud` | `held in the offline buffer, ts worked out from the hub uptime when the clock first syncs, sent after the first connect; one left over from a restart before the sync is dropped  (2.1.4)` |
 | water_access_override_enabled, override started before the clock synced (R10) | `expires_ts an instant in 1970, and the window ended the moment the clock synced` | `expires_ts omitted; the window runs on the hub uptime until the clock syncs, then carries on  (2.1.4)` |
 | Firmware version | `1.9.0` | `2.1.4 — breaking changes on both the telemetry and command planes` |
@@ -361,7 +371,7 @@ New in 2.1.4. A hub with nothing provisioned used to publish nothing at all (BUG
 
 ### S1 — Routine heartbeat, everything healthy
 
-The heartbeat. Cadence defaults to 300 s but is tunable 60-3600 s per hub through the Device Twin and persists across reboots (2.0.2) — read reported.snapshot_interval_s rather than assuming 300.
+The heartbeat. Cadence defaults to 300 s but is tunable 60-3600 s per hub through the Device Twin and persists across reboots (2.0.2) — read reported.snapshot_interval_s rather than assuming 300. The valve's last_seen_age_s is 0 while its link is up (2.1.4): link supervision drops a link that stops answering, so a linked valve is being heard now. Up to 2.1.3 it counted from the valve's last changed value, and a steady valve read hundreds of seconds while connected.
 
 ```json
 {
@@ -390,7 +400,7 @@ The heartbeat. Cadence defaults to 300 s but is tunable 60-3600 s per hub throug
       "connected": true,
       "fw_version": "2.2.0",
       "rating": "excellent",
-      "last_seen_age_s": 4
+      "last_seen_age_s": 0
     },
     "lora_sensors": [],
     "ble_leak_sensors": [
@@ -436,7 +446,7 @@ The heartbeat. Cadence defaults to 300 s but is tunable 60-3600 s per hub throug
 
 ### S2 — Heartbeat with the valve disconnected
 
-The BLE link to the valve is down: battery, leak_state, rmleak and fw_version are omitted and state carries "disconnected".
+The BLE link to the valve is down: battery, leak_state, rmleak and fw_version are omitted and state carries "disconnected". last_seen_age_s counts from the moment the link dropped (2.1.4). Here that is 245 s, past the valve's 180 s grace, so the valve is critical.
 
 ```json
 {
@@ -536,7 +546,7 @@ Sensor unheard for 10 minutes. connected goes false and the rating critical. bat
       "connected": true,
       "fw_version": "2.2.0",
       "rating": "excellent",
-      "last_seen_age_s": 4
+      "last_seen_age_s": 0
     },
     "lora_sensors": [],
     "ble_leak_sensors": [
@@ -611,7 +621,7 @@ A 24-hour override is open. override_active is on EVERY snapshot; override_remai
       "connected": true,
       "fw_version": "2.2.0",
       "rating": "excellent",
-      "last_seen_age_s": 4
+      "last_seen_age_s": 0
     },
     "lora_sensors": [],
     "ble_leak_sensors": [
@@ -688,7 +698,7 @@ S1 with a different reason: heartbeat, event, commission, boot, fast or decommis
       "connected": true,
       "fw_version": "2.2.0",
       "rating": "excellent",
-      "last_seen_age_s": 4
+      "last_seen_age_s": 0
     },
     "lora_sensors": [],
     "ble_leak_sensors": [
@@ -763,7 +773,7 @@ Fires the moment the valve's BLE setup completes, before the sensors have beacon
       "connected": true,
       "fw_version": "2.2.0",
       "rating": "excellent",
-      "last_seen_age_s": 4
+      "last_seen_age_s": 0
     },
     "lora_sensors": [],
     "ble_leak_sensors": [
@@ -1049,7 +1059,7 @@ New in 2.1.4 (BUG-1). The valve's battery is at or below 10 %, so the valve is r
       "connected": true,
       "fw_version": "2.2.0",
       "rating": "critical",
-      "last_seen_age_s": 3
+      "last_seen_age_s": 0
     },
     "lora_sensors": [],
     "ble_leak_sensors": [
@@ -1471,7 +1481,7 @@ These name their device the same way every other message does: `valve_id` when `
 
 ### R1 — Hub closed the valve because a sensor reported a leak
 
-The automatic shut-off. rmleak_asserted says whether the interlock writes were ISSUED, not that they landed — false when the valve was unreachable (hardcoded true up to 2.0.1). location is present only when the source has a sensor_meta entry and OMITTED otherwise, the opposite of K1-K6.
+The automatic shut-off. rmleak_asserted says whether the interlock writes were ISSUED, not that they landed — false when the valve was unreachable (hardcoded true up to 2.0.1). location is present only when the source has a sensor_meta entry and OMITTED otherwise, the opposite of K1-K6. A hub with no valve provisioned sends no auto_close at all (2.1.4): a leak there sends leak_detected only. Up to 2.1.3 it also sent auto_close with rmleak_asserted false. When the valve is out of range, rmleak_asserted is false and the RMLEAK and close writes are held for its reconnect, RMLEAK first (2.1.4).
 
 ```json
 {
@@ -1557,7 +1567,7 @@ A structurally different auto_close: carries active_leak_count and data.cause "r
 
 ### R4 — A leak occurred but auto-close was suppressed
 
-An override window is open, so the hub deliberately did not close. override_remaining_s is omitted when the remaining time is unknown: the window has just expired but the hub has not processed it yet, or a window restored after a reboot has a real expiry and the clock has not synced yet. Since 2.1.4 a window started before the clock synced is timed on the hub uptime, so it does carry override_remaining_s.
+An override window is open, so the hub deliberately did not close. override_remaining_s is omitted only when the window has just expired and the hub has not processed it yet. Since 2.1.4 a window started before the clock synced is timed on the hub uptime, and a window with a real expiry restored after a power-on that lost the clock counts down from that power-on, so both carry override_remaining_s (the second used to omit it).
 
 ```json
 {
@@ -1611,7 +1621,7 @@ Started by a valve long-press ("button") or the override_enable command ("c2d_co
 
 ### R6 — The override window elapsed
 
-auto_close_resumed is exactly active_leak_count > 0 sampled BEFORE any close is attempted — not a report of what happened. With auto-close disabled it still reads true and nothing closes. This message is the only trace of an expiry-driven closure.
+auto_close_resumed is exactly active_leak_count > 0 sampled BEFORE any close is attempted — not a report of what happened. With auto-close disabled it still reads true and nothing closes. This message is the only trace of an expiry-driven closure. Since 2.1.4 it can also come before the hub's clock has synced: a window restored after a power-on that lost the clock ends 24 h after that power-on if the clock has still not synced, and the event then arrives late, like any pre-sync event (R10).
 
 ```json
 {
@@ -1808,7 +1818,7 @@ The recovery counterpart of H1, sent only if the device_offline was. Never carri
 
 ### H3 — The valve stopped responding
 
-H1 for the valve. rssi is ALWAYS absent and offline_duration_s is omitted when it would be zero. prev_rating is normally "warning", because a valve gets a 3-minute grace before promotion to critical; only sensors jump straight there. battery is omitted, not null, when the valve has never reported one.
+H1 for the valve. rssi is ALWAYS absent and offline_duration_s is omitted when it would be zero. offline_duration_s is measured from the link drop (2.1.4), so it is normally about 180, the grace; up to 2.1.3 it counted from the valve's last changed value and could read hours. prev_rating is normally "warning", because a valve gets a 3-minute grace before promotion to critical; only sensors jump straight there. battery is omitted, not null, when the valve has never reported one.
 
 ```json
 {
@@ -1925,7 +1935,7 @@ No inbound id, so data.id is OMITTED rather than empty. Match on cmd and timing.
 
 ### C3 — A command was refused
 
-error.code is not a code — it is the command name repeated. The free-text detail is the only real discriminator.
+error.code is not a code — it is the command name repeated. The free-text detail is the only real discriminator. This detail answers valve_open, or valve_set_state open, while the valve's RMLEAK latch is asserted. Since 2.1.4 it is also sent while the hub has a leak incident latched and no override window, even with the valve disconnected; an open sent while the valve was out of range used to be accepted and written at the reconnect.
 
 ```json
 {
@@ -1952,7 +1962,7 @@ error.code is not a code — it is the command name repeated. The free-text deta
 }
 ```
 
-*`telemetry_v2_publish_cmd_ack() main/telemetry/telemetry_v2.c:872-895; message valve_open_reject_reason() main/iothub/app_iothub.c:552-559`*
+*`telemetry_v2_publish_cmd_ack() main/telemetry/telemetry_v2.c; message valve_open_reject_reason() main/iothub/app_iothub.c`*
 
 ### C4 — An unrecognised command
 

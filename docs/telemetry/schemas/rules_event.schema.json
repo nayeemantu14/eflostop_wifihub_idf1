@@ -117,7 +117,7 @@
         },
         "valve_id": {
           "type": "string",
-          "description": "The PROVISIONED valve's MAC (2.1.4: never the live link's). On auto_close / auto_close_blocked_override when the source is the valve; on rmleak_cleared / rmleak_auto_cleared always when it resolves. Range/enum: uppercase colon MAC. Presence: OMITTED when no valve is provisioned (or provisioning is busy); never a placeholder.",
+          "description": "The PROVISIONED valve's MAC (2.1.4: never the live link's). On auto_close / auto_close_blocked_override when the source is the valve; on rmleak_cleared / rmleak_auto_cleared always when it resolves. Range/enum: uppercase colon MAC. Presence: OMITTED when no valve is provisioned (or provisioning is busy); never a placeholder. A hub with no provisioned valve sends no auto_close at all (2.1.4).",
           "x-source": "wire_device_id() / add_device_id() main/rules_engine/rules_engine.c",
           "x-category": "12.1"
         },
@@ -129,7 +129,7 @@
         },
         "rmleak_asserted": {
           "type": "boolean",
-          "description": "Whether the RMLEAK + close writes were actually issued (the valve was reachable). false when it was not, including on a hub with no valve (since 2.0.2; it was hardcoded true). Presence: auto_close only.",
+          "description": "Whether the RMLEAK + close writes were actually issued to a reachable provisioned valve. false when the valve was unreachable (since 2.0.2; it was hardcoded true); since 2.1.4 the writes are then held for its reconnect, RMLEAK first. A hub with no provisioned valve sends no auto_close at all since 2.1.4 (up to 2.1.3 it sent one with false). Presence: auto_close only.",
           "x-source": "main/rules_engine/rules_engine.c:336, :938",
           "x-category": "12.10"
         },
@@ -181,7 +181,7 @@
         },
         "override_remaining_s": {
           "type": "number",
-          "description": "Seconds left in the override window. A window started before the clock synced is measured on the hub uptime until the clock syncs (2.1.4). Units: seconds. Range/enum: >= 0. Presence: auto_close_blocked_override; OMITTED when the remaining time is unknown: the window has just expired but the rules tick has not processed it yet, or a window restored from flash with a real expiry while the clock is not yet synced.",
+          "description": "Seconds left in the override window. A window started before the clock synced is measured on the hub uptime until the clock syncs (2.1.4). Units: seconds. Range/enum: >= 0. A window with a real expiry restored after a power-on that lost the clock counts down from that power-on until the clock syncs (2.1.4; it used to be omitted). Presence: auto_close_blocked_override; OMITTED when the remaining time is unknown: the window has just expired but the rules tick has not processed it yet.",
           "x-source": "rules_engine_evaluate_leak(), override_uptime_remaining_s() main/rules_engine/rules_engine.c",
           "x-category": "12.10",
           "minimum": 0
@@ -217,7 +217,7 @@
         },
         "previous_remaining_s": {
           "type": "number",
-          "description": "How much of the override window was discarded when it was cancelled early. A window started before the clock synced is measured on the hub uptime (2.1.4; it used to read 0). Units: seconds. Range/enum: >= 0. Presence: always (auto_close_reenabled only).",
+          "description": "How much of the override window was discarded when it was cancelled early. A window started before the clock synced is measured on the hub uptime, and a window with a real expiry restored after a power-on that lost the clock counts down from that power-on until the clock syncs (2.1.4; both used to read 0). Units: seconds. Range/enum: >= 0. Presence: always (auto_close_reenabled only).",
           "x-source": "rules_engine_cancel_override(), cancel_override_window() main/rules_engine/rules_engine.c",
           "x-category": "12.10",
           "minimum": 0
