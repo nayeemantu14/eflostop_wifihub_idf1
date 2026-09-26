@@ -31,6 +31,7 @@ static SemaphoreHandle_t g_prov_mutex = NULL;
 // Forward declaration
 static bool validate_mac_string(const char *mac_str);
 static bool parse_hex_id(const char *hex_str, uint32_t *out_id);
+static bool should_remain_provisioned(const provisioning_config_t *config);
 
 bool provisioning_init(void)
 {
@@ -387,8 +388,10 @@ static bool parse_hex_id(const char *hex_str, uint32_t *out_id)
     return false;
 }
 
-bool provisioning_handle_azure_payload_json(const char *json, size_t len)
+bool provisioning_handle_azure_payload_json(const char *json, size_t len, bool *now_empty)
 {
+    if (now_empty) *now_empty = false;
+
     if (!json || len == 0) {
         ESP_LOGE(PROV_TAG, "Invalid JSON input");
         return false;
@@ -575,6 +578,21 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
         has_updates = true;
     }
 
+    // Sensor arrays that leave no device empty the hub just as the last removal does, and in
+    // the same way (see mark_unprovisioned_if_empty()): decided in this mutex hold, with the
+    // rules back to the defaults in this same save, so the reset is ordered before any later
+    // provision or rules_config (E-05). Done BEFORE the auto-close and rules keys below, so
+    // anything this payload sets for them still applies on top of the defaults. A provision
+    // cannot clear the valve, so only a sensors-only hub gets here. An empty set always came
+    // from an array above, so has_updates is already true. The state stays PROVISIONED.
+    bool emptied = g_config.state == PROV_STATE_PROVISIONED &&
+                   should_remain_provisioned(&g_config) &&
+                   !should_remain_provisioned(&new_config);
+    if (emptied) {
+        new_config.rules.auto_close_enabled = true;
+        new_config.rules.trigger_mask       = RULES_TRIGGER_ALL;
+    }
+
     // Parse the setup-flow auto-close opt-in.
     //
     // Top-level "auto_close_enabled" is the COMMISSIONING form: the app asks the
@@ -672,7 +690,9 @@ bool provisioning_handle_azure_payload_json(const char *json, size_t len)
     ESP_LOGI(PROV_TAG, "Auto-close: %s triggers=0x%02X",
              new_config.rules.auto_close_enabled ? "enabled" : "disabled",
              new_config.rules.trigger_mask);
+    if (emptied) ESP_LOGI(PROV_TAG, "Hub empty: rules config reset to defaults");
 
+    if (now_empty) *now_empty = emptied;
     return true;
 }
 

@@ -105,11 +105,18 @@ bool provisioning_save_to_nvs(const provisioning_config_t *config);
  * A LoRa id or BLE MAC (case-insensitive) listed twice in the payload is kept once;
  * the repeat is logged and ignored.
  * 
+ * Sensor arrays that leave a hub with devices holding none empty it, as the last removal
+ * does: the rules config goes back to the defaults (auto-close on, RULES_TRIGGER_ALL) in
+ * the same mutex hold and the same save, before this payload's own auto_close_enabled /
+ * rules are applied on top. The state stays PROVISIONED.
+ * 
  * @param json JSON string (may not be null-terminated)
  * @param len Length of JSON string
+ * @param now_empty Optional (NULL allowed): set true only when this provision succeeded
+ *                  and emptied a hub that had devices; false on every other return
  * @return true if provisioning successful
  */
-bool provisioning_handle_azure_payload_json(const char *json, size_t len);
+bool provisioning_handle_azure_payload_json(const char *json, size_t len, bool *now_empty);
 
 /**
  * @brief Decommission device - erase all provisioning data and return to UNPROVISIONED state

@@ -139,7 +139,7 @@ static volatile bool s_ble_apply_owed = false;
 // the 2 s commission poll off on an empty hub, which has nothing to sync.
 static bool s_hub_empty = false;
 
-// An empty-hub rules-engine reset (boot, or the C2D removal that emptied the hub) could not
+// An empty-hub rules-engine reset (boot, or the C2D change that emptied the hub) could not
 // take the rules mutex, so the RAM latch/override may be stale. iothub_task retries it in
 // on_hub_emptied() and on the next empty -> non-empty edge in apply_device_set_change().
 // Written by the esp-mqtt task (reset_rules_state_hub_emptied()) and by iothub_task; each
@@ -790,10 +790,11 @@ static void on_hub_emptied(void)
     // The rules are NOT reset here any more (E-05). This edge is decided from a read that is
     // not ordered against a C2D provision/rules_config landing on the esp-mqtt task right
     // after the removal, so a reset here could overwrite a just-acked opt-out, or be skipped
-    // and let the old install's latch/override carry over. The removal that emptied the hub
-    // resets them itself: the config in its own provisioning save, the rules-engine state
-    // synchronously on the esp-mqtt task (reset_rules_state_hub_emptied()). Only a state
-    // reset that failed there, or the boot fallback's, is retried here.
+    // and let the old install's latch/override carry over. The removal (or the provision's
+    // sensor arrays) that emptied the hub resets them itself: the config in its own
+    // provisioning save, the rules-engine state synchronously on the esp-mqtt task
+    // (reset_rules_state_hub_emptied()). Only a state reset that failed there, or the boot
+    // fallback's, is retried here.
     if (s_rules_reset_owed) {
         s_rules_reset_owed = !rules_engine_reset_all();   // else retried when the hub next gains a device
         if (s_rules_reset_owed) {
@@ -824,10 +825,11 @@ static void on_hub_emptied(void)
     g_prov_pulse_count    = 0;
 }
 
-// A C2D removal just emptied the hub (esp-mqtt task, after the provisioning change and the
-// BLE target change). Nothing left to protect: drop the latch, the override, the active leaks
-// and any pending close, so the next deployment starts clean (Q6; L12). The rules CONFIG was
-// already put back to the defaults in the removal's own save (provisioning_remove_*()).
+// A C2D removal or provision just emptied the hub (esp-mqtt task, after the provisioning
+// change and the BLE target change). Nothing left to protect: drop the latch, the override,
+// the active leaks and any pending close, so the next deployment starts clean (Q6; L12). The
+// rules CONFIG was already put back to the defaults in that change's own save
+// (provisioning_remove_*() or provisioning_handle_azure_payload_json()).
 // Synchronous, as decommission-all does: esp-mqtt handles C2D one at a time, so this is done
 // before any later provision or rules_config is handled (E-05). Takes only the rules mutex;
 // no other lock is held here.
@@ -1358,14 +1360,19 @@ static void handle_c2d_command(const char *data, size_t data_len)
     // ---- Provisioning ----
     else if (strcmp(cmd.cmd, C2D_CMD_PROVISION) == 0) {
         ESP_LOGI(IOTHUB_TAG, "Provisioning JSON detected");
+        bool emptied = false;
         if (cmd.payload_json &&
             provisioning_handle_azure_payload_json(
-                cmd.payload_json, strlen(cmd.payload_json))) {
+                cmd.payload_json, strlen(cmd.payload_json), &emptied)) {
             // The BLE target stays synchronous here (the safety half). A busy provisioning
             // read applies nothing: the retry goes to iothub_task.
             if (!iothub_apply_provisioned_mac()) {
                 s_ble_apply_owed = true;
             }
+            // Sensor arrays that left no device empty the hub like the last removal: reset
+            // the rules-engine state now, ordered before any later C2D (E-05). The rules
+            // config went back to the defaults, under this payload's own rules, in its save.
+            if (emptied) reset_rules_state_hub_emptied();
             // WI-3: apply any inline per-sensor metadata carried in the SAME
             // provision payload (optional "sensor_meta":[{sensor_type,sensor_id,
             // location_code,label},...]). Shares the standalone-command apply path;
@@ -2530,7 +2537,7 @@ void iothub_task(void *param)
      * rules_engine_init() above always restores the incident latch and the override window
      * from NVS, and a hub emptied by per-device removals under 2.1.3 or earlier still has
      * both keys (only decommission-all cleared them there); the runtime empty-hub reset runs
-     * only in the C2D removal that empties a hub, which such a hub never takes. Left alone,
+     * only in the C2D change that empties a hub, which such a hub never takes. Left alone,
      * the next valve provisioned and linked open with RMLEAK clear would be read as a
      * physical override and block auto-close for 24 h on the new installation. Race-free
      * here: the event loop has not started, so no leak can have latched since the load.
