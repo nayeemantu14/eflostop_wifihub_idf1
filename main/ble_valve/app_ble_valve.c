@@ -175,8 +175,21 @@ static int g_pending_rmleak_cmd = -1;
 #define CMD_WR_RELINK       (-3)   // no set-up link to the provisioned valve: pend it
 #define CMD_WR_MOVED        (-4)   // replay only: its pending slot no longer holds it
 
-// Forced reconnects after failed writes in a row, with no accepted write that left nothing
-// pended in between, before the hub stops forcing them (drop_link_after_failed_write()).
+// BLE_HS_ENOMEM is not such a failure (B1). Every hub command takes two of NimBLE's GATT
+// procedures (CONFIG_BT_NIMBLE_GATT_MAX_PROCS = 4), the write and its read-back, and the ATT
+// requests go out one at a time per link, each procedure freed only when the valve answers
+// (0.45-0.75 s on the bench). Setup completion's replay of both slots plus the rules engine's
+// reconcile SET+CLOSE needs more than the pool holds: ENOMEM means it is busy with this hub's
+// own commands, not that the link failed. The command task waits for a free procedure,
+// CMD_BUSY_RETRY_MS apart for at most CMD_BUSY_MAX_MS, without using up an attempt, and does
+// the same for the read-back (read_back_when_free()). Past that bound, or when setup
+// completion's replay gets it, the command stays pended and the replay token replays it. The
+// link is never dropped for it: the terminate would discard the commands queued on it.
+#define CMD_BUSY_RETRY_MS    250
+#define CMD_BUSY_MAX_MS      5000
+
+// Forced reconnects after failed writes in a row, with no accepted live command that left
+// nothing pended in between, before the hub stops forcing them (drop_link_after_failed_write()).
 #define CMD_MAX_FORCED_RELINKS  3
 
 // ble_cmd_queue items carry the command (bits 0-7) and the generation it was issued under
@@ -339,16 +352,19 @@ static int pending_get(const int *slot, uint32_t gen)
     return v;
 }
 
-// Links dropped after failed writes (drop_link_after_failed_write()) since the last write
-// the host accepted with nothing left pended. Under s_mac_lock. Counted for generation
-// s_relink_gen only, so a valve target change starts a new count.
+// Links dropped after failed writes (drop_link_after_failed_write()) since the last live
+// command the host accepted with nothing left pended. Under s_mac_lock. Counted for
+// generation s_relink_gen only, so a valve target change starts a new count.
 static uint8_t s_relink_count = 0;
 static uint32_t s_relink_gen = 0;
 
-// A hub write was accepted (host task replay or command task), after its slot was cleared:
+// A live hub command (command task, not a replay) was accepted, after its slot was cleared:
 // forced reconnects allowed again, once nothing is left pended. Not while a command of the
 // other kind still waits: a valve that accepts one kind and keeps refusing the other would
 // otherwise have every reconnect's accepted write re-arm the reconnects its failures used up.
+// Never for a replay, at setup completion or from the replay token (B1): every forced
+// reconnect ends in one, so a cycle of replay accepted -> live write fails -> forced reconnect
+// would re-arm itself, and CMD_MAX_FORCED_RELINKS would never engage.
 static void relink_count_reset(void)
 {
     taskENTER_CRITICAL(&s_mac_lock);
@@ -996,7 +1012,8 @@ static int on_read_dis_cb(uint16_t conn_handle,
 // Returns true when the slot still holds a command after a failure on the live link (mutex
 // timeout, rc != 0, or a newer command of its kind pended meanwhile): the caller then has
 // the command task replay it (post_replay_token()). False: written, nothing pended, or it
-// waits for the next link.
+// waits for the next link. A busy GATT procedure pool (BLE_HS_ENOMEM, CMD_BUSY_RETRY_MS) is
+// such an rc: this task never waits for a procedure, the command task's replay does.
 static bool apply_pending_cmd(int *slot, uint16_t handle, bool is_rmleak)
 {
     const char *what = is_rmleak ? "RMLEAK" : "valve";
@@ -1049,9 +1066,9 @@ static bool apply_pending_cmd(int *slot, uint16_t handle, bool is_rmleak)
     bool retry = false;
     if (rc == 0)
     {
-        // Out of the slot before gatt_mutex is released, like every accepted hub write.
+        // Out of the slot before gatt_mutex is released, like every accepted hub write. A
+        // replay does not reset the forced-reconnect count (relink_count_reset()).
         (void)pending_update(slot, v, -1, gen);
-        relink_count_reset();
         int rrc = ble_gattc_read(valve_conn_handle, handle, on_cmd_read_cb, NULL);
         if (rrc != 0)
             ESP_LOGW(BLE_TAG, "[CMD] %s read-back rc=%d - %s unconfirmed", what, rrc,
@@ -2165,10 +2182,46 @@ static void start_scan(void)
 // -----------------------------------------------------------------------------
 // WRITE COMMAND
 // -----------------------------------------------------------------------------
+// The read-back of an accepted hub write found the GATT procedure pool busy (BLE_HS_ENOMEM,
+// see CMD_BUSY_RETRY_MS): issue it once a procedure frees, polled like the write, for at most
+// CMD_BUSY_MAX_MS. It is mandatory for RMLEAK, which the valve does not echo: without it the
+// cache keeps the value from before the write, and a stale RMLEAK=0 while the hub holds the
+// interlock reads as a valve-button override. ATT is sequential on a link, so a later read
+// still returns the value after this write. Same link and target only: a new link reads every
+// value at setup. Command task only, without gatt_mutex held.
+static void read_back_when_free(uint16_t conn, const uint16_t *handle, uint32_t gen,
+                                const char *what, const char *unconfirmed)
+{
+    ESP_LOGW(BLE_TAG, "[CMD] %s read-back: GATT busy - waiting", what);
+    int rrc = BLE_HS_ENOMEM;
+    for (int waited_ms = 0; rrc == BLE_HS_ENOMEM && waited_ms < CMD_BUSY_MAX_MS;
+         waited_ms += CMD_BUSY_RETRY_MS)
+    {
+        vTaskDelay(pdMS_TO_TICKS(CMD_BUSY_RETRY_MS));
+        if (gatt_mutex == NULL || xSemaphoreTake(gatt_mutex, pdMS_TO_TICKS(1000)) != pdTRUE)
+        {
+            rrc = CMD_WR_NO_MUTEX;
+            break;
+        }
+        bool same_link = cmd_gen_is_current(gen) && valve_conn_handle == conn &&
+                         cmd_link_ready(*handle);
+        if (same_link)
+            rrc = ble_gattc_read(conn, *handle, on_cmd_read_cb, NULL);
+        xSemaphoreGive(gatt_mutex);
+        if (!same_link)
+            return;
+    }
+    if (rrc != 0)
+        ESP_LOGW(BLE_TAG, "[CMD] %s read-back rc=%d - %s unconfirmed", what, rrc, unconfirmed);
+}
+
 // Writes a hub command to the provisioned valve's characteristic *handle (re-read on every
 // attempt: a rediscovery zeroes it) and issues the read-back. Up to CMD_WRITE_ATTEMPTS
 // attempts, 200 ms then 400 ms apart, with gatt_mutex released in between so the host
 // task's replays are not held off. Command task only: it sleeps.
+// A busy GATT procedure pool (BLE_HS_ENOMEM) is not a failed attempt: the write is retried
+// every CMD_BUSY_RETRY_MS for at most CMD_BUSY_MAX_MS, with the same checks before each, and a
+// read-back that finds the pool busy is issued once a procedure frees (read_back_when_free()).
 // `slot` is the command's pending slot. An accepted write clears it under gatt_mutex, where
 // setup completion's replay re-checks it (apply_pending_cmd()); a CMD_WR_RELINK pend is made
 // after the mutex is released, by finish_cmd_write(). A live command clears whatever older
@@ -2179,16 +2232,19 @@ static void start_scan(void)
 // *conn_out = the link the last write went to (NONE when no attempt got that far).
 // Returns 0 once the host accepted the write, CMD_WR_STALE, CMD_WR_RELINK, CMD_WR_MOVED
 // (replay cancelled or superseded meanwhile), or the last failure (a NimBLE rc, or
-// CMD_WR_NO_MUTEX) when every attempt failed on a live link.
+// CMD_WR_NO_MUTEX) when every attempt failed on a live link: BLE_HS_ENOMEM when the pool
+// stayed busy for CMD_BUSY_MAX_MS.
 static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t gen, int *slot,
                                 bool replay, uint16_t *conn_out, const char *what,
                                 const char *unconfirmed)
 {
     int rc = CMD_WR_RELINK;
+    int busy_ms = 0;   // waited so far for a free GATT procedure (BLE_HS_ENOMEM)
     *conn_out = BLE_HS_CONN_HANDLE_NONE;
     for (int attempt = 1; attempt <= CMD_WRITE_ATTEMPTS; attempt++)
     {
-        if (attempt > 1)
+        // Not after a busy pool: that wait is below, and it did not use up this attempt.
+        if (attempt > 1 && rc != BLE_HS_ENOMEM)
         {
             int delay_ms = (attempt == 2) ? 200 : 400;
             ESP_LOGW(BLE_TAG, "[CMD] %s write attempt %d/%d failed (rc=%d) - retrying in %d ms",
@@ -2202,6 +2258,7 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
             continue;
         }
 
+        bool read_back_busy = false;
         // Checked right before each write: while this task waited or slept, the target may
         // have changed (its flush must win), the link dropped, or a replayed command been
         // cancelled, superseded or written on a new link.
@@ -2221,17 +2278,24 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
         {
             uint16_t conn = valve_conn_handle;
             *conn_out = conn;
-            ESP_LOGI(BLE_TAG, "[CMD] Writing %s=%u", what, val);
+            // While polling a busy pool, only a write that got a procedure is logged.
+            bool polling = (busy_ms > 0);
+            if (!polling)
+                ESP_LOGI(BLE_TAG, "[CMD] Writing %s=%u", what, val);
             rc = ble_gattc_write_flat(conn, *handle, &val, 1, NULL, NULL);
-            ESP_LOGI(BLE_TAG, "[CMD] %s write rc=%d (value awaits the valve's own report)", what, rc);
+            if (!polling || rc != BLE_HS_ENOMEM)
+                ESP_LOGI(BLE_TAG, "[CMD] %s write rc=%d (value awaits the valve's own report)", what, rc);
             if (rc == 0)
             {
                 // Before gatt_mutex is released (see above).
                 (void)pending_update(slot, replay ? (int)val : PEND_ANY, -1, gen);
-                relink_count_reset();
+                if (!replay)
+                    relink_count_reset();
                 // The read-back write_valve_command() / write_rmleak_command() explain.
                 int rrc = ble_gattc_read(conn, *handle, on_cmd_read_cb, NULL);
-                if (rrc != 0)
+                if (rrc == BLE_HS_ENOMEM)
+                    read_back_busy = true;   // issued below, once a procedure frees
+                else if (rrc != 0)
                     ESP_LOGW(BLE_TAG, "[CMD] %s read-back rc=%d - %s unconfirmed", what, rrc, unconfirmed);
             }
             else if (rc == BLE_HS_ENOTCONN || !link_is_target())
@@ -2243,8 +2307,23 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
         }
         xSemaphoreGive(gatt_mutex);
 
+        if (read_back_busy)
+            read_back_when_free(*conn_out, handle, gen, what, unconfirmed);
         if (rc == 0 || rc == CMD_WR_STALE || rc == CMD_WR_RELINK || rc == CMD_WR_MOVED)
             return rc;
+        if (rc == BLE_HS_ENOMEM)
+        {
+            // The pool is busy with this hub's own commands: wait for a free procedure, without
+            // using up an attempt. Past the bound the caller keeps the command pended and has it
+            // replayed (drop_link_after_failed_write()).
+            if (busy_ms >= CMD_BUSY_MAX_MS)
+                return rc;
+            if (busy_ms == 0)
+                ESP_LOGW(BLE_TAG, "[CMD] %s write: GATT busy - waiting", what);
+            vTaskDelay(pdMS_TO_TICKS(CMD_BUSY_RETRY_MS));
+            busy_ms += CMD_BUSY_RETRY_MS;
+            attempt--;   // not one of the CMD_WRITE_ATTEMPTS
+        }
     }
     return rc;
 }
@@ -2265,10 +2344,20 @@ static void request_valve_link(void)
 // At most CMD_MAX_FORCED_RELINKS drops in a row: a command the valve keeps refusing must not
 // cycle replay -> failed attempts -> reconnect for ever (valve battery, and every cycle is a
 // CONNECTED/DISCONNECTED pair and a rules reconcile). After that it waits for the next
-// natural reconnect. A write the host accepts that leaves nothing pended
+// natural reconnect. A live command the host accepts that leaves nothing pended
 // (relink_count_reset()), or a valve target change, starts a new count.
+// Never for BLE_HS_ENOMEM: the GATT procedure pool stayed busy with this hub's own commands
+// (CMD_BUSY_RETRY_MS). The link works, and dropping it would discard the commands queued on
+// it, a replayed CLOSE among them (B1). The command task replays the command instead.
 static void drop_link_after_failed_write(int rc, uint16_t conn, const char *what, uint8_t val)
 {
+    if (rc == BLE_HS_ENOMEM)
+    {
+        ESP_LOGW(BLE_TAG, "[CMD] %s=%u kept pending - GATT still busy, replaying it", what, val);
+        post_replay_token();
+        return;
+    }
+
     g_connect_requested = true;
     if (conn == BLE_HS_CONN_HANDLE_NONE)
         conn = valve_conn_handle;
@@ -2351,7 +2440,8 @@ static void finish_cmd_write(int rc, uint8_t val, uint32_t gen, int *slot, uint1
     }
     else if (rc != 0)
     {
-        // Pended above. Every attempt failed on a live link.
+        // Pended above. Every attempt failed on a live link, or the GATT procedure pool stayed
+        // busy (BLE_HS_ENOMEM: replayed, never a forced reconnect).
         drop_link_after_failed_write(rc, conn, what, val);
     }
     cmd_settle_release();
