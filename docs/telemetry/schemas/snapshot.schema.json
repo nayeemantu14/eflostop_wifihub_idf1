@@ -157,13 +157,13 @@
             },
             "leak_state": {
               "type": "boolean",
-              "description": "Water detected AT THE VALVE body (its own flood probe), distinct from the remote leak sensors. Reads the module's cached value, which is false until the first read on this link. Presence: when connected is true; ABSENT when connected is false.",
+              "description": "Water detected AT THE VALVE body (its own flood probe), distinct from the remote leak sensors. Reads the module's cached value, which is false until the first read on this link: ignore it while state is \"unknown\". Presence: when connected is true; ABSENT when connected is false.",
               "x-source": "ble_valve_get_leak() in telemetry_v2_publish_snapshot()",
               "x-category": "12.6"
             },
             "rmleak": {
               "type": "boolean",
-              "description": "The valve's remote-leak interlock latch. While true the valve refuses to open, and the hub refuses a valve_open command. Presence: when connected is true; ABSENT when connected is false.",
+              "description": "The valve's remote-leak interlock latch. While true the valve refuses to open, and the hub refuses a valve_open command. Reads the module's cached value, which is false until the first read on this link: while state is \"unknown\" (link up, readings not in yet) it reads false even on a valve locked after a leak, beside \"Leak interlock latched\". Ignore it, like leak_state, while state is \"unknown\". Presence: when connected is true; ABSENT when connected is false.",
               "x-source": "ble_valve_get_rmleak_state() in telemetry_v2_publish_snapshot(); open refusal valve_open_reject_reason() main/iothub/app_iothub.c",
               "x-category": "12.6"
             },

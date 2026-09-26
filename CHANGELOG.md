@@ -155,6 +155,25 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
   (`RMLEAK cleared externally (valve override) — starting 24h override window`) and blocked auto-close for
   24 h while the sensor was wet. A newly latched incident now always re-asserts RMLEAK and CLOSE, queued
   behind the clear so the valve ends locked, and publishes `auto_close`. The race predates 2.1.4.
+- **The hub's own RMLEAK clear is no longer read as a valve-button override.**
+  - When the hub releases the interlock itself (the 10 s auto-clear, `leak_reset` or `override_enable`) while
+    the valve is out of range or still setting up its link, the clear is held for the reconnect. At the
+    reconnect the valve still reports its old RMLEAK for a moment, until the held clear is written and read
+    back. The hub read that as "valve locked, no incident" and re-latched the incident. When its own clear
+    then landed, it read it as a press of the valve button and started a false 24 h
+    `water_access_override_enabled{trigger:"button"}` window that blocked auto-close.
+  - The hub now remembers, in RAM, a clear it owes the valve until it reads RMLEAK clear back. At the
+    reconnect it sends the clear again instead of re-latching, and the clear landing starts nothing. After a
+    hub restart that memory is gone and the reconnect re-latches, as in 2.1.3 (fail closed); the 10 s
+    auto-clear then releases it once every source is dry.
+  - A live button override is now read only when the valve was seen with RMLEAK set during this incident and
+    it then goes clear. A lock that never reached the valve (a close that never landed) no longer produces
+    `trigger:"button"`.
+  - `leak_reset` and the auto-clear queue their clear while they hold the rules lock. A re-latch on another
+    task can therefore no longer queue its RMLEAK and close ahead of the clear, which then landed last and
+    read as a button press.
+  - The inference a reconnect makes from "valve open, RMLEAK clear" (SRS §4.4.2, a press while the hub was
+    offline) is unchanged; see Known limitations.
 
 ### Changed
 
@@ -169,29 +188,52 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
   - A sensor that goes wet again 10–30 s after drying (up to about 60 s, counting the old idle wait) now
     produces a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again), where the old
     dwell used to hold the interlock. The valve stays closed throughout, including for a re-wet at the very
-    moment of the clear (see Safety).
+    moment of the clear (see Safety). That re-wet also sends `rmleak_auto_cleared` and then `auto_close`
+    (see *Rules events* under Reliability).
 
 ### Reliability
 
 - **Valve writes.**
   - A valve or RMLEAK write that the BLE stack refuses is retried up to 3 times, 200 ms and then 400 ms apart.
+  - "GATT busy" is not a failure. NimBLE has 4 GATT procedures, and a command write that finds them all in use
+    (`BLE_HS_ENOMEM`, rc=6) is retried every 250 ms for up to 5 s without using up one of the 3 attempts. Its
+    read-back waits the same way, so the hub's RMLEAK cache is not left stale (a stale clear could read as a
+    button override). If the pool is still full after 5 s, the command stays pending and is replayed on the
+    same link; it never forces a reconnect. Before this, the RMLEAK and close queued right after a
+    reconnect's own replays could find the pool full and force a reconnect, so the valve closed a leak one or
+    more 15–40 s reconnect cycles late. A valve that stops answering is still dropped by NimBLE's 30 s GATT
+    timeout.
   - After that, the link is dropped and the command is re-applied when the valve reconnects. It used to be
     lost.
   - Forced reconnects are capped at 3 in a row. After that a failed write stays pending for the next natural
-    reconnect, and the cap is lifted once a write succeeds with nothing left pending (or the valve target
-    changes).
+    reconnect, and the cap is lifted once a live command write succeeds with nothing left pending (or the
+    valve target changes). A command replayed at a reconnect no longer lifts it, so a valve that accepts the
+    replays but refuses live writes still reaches the cap.
   - A re-applied command that fails again at reconnect is replayed ahead of any newer command, never after
     it, so it can no longer undo a newer command. A command cancelled or superseded meanwhile is not
     replayed. A newer command written during the reconnect is never overwritten by an older pending one.
   - RMLEAK is applied before the valve command, on every path. One exception, once the reconnect cap is
     reached (or the link could not be dropped): if the RMLEAK write itself keeps failing on a live link, an
     open waits behind it, but a close is still written, because holding a close back during a leak is worse.
+  - That order also holds across the end of the link setup. A valve command queued while the link was
+    finishing its setup could be written ahead of an RMLEAK command held for that link; it now waits behind
+    it. While a held RMLEAK write waits for a busy GATT pool, a held close waits behind it too.
   - A disconnect the controller refuses (`BLE_GAP_EVENT_TERM_FAILURE`) no longer leaves valve commands
     blocked for the rest of the link.
   - A command held for the next link just as the current link finished its setup is replayed on that link at
     once. It could sit until the next reconnect.
   - BLE start-up (`nimble_port_init`) is retried up to 5 times, and each failed attempt now releases the
     NimBLE porting-layer memory it allocated.
+  - BLE start requested by two tasks at once (a `provision` and the boot-time valve apply) starts the stack
+    once: the start signal is claimed atomically, and the start-up task clears its handle before it exits.
+- **Rules events.** A rules event raised by the rules tick (`rmleak_auto_cleared`,
+  `water_access_override_expired`, or a button `water_access_override_enabled`) is now published straight
+  after the tick, before the same pass handles a leak report. The rules engine holds one pending event, and a
+  wet report handled in that pass replaced it with its `auto_close`, so the release never reached the cloud.
+  A sensor that goes wet again just as the interlock auto-clears now gives `rmleak_auto_cleared`, then
+  `leak_detected` and `auto_close`. The one exception is the pass in which MQTT (re)connects: its offline
+  replay and lifecycle go first, and there the event can still be replaced as before. A multi-slot buffer is
+  still deferred.
 - **Health.**
   - A debounced alert is sent once the debounce has passed, instead of being dropped.
   - A change of the hub rating to, from or within warning and critical with no device event (for example the
@@ -309,7 +351,12 @@ next snapshot) confirms it.
   - events that arrive late, after the first connect, with a `ts` earlier than that connect's lifecycle
     message (events raised before the first clock sync);
   - `water_access_override_enabled` without `expires_ts`, and a snapshot with `override_active:true` and no
-    `expires_ts` for up to about 30 s after the first clock sync.
+    `expires_ts` for up to about 30 s after the first clock sync;
+  - `data.valve.rmleak` and `data.valve.leak_state` reading `false` while `data.valve.state` is `"unknown"`
+    (the link is up but the valve's readings are not in yet), even on a valve locked after a leak. Ignore
+    both until the state is known;
+  - lifecycle and twin reported with `provisioned:true` and no devices, from a hub that a `provision` emptied
+    (a hub emptied by removals reports `false`).
 - **Serial log.**
   - Unchanged: every line the production tool and the bench scripts match.
   - A refused valve command now logs its full reason: `VALVE_OPEN refused — <detail>`, and likewise for
@@ -369,6 +416,34 @@ next snapshot) confirms it.
     - `IOTHUB`: `Telemetry-cache purge: provisioning busy, retrying`
     - `PROVISIONING`: `Hub empty: rules config reset to defaults`, after the removal or `provision` that
       empties the hub
+  - New, council fixes:
+    - `RULES_ENGINE`: `Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching`
+    - `RULES_ENGINE`: `RMLEAK clear read back - the hub's own clear, not a valve override`
+    - `RULES_ENGINE`: `RECONNECT: RMLEAK clear not sent - no provisioned valve` (warning) and `RECONNECT:
+      RMLEAK clear enqueue FAILED — valve interlock left set` (error)
+    - `BLE_VALVE`: `[CMD] %s write: GATT busy - waiting` and `[CMD] %s read-back: GATT busy - waiting`, once
+      per wait
+    - `BLE_VALVE`: `[CMD] %s=%u kept pending - GATT still busy, replaying it`, after a 5 s wait
+    - `BLE_VALVE`: `[CMD] %s=%u held behind the pending RMLEAK command`
+    - `BLE_VALVE`: `[CMD] Pending valve command=0 kept behind the RMLEAK command (GATT busy)`
+
+    `GATT busy - waiting` is normal when a reconnect replays commands while new ones are queued. None of
+    these should repeat for long.
+  - Same text, new conditions (council fixes):
+    - `RULES_ENGINE` `RMLEAK cleared externally (valve override) — starting 24h override window`: only when
+      the valve was seen with RMLEAK set during the incident and no hub clear is owed.
+    - `RULES_ENGINE` `Reconnected with %d active leak(s) — valve already closed + RMLEAK asserted, nothing to
+      do`: not while a hub clear is owed; `Valve reconnected with %d active leak(s) — executing auto-close`
+      prints instead.
+    - `BLE_VALVE` `[CMD] Writing %s=%u` is not repeated while a write waits for a busy GATT pool, and `[CMD]
+      %s write rc=%d (value awaits the valve's own report)` prints on the first try and then only for an rc
+      other than 6.
+    - `BLE_VALVE` `[CMD] %s read-back rc=%d - %s unconfirmed`: also when a read-back's 5 s busy wait runs out
+      (rc=6) or its lock wait times out (rc=-1).
+    - `BLE_VALVE` `[CMD] valve writes keep failing - no more forced reconnects until a write succeeds`: now
+      until a live command write succeeds.
+    - A rules event raised by the tick logs its `Pub event: ...` (or offline-buffer) line right after the
+      tick, before the pass's leak-report lines.
   - Changed number, RMLEAK auto-clear (`RULES_ENGINE`): these print `10s` where they printed `30s`. The
     production tool matches neither; `docs/health_leak_led/TEST_PLAN.md` still quotes the 30 s values.
     - `All sensors clear — auto-clear timer started (%ds)`
@@ -424,9 +499,10 @@ next snapshot) confirms it.
     every 5 s. NimBLE now also runs on a sensors-only hub with a BLE sensor (P0-b), which 2.1.3 did not. Heap
     tuning is deferred to 2.1.5.
   - Heap budget: 2.1.4 uses about 176 B more static RAM than 2.1.3 (`.bss` +160 B, `.data` +16 B at build
-    checkpoint 2; the final review fixes add none), plus about 50 B of permanent heap for the two per-tag
-    log levels set at boot. Both come out of the heap (2.1.3 field minimum: 2972 B free). The NimBLE host task
-    also uses about 54 B more of its fixed stack on the valve notify path.
+    checkpoint 2; the final review fixes add none, the council fixes about 5 B of `.bss`), plus about 50 B of
+    permanent heap for the two per-tag log levels set at boot. Both come out of the heap (2.1.3 field
+    minimum: 2972 B free). The NimBLE host task also uses about 54 B more of its fixed stack on the valve
+    notify path.
   - An override started before the clock synced and then restored after a software reset cannot be re-based,
     because its elapsed time is unknown, so it ends at the first clock sync, possibly hours early. That fails
     toward auto-close.
@@ -437,3 +513,36 @@ next snapshot) confirms it.
     runs beside the SoftAP portal, which therefore has less free heap than on 2.1.3.
   - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
     oldest held events, as it already could after the sync.
+  - **A leak latched while the valve was out of reach can still be read as a button press at the reconnect
+    (deferred to 2.1.5).** If the hub then restarts, or every sensor dries within about 10 s of the valve
+    reconnecting, the reconnect finds the valve open with RMLEAK never applied. It reads that as a press of
+    the valve button while the hub was offline (the SRS §4.4.2 cross-reboot inference, unchanged from 2.1.3)
+    and starts a 24 h `water_access_override_enabled{trigger:"button"}` window. Auto-close is blocked for that
+    window, so the valve stays open if the leak returns.
+  - **After a hub restart during a leak, the interlock can be released for one wet report (accepted).** The
+    restart empties the hub's list of wet sources, so the first dry report from any device starts the 10 s
+    auto-clear before a still-wet sensor is heard again. RMLEAK can then be released (`rmleak_auto_cleared`)
+    for up to one wet burst of that sensor: about 15 s for a BLE sensor, minutes for a LoRa sensor. A
+    `valve_open` in that gap is accepted. The valve stays closed unless it is opened, and the interlock
+    re-latches (`auto_close`, closing the valve again) when the wet sensor is heard.
+  - Found in the final review and planned for 2.1.5:
+    - A leak evaluated while provisioning is busy for more than 1 s (for example during a C2D save) is dropped
+      by the rules engine, so the valve is not closed until that sensor reports again (up to 5 minutes).
+    - The rules reset after a valve replacement is not retried when the rules lock is busy for more than 1 s,
+      and a failed rules reset of an emptied hub (lock busy for more than 5 s) is not retried when a
+      `provision` arrives first. The old valve's leak source, or a stale latch or override window, can then
+      survive into the new setup.
+    - A valve that went offline with its flood probe wet and comes back dry after more than 180 s sends a
+      late `device_offline` as it reconnects, then `device_recovered` 60–90 s later.
+    - After a decommission and re-provision of the same valve within one loop pass, a valve that does not
+      relink can stay connected and excellent in health (and green on the LED) with no link.
+    - A hub name set for the first time while a snapshot is built fails that snapshot with a misleading
+      `Snapshot not built - out of memory`; it is rebuilt at the 5 s retry.
+    - Twin reported can carry `valve_id` null and device counts of 0 when provisioning is busy for more than
+      1 s; the next device-set change republishes it.
+    - A `provision` that adds no device (an identical re-send, a rules-only provision) no longer restarts the
+      commission snapshot and the post-provision snapshot pulse, as 2.1.3 did; only newly added devices do.
+      The command still gets its own `event` snapshot.
+    - When a reconnect replays both a held RMLEAK and a held valve command, the valve command's read-back finds
+      the GATT pool full (`[CMD] valve read-back rc=6 - position unconfirmed`); the valve's own state
+      notification then reports the position.

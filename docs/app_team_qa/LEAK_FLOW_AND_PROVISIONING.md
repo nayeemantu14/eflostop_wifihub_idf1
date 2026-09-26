@@ -94,8 +94,10 @@ refused while any leak is still active.)
 > the valve stays closed throughout.
 >
 > A re-wet at the very moment of the clear is handled the same way: a newly latched incident always
-> re-asserts RMLEAK and closes. Before 2.1.4 that moment could be misread as a valve-button override and
-> start a false 24 h `water_access_override_enabled{trigger:"button"}` window.
+> re-asserts RMLEAK and closes, and the cloud gets `rmleak_auto_cleared`, then `leak_detected` and
+> `auto_close`. Before 2.1.4 that moment could be misread as a valve-button override and start a false
+> 24 h `water_access_override_enabled{trigger:"button"}` window. (In the one pass where the hub's cloud
+> connection is coming back, the `rmleak_auto_cleared` can still be missing; the valve stays locked.)
 
 ---
 
@@ -108,6 +110,9 @@ A `cmd_ack` with `status:"ok"` is returned. **But two caveats:**
 - `status:"ok"` means **the configuration was accepted and stored** — it does **not** confirm the
   physical device was found/connected. Confirm real connectivity from the next **snapshot**:
   `valve.connected:true` / the sensor appearing in `ble_leak_sensors[]` with a `rating`.
+  In the first seconds after the valve links, the snapshot shows `valve.connected:true` with
+  `valve.state:"unknown"`: its readings are not in yet, and `valve.rmleak` / `valve.leak_state` read
+  `false` until they are, even on a valve locked after a leak. Ignore both while `state` is `"unknown"`.
 - Provisioning is a **merge** — sending `valve_mac` / `ble_leak_sensors` adds/updates them; you can
   provision the valve and sensors in one payload or incrementally.
 

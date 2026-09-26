@@ -8,7 +8,7 @@
 |---|---|
 | Document version | 5.0 (supersedes v2.0, which documented firmware 1.9.0) |
 | Firmware version | 2.1.4 — `CMakeLists.txt:12` |
-| Git commit | `b245d943bd59c177157348b9f18829ab23aac07d` |
+| Git commit | `d9fa9c85346853266820a6e24cd4af2547863d9e` |
 | Schema | `eflostop.v2` |
 | Topic | `devices/<device_id>/messages/events/` (QoS 1) |
 | Message count | 48 distinct messages across 8 families |
@@ -102,7 +102,8 @@ appear, and every one of them replaces a message that stated something false.
 3. **An unknown battery is `null`, never 0.** On the snapshot valve, `valve_state_changed` and every leak
    event (S10, V6, K7). During the seconds between the valve's link coming up and its readings arriving,
    the snapshot says `state:"unknown"` and `battery:null` rather than a default that reads as an empty
-   battery.
+   battery. `rmleak` and `leak_state` in that window are still their defaults (`false`), even on a valve
+   locked after a leak, so ignore both while `state` is `"unknown"`.
 
 4. **The valve's battery can make it critical.** At or below 10 % the valve is rated `critical` with the
    reason `"Valve battery critical"` (S11); 11–20 % is `warning` / `"Valve battery low"`. This band is the
@@ -276,7 +277,7 @@ Every MQTT connect, including reconnects — so not once per boot. Since 2.1.4 i
 
 ### L2 — Hub commissioned, but with no devices
 
-A provision that carried only rules (no valve, no sensors) leaves the hub provisioned with zero devices. Rare; treat it exactly like L4.
+A provision that carried only rules (no valve, no sensors) leaves the hub provisioned with zero devices, and so does a provision whose sensor arrays remove every device (2.1.4): a hub emptied by decommission reports provisioned false (L4), one emptied by a provision still reports true. Rare; treat it exactly like L4.
 
 ```json
 {
@@ -958,7 +959,7 @@ New in 2.1.4 (BUG-5). A sensors-only hub reports valve {} — no valve_id, no st
 
 ### S10 — Valve linked, but its readings not in yet
 
-New in 2.1.4 (BUG-1). The BLE link to the provisioned valve is up but its characteristics have not been read yet — a few seconds after every connect. state is "unknown", battery and fw_version are null, and leak_state / rmleak are the defaults. Up to 2.1.3 this window published battery 0, which read as an empty battery. Here the valve has not been heard since boot, so it is still in its sync window.
+New in 2.1.4 (BUG-1). The BLE link to the provisioned valve is up but its characteristics have not been read yet — a few seconds after every connect. state is "unknown", battery and fw_version are null, and leak_state / rmleak are the defaults (false), even on a valve locked after a leak while the hub reports "Leak interlock latched": ignore both while state is "unknown". Up to 2.1.3 this window published battery 0, which read as an empty battery. Here the valve has not been heard since boot, so it is still in its sync window.
 
 ```json
 {
@@ -1597,7 +1598,7 @@ An override window is open, so the hub deliberately did not close. override_rema
 
 ### R5 — A 24-hour water-access override started
 
-Started by a valve long-press ("button") or the override_enable command ("c2d_command"). remaining_s is always the full 86400. expires_ts is omitted when the window started before the hub's clock synced (R10).
+Started by a valve long-press ("button") or the override_enable command ("c2d_command"). remaining_s is always the full 86400. expires_ts is omitted when the window started before the hub's clock synced (R10). Since 2.1.4 a live "button" window needs the valve to have been seen with RMLEAK set during the incident: the hub's own clear landing at a reconnect, or a lock that never reached the valve, no longer produces one. The inference a reconnect makes from an open valve with RMLEAK clear is unchanged.
 
 ```json
 {
@@ -1702,7 +1703,7 @@ Response to leak_reset. override_cancelled appears only if a window was open. De
 
 ### R9 — The leak interlock cleared itself
 
-Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying (up to about 60 s, counting the old idle wait) therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout. That includes a re-wet at the very moment of the clear: a newly latched incident always re-asserts RMLEAK and closes, so it can no longer be misread as a valve-button override (before 2.1.4 it could start a false 24 h window).
+Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying (up to about 60 s, counting the old idle wait) therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout. That includes a re-wet at the very moment of the clear: a newly latched incident always re-asserts RMLEAK and closes, so it can no longer be misread as a valve-button override (before 2.1.4 it could start a false 24 h window). This event is published before that re-latch's leak_detected and auto_close, which used to replace it in the hub's single pending-event slot; the one exception is the pass in which the hub's MQTT connection comes back.
 
 ```json
 {

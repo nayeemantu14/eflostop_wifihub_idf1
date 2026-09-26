@@ -107,7 +107,7 @@ MESSAGES = [
              "valve_id": VALVE_MAC, "lora_sensor_count": 0, "ble_leak_sensor_count": 2,
              "rules": RULES})),
     dict(group="Lifecycle", id="L2", title="Hub commissioned, but with no devices",
-         when="A provision that carried only rules (no valve, no sensors) leaves the hub provisioned with zero devices. Rare; treat it exactly like L4.",
+         when="A provision that carried only rules (no valve, no sensors) leaves the hub provisioned with zero devices, and so does a provision whose sensor arrays remove every device (2.1.4): a hub emptied by decommission reports provisioned false (L4), one emptied by a provision still reports true. Rare; treat it exactly like L4.",
          cite="omissions build_envelope() and telemetry_v2_publish_lifecycle() main/telemetry/telemetry_v2.c",
          msg=env(TS, 18, "lifecycle", {
              "event": "online", "reset_reason": "power_on", "provisioned": True,
@@ -181,7 +181,7 @@ MESSAGES = [
          cite="valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
          msg=env(TS, 3600, "snapshot", snap("heartbeat", NO_VALVE, [S_A, S_B]))),
     dict(group="Snapshot", id="S10", title="Valve linked, but its readings not in yet",
-         when="New in 2.1.4 (BUG-1). The BLE link to the provisioned valve is up but its characteristics have not been read yet — a few seconds after every connect. state is \"unknown\", battery and fw_version are null, and leak_state / rmleak are the defaults. Up to 2.1.3 this window published battery 0, which read as an empty battery. Here the valve has not been heard since boot, so it is still in its sync window.",
+         when="New in 2.1.4 (BUG-1). The BLE link to the provisioned valve is up but its characteristics have not been read yet — a few seconds after every connect. state is \"unknown\", battery and fw_version are null, and leak_state / rmleak are the defaults (false), even on a valve locked after a leak while the hub reports \"Leak interlock latched\": ignore both while state is \"unknown\". Up to 2.1.3 this window published battery 0, which read as an empty battery. Here the valve has not been heard since boot, so it is still in its sync window.",
          cite="ready / live branch of the valve block in telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
          msg=env(TS, 20, "snapshot",
                  snap("event", VALVE_NOT_READY, [S_A, S_B],
@@ -311,7 +311,7 @@ MESSAGES = [
                                       "source_type": "ble_leak_sensor", "sensor_id": SENSOR_A,
                                       "override_remaining_s": 61200})),
     dict(group="Rules events", id="R5", title="A 24-hour water-access override started",
-         when="Started by a valve long-press (\"button\") or the override_enable command (\"c2d_command\"). remaining_s is always the full 86400. expires_ts is omitted when the window started before the hub's clock synced (R10).",
+         when="Started by a valve long-press (\"button\") or the override_enable command (\"c2d_command\"). remaining_s is always the full 86400. expires_ts is omitted when the window started before the hub's clock synced (R10). Since 2.1.4 a live \"button\" window needs the valve to have been seen with RMLEAK set during the incident: the hub's own clear landing at a reconnect, or a lock that never reached the valve, no longer produces one. The inference a reconnect makes from an open valve with RMLEAK clear is unchanged.",
          cite="start_override_window() main/rules_engine/rules_engine.c:193-223; OVERRIDE_WINDOW_DURATION_S main/rules_engine/rules_engine.c:29",
          msg=env(TS, 19000, "event", {"event": "water_access_override_enabled",
                                       "trigger": "button", "expires_ts": TS + 86400,
@@ -334,7 +334,7 @@ MESSAGES = [
          msg=env(TS, 26000, "event", {"event": "rmleak_cleared", "valve_id": VALVE_MAC,
                                       "override_cancelled": True})),
     dict(group="Rules events", id="R9", title="The leak interlock cleared itself",
-         when="Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying (up to about 60 s, counting the old idle wait) therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout. That includes a re-wet at the very moment of the clear: a newly latched incident always re-asserts RMLEAK and closes, so it can no longer be misread as a valve-button override (before 2.1.4 it could start a false 24 h window).",
+         when="Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying (up to about 60 s, counting the old idle wait) therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout. That includes a re-wet at the very moment of the clear: a newly latched incident always re-asserts RMLEAK and closes, so it can no longer be misread as a valve-button override (before 2.1.4 it could start a false 24 h window). This event is published before that re-latch's leak_detected and auto_close, which used to replace it in the hub's single pending-event slot; the one exception is the pass in which the hub's MQTT connection comes back.",
          cite="rules_engine_tick() main/rules_engine/rules_engine.c; AUTO_CLEAR_TIMEOUT_MS main/rules_engine/rules_engine.c",
          msg=env(TS, 8700, "event", {"event": "rmleak_auto_cleared", "valve_id": VALVE_MAC,
                                      "clear_after_seconds": 10})),
@@ -669,7 +669,8 @@ appear, and every one of them replaces a message that stated something false.
 3. **An unknown battery is `null`, never 0.** On the snapshot valve, `valve_state_changed` and every leak
    event (S10, V6, K7). During the seconds between the valve's link coming up and its readings arriving,
    the snapshot says `state:"unknown"` and `battery:null` rather than a default that reads as an empty
-   battery.
+   battery. `rmleak` and `leak_state` in that window are still their defaults (`false`), even on a valve
+   locked after a leak, so ignore both while `state` is `"unknown"`.
 
 4. **The valve's battery can make it critical.** At or below 10 % the valve is rated `critical` with the
    reason `"Valve battery critical"` (S11); 11–20 % is `warning` / `"Valve battery low"`. This band is the

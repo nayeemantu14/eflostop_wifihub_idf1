@@ -142,8 +142,8 @@
         "status"
       ],
       "additionalProperties": false,
-      "description": "Type-specific payload container. Created and attached with UNCHECKED cJSON calls in every publisher, so an allocation failure yields a published envelope with NO data key. Presence: always in practice; see note.",
-      "x-source": "main/telemetry/telemetry_v2.c:339+366 (lifecycle), :377+602 (snapshot), :613+627, :640+652, :665, :670, :684, :689, :703+716",
+      "description": "Type-specific payload container. Attached on creation and NULL-checked since 2.1.4: if data or the gateway object cannot be allocated, the ack is not published (logged \"Message not built (event) - out of memory\"). Up to 2.1.3 an allocation failure published an envelope with no data key. Presence: always.",
+      "x-source": "telemetry_v2_publish_cmd_ack(), build_envelope() and drop_unbuilt() main/telemetry/telemetry_v2.c",
       "x-category": "12.1",
       "allOf": [
         {

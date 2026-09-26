@@ -511,7 +511,7 @@ At least one field is required. Each present array does a **full replace** of th
 
 **Precedence when both are present.** The top-level flag is applied first, then `rules` is merged over it — specific beats shorthand. So `{"auto_close_enabled": true, "rules": {"trigger_mask": 3}}` ends up **enabled with only the two sensor bits armed**, the valve probe excluded.
 
-**A provision that empties the hub (2.1.4).** When the sensor arrays in a `provision` leave the hub with no device, the hub resets `auto_close_enabled` / `trigger_mask` to `true` / `7` and clears the leak latch and any override window, before the ack. Rules keys in the same payload (`auto_close_enabled`, `rules`) apply on top of those defaults.
+**A provision that empties the hub (2.1.4).** When the sensor arrays in a `provision` leave the hub with no device, the hub resets `auto_close_enabled` / `trigger_mask` to `true` / `7` and clears the leak latch and any override window, before the ack. Rules keys in the same payload (`auto_close_enabled`, `rules`) apply on top of those defaults. The hub stays marked provisioned: lifecycle and twin reported then read `provisioned:true` with no devices, where a hub emptied by `decommission` reads `false`. Treat both as an empty hub.
 
 `auto_close_enabled` also satisfies the at-least-one-field requirement on its own — which means a payload whose only key is `auto_close_enabled` marks an unprovisioned hub as commissioned with no devices. Send it with the devices it describes, as the setup flow does.
 
@@ -606,7 +606,7 @@ At least one field is required. Each present array does a **full replace** of th
 }
 ```
 
-Confirm the result two ways. Twin reported is republished **immediately** on a successful provision (FW 2.0.2 — before that it only refreshed on the next MQTT reconnect, so the twin could read stale for hours), carrying `auto_close_enabled`, `trigger_mask`, `valve_id` and the device counts. The commission snapshot that follows carries the same rules values under `data.rules`.
+Confirm the result two ways. Twin reported is republished **immediately** on a successful provision (FW 2.0.2 — before that it only refreshed on the next MQTT reconnect, so the twin could read stale for hours), carrying `auto_close_enabled`, `trigger_mask`, `valve_id` and the device counts. The snapshot that follows carries the same rules values under `data.rules`: a `commission` snapshot when the provision added a device, otherwise the command's own `event` snapshot. Since 2.1.4 a provision that adds no device (an identical re-send, a rules-only provision) does not restart the commission snapshot or the post-provision snapshot pulse.
 
 Limits: 1 valve · up to 16 LoRa sensors · up to 16 BLE leak sensors.
 

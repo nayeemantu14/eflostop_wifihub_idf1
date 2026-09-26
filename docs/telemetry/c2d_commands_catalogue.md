@@ -8,7 +8,7 @@
 |---|---|
 | Document version | 3.0 (supersedes v1.0, which documented firmware 1.9.0) |
 | Firmware version | 2.1.4 — `CMakeLists.txt:12` |
-| Git commit | `12a9b9e9d40469e5773719e852c7a832609be7b6` |
+| Git commit | `d9fa9c85346853266820a6e24cd4af2547863d9e` |
 | Schema | `eflostop.cmd` |
 | Direction | cloud → hub (C2D) |
 | Transport | devices/<device_id>/messages/devicebound/#  (MQTT, QoS 1) |
@@ -521,7 +521,7 @@ Sets the valve, the sensor lists, the auto-close choice and optional per-sensor 
 | `rules` | object | no | Merged. Accepts auto_close_enabled (boolean) and trigger_mask (number). The three convenience booleans of rules_config are NOT honoured here. Applied AFTER the top-level auto_close_enabled, so specific beats shorthand: {"auto_close_enabled":true,"rules":{"trigger_mask":3}} ends up enabled with the valve probe excluded. |
 | `sensor_meta` | object[] | no | Applied after commissioning succeeds. Elements use exactly the same rules as the standalone sensor_meta command. A rejected element is skipped and never fails the provision. IMPORTANT: this key alone does not satisfy the at-least-one requirement (Trap 3). |
 
-A commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries. **A provision that changes the valve** (2.1.4) discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one. **A provision that empties the hub** (2.1.4): when its sensor arrays leave the hub with no device, the hub resets auto_close_enabled / trigger_mask to true / 7 and clears the leak latch and any override window, before the ack. Rules keys in the same payload apply on top of those defaults.
+When the provision adds a device, a commissioning window follows: a `commission` snapshot once every device has been heard, or at a 150 s deadline, then refreshes for about six minutes as late devices appear. A provision that adds no device (an identical re-send, a rules-only provision) gets only the command's own `event` snapshot (2.1.4; 2.1.3 restarted the window on every provision). Twin reported is republished immediately on success (2.0.2). Limits: 16 LoRa, 16 BLE leak sensors, 32 metadata entries. **A provision that changes the valve** (2.1.4) discards every valve command queued, pending or in flight for the old one, and drops a link still up to it. A connect already in flight to the old valve is not cancelled: it completes, and the hub then drops it at once, before pairing or any command, because that valve is no longer the provisioned one. **A provision that empties the hub** (2.1.4): when its sensor arrays leave the hub with no device, the hub resets auto_close_enabled / trigger_mask to true / 7 and clears the leak latch and any override window, before the ack. Rules keys in the same payload apply on top of those defaults. The hub stays marked provisioned: lifecycle and twin reported read provisioned true with no devices, where a hub emptied by decommission reads false.
 
 **Acknowledgement on success:**
 
