@@ -79,9 +79,15 @@ static void execute_wifi_reset(void)
      * wifi_manager_disconnect_async() disconnects STA and memsets the stored WiFi
      * config to 0 + saves it (default "nvs" partition only — credentials erased).
      *
-     * We then reboot. A fresh boot gives the SoftAP captive portal a pristine,
-     * unfragmented heap (~130 KB vs ~40 KB when the live BLE/telemetry stack is
-     * still loaded), so it stays responsive under a phone's DNS/HTTP probe storm.
+     * We then reboot. A fresh boot gives the SoftAP captive portal a less fragmented
+     * heap than the running one, with no MQTT/TLS session loaded (without Wi-Fi
+     * there is no cloud bring-up), so it stays responsive under a phone's DNS/HTTP
+     * probe storm. It is NOT a BLE-free heap any more: since 2.1.4 iothub_task
+     * starts NimBLE, the valve link and the leak scanner at boot, with no Wi-Fi gate,
+     * on any hub with a valve or a BLE sensor (leak protection must not wait for
+     * Wi-Fi), so they run beside the portal. The old ~130 KB figure predates that; the
+     * portal's heap next to BLE is recorded on the bench (S21: free, min_ever,
+     * largest block while a phone drives the portal).
      *
      * The reboot does NOT forget provisioned devices: commissioning (valve / LoRa
      * / BLE-leak sensors), hub identity, and DPS cache live in the dedicated
