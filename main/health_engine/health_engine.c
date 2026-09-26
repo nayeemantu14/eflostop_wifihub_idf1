@@ -656,8 +656,16 @@ static void handle_valve_leak(bool leaking)
  * re-read from the live values as well. That is safe now that an unknown battery is 0xFF,
  * which handle_valve_battery() ignores, rather than the 0 % the deleted
  * reseed_valve_health_if_connected() fed in (the BUG-1 trap). Both handlers are keyed on
- * the value, so re-feeding what the entry already holds changes nothing, and the values are
- * read at processing time under the same FIFO argument as the link.
+ * the value, so re-feeding what the entry already holds changes nothing.
+ *
+ * The FIFO argument above covers the LINK state only, not these readings: the valve
+ * module's DISCONNECT resets its cache (leak false, battery 0xFF) BEFORE it clears the ready
+ * bits and posts DISCONNECTED, so a disconnect that lands between the checks below and the
+ * reads leaves them reading a reset cache. That can only read dry and unknown, never a stale
+ * wet (CONNECT resets the cache before any ready bit is set). So the leak is only ever RAISED
+ * here: a dry read could be that reset, and would demote a wet valve to the WARNING grace,
+ * while a real dry reading always arrives as its own HEALTH_EVT_VALVE_LEAK. The unknown
+ * battery is already ignored.
  * Call with s_mutex held. */
 static void handle_valve_resync(void)
 {
@@ -678,7 +686,7 @@ static void handle_valve_resync(void)
         ESP_LOGI(HEALTH_TAG, "Valve link resync: link was already up when its table entry was added");
         handle_valve_event(true);
     }
-    handle_valve_leak(ble_valve_get_leak());
+    if (ble_valve_get_leak()) handle_valve_leak(true);   // raise only: see above
     handle_valve_battery(ble_valve_get_battery());
 }
 
