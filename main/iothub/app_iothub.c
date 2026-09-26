@@ -884,7 +884,7 @@ static void sync_valve_detectors(void)
     // engine's MAC-less valve leak source, and a latch no other wet source holds, would
     // otherwise act on the next valve. On a swap the new, dry valve was auto-closed on its
     // first link (E-04). On a removal forget_unprovisioned() drops the source but leaves the
-    // latch to the 30 s all-clear, and a valve provisioned within it links open with RMLEAK
+    // latch to the 10 s all-clear, and a valve provisioned within it links open with RMLEAK
     // clear, reads as a physical override and blocks auto-close for 24 h. A latch another
     // source still holds is kept. Decided before s_det_valve_mac takes the new MAC. Takes
     // only the rules mutex; no other lock is held here.
