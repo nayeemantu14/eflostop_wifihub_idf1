@@ -338,12 +338,13 @@ uint32_t health_get_checkin_seq(void);
 /**
  * @brief Monotonic counter of rating changes the cloud must see promptly.
  *
- * Bumped when the system roll-up rating changes, and when the valve's rating changes to
- * or from a battery-driven state; each bump also wakes iothub_task
- * (telemetry_v2_wake_snapshot()). iothub_task polls it and requests an EVENT snapshot, so
- * a rating change that raises no alert (valve battery-critical is deliberately silent,
- * and a roll-up grace expiry has no device edge at all) reaches the cloud within seconds
- * instead of at the next heartbeat.
+ * Bumped when the system roll-up rating changes to, from or within WARNING/CRITICAL, and
+ * when the valve's rating changes to or from a battery-driven state; each bump also wakes
+ * iothub_task (telemetry_v2_wake_snapshot()). iothub_task polls it and requests an EVENT
+ * snapshot, so a rating change that raises no alert (valve battery-critical is deliberately
+ * silent, and a roll-up grace expiry has no device edge at all) reaches the cloud within
+ * seconds instead of at the next heartbeat. An EXCELLENT <-> GOOD roll-up change (both
+ * GREEN; RSSI jitter near -80 dBm flips it) is not bumped and waits for the heartbeat.
  *
  * Lock-free read; every write happens under the engine's mutex. Wraps at 2^32 — compare
  * with != , never with <.

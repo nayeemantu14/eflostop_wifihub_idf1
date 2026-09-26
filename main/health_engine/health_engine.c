@@ -77,9 +77,10 @@ static uint32_t s_boot_sync_timeout_ms = HEALTH_BOOT_SYNC_TIMEOUT_MS;  // window
  * health_engine_task (single writer), read lock-free by iothub_task via
  * health_get_checkin_seq(). See that declaration for why this exists. */
 static volatile uint32_t s_checkin_seq = 0;
-/* Bumped on a system roll-up change and on a valve rating change to/from a battery-driven
- * state. Every write happens under s_mutex; read lock-free by iothub_task via
- * health_get_rating_seq(). See that declaration for why this exists. */
+/* Bumped on a system roll-up change to, from or within WARNING/CRITICAL, and on a valve
+ * rating change to/from a battery-driven state. Every write happens under s_mutex; read
+ * lock-free by iothub_task via health_get_rating_seq(). See that declaration for why this
+ * exists. */
 static volatile uint32_t s_rating_seq = 0;
 /* The provisioned valve's last REAL battery reading is <= HEALTH_VALVE_BATTERY_CRIT_PCT.
  * Written ONLY under s_mutex, by recalc_system_rating() — which every path that changes a
@@ -413,11 +414,19 @@ static void recalc_system_rating(void)
      * Wake iothub_task too: a change latched off the health task — e.g. the grace expiry
      * the fleet LED's 250 ms poll latches via check_boot_sync_locked() — would otherwise
      * wait for that loop's 30 s idle cap. Non-blocking and NULL-guarded (enqueue_alert()
-     * already calls it under s_mutex), so safe before telemetry is up. */
+     * already calls it under s_mutex), so safe before telemetry is up.
+     *
+     * Only a change to, from or within WARNING/CRITICAL is news, though. EXCELLENT and GOOD
+     * are both GREEN, and a sensor sitting near -80 dBm flips between them on RSSI jitter:
+     * every flip published a full snapshot (E-15). That change is still committed, and the
+     * next heartbeat carries it, as in 2.1.3. */
     if (worst != s_system_rating) {
+        health_rating_t old = s_system_rating;
         s_system_rating = worst;
-        s_rating_seq++;
-        telemetry_v2_wake_snapshot();
+        if (old >= HEALTH_WARNING || worst >= HEALTH_WARNING) {
+            s_rating_seq++;
+            telemetry_v2_wake_snapshot();
+        }
     }
 
     // Mirror for health_is_valve_battery_critical(); see s_valve_batt_crit.
