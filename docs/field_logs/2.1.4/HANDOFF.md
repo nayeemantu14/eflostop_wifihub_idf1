@@ -45,7 +45,7 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | D: review-fix round | committed (`6e496f5`, `7ae131d`, `abd7d9d`, `24782b5`, `00beb81`) |
 | 🔨 Build checkpoint 2 | **passed** (build of `00beb81`, §4a) |
 | E: adversarial review | **done**; fixes committed `095b5d6` … `b245d94` plus docs (§10) |
-| 🔨 Build checkpoint 3 | **next**, waiting for the user (§7) |
+| 🔨 Build checkpoint 3 | **passed** (build of `d9fa9c8`, §4b) |
 | F: 5-specialist council | not started |
 | G: MANUAL_TEST_PLAN.md + summary | not started |
 
@@ -196,6 +196,19 @@ The user ran an incremental build through the VS Code extension. The objects of 
 | DIRAM `.text`, IRAM | 113,387 / 100 % | same | 0 |
 
 ---
+
+## 4b. Build checkpoint 3 result (build of firmware `d9fa9c8`, Sunday 2026-09-27 09:10)
+
+The user ran an incremental build through the VS Code extension. The build succeeded, so there are no errors and no `-Wall` warnings (`-Werror=all`). Every source file changed since CP2 was recompiled at 09:10, after `d9fa9c8` (00:35). The `offline_buffer.c` and `provisioning_manager.c` objects are from 26 Sep 22:29, and neither source changed after that. The paste began at the image step, so the non-`-Wall` warning lines were not shown. The four known `master` warnings are expected; the user was asked to confirm.
+
+| | 2.1.3 | CP2 | CP3 | CP3 vs 2.1.3 |
+|---|---|---|---|---|
+| App `.bin` | 1,502,240 | 1,524,016 | 1,528,576 (0x175300) | +26,336 B (+1.75 %); 27 % of the partition free |
+| Flash `.text` / `.rodata` | 999,990 / 350,524 | 1,013,258 / 359,004 | 1,016,642 / 360,188 | +16,652 / +9,664 |
+| DIRAM `.bss` / `.data` | 36,120 / 21,556 | 36,280 / 21,572 | 36,280 / 21,572 | +160 / +16 (alignment padding absorbed the council fixes' ~5 B) |
+| DIRAM `.text`, IRAM | 113,387 / 100 % | same | same | 0 |
+
+The heap budget against 2.1.3 is about +176 B of static RAM, plus about 50 B of permanent heap for two log-level tag nodes (E-20).
 
 ## 5. Bench results: CP1 image `84a5d6a` (UART + IoT Hub monitor logs, 16:45–17:06)
 
