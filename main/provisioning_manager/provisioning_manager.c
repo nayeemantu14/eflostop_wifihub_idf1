@@ -1003,8 +1003,27 @@ static bool should_remain_provisioned(const provisioning_config_t *config)
             config->ble_leak_sensor_count > 0);
 }
 
-bool provisioning_remove_valve(void)
+// A removal just changed g_config (g_prov_mutex held, not yet saved). When it left no device,
+// the hub goes UNPROVISIONED and its rules go back to the provisioning defaults in that SAME
+// save. Deciding "empty" and resetting the rules in the removal's own mutex hold orders the
+// reset before any later provision or rules_config (esp-mqtt handles C2D one at a time); the
+// reset used to run later on iothub_task from its own read, and could overwrite a just-acked
+// opt-out or miss the edge entirely (E-05). No new keys: the save writes rules_en/rules_trig.
+// A rules_config set on an already empty hub is not touched here. Returns true = emptied.
+static bool mark_unprovisioned_if_empty(void)
 {
+    if (should_remain_provisioned(&g_config)) return false;
+    g_config.state                    = PROV_STATE_UNPROVISIONED;
+    g_config.rules.auto_close_enabled = true;
+    g_config.rules.trigger_mask       = RULES_TRIGGER_ALL;
+    ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
+    return true;
+}
+
+bool provisioning_remove_valve(bool *now_empty)
+{
+    if (now_empty) *now_empty = false;
+
     if (!g_initialized || g_prov_mutex == NULL) {
         ESP_LOGE(PROV_TAG, "Provisioning manager not initialized");
         return false;
@@ -1026,26 +1045,25 @@ bool provisioning_remove_valve(void)
         return false;
     }
 
-    // Only these two fields change. Kept (not the whole ~384 B config) so a failed save
+    // Only these fields change. Kept (not the whole ~384 B config) so a failed save
     // can put RAM back (L13).
     char old_valve_mac[sizeof(g_config.valve_mac)];
     memcpy(old_valve_mac, g_config.valve_mac, sizeof(old_valve_mac));
     provisioning_state_t old_state = g_config.state;
+    rules_config_t old_rules = g_config.rules;
 
     // Clear valve MAC
     memset(g_config.valve_mac, 0, sizeof(g_config.valve_mac));
     
     // Check if device should stay provisioned
-    if (!should_remain_provisioned(&g_config)) {
-        g_config.state = PROV_STATE_UNPROVISIONED;
-        ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
-    }
+    bool emptied = mark_unprovisioned_if_empty();
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
     if (!save_result) {
         memcpy(g_config.valve_mac, old_valve_mac, sizeof(g_config.valve_mac));
         g_config.state = old_state;
+        g_config.rules = old_rules;
         ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - valve removal rolled back");
         resave_after_failed_write();
     }
@@ -1057,13 +1075,17 @@ bool provisioning_remove_valve(void)
         ESP_LOGI(PROV_TAG, "Valve removed successfully");
         ESP_LOGI(PROV_TAG, "State: %s", 
                  state_now == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
+        if (emptied) ESP_LOGI(PROV_TAG, "Hub empty: rules config reset to defaults");
     }
 
+    if (now_empty) *now_empty = save_result && emptied;
     return save_result;
 }
 
-bool provisioning_remove_lora_sensor(uint32_t sensor_id)
+bool provisioning_remove_lora_sensor(uint32_t sensor_id, bool *now_empty)
 {
+    if (now_empty) *now_empty = false;
+
     if (!g_initialized || g_prov_mutex == NULL) {
         ESP_LOGE(PROV_TAG, "Provisioning manager not initialized");
         return false;
@@ -1092,9 +1114,10 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id)
         return false;
     }
 
-    // Undo record for a failed save (L13): the slot index and the state. The id itself
-    // is sensor_id, and the shift below keeps every other entry.
+    // Undo record for a failed save (L13): the slot index, the state and the rules. The id
+    // itself is sensor_id, and the shift below keeps every other entry.
     provisioning_state_t old_state = g_config.state;
+    rules_config_t old_rules = g_config.rules;
 
     // Shift remaining sensors down
     for (int j = idx; j < g_config.lora_sensor_count - 1; j++) {
@@ -1103,10 +1126,7 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id)
     g_config.lora_sensor_count--;
 
     // Check if device should stay provisioned
-    if (!should_remain_provisioned(&g_config)) {
-        g_config.state = PROV_STATE_UNPROVISIONED;
-        ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
-    }
+    bool emptied = mark_unprovisioned_if_empty();
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
@@ -1118,6 +1138,7 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id)
         g_config.lora_sensor_ids[idx] = sensor_id;
         g_config.lora_sensor_count++;
         g_config.state = old_state;
+        g_config.rules = old_rules;
         ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - LoRa removal rolled back");
         resave_after_failed_write();
     }
@@ -1131,13 +1152,17 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id)
         ESP_LOGI(PROV_TAG, "Remaining LoRa sensors: %d", remaining);
         ESP_LOGI(PROV_TAG, "State: %s", 
                  state_now == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
+        if (emptied) ESP_LOGI(PROV_TAG, "Hub empty: rules config reset to defaults");
     }
 
+    if (now_empty) *now_empty = save_result && emptied;
     return save_result;
 }
 
-bool provisioning_remove_ble_sensor(const char *mac)
+bool provisioning_remove_ble_sensor(const char *mac, bool *now_empty)
 {
+    if (now_empty) *now_empty = false;
+
     if (!mac || !g_initialized || g_prov_mutex == NULL) {
         ESP_LOGE(PROV_TAG, "Invalid parameters");
         return false;
@@ -1172,10 +1197,11 @@ bool provisioning_remove_ble_sensor(const char *mac)
     }
 
     // Undo record for a failed save (L13): the slot, the stored string (its case may
-    // differ from `mac`) and the state - 18 B, not a copy of the 288 B MAC table.
+    // differ from `mac`), the state and the rules - ~24 B, not a copy of the 288 B MAC table.
     char removed_mac[sizeof(g_config.ble_leak_sensors[0])];
     memcpy(removed_mac, g_config.ble_leak_sensors[idx], sizeof(removed_mac));
     provisioning_state_t old_state = g_config.state;
+    rules_config_t old_rules = g_config.rules;
 
     // Shift remaining sensors down
     for (int j = idx; j < g_config.ble_leak_sensor_count - 1; j++) {
@@ -1184,10 +1210,7 @@ bool provisioning_remove_ble_sensor(const char *mac)
     g_config.ble_leak_sensor_count--;
 
     // Check if device should stay provisioned
-    if (!should_remain_provisioned(&g_config)) {
-        g_config.state = PROV_STATE_UNPROVISIONED;
-        ESP_LOGI(PROV_TAG, "No devices remain - state changed to UNPROVISIONED");
-    }
+    bool emptied = mark_unprovisioned_if_empty();
 
     // Save updated config to NVS
     bool save_result = provisioning_save_to_nvs(&g_config);
@@ -1200,6 +1223,7 @@ bool provisioning_remove_ble_sensor(const char *mac)
         memcpy(g_config.ble_leak_sensors[idx], removed_mac, sizeof(removed_mac));
         g_config.ble_leak_sensor_count++;
         g_config.state = old_state;
+        g_config.rules = old_rules;
         ESP_LOGE(PROV_TAG, "Failed to save updated config to NVS - BLE removal rolled back");
         resave_after_failed_write();
     }
@@ -1213,8 +1237,10 @@ bool provisioning_remove_ble_sensor(const char *mac)
         ESP_LOGI(PROV_TAG, "Remaining BLE sensors: %d", remaining);
         ESP_LOGI(PROV_TAG, "State: %s", 
                  state_now == PROV_STATE_PROVISIONED ? "PROVISIONED" : "UNPROVISIONED");
+        if (emptied) ESP_LOGI(PROV_TAG, "Hub empty: rules config reset to defaults");
     }
 
+    if (now_empty) *now_empty = save_result && emptied;
     return save_result;
 }
 

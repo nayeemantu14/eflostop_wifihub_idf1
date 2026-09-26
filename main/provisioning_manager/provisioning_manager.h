@@ -132,10 +132,17 @@ bool provisioning_decommission(void);
  * Removes valve MAC and updates state to UNPROVISIONED if no other devices remain.
  * The remove/add/set functions below change RAM only when the NVS save succeeds.
  * 
+ * A removal that leaves NO device also puts the rules config back to the defaults
+ * (auto-close on, RULES_TRIGGER_ALL) in the same mutex hold and the same save, so the
+ * empty-hub reset is ordered before any later provision or rules_config. The same holds
+ * for the two sensor removals below.
+ * 
+ * @param now_empty Optional (NULL allowed): set true only when this removal succeeded
+ *                  and left no device provisioned; false on every other return
  * @return true if removal successful; false if no valve is provisioned, the mutex
  *         timed out, or the NVS save failed (RAM then unchanged)
  */
-bool provisioning_remove_valve(void);
+bool provisioning_remove_valve(bool *now_empty);
 
 /**
  * @brief Remove specific LoRa sensor from provisioning (selective decommission)
@@ -143,9 +150,10 @@ bool provisioning_remove_valve(void);
  * Removes sensor from list and updates state to UNPROVISIONED if no other devices remain
  * 
  * @param sensor_id Sensor ID to remove
+ * @param now_empty Optional (NULL allowed): see provisioning_remove_valve()
  * @return true if removal successful
  */
-bool provisioning_remove_lora_sensor(uint32_t sensor_id);
+bool provisioning_remove_lora_sensor(uint32_t sensor_id, bool *now_empty);
 
 /**
  * @brief Remove specific BLE leak sensor from provisioning (selective decommission)
@@ -153,9 +161,10 @@ bool provisioning_remove_lora_sensor(uint32_t sensor_id);
  * Removes sensor from list and updates state to UNPROVISIONED if no other devices remain
  * 
  * @param mac MAC address to remove (format: "XX:XX:XX:XX:XX:XX")
+ * @param now_empty Optional (NULL allowed): see provisioning_remove_valve()
  * @return true if removal successful
  */
-bool provisioning_remove_ble_sensor(const char *mac);
+bool provisioning_remove_ble_sensor(const char *mac, bool *now_empty);
 
 /**
  * @brief Add a LoRa sensor to existing provisioning
