@@ -1084,6 +1084,16 @@ static bool apply_pending_cmd(int *slot, uint16_t handle, bool is_rmleak)
     return retry;
 }
 
+// A replay token of generation `gen` waits at the front of ble_cmd_queue. Only
+// post_replay_token() queues at the front, and only the command task takes items, so it stays
+// there until the command task takes it.
+static bool replay_token_queued(uint32_t gen)
+{
+    uint32_t front = 0;
+    return ble_cmd_queue != NULL && xQueuePeek(ble_cmd_queue, &front, 0) == pdTRUE &&
+           CMD_ITEM_IS_REPLAY(front) && CMD_ITEM_GEN(front) == gen;
+}
+
 // Queues the replay token at the FRONT of ble_cmd_queue (setup completion, NimBLE host task)
 // for the pended commands apply_pending_cmd() could not write, or that the command task
 // pended just as a setup completed (finish_cmd_write()). The command task replays them
@@ -1100,9 +1110,7 @@ static void post_replay_token(void)
     // outstanding" flag: nothing to reset when a valve target change wipes the queue. One of
     // an older generation is dropped when taken, so it does not count.
     uint32_t gen = cmd_gen_now();
-    uint32_t front = 0;
-    if (xQueuePeek(ble_cmd_queue, &front, 0) == pdTRUE && CMD_ITEM_IS_REPLAY(front) &&
-        CMD_ITEM_GEN(front) == gen)
+    if (replay_token_queued(gen))
     {
         ESP_LOGW(BLE_TAG, "[CMD] Pending valve commands not applied - left to the replay already queued");
         return;
@@ -2286,7 +2294,8 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
             // finish_cmd_write() queues the replay token, and replay_pending_cmds() writes the
             // RMLEAK command first. That replay writes this one as a replay, never held here
             // again: a CLOSE still goes if the RMLEAK write fails there (also when that check
-            // had just tried it and failed: it is then tried once more first), an OPEN waits.
+            // had just tried it and failed: it is then tried once more first), an OPEN waits,
+            // and both wait while that RMLEAK write waits for a busy GATT pool.
             ESP_LOGW(BLE_TAG, "[CMD] %s=%u held behind the pending RMLEAK command", what, val);
             rc = CMD_WR_RELINK;
         }
@@ -2464,25 +2473,27 @@ static void finish_cmd_write(int rc, uint8_t val, uint32_t gen, int *slot, uint1
 }
 
 // Replays the command pended in *slot (command task: replay_pending_cmds(), and the
-// interlock ahead of a live valve command in write_valve_command()). Returns false when it
-// failed on a live link: it stays pended, and a valve command must not overtake it.
-static bool replay_pending_slot(int *slot, const uint16_t *handle, uint32_t gen,
-                                const char *what, const char *unconfirmed)
+// interlock ahead of a live valve command in write_valve_command()). Returns 0, or the last
+// failure (write_cmd_with_retry()) when it failed on a live link: it stays pended, and a valve
+// command must not overtake it. BLE_HS_ENOMEM: the GATT pool stayed busy, and the replay token
+// is queued to try it again (drop_link_after_failed_write()).
+static int replay_pending_slot(int *slot, const uint16_t *handle, uint32_t gen,
+                               const char *what, const char *unconfirmed)
 {
     int v = pending_get(slot, gen);
     if (v != 0 && v != 1)
-        return true;   // nothing pended any more: written, cancelled or superseded meanwhile
+        return 0;   // nothing pended any more: written, cancelled or superseded meanwhile
 
     ESP_LOGI(BLE_TAG, "[CMD] Replaying pending %s command=%d", what, v);
     uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
     int rc = write_cmd_with_retry(handle, (uint8_t)v, gen, slot, true, &conn, what, unconfirmed);
     if (rc == 0)
-        return true;
+        return 0;
     if (rc == CMD_WR_STALE || rc == CMD_WR_MOVED)
     {
         ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d cancelled, superseded or flushed meanwhile - not replayed",
                  what, v);
-        return true;
+        return 0;
     }
     if (rc == CMD_WR_RELINK)
     {
@@ -2491,10 +2502,10 @@ static bool replay_pending_slot(int *slot, const uint16_t *handle, uint32_t gen,
         // characteristic, as at setup completion.
         ESP_LOGW(BLE_TAG, "[CMD] Pending %s command=%d kept for the next link", what, v);
         request_valve_link();
-        return true;
+        return 0;
     }
     drop_link_after_failed_write(rc, conn, what, (uint8_t)v);
-    return false;
+    return rc;
 }
 
 static void write_valve_command(uint8_t val, uint32_t gen)
@@ -2515,7 +2526,7 @@ static void write_valve_command(uint8_t val, uint32_t gen)
     // goes, since the interlock was tried first and holding a CLOSE back during a leak is
     // worse. When that failure drops the link, the command pends behind it (CMD_WR_RELINK).
     if (cmd_link_ready(h_rmleak_char) &&
-        !replay_pending_slot(&g_pending_rmleak_cmd, &h_rmleak_char, gen, "RMLEAK", "interlock state") &&
+        replay_pending_slot(&g_pending_rmleak_cmd, &h_rmleak_char, gen, "RMLEAK", "interlock state") != 0 &&
         val == 1)
     {
         ESP_LOGW(BLE_TAG, "[CMD] Valve=%u not written - kept behind the pending RMLEAK command", val);
@@ -2635,21 +2646,29 @@ static void write_rmleak_command(uint8_t val, uint32_t gen)
 // while its slot still holds it (a cancel, or a newer command of its kind, wins). Every
 // command queued after the token is newer and runs after this.
 // After a failed RMLEAK write only an OPEN is held back; a CLOSE still goes, for the reason
-// write_valve_command() gives.
+// write_valve_command() gives. Not after BLE_HS_ENOMEM: that RMLEAK write has not failed, it
+// waits for a GATT procedure, and a CLOSE replayed now would poll the same pool and could take
+// the first one that frees, ahead of it. The CLOSE stays pended behind the replay token
+// drop_link_after_failed_write() just queued, which writes the RMLEAK command first. If the
+// pool never frees, NimBLE's GATT timeout drops the link, and setup completion writes both,
+// RMLEAK first. Only while that token is queued: when the command queue was full, the CLOSE
+// goes now rather than wait for the next link.
 static void replay_pending_cmds(uint32_t gen)
 {
     if (!cmd_gen_is_current(gen))
     {
         ESP_LOGW(BLE_TAG, "[CMD] Replay of pending valve commands dropped - the valve target changed");
     }
-    else if (!replay_pending_slot(&g_pending_rmleak_cmd, &h_rmleak_char, gen, "RMLEAK", "interlock state") &&
-             pending_get(&g_pending_valve_cmd, gen) == 1)
-    {
-        ESP_LOGW(BLE_TAG, "[CMD] Pending valve command=1 kept behind the RMLEAK command");
-    }
     else
     {
-        (void)replay_pending_slot(&g_pending_valve_cmd, &h_valve_char, gen, "Valve", "position");
+        int rc = replay_pending_slot(&g_pending_rmleak_cmd, &h_rmleak_char, gen, "RMLEAK", "interlock state");
+        int v = pending_get(&g_pending_valve_cmd, gen);
+        if (rc != 0 && v == 1)
+            ESP_LOGW(BLE_TAG, "[CMD] Pending valve command=1 kept behind the RMLEAK command");
+        else if (rc == BLE_HS_ENOMEM && v == 0 && replay_token_queued(gen))
+            ESP_LOGW(BLE_TAG, "[CMD] Pending valve command=0 kept behind the RMLEAK command (GATT busy)");
+        else
+            (void)replay_pending_slot(&g_pending_valve_cmd, &h_valve_char, gen, "Valve", "position");
     }
     cmd_settle_release();   // armed by post_replay_token()
 }
