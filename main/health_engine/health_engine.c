@@ -47,6 +47,11 @@ typedef struct {
 _Static_assert(sizeof(health_device_t) <= 80,
                "health_device_t grew: s_devices[] is .bss, every byte is heap on this board");
 
+/* The valve member carries its link's MAC. It must stay within the union's largest member,
+ * ble_leak, or every slot of the 16-deep event queue grows with it. */
+_Static_assert(sizeof(((health_event_t *)0)->valve) <= sizeof(((health_event_t *)0)->ble_leak),
+               "health_event_t.valve outgrew ble_leak: every health queue slot would grow");
+
 // ---------------------------------------------------------------------------
 // Static state
 // ---------------------------------------------------------------------------
@@ -166,6 +171,25 @@ static health_device_t *find_valve(void)
         }
     }
     return NULL;
+}
+
+/* The valve entry a valve event applies to: only the one of `mac`, the link the valve module
+ * stamped on the event. The reconcile replaces the entry on iothub_task while events queued
+ * from the previous valve still wait here, so across a valve swap one of them was applied to
+ * the new valve's fresh entry: a stale CONNECTED rated an absent valve EXCELLENT for good, a
+ * stale battery rated the new valve battery-critical. NULL = whichever valve the table holds,
+ * for the dropped-DISCONNECTED fallback only, which has no identity (see
+ * g_health_valve_disc_pending). */
+static health_device_t *find_valve_for(const char *mac)
+{
+    health_device_t *dev = find_valve();
+    if (!dev || !mac) return dev;
+    if (strcasecmp(mac, dev->dev_id) != 0) {
+        ESP_LOGW(HEALTH_TAG, "Valve event from %s dropped - the table's valve is %s",
+                 mac[0] ? mac : "unknown", dev->dev_id);
+        return NULL;
+    }
+    return dev;
 }
 
 // Forward declaration (defined after evaluate_timeouts)
@@ -560,9 +584,9 @@ static void handle_ble_leak_checkin(const health_event_t *evt)
     check_boot_sync_locked();
 }
 
-static void handle_valve_event(bool connected)
+static void handle_valve_event(const char *mac, bool connected)
 {
-    health_device_t *dev = find_valve();
+    health_device_t *dev = find_valve_for(mac);
     if (!dev) return;
 
     int64_t now = now_ms();
@@ -605,9 +629,9 @@ static void handle_valve_event(bool connected)
 // stays with the connect/disconnect events. Without this the valve path never fed
 // a battery, so compute_valve_rating saw last_battery==0xFF and always returned
 // EXCELLENT.
-static void handle_valve_battery(uint8_t battery)
+static void handle_valve_battery(const char *mac, uint8_t battery)
 {
-    health_device_t *dev = find_valve();
+    health_device_t *dev = find_valve_for(mac);
     if (!dev) return;
     // Unknown (no characteristic, failed read, setup not done) — ignore, so
     // last_battery keeps the last REAL reading across a reconnect.
@@ -623,9 +647,9 @@ static void handle_valve_battery(uint8_t battery)
 
 // Valve flood-probe state change. Owns ONLY `leaking`; connectivity and battery
 // stay with their own events, matching how handle_valve_battery() is scoped.
-static void handle_valve_leak(bool leaking)
+static void handle_valve_leak(const char *mac, bool leaking)
 {
-    health_device_t *dev = find_valve();
+    health_device_t *dev = find_valve_for(mac);
     if (!dev) return;
 
     dev->leaking = leaking;
@@ -684,10 +708,10 @@ static void handle_valve_resync(void)
     // The link only if the entry does not already reflect it; the readings always.
     if (dev->last_seen_ms == 0 || dev->disconnect_ms != 0) {
         ESP_LOGI(HEALTH_TAG, "Valve link resync: link was already up when its table entry was added");
-        handle_valve_event(true);
+        handle_valve_event(live_mac, true);
     }
-    if (ble_valve_get_leak()) handle_valve_leak(true);   // raise only: see above
-    handle_valve_battery(ble_valve_get_battery());
+    if (ble_valve_get_leak()) handle_valve_leak(live_mac, true);   // raise only: see above
+    handle_valve_battery(live_mac, ble_valve_get_battery());
 }
 
 static void evaluate_timeouts(void)
@@ -913,16 +937,16 @@ static void health_engine_task(void *param)
                 s_checkin_seq++;
                 break;
             case HEALTH_EVT_VALVE_CONNECTED:
-                handle_valve_event(true);
+                handle_valve_event(evt.valve.mac, true);
                 break;
             case HEALTH_EVT_VALVE_DISCONNECTED:
-                handle_valve_event(false);
+                handle_valve_event(evt.valve.mac, false);
                 break;
             case HEALTH_EVT_VALVE_BATTERY:
-                handle_valve_battery(evt.valve.battery);
+                handle_valve_battery(evt.valve.mac, evt.valve.battery);
                 break;
             case HEALTH_EVT_VALVE_LEAK:
-                handle_valve_leak(evt.valve.leaking);
+                handle_valve_leak(evt.valve.mac, evt.valve.leaking);
                 break;
             case HEALTH_EVT_TICK:
                 evaluate_timeouts();
@@ -960,10 +984,13 @@ static void health_engine_task(void *param)
         // notify, a dropped DISCONNECTED does not. So the fallback is biased
         // toward applying the disconnect — if it is stale, the next notify
         // corrects it, which is the safe direction to be wrong in.
+        //
+        // The flag carries no MAC, so it goes to whichever valve the table holds; the
+        // reconcile clears it when it removes that valve's entry.
         if (g_health_valve_disc_pending) {
             g_health_valve_disc_pending = false;
             ESP_LOGW(HEALTH_TAG, "Recovering dropped valve DISCONNECTED event");
-            handle_valve_event(false);
+            handle_valve_event(NULL, false);
         }
 
         recalc_system_rating();
@@ -1064,6 +1091,9 @@ bool health_engine_reconcile_devices(uint32_t sync_window_ms, health_reconcile_r
         health_device_t *dev = &s_devices[i];
         if (!dev->in_use) continue;
         if (!device_in_set(&set, dev)) {
+            // A dropped DISCONNECTED pending for this valve has no MAC: replayed after the
+            // swap, it would stamp a disconnect on the next valve's fresh entry.
+            if (dev->dev_type == HEALTH_DEV_VALVE) g_health_valve_disc_pending = false;
             memset(dev, 0, sizeof(*dev));
             removed++;
         }

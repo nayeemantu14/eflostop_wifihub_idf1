@@ -124,6 +124,9 @@ typedef struct {
             bool    leaking;
         } ble_leak;
         struct {
+            char    mac[18];    // the link the event came from; the engine applies it only
+                                // to the valve entry of that MAC (fits within ble_leak, so
+                                // the union does not grow: asserted in health_engine.c)
             uint8_t battery;
             bool    leaking;
         } valve;
@@ -429,14 +432,21 @@ static inline void health_post_ble_leak_checkin(const char *mac_str, uint8_t bat
  * event stamps disconnect_ms, so every re-rate still sees a connected valve and the
  * rating stays at its last healthy value indefinitely. This fallback is therefore
  * still required. Written by health_post_valve_event(), drained by health_engine_task().
+ * It carries no MAC, so health_engine_reconcile_devices() clears it when it removes the
+ * valve entry: replayed after a valve swap it would stamp a disconnect on the new valve.
  */
 extern volatile bool g_health_valve_disc_pending;
 
-static inline void health_post_valve_event(bool connected)
+/* The valve posts carry `mac`, the MAC of the link the event came from (the valve module
+ * copies it in the same critical section as its provisioned-valve gate). The engine applies
+ * an event only to the valve entry of that MAC, so one still queued from the previous valve
+ * across a valve swap is dropped rather than applied to the new valve's fresh entry. */
+static inline void health_post_valve_event(const char *mac, bool connected)
 {
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
     evt.type = connected ? HEALTH_EVT_VALVE_CONNECTED : HEALTH_EVT_VALVE_DISCONNECTED;
+    if (mac) strncpy(evt.valve.mac, mac, sizeof(evt.valve.mac) - 1);
 
     bool queued = health_post_event(&evt);
 
@@ -450,11 +460,12 @@ static inline void health_post_valve_event(bool connected)
     }
 }
 
-static inline void health_post_valve_battery(uint8_t battery)
+static inline void health_post_valve_battery(const char *mac, uint8_t battery)
 {
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
     evt.type = HEALTH_EVT_VALVE_BATTERY;
+    if (mac) strncpy(evt.valve.mac, mac, sizeof(evt.valve.mac) - 1);
     evt.valve.battery = battery;
     health_post_event(&evt);
 }
@@ -462,11 +473,12 @@ static inline void health_post_valve_battery(uint8_t battery)
 /* The valve's own flood probe. Needs its own event (unlike the sensors) because the
  * flood characteristic notifies independently of battery and of connect/disconnect,
  * so there is no existing check-in to ride along on. */
-static inline void health_post_valve_leak(bool leaking)
+static inline void health_post_valve_leak(const char *mac, bool leaking)
 {
     health_event_t evt;
     memset(&evt, 0, sizeof(evt));
     evt.type = HEALTH_EVT_VALVE_LEAK;
+    if (mac) strncpy(evt.valve.mac, mac, sizeof(evt.valve.mac) - 1);
     evt.valve.leaking = leaking;
     health_post_event(&evt);
 }

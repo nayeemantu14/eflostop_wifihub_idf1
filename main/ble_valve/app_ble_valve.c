@@ -273,15 +273,26 @@ static bool target_copy(char out[18])
 
 // True only while the current link is to the PROVISIONED valve. The single gate for
 // everything that may act on, or report from, a link (P0-a).
-static bool link_is_target(void)
+// mac_out (18 bytes, or NULL): the link's MAC when true, else "". Copied in the gate's own
+// critical section, so a health event stamped with it names the valve the gate passed.
+static bool link_is_target_mac(char *mac_out)
 {
+    if (mac_out)
+        mac_out[0] = '\0';
     if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
         return false;
     taskENTER_CRITICAL(&s_mac_lock);
     bool match = g_has_target_mac && g_valve_mac[0] != '\0' &&
                  strcasecmp(g_valve_mac, g_target_valve_mac) == 0;
+    if (match && mac_out)
+        memcpy(mac_out, g_valve_mac, sizeof(g_valve_mac));
     taskEXIT_CRITICAL(&s_mac_lock);
     return match;
+}
+
+static bool link_is_target(void)
+{
+    return link_is_target_mac(NULL);
 }
 
 // Valve-command generation, under s_mac_lock. Bumped with every valve target change, in the
@@ -637,13 +648,16 @@ static const char *batt_to_str(uint8_t batt, char *buf, size_t len)
 // -----------------------------------------------------------------------------
 // UPDATE NOTIFY
 // -----------------------------------------------------------------------------
-static void notify_hub_update(ble_update_type_t update_type)
+// disc_mac: DISCONNECTED only, the MAC of the link that went down, which its handler sampled
+// with its gate before clearing g_valve_mac. NULL for every other update.
+static void notify_hub_update(ble_update_type_t update_type, const char *disc_mac)
 {
     /* Only the provisioned valve may reach the hub and the health engine (P0-a). A link
      * can outlive its target (changed or removed while linked) until the queued DISCONNECT
      * lands. A DISCONNECTED is posted after the link is gone, so the DISCONNECT handler
-     * makes that call itself. */
-    if (update_type != BLE_UPD_DISCONNECTED && !link_is_target())
+     * makes that call itself. The health posts below carry the MAC the gate passed. */
+    char mac[18] = {0};
+    if (update_type != BLE_UPD_DISCONNECTED && !link_is_target_mac(mac))
     {
         ESP_LOGW(BLE_TAG, "[NOTIFY] update type=%d dropped - link is not the provisioned valve",
                  (int)update_type);
@@ -681,15 +695,15 @@ static void notify_hub_update(ble_update_type_t update_type)
      * the snapshot would grow unboundedly even while battery NOTIFYs and
      * state changes are arriving every few minutes. */
     if (update_type == BLE_UPD_DISCONNECTED)
-        health_post_valve_event(false);
+        health_post_valve_event(disc_mac, false);
     else if (update_type != BLE_UPD_NONE) {
-        health_post_valve_event(true);
+        health_post_valve_event(mac, true);
         /* Battery resync at LINK-UP only. The battery itself reaches the health engine
          * from on_notify() on every read/notify; re-posting it on every STATE/LEAK/RMLEAK
          * update as well doubled the health-queue traffic (L19). This one covers a
          * setup-time post the 16-deep queue dropped. 0xFF (unknown) is ignored there. */
         if (update_type == BLE_UPD_CONNECTED)
-            health_post_valve_battery(g_val_battery);
+            health_post_valve_battery(mac, g_val_battery);
     }
 }
 
@@ -699,8 +713,10 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
     (void)arg;
 
     // Values from any other valve must not reach the cache, the health engine (flood probe,
-    // battery) or the hub. Covers notifies and every read that lands here.
-    if (!link_is_target())
+    // battery) or the hub. Covers notifies and every read that lands here. The health posts
+    // below carry the MAC this gate passed.
+    char mac[18] = {0};
+    if (!link_is_target_mac(mac))
     {
         ESP_LOGW(BLE_TAG, "[NOTIFY] attr_handle=%u ignored - link is not the provisioned valve",
                  attr_handle);
@@ -723,7 +739,7 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
         g_val_state = data[0];
         ESP_LOGI(BLE_TAG, "[DATA] Valve State=%d (%s)", g_val_state, g_val_state ? "OPEN" : "CLOSED");
         if (old_state != g_val_state && !g_setup_in_progress)
-            notify_hub_update(BLE_UPD_STATE);
+            notify_hub_update(BLE_UPD_STATE, NULL);
     }
     else if (attr_handle == h_flood_char)
     {
@@ -734,9 +750,9 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
          * health roll-up (a wet valve probe is CRITICAL), and the initial setup read
          * is exactly when the roll-up most needs the value. The health engine keys
          * off the value, not the edge, so a repeat post is a no-op. */
-        health_post_valve_leak(g_val_leak);
+        health_post_valve_leak(mac, g_val_leak);
         if (old_leak != g_val_leak && !g_setup_in_progress)
-            notify_hub_update(BLE_UPD_LEAK);
+            notify_hub_update(BLE_UPD_LEAK, NULL);
     }
     else if (attr_handle == h_rmleak_char)
     {
@@ -744,7 +760,7 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
         g_val_rmleak = (data[0] != 0);
         ESP_LOGI(BLE_TAG, "[DATA] RMLEAK=%d (%s)", g_val_rmleak, g_val_rmleak ? "ACTIVE" : "CLEAR");
         if (old_rmleak != g_val_rmleak && !g_setup_in_progress)
-            notify_hub_update(BLE_UPD_RMLEAK);
+            notify_hub_update(BLE_UPD_RMLEAK, NULL);
     }
     else if (attr_handle == h_batt_char)
     {
@@ -764,9 +780,9 @@ static int on_notify(uint16_t conn_handle, uint16_t attr_handle, struct os_mbuf 
          * critical reading never passes the delta gate, so an earlier post the queue
          * dropped would otherwise never be corrected and the valve would never be rated
          * CRITICAL. The health engine keys off the value, so a repeat is a no-op. */
-        health_post_valve_battery(g_val_battery);
+        health_post_valve_battery(mac, g_val_battery);
         if (old_batt != g_val_battery && !g_setup_in_progress)
-            notify_hub_update(BLE_UPD_BATTERY);
+            notify_hub_update(BLE_UPD_BATTERY, NULL);
     }
     else
     {
@@ -1237,7 +1253,7 @@ static void setup_next_step(void)
         ESP_LOGI(BLE_TAG, "[READY] State: %s", state_bits_to_str(get_state_bits()));
 
         g_setup_in_progress = false;
-        notify_hub_update(BLE_UPD_CONNECTED);
+        notify_hub_update(BLE_UPD_CONNECTED, NULL);
 
         /* ANNOUNCE THE FLOOD PROBE STATE AT LINK-UP, WET OR DRY.
          *
@@ -1270,7 +1286,7 @@ static void setup_next_step(void)
             ESP_LOGW(BLE_TAG, "[READY] Flood probe already WET at link-up — announcing for evaluation");
         else
             ESP_LOGI(BLE_TAG, "[READY] Announcing flood probe state (dry) for reconciliation");
-        notify_hub_update(BLE_UPD_LEAK);
+        notify_hub_update(BLE_UPD_LEAK, NULL);
 
         /* RMLEAK before the valve command, the order every live pair is issued in (rules
          * engine: set_rmleak(true) then close, set_rmleak(false) then open). A CLOSE must
@@ -1648,6 +1664,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     struct ble_gap_conn_desc desc;
     int rc;
     bool was_target = false;   // DISCONNECT only
+    char disc_mac[18];         // DISCONNECT only: the MAC was_target passed
 
     switch (event->type)
     {
@@ -1783,8 +1800,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
         // Sampled before the link state is cleared. A link whose target was changed or
         // removed while it was up is no longer the provisioned valve's, and its teardown
-        // must not reach the hub or the health engine either.
-        was_target = link_is_target();
+        // must not reach the hub or the health engine either. Its MAC is sampled with it,
+        // for the health engine's DISCONNECTED (g_valve_mac is cleared below).
+        was_target = link_is_target_mac(disc_mac);
 
         valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         reset_link_cache();
@@ -1817,7 +1835,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         memset(g_valve_mac, 0, sizeof(g_valve_mac));
         taskEXIT_CRITICAL(&s_mac_lock);
         if (was_target)
-            notify_hub_update(BLE_UPD_DISCONNECTED);
+            notify_hub_update(BLE_UPD_DISCONNECTED, disc_mac);
         else
             ESP_LOGW(BLE_TAG, "[DISCONNECT] Link was not the provisioned valve - hub not notified");
 
