@@ -705,7 +705,9 @@ static bool snapshot_envelope_complete(const cJSON *root)
            cJSON_GetObjectItemCaseSensitive(gw, "id") &&
            cJSON_GetObjectItemCaseSensitive(gw, "short_id") &&
            cJSON_GetObjectItemCaseSensitive(gw, "fw") &&
-           cJSON_GetObjectItemCaseSensitive(gw, "uptime_s");
+           cJSON_GetObjectItemCaseSensitive(gw, "uptime_s") &&
+           (hub_identity_get_name()[0] == '\0' ||           // name is optional on the wire
+            cJSON_GetObjectItemCaseSensitive(gw, "name"));
 }
 
 // Every key the snapshot adds goes through this: one that could not be allocated fails
