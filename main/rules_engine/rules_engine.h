@@ -150,7 +150,9 @@ void rules_engine_on_valve_connected(void);
  *        Checks override window expiry, auto-clear timeout, and valve-side override.
  *        A window stamped before the clock synced is timed on uptime until the first
  *        valid clock, then re-based to it (started this boot) or expired (restored
- *        from an earlier boot, whose elapsed time is unknown).
+ *        from an earlier boot, whose elapsed time is unknown). A real-epoch window
+ *        restored after a power-on lost the clock expires, while the clock is still
+ *        unsynced, once the full duration has passed since that power-on.
  */
 void rules_engine_tick(void);
 
@@ -164,7 +166,8 @@ bool rules_engine_is_override_window_active(void);
 /**
  * @brief Get remaining seconds in the override window.
  *        Before the clock syncs, a window stamped from the unsynced clock is measured
- *        on uptime; a window with a real-epoch expiry reports the full duration.
+ *        on uptime; a window with a real-epoch expiry (restored after a power-on) counts
+ *        down from that power-on.
  * @return Seconds remaining (>=0), or -1 if no override window active.
  */
 int32_t rules_engine_get_override_remaining_s(void);
