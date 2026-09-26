@@ -2303,8 +2303,9 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
         {
             uint16_t conn = valve_conn_handle;
             *conn_out = conn;
-            // While polling a busy pool, only a write that got a procedure is logged.
-            bool polling = (busy_ms > 0);
+            // While polling a busy pool, only a write that got a procedure is logged. rc is the
+            // previous attempt's: a genuine retry after the wait is logged in full.
+            bool polling = (rc == BLE_HS_ENOMEM);
             if (!polling)
                 ESP_LOGI(BLE_TAG, "[CMD] Writing %s=%u", what, val);
             rc = ble_gattc_write_flat(conn, *handle, &val, 1, NULL, NULL);
