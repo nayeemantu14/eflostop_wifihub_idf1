@@ -743,6 +743,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // Latch the leak incident ALWAYS — even during override window.
     // This ensures the system knows about the incident when the window expires
     // and can immediately auto-close.
+    bool new_incident = !g_leak_incident_active;
     if (!g_leak_incident_active) {
         ESP_LOGW(RULES_TAG, "LEAK INCIDENT latched by %s sensor %s",
                  leak_source_to_str(source), source_id ? source_id : "unknown");
@@ -795,10 +796,17 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // valve counts: after a valve decommission the old link stays up until its DISCONNECT
     // (about 0.5 s, up to the 5 s supervision timeout), and neither its stale cache nor
     // that link may speak for a valve that is gone. The link is gated the same way below.
+    //
+    // Never for an incident this call has just latched. The cache can still read an RMLEAK
+    // the hub has itself just queued a clear for (auto-clear or leak_reset, written and read
+    // back on the valve task after this). Skipping the re-assert then left the clear to land
+    // with the incident latched and no fresh grace, and tick Check 2 read the hub's own
+    // clear as a valve-button override: a false 24 h window, auto-close blocked while wet.
+    // Re-asserting a closed valve's RMLEAK is harmless; it also restarts the grace below.
     bool has_target = ble_valve_has_target_mac();
     int valve_state = ble_valve_get_state();
     bool rmleak_already = ble_valve_get_rmleak_state();
-    if (has_target && valve_state == 0 && rmleak_already) {
+    if (!new_incident && has_target && valve_state == 0 && rmleak_already) {
         ESP_LOGD(RULES_TAG, "Valve closed + RMLEAK active, no action needed");
         xSemaphoreGive(g_mutex);
         return;
