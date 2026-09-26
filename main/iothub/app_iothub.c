@@ -871,6 +871,18 @@ static void apply_device_set_change(void)
         g_devset_changed = true;
     }
 
+    // The BLE scanner keeps its per-MAC delta state (seen / last leak) until its own 10 s
+    // whitelist reload drops the MAC, so a sensor removed and re-added between two reloads
+    // keeps it: a wet sensor's unchanged advertisement then produces no event, so no rules
+    // evaluation and no leak_detected, while the removal's purge above already took it out
+    // of the active-leak set and the interlock auto-clears (L8/L9, S6). On an ADD, forget
+    // what every sensor reported, as at boot, so each re-emits once; the cache gate and the
+    // idempotent rules evaluation absorb the survivors' repeats. Not on a removal alone: a
+    // removed sensor still heard before the reload would simply re-commit its state.
+    if (r.added > 0) {
+        app_ble_leak_reset_tracking();
+    }
+
     // Emptied -> reset once (edge). Otherwise ONLY additions arm the commission snapshot +
     // pulse; removals never do (BUG-2/3).
     bool now_empty = (r.total == 0);
