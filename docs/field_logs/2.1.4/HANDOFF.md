@@ -2,13 +2,14 @@
 
 Written for the user and for the next Claude Code session. It records where the 2.1.4 fix job stands and how to pick it up again.
 
-> **Resume here.** Read §1, §7 and §10 first.
+> **Resume here.** Read §1, §7, §10 and §11 first.
 >
 > **Update, Saturday 2026-09-26.**
 > - **Build checkpoint 2 passed.** The user built `00beb81` at 07:20 (§4a).
 > - **Phase E (adversarial review) is done, and its fixes are committed.** Findings, decisions and commits are in §10.
 > - **The user asked for a new change: the RMLEAK auto-clear is now 10 s** (`75a4a59`).
-> - **Next: 🔨 Build checkpoint 3** (§7). The last firmware commit is `b245d94`; everything after it is docs only. After Build checkpoint 3 come Phase F (the council) and Phase G.
+> - **Update, Sunday 2026-09-27:** at the user's request (before flashing) a second adversarial round plus the Phase F council ran (§11). Three council members voted BLOCK on two issues. Both are fixed, reviewed and committed.
+> - **Next: 🔨 Build checkpoint 3** (§7). The last firmware commit is **`d9fa9c8`**; everything after it is docs only. After Build checkpoint 3 comes the council's final vote, then Phase G. This was E/F round 2 of the allowed 2, so any BLOCK left after the final vote goes to the user with its evidence.
 >
 > *(Friday: Phase D completed after the 20:42 resume; §3 records how workflow 2 was resumed.)*
 
@@ -126,7 +127,7 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
   - Then B links.
   - Nothing queued before the change reaches B.
 - **No valve (N9).** `valve_open` / `valve_close` must ack `error` "No valve is set up for this hub.".
-- **Stack.** A `provision` now puts `prov_device_set_t` (~376 B) on the esp-mqtt task stack, which is the default 6144 B. Check that task's stack high-water mark, or have the reviewer judge the headroom.
+- **Stack.** *(Superseded.)* The provision path no longer puts `prov_device_set_t` on the esp-mqtt stack: `provisioning_with_valve_target()` uses an 18 B copy (abd7d9d). Every `prov_device_set_t` user now runs on iothub_task or in the scanner's noinline helper.
 - **Noise.** "[CMD] Flushed queued/pending valve commands (valve target changed)" prints at every boot with a valve, because no target → valve counts as a change. Consider logging only when something was actually flushed.
 - **Known gaps left for G4b.**
   - Boot still depends on `provisioning_is_provisioned()`: a busy read means "UNPROVISIONED" and no BLE.
@@ -269,14 +270,27 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 ## 7. Remaining steps
 
 1. ~~Finish or resume workflow 2 (§3). Triage its reviews and commit the fixes.~~ Done: `2c012b7` … `00beb81`.
-1a. **🔨 Build checkpoint 3 (user), NEXT.** It is required because Phase E changed code (§10). Build the branch at its latest commit. The last firmware commit is `b245d94`; everything after it is docs. Use the same commands and paste-back as Build checkpoint 2 below, with `build_cp3.log`.
+1a. **🔨 Build checkpoint 3 (user), NEXT.** It is required because Phase E changed code (§10). Build the branch at its latest commit. The last firmware commit is `d9fa9c8`; everything after it is docs. Use the same commands and paste-back as Build checkpoint 2 below, with `build_cp3.log`.
    - **Compare against §4a (CP2):**
      - no new warnings (only the four from `master`);
      - IRAM unchanged;
      - `.bss` and `.data` about the same as CP2 (36,280 / 21,572). The Phase E lanes added no statics, so a change of more than about ±40 B needs a look;
      - flash grows a few KB.
    - **Bench after flashing CP3.** Run the CP2 list below, plus:
-     - **Re-wet at the clear:** dry a sensor, then wet it again about 10–12 s later. You should see `rmleak_auto_cleared` then `auto_close`, the valve locked, and **no** "RMLEAK cleared externally (valve override)" line.
+     - **Re-wet at the clear:** dry a sensor, then wet it again about 10–12 s later. Expect `rmleak_auto_cleared`, then `leak_detected` and `auto_close`, with the valve locked and closed. The exception is a pass that is also an MQTT (re)connect, where only `auto_close` may appear. There must be no "RMLEAK cleared externally (valve override)".
+     - **F-01, the hub's own clear across a relink:**
+       - (a) Latch a sensor leak. Take the valve out of RF range; do not power it off. Dry the sensor and wait for `rmleak_auto_cleared`, then restore the link. Expect "Applying pending RMLEAK command=0", "Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching" and "RMLEAK clear read back - the hub's own clear, not a valve override". There must be no "re-latching incident", no "RMLEAK cleared externally" and no `water_access_override_enabled`.
+       - (b) The same, with `leak_reset` sent while the valve is unlinked.
+       - (c) The incident is latched and all sensors are dry; power-cycle the hub. Expect no `water_access_override_enabled`.
+     - **Genuine button override still works:** latch a leak with the valve linked (RMLEAK set). Long-press the valve button. Expect "RMLEAK cleared externally (valve override) — starting 24h override window" and `water_access_override_enabled{trigger:"button"}`.
+     - **B1, a busy GATT pool:**
+       - (a) Power-cycle the hub with a sensor wet and the valve open.
+       - (b) Take the valve out of range, wet a sensor, then bring the valve back.
+       - (c) The re-wet-at-clear case above.
+       - **Pass:** the valve is CLOSED within about 3 s of "SETUP COMPLETE". There must be no "write attempt N/3 failed (rc=6)", no "valve write failed 3 times (rc=6)", no "reconnecting to re-apply", and no second GAP DISCONNECT.
+       - **Acceptable lines:** "[CMD] … write: GATT busy - waiting", "… held behind the pending RMLEAK command", "… kept pending - GATT still busy, replaying it" and "Pending valve command=0 kept behind the RMLEAK command (GATT busy)". At setup completion with both slots pended, the host's "valve read-back rc=6 - position unconfirmed" is expected (pre-existing); the position then comes from the valve's own state notify.
+     - **RMLEAK before CLOSE across a relink:** take the valve out of range and wet a BLE sensor ("RMLEAK write not ready. Queuing val=1", then "Valve write not ready. Queuing val=0"). Bring the valve back. "Applying pending RMLEAK command=1" (or its Replaying line) must come before the valve command.
+     - **CP3 sizes:** `.bss` about 36,285 (CP2 36,280, plus the council fixes' ~5 B); `.data` 21,572.
      - **Auto-clear:** wet a sensor (auto-close), then dry it. You should see "All sensors clear — auto-clear timer started (10s)", then about 10–12 s later "AUTO-CLEAR: all sensors clear for 10s" and `rmleak_auto_cleared {clear_after_seconds:10}`. The LED goes RED → amber for about 10 s → GREEN, and the valve stays closed.
      - **`valve_open` during a leak with the valve powered off:** the ack is `error` with "Valve is locked after a leak (RMLEAK)…".
      - **Sensors-only hub leak:** you see `leak_detected` and **no** `auto_close`, plus the UART line "AUTO-CLOSE: no provisioned valve - auto_close event not published".
@@ -434,3 +448,62 @@ Phase E material:
 - A bench check of the NimBLE host-task stack high-water mark. E-08 added about 54 B on the notify path, and the reviewer noted the DISC path too.
 - The plan text still says "rating seq bumped on any system-rating change"; E-15 narrowed that.
 - `validate_capture.py`'s new valve-less `auto_close` check can flag a leak that happens while provisioning is busy.
+
+---
+
+## 11. Phase E round 2 and Phase F council, Sunday 2026-09-27 (E/F round 2 of 2)
+
+The user asked for this before flashing CP3. It ran as run `wf_40fd522e-eda` (results in the scratchpad file `phaseE2F.json`).
+- **Round 2 adversarial review.** Six lenses targeted the post-CP2 code: rules safety, provisioning/empty hub, valve/health, telemetry/offline buffer, concurrency, and a whole-branch regression hunt against 2.1.3. Their 21 raw findings were merged into F-01 … F-15 and checked by two refuters each. Result: 7 confirmed, 3 disputed, 0 refuted, 5 nits.
+- **Phase F council.** Five specialists voted on the final diff:
+
+  | Specialist | Vote | Reason |
+  |---|---|---|
+  | F1 RTOS / concurrency | BLOCK | F-01, and B1 |
+  | F2 memory / robustness | SHIP | |
+  | F3 cloud contract / UI sync | SHIP | |
+  | F4 BLE lifecycle | BLOCK | F-01 |
+  | F5 persistence / upgrade | BLOCK | F-01 |
+
+**The blocking issues:**
+- **F-01.** The hub's own RMLEAK clear was pended while the valve link was down (auto-clear, `leak_reset`, or a failed clear that G4c pends). At relink, `BLE_UPD_CONNECTED` is posted before that clear is written and read back, so Priority 2 re-latched the incident. When the clear landed, tick Check 2 read it as a valve-button press and opened a false 24 h override, blocking auto-close. This predates 2.1.4; 2.1.4 widened it.
+- **B1.** A regression from G4c. The GATT procedure pool holds 4, and each command costs a write plus its read-back. At setup completion plus the rules reconcile, `ble_gattc_write_flat()` returns `BLE_HS_ENOMEM`. G4c counted that as a failure and forced a relink, which discarded the queued replay CLOSE: a leak close was delayed 15–40 s per cycle, and the relink cap never engaged.
+
+**Fixes** (run `wf_cffafc2b-e9d`, two lanes, each adversarially reviewed):
+
+| Commit | What |
+|---|---|
+| `54c8ed0` | F-01 + F-05: RAM flags `g_rmleak_clear_owed` and `g_interlock_confirmed`, both under g_mutex. The auto-clear and `leak_reset` queue their clear under the rules lock. At reconnect, a clear the hub still owes is re-sent instead of re-latching. Check 2 fires only on a true 1→0 edge of a confirmed lock with no hub clear owed. Priority 2(a) is unchanged (F-03 deferred). +2 B `.bss` |
+| `44d3d43` | F-08: the tick's rules event (`rmleak_auto_cleared`) is published before the same pass can overwrite it |
+| `ee30f89` | F-15 comment |
+| `c2da6be` | B1: GATT busy (ENOMEM) is waited out (250 ms steps, up to 5 s, then a replay token) and never forces a relink. The read-back waits the same way. Only a live write resets the relink cap |
+| `d3b9ef8` | A valve command never overtakes an RMLEAK pended during setup (council F4, non-blocking) |
+| `38439d2` | `app_ble_valve_signal_start()` claims the start atomically and clears the starter's handle (council F1, non-blocking). About +3 B `.bss` |
+| `dcf0e07` | Lane V review fix: a busy RMLEAK replay keeps a pended CLOSE behind it (the RMLEAK-before-CLOSE order could reverse when the busy bound expired) |
+| `d9fa9c8` | Retry-log fix after a busy wait |
+| `98bec23`, `cc3103d` | Docs: CHANGELOG, schemas, catalogues, app-team docs, known limitations |
+
+**User decisions, 2026-09-27:**
+- **F-03 deferred to 2.1.5.** A leak latched while the valve was unreachable, followed by a hub restart (or the valve relinking less than 10 s after every sensor dried), can still be inferred as a button override by Priority 2(a). This is the SRS 4.4.2 cross-reboot inference, unchanged from 2.1.3.
+- **F-02: keep 10 s everywhere.** After a restart during a leak, the first dry report starts the 10 s auto-clear before a still-wet sensor is heard again. RMLEAK is then released for up to one wet report (about 15 s for BLE, minutes for LoRa); the valve stays closed.
+
+**Deferred to 2.1.5, documented in the CHANGELOG:**
+- F-04: a leak dropped while provisioning is busy for more than 1 s.
+- F-06 / F-07: the valve-replaced and empty-hub rules resets are not retried after a rules-mutex timeout.
+- F-09: a late `device_offline` when a valve that went offline wet returns dry after more than 180 s.
+- F-10: `rmleak` and `leak_state` read false during valve setup; this one is documented in the schema.
+- F-11 and F-14.
+- The twin (and lifecycle) can read `provisioned:false`, `valve_id` null and counts 0 when provisioning is busy.
+- A provision that adds no device no longer re-arms the pulse or commission snapshot.
+
+**Residuals from the lanes (none blocking; they go into the test plan):**
+- A stale confirm: a re-wet at the clear whose SET read-back lands more than 5 s after the grace can still start a window. This predates 2.1.4; b245d94 had it too.
+- The owed flag can be cleared early if setup step 7's RMLEAK read failed *and* the clear failed.
+- A genuine press can be missed if iothub_task is blocked for seconds right after a close. This fails closed.
+- The F-08 early publish now runs before Phase 2 in a pass whose slot is non-empty.
+- At setup completion with both slots pended, the host's valve read-back gets rc=6. The position then comes from the valve's state notify; this predates 2.1.4.
+- Sustained ATT stalls log about 8 lines per 5 s, bounded by NimBLE's 30 s GATT timeout.
+
+**Commit subjects over 72 characters:** `44d3d43` joins the five listed in §10.
+
+**Next:** 🔨 Build checkpoint 3 of `d9fa9c8`, then the council's final vote on it. BLOCKs left after that go to the user. Then Phase G (MANUAL_TEST_PLAN.md, including every residual risk the council listed in `phaseE2F.json`).
