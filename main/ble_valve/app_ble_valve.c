@@ -2841,6 +2841,7 @@ static void ble_starter_task(void *param)
     if (rc != ESP_OK) {
         ESP_LOGE(BLE_TAG, "[INIT] nimble_port_init failed (rc=%d) after %d attempts - BLE is not available",
                  rc, NIMBLE_INIT_ATTEMPTS);
+        ble_starter_task_handle = NULL;   // gone: see app_ble_valve_signal_start()
         vTaskDelete(NULL);
         return;
     }
@@ -2899,6 +2900,7 @@ static void ble_starter_task(void *param)
     // Signal BLE leak scanner that NimBLE stack is ready
     app_ble_leak_signal_start();
 
+    ble_starter_task_handle = NULL;   // gone: see app_ble_valve_signal_start()
     vTaskDelete(NULL);
 }
 
@@ -2948,17 +2950,20 @@ void app_ble_valve_init(void)
     xTaskCreate(ble_starter_task, "ble_starter", 3072, NULL, 5, &ble_starter_task_handle);
 }
 
+// Called from iothub_task (boot, the owed BLE-apply retry) and from esp-mqtt (`provision`),
+// possibly at once: the start is claimed atomically, so exactly one caller notifies. Only that
+// notify lets ble_starter_task run, and it clears its handle before deleting itself, so the
+// caller that claimed the start notifies a live task. No handle yet: nothing is claimed, and a
+// later call can still start BLE.
 void app_ble_valve_signal_start(void)
 {
-    static bool is_started = false;
-    if (is_started)
+    static atomic_int is_started = 0;
+    TaskHandle_t starter = ble_starter_task_handle;
+    if (starter == NULL)
         return;
-
-    if (ble_starter_task_handle != NULL)
-    {
-        xTaskNotifyGive(ble_starter_task_handle);
-        is_started = true;
-    }
+    if (atomic_exchange(&is_started, 1) != 0)
+        return;
+    xTaskNotifyGive(starter);
 }
 
 // Tagged with the current generation: if the valve target changes before the command task

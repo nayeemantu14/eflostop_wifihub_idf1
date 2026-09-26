@@ -66,7 +66,8 @@ extern "C"
      * @brief Signals the BLE starter task to wake up and initialize the stack.
      * Called by iothub_apply_provisioned_mac() when a valve or a BLE sensor is provisioned:
      * at boot, once iothub_task has built its event QueueSet, and on every `provision`.
-     * It is safe to call multiple times (subsequent calls are ignored).
+     * It is safe to call multiple times, from any task (only the first call signals; later
+     * calls are ignored).
      */
     void app_ble_valve_signal_start(void);
 
