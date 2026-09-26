@@ -768,10 +768,14 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
         return;
     }
 
-    // Check if valve is already closed AND RMLEAK already asserted
+    // Check if valve is already closed AND RMLEAK already asserted. Only the provisioned
+    // valve counts: after a valve decommission the old link stays up until its DISCONNECT
+    // (about 0.5 s, up to the 5 s supervision timeout), and neither its stale cache nor
+    // that link may speak for a valve that is gone. The link is gated the same way below.
+    bool has_target = ble_valve_has_target_mac();
     int valve_state = ble_valve_get_state();
     bool rmleak_already = ble_valve_get_rmleak_state();
-    if (valve_state == 0 && rmleak_already) {
+    if (has_target && valve_state == 0 && rmleak_already) {
         ESP_LOGD(RULES_TAG, "Valve closed + RMLEAK active, no action needed");
         xSemaphoreGive(g_mutex);
         return;
@@ -796,8 +800,11 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
 
     // Sample the link ONCE, here, and use the same value for the telemetry and for
     // the branch below. Reading ble_valve_is_connected() twice would let the event
-    // and the action disagree if the link dropped between them.
-    bool valve_reachable = ble_valve_is_connected();
+    // and the action disagree if the link dropped between them. It counts any GAP
+    // link, including a decommissioned valve's that is still being torn down, so it
+    // is gated on the target: otherwise auto_close claimed rmleak_asserted:true for a
+    // valve that no longer exists (and whose commands are refused).
+    bool valve_reachable = has_target && ble_valve_is_connected();
 
     // Build telemetry before releasing mutex
     build_auto_close_telemetry(source, source_id, valve_reachable);
