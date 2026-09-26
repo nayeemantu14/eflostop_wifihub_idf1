@@ -66,6 +66,14 @@ const char *telemetry_v2_fw_version(void)
 // Minimum epoch to consider time synced (2024-01-01 00:00:00 UTC)
 #define EPOCH_VALID_THRESHOLD_TELEM  1704067200
 
+// Out of memory part-way through building a message: frees it and says so. Nothing of it
+// is published or buffered.
+static void drop_unbuilt(cJSON *root, const char *what)
+{
+    ESP_LOGE(TELEM_TAG, "Message not built (%s) - out of memory", what);
+    cJSON_Delete(root);
+}
+
 static cJSON *build_envelope(const char *type)
 {
     cJSON *root = cJSON_CreateObject();
@@ -99,7 +107,14 @@ static cJSON *build_envelope(const char *type)
     // gateway.uptime_s, below, the same way.
     cJSON_AddNumberToObject(root, "ts", (double)now);
 
-    cJSON *gw = cJSON_CreateObject();
+    // Created already attached, so it is either in the tree or freed: a detached object
+    // leaked its whole subtree when the attach (the key's strdup) failed. Nothing goes out
+    // without its gateway - a pre-sync event without gateway.uptime_s cannot be stamped.
+    cJSON *gw = cJSON_AddObjectToObject(root, "gateway");
+    if (!gw) {
+        drop_unbuilt(root, type);
+        return NULL;
+    }
     cJSON_AddStringToObject(gw, "id", s_gateway_id);
     cJSON_AddStringToObject(gw, "short_id", hub_identity_get_short_id());
     const char *hub_name = hub_identity_get_name();
@@ -108,7 +123,6 @@ static cJSON *build_envelope(const char *type)
     cJSON_AddStringToObject(gw, "fw", telemetry_v2_fw_version());
     cJSON_AddNumberToObject(gw, "uptime_s",
                             (double)(esp_timer_get_time() / 1000000));
-    cJSON_AddItemToObject(root, "gateway", gw);
 
     cJSON_AddStringToObject(root, "type", type);
 
@@ -211,11 +225,12 @@ static void add_location_for_source(cJSON *parent, leak_source_t source,
             add_location_obj(parent, SENSOR_TYPE_LORA, device_id);
             break;
         default: {   // LEAK_SOURCE_VALVE — no metadata exists for the valve
-            cJSON *loc = cJSON_CreateObject();
-            cJSON_AddStringToObject(loc, "code",
-                sensor_meta_location_code_to_str(LOC_UNKNOWN));
-            cJSON_AddStringToObject(loc, "label", "");
-            cJSON_AddItemToObject(parent, "location", loc);
+            cJSON *loc = cJSON_AddObjectToObject(parent, "location");   // attached, or NULL
+            if (loc) {
+                cJSON_AddStringToObject(loc, "code",
+                    sensor_meta_location_code_to_str(LOC_UNKNOWN));
+                cJSON_AddStringToObject(loc, "label", "");
+            }
             break;
         }
     }
@@ -638,7 +653,13 @@ void telemetry_v2_publish_lifecycle(void)
     cJSON *root = build_envelope("lifecycle");
     if (!root) return;
 
-    cJSON *data = cJSON_CreateObject();
+    // Every object here is created already attached ("data" is the last root key anyway),
+    // so a failed attach cannot leave a detached subtree to leak. Key order is unchanged.
+    cJSON *data = cJSON_AddObjectToObject(root, "data");
+    if (!data) {
+        drop_unbuilt(root, "lifecycle");
+        return;
+    }
     cJSON_AddStringToObject(data, "event", "online");
     cJSON_AddStringToObject(data, "reset_reason", reset_reason_str());
     cJSON_AddBoolToObject(data, "provisioned", provisioning_is_provisioned());
@@ -659,13 +680,13 @@ void telemetry_v2_publish_lifecycle(void)
 
     rules_config_t rules;
     if (provisioning_get_rules_config(&rules)) {
-        cJSON *r = cJSON_CreateObject();
-        cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled);
-        cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask);
-        cJSON_AddItemToObject(data, "rules", r);
+        cJSON *r = cJSON_AddObjectToObject(data, "rules");
+        if (r) {
+            cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled);
+            cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask);
+        }
     }
 
-    cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "lifecycle");
 }
 
@@ -1011,7 +1032,13 @@ void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_
     cJSON *root = build_envelope("event");
     if (!root) return;
 
-    cJSON *data = cJSON_CreateObject();
+    // Created already attached, as in every event below ("data" is the last root key), so
+    // a failed attach cannot leave a detached subtree to leak. Key order is unchanged.
+    cJSON *data = cJSON_AddObjectToObject(root, "data");
+    if (!data) {
+        drop_unbuilt(root, "event");
+        return;
+    }
     cJSON_AddStringToObject(data, "event", event_name);
 
     // Same identity pair every device-reported event carries, so the cloud can
@@ -1042,7 +1069,6 @@ void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_
     if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
         cJSON_AddStringToObject(data, "fw_version", valve_fw);
 
-    cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "event");
 }
 
@@ -1053,7 +1079,11 @@ void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev)
     cJSON *root = build_envelope("event");
     if (!root) return;
 
-    cJSON *data = cJSON_CreateObject();
+    cJSON *data = cJSON_AddObjectToObject(root, "data");   // created + attached, or NULL
+    if (!data) {
+        drop_unbuilt(root, "event");
+        return;
+    }
 
     // ---- required core: same keys, order and types for every source; the 3rd
     // key is the identity, named for the device type (valve_id | sensor_id) ----
@@ -1079,7 +1109,6 @@ void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev)
             cJSON_AddStringToObject(data, "fw_version", ev->fw_version);
     }
 
-    cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "event");
 }
 
@@ -1091,13 +1120,20 @@ void telemetry_v2_publish_rules_event(const char *rules_json)
 
     cJSON *parsed = cJSON_Parse(rules_json);
     if (parsed) {
-        // Rules engine JSON becomes the "data" payload directly
-        cJSON_AddItemToObject(root, "data", parsed);
+        // Rules engine JSON becomes the "data" payload directly. Not attached = still ours.
+        if (!cJSON_AddItemToObject(root, "data", parsed)) {
+            cJSON_Delete(parsed);
+            drop_unbuilt(root, "event");
+            return;
+        }
     } else {
-        cJSON *data = cJSON_CreateObject();
+        cJSON *data = cJSON_AddObjectToObject(root, "data");
+        if (!data) {
+            drop_unbuilt(root, "event");
+            return;
+        }
         cJSON_AddStringToObject(data, "event", "rules_engine");
         cJSON_AddStringToObject(data, "raw", rules_json);
-        cJSON_AddItemToObject(root, "data", data);
     }
 
     publish_json(root, "event");
@@ -1111,12 +1147,19 @@ void telemetry_v2_publish_health_event(const char *health_json)
 
     cJSON *parsed = cJSON_Parse(health_json);
     if (parsed) {
-        cJSON_AddItemToObject(root, "data", parsed);
+        if (!cJSON_AddItemToObject(root, "data", parsed)) {   // not attached = still ours
+            cJSON_Delete(parsed);
+            drop_unbuilt(root, "event");
+            return;
+        }
     } else {
-        cJSON *data = cJSON_CreateObject();
+        cJSON *data = cJSON_AddObjectToObject(root, "data");
+        if (!data) {
+            drop_unbuilt(root, "event");
+            return;
+        }
         cJSON_AddStringToObject(data, "event", "health_engine");
         cJSON_AddStringToObject(data, "raw", health_json);
-        cJSON_AddItemToObject(root, "data", data);
     }
 
     publish_json(root, "event");
@@ -1130,20 +1173,24 @@ void telemetry_v2_publish_cmd_ack(const char *correlation_id,
     cJSON *root = build_envelope("event");
     if (!root) return;
 
-    cJSON *data = cJSON_CreateObject();
+    cJSON *data = cJSON_AddObjectToObject(root, "data");   // created + attached, or NULL
+    if (!data) {
+        drop_unbuilt(root, "event");
+        return;
+    }
     cJSON_AddStringToObject(data, "event", "cmd_ack");
     if (correlation_id && correlation_id[0])
         cJSON_AddStringToObject(data, "id", correlation_id);
     cJSON_AddStringToObject(data, "cmd", cmd_name);
     cJSON_AddStringToObject(data, "status", success ? "ok" : "error");
     if (!success && error_msg) {
-        cJSON *err = cJSON_CreateObject();
-        cJSON_AddStringToObject(err, "code", cmd_name);
-        cJSON_AddStringToObject(err, "detail", error_msg);
-        cJSON_AddItemToObject(data, "error", err);
+        cJSON *err = cJSON_AddObjectToObject(data, "error");
+        if (err) {
+            cJSON_AddStringToObject(err, "code", cmd_name);
+            cJSON_AddStringToObject(err, "detail", error_msg);
+        }
     }
 
-    cJSON_AddItemToObject(root, "data", data);
     publish_json(root, "event");
 }
 
