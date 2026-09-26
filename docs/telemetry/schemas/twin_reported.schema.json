@@ -32,7 +32,7 @@
     },
     "provisioned": {
       "type": "boolean",
-      "description": "The hub's provisioning state; false on a hub with no devices (the twin is published for it too since 2.1.4). A hub emptied by a provision whose sensor arrays removed every device still reads true with no devices, as does a rules-only provision.",
+      "description": "The hub's provisioning state; false on a hub with no devices (the twin is published for it too since 2.1.4). A hub emptied by a provision whose sensor arrays removed every device still reads true with no devices, as does a rules-only provision. It can also read false (with valve_id null and both counts 0) when provisioning was busy for more than 1 s as the twin was built; the next device-set change republishes it (to be fixed in 2.1.5).",
       "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "valve_mac": {
@@ -50,7 +50,7 @@
         "string",
         "null"
       ],
-      "description": "The provisioned valve MAC; null when no valve is provisioned (never omitted, so a removed valve is deleted from the twin). Read this key and nothing else. It can also read null, with both device counts 0, when provisioning was busy for more than 1 s as the twin was built; the next device-set change republishes it (to be fixed in 2.1.5).",
+      "description": "The provisioned valve MAC; null when no valve is provisioned (never omitted, so a removed valve is deleted from the twin). Read this key and nothing else. It can also read null, with both device counts 0 and provisioned false, when provisioning was busy for more than 1 s as the twin was built; the next device-set change republishes it (to be fixed in 2.1.5).",
       "x-source": "publish_twin_reported() main/iothub/app_iothub.c"
     },
     "lora_sensor_count": {

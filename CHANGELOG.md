@@ -435,9 +435,9 @@ next snapshot) confirms it.
     - `RULES_ENGINE` `Reconnected with %d active leak(s) — valve already closed + RMLEAK asserted, nothing to
       do`: not while a hub clear is owed; `Valve reconnected with %d active leak(s) — executing auto-close`
       prints instead.
-    - `BLE_VALVE` `[CMD] Writing %s=%u` is not repeated while a write waits for a busy GATT pool, and `[CMD]
-      %s write rc=%d (value awaits the valve's own report)` prints on the first try and then only for an rc
-      other than 6.
+    - `BLE_VALVE` `[CMD] Writing %s=%u` and `[CMD] %s write rc=%d (value awaits the valve's own report)` are
+      not printed for a retry that polls a busy GATT pool; after a busy poll only a result other than rc=6
+      prints. Every other attempt logs both as before.
     - `BLE_VALVE` `[CMD] %s read-back rc=%d - %s unconfirmed`: also when a read-back's 5 s busy wait runs out
       (rc=6) or its lock wait times out (rc=-1).
     - `BLE_VALVE` `[CMD] valve writes keep failing - no more forced reconnects until a write succeeds`: now
@@ -498,8 +498,8 @@ next snapshot) confirms it.
     7.5 KB (2.1.3 field log), so a hub with about 20 or more devices may fail to publish snapshots, retrying
     every 5 s. NimBLE now also runs on a sensors-only hub with a BLE sensor (P0-b), which 2.1.3 did not. Heap
     tuning is deferred to 2.1.5.
-  - Heap budget: 2.1.4 uses about 176 B more static RAM than 2.1.3 (`.bss` +160 B, `.data` +16 B at build
-    checkpoint 2; the final review fixes add none, the council fixes about 5 B of `.bss`), plus about 50 B of
+  - Heap budget: 2.1.4 uses about 181 B more static RAM than 2.1.3 (`.bss` +160 B, `.data` +16 B at build
+    checkpoint 2, plus about 5 B of `.bss` from the council fixes), plus about 50 B of
     permanent heap for the two per-tag log levels set at boot. Both come out of the heap (2.1.3 field
     minimum: 2972 B free). The NimBLE host task also uses about 54 B more of its fixed stack on the valve
     notify path.
@@ -514,11 +514,13 @@ next snapshot) confirms it.
   - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
     oldest held events, as it already could after the sync.
   - **A leak latched while the valve was out of reach can still be read as a button press at the reconnect
-    (deferred to 2.1.5).** If the hub then restarts, or every sensor dries within about 10 s of the valve
-    reconnecting, the reconnect finds the valve open with RMLEAK never applied. It reads that as a press of
+    (deferred to 2.1.5).** If the hub then restarts, or the valve reconnects less than about 10 s after every
+    sensor dried, the reconnect finds the valve open with RMLEAK never applied. It reads that as a press of
     the valve button while the hub was offline (the SRS §4.4.2 cross-reboot inference, unchanged from 2.1.3)
     and starts a 24 h `water_access_override_enabled{trigger:"button"}` window. Auto-close is blocked for that
-    window, so the valve stays open if the leak returns.
+    window. After a restart the sensor may still be wet, and its next wet report is then blocked too
+    (`auto_close_blocked_override`), so the valve stays open during the leak until the window ends, the
+    override is cancelled, or someone closes the valve.
   - **After a hub restart during a leak, the interlock can be released for one wet report (accepted).** The
     restart empties the hub's list of wet sources, so the first dry report from any device starts the 10 s
     auto-clear before a still-wet sensor is heard again. RMLEAK can then be released (`rmleak_auto_cleared`)
@@ -527,7 +529,8 @@ next snapshot) confirms it.
     re-latches (`auto_close`, closing the valve again) when the wet sensor is heard.
   - Found in the final review and planned for 2.1.5:
     - A leak evaluated while provisioning is busy for more than 1 s (for example during a C2D save) is dropped
-      by the rules engine, so the valve is not closed until that sensor reports again (up to 5 minutes).
+      by the rules engine, so the valve is not closed until that sensor reports again (up to 5 minutes for a
+      BLE sensor; a LoRa sensor's next packet).
     - The rules reset after a valve replacement is not retried when the rules lock is busy for more than 1 s,
       and a failed rules reset of an emptied hub (lock busy for more than 5 s) is not retried when a
       `provision` arrives first. The old valve's leak source, or a stale latch or override window, can then
@@ -538,8 +541,9 @@ next snapshot) confirms it.
       relink can stay connected and excellent in health (and green on the LED) with no link.
     - A hub name set for the first time while a snapshot is built fails that snapshot with a misleading
       `Snapshot not built - out of memory`; it is rebuilt at the 5 s retry.
-    - Twin reported can carry `valve_id` null and device counts of 0 when provisioning is busy for more than
-      1 s; the next device-set change republishes it.
+    - Twin reported can read `provisioned:false`, `valve_id` null and device counts of 0 (a
+      decommissioned-looking twin) when provisioning is busy for more than 1 s; the next device-set change
+      republishes it. The lifecycle `provisioned` flag has the same exposure.
     - A `provision` that adds no device (an identical re-send, a rules-only provision) no longer restarts the
       commission snapshot and the post-provision snapshot pulse, as 2.1.3 did; only newly added devices do.
       The command still gets its own `event` snapshot.

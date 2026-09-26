@@ -53,7 +53,7 @@ the valve off and reporting a leak are different code paths.
 
 *B1 preconditions: valve provisioned, valve reachable (≤10 s reconnect), something to override (incident/RMLEAK/window), and the valve's own flood probe is dry.*
 
-*B3 (2.1.4): the hub reads a press only when it has seen RMLEAK set on the valve during this incident and it then goes clear. The hub's own clear (10 s auto-clear, `leak_reset`, `override_enable`) landing when the valve reconnects is never read as a press, and neither is a lock that never reached the valve.*
+*B3 (2.1.4): the hub reads a live press only when it has seen RMLEAK set on the valve during this incident and it then goes clear. The hub's own clear (10 s auto-clear, `leak_reset`, `override_enable`) landing when the valve reconnects is never read as a press, and neither is a lock that never reached the valve. (The reconnect inference in G2 is unchanged; see its known limitation.)*
 
 ---
 
@@ -98,7 +98,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 
 *Changed in firmware 2.1.4: the E1 dwell was 30 s (30–60 s in practice). A sensor that goes wet again 10–30 s after drying (up to about 60 s, which older firmware still held) now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout. A re-wet at the very moment of the clear is handled the same way: a newly latched incident always re-asserts RMLEAK and closes, so it is no longer misread as a valve-button override (before 2.1.4 it could start a false 24 h window, as in B3). The cloud gets `rmleak_auto_cleared`, then `leak_detected` and `auto_close` (except in the one pass where the hub's cloud connection is coming back, where the `rmleak_auto_cleared` can still be missing).*
 
-*Known limitation (2.1.4): after a hub restart during a leak, E1 can start on the first dry report from any device, before a sensor that is still wet is heard again. RMLEAK is then released (`rmleak_auto_cleared`) for up to one wet report of that sensor, about 15 s for a BLE sensor. The valve stays closed unless someone opens it in that gap, and the lock re-latches (`auto_close`) when the sensor reports wet.*
+*Known limitation (2.1.4): after a hub restart during a leak, E1 can start on the first dry report from any device, before a sensor that is still wet is heard again. RMLEAK is then released (`rmleak_auto_cleared`) for up to one wet report of that sensor, about 15 s for a BLE sensor, minutes for a LoRa sensor. The valve stays closed unless someone opens it in that gap, and the lock re-latches (`auto_close`) when the sensor reports wet.*
 
 ---
 
@@ -121,7 +121,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 | **G2** | Persisted incident + valve reports **open & RMLEAK clear** → hub infers the user pressed the valve button while the hub was offline | Unchanged (honors physical override) | `water_access_override_enabled{trigger:"button"}` |
 | **G3** | RMLEAK state re-sync across reboot (valve lost RMLEAK → re-assert; hub lost incident but valve still RMLEAK → re-latch incident, unless that RMLEAK is waiting for a clear the hub itself sent while the valve was away: then the hub sends the clear again, 2.1.4) | Unchanged | **none** (silent reconciliation) |
 
-*G2 known limitation (2.1.4, fix planned for 2.1.5): G2 also fires when the lock never reached the valve. If a leak latched while the valve was out of range and the hub then restarts, or every sensor dries within about 10 s of the valve reconnecting, the hub reads "open, RMLEAK clear" as a press and sends `water_access_override_enabled{trigger:"button"}`. Auto-close is then blocked for 24 h, so the valve stays open if the leak returns.*
+*G2 known limitation (2.1.4, fix planned for 2.1.5): G2 also fires when the lock never reached the valve. If a leak latched while the valve was out of range and the hub then restarts, or the valve reconnects less than about 10 s after every sensor dried, the hub reads "open, RMLEAK clear" as a press and sends `water_access_override_enabled{trigger:"button"}`. Auto-close is then blocked for 24 h. After a restart the sensor may still be wet; its next wet report is blocked too (`auto_close_blocked_override`), so the valve stays open during the leak until the window ends, the override is cancelled, or someone closes the valve.*
 
 ---
 
