@@ -256,6 +256,26 @@ bool rules_engine_reset_all(void);
  */
 bool rules_engine_forget_unprovisioned(void);
 
+/**
+ * @brief The provisioned valve was replaced by a DIFFERENT valve: drop the old valve's
+ *        rules state that would otherwise act on the new one.
+ *
+ * The valve's leak source (VALVE_SOURCE_ID) is MAC-less, so a flood reading from the old
+ * valve survived the swap and auto-closed the new, dry valve on its first link. This
+ * drops it through the normal "leak cleared" path. If no other source is then wet, a
+ * latched incident is released at once (NVS and the health floor with it): left to the
+ * 30 s all-clear, the new valve's first link (open, RMLEAK clear) would read as a
+ * physical override and start a 24 h window. Nothing is written to either valve. If
+ * another source is still wet, the latch and count stay, so the new valve is closed on
+ * its first link. The override window is not touched. A wet new valve re-adds the source
+ * with its own link-up leak report.
+ *
+ * Call from iothub_task when the provisioned valve MAC changes from one valve to another
+ * (not on a first provision or a removal: forget_unprovisioned() covers a removal). Takes
+ * the rules mutex (1 s); on a timeout it logs and changes nothing.
+ */
+void rules_engine_on_valve_replaced(void);
+
 #ifdef __cplusplus
 }
 #endif

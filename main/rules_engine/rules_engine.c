@@ -201,7 +201,7 @@ static void override_save_to_nvs(void)
  *
  * This is deliberately the ONE place both of those happen. Every runtime
  * `g_leak_incident_active = ...` site in this file but one is immediately followed by
- * a call to this function (13 assignments / 13 callsites at 2.1.4), so routing the
+ * a call to this function (14 assignments / 14 callsites at 2.1.4), so routing the
  * health mirror through here means a future mutation cannot silently skip it the
  * way it could with a dozen parallel call pairs.
  *
@@ -1801,4 +1801,46 @@ bool rules_engine_forget_unprovisioned(void)
 
     xSemaphoreGive(g_mutex);
     return true;
+}
+
+void rules_engine_on_valve_replaced(void)
+{
+    // Not initialised: nothing is tracked or latched yet.
+    if (!g_initialized) return;
+
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(RULES_TAG, "Failed to take mutex (valve replaced)");
+        return;
+    }
+
+    /* VALVE_SOURCE_ID is MAC-less, so forget_unprovisioned() keeps it while any valve is
+     * provisioned: the old valve's flood reading used to survive the swap and close the
+     * new, dry valve on its first link. If the new valve is wet, its own link-up LEAK
+     * re-adds the source and closes it through evaluate_leak(). */
+    uint8_t before = g_active_leak_count;
+    track_leak_source(VALVE_SOURCE_ID, false);
+    bool dropped = (g_active_leak_count < before);
+
+    /* Nothing else wet: release the latch now, not on the 30 s all-clear. The new valve
+     * usually links sooner, and on_valve_connected() would read a latched incident with
+     * an open valve and RMLEAK clear as a physical override (Priority 2) and block
+     * auto-close for 24 h. Nothing is written to the valve: the old valve's RMLEAK left
+     * with it, and the new one never carried one. With another source still wet the
+     * latch and count stay, so Priority 1 closes the new valve on its first link. The
+     * override window is not touched. */
+    bool released = false;
+    if (g_active_leak_count == 0 && g_leak_incident_active) {
+        g_leak_incident_active = false;
+        incident_save_to_nvs();   // also releases the health interlock floor
+        g_auto_close_triggered = false;
+        g_all_clear_since = 0;
+        g_rmleak_assert_tick = 0;
+        released = true;
+    }
+
+    ESP_LOGW(RULES_TAG, "Valve replaced: old valve leak source %s, %u source(s) still wet, incident %s",
+             dropped ? "dropped" : "not tracked", (unsigned)g_active_leak_count,
+             released ? "released" : (g_leak_incident_active ? "kept" : "not latched"));
+
+    xSemaphoreGive(g_mutex);
 }
