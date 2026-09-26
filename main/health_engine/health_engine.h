@@ -324,7 +324,8 @@ bool health_is_rollup_syncing(void);
 /**
  * @brief Monotonic counter of sensor check-ins processed by the engine.
  *
- * Bumped once per LoRa packet / BLE-leak advertisement that reaches the engine — and
+ * Bumped once per LoRa packet / BLE-leak advertisement that reaches the engine from a
+ * device in its table (not from one just removed, or a neighbour's) — and
  * ONLY for those two; valve events are excluded because they already couple their own
  * snapshot in iothub_task. Lets a poller detect "a sensor was heard" without a queue
  * of its own, which matters because a repeat packet from an unchanged sensor is dropped

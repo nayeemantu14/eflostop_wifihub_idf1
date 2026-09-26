@@ -561,13 +561,15 @@ static void apply_rating(health_device_t *dev, health_rating_t new_rating,
 // Event handlers
 // ---------------------------------------------------------------------------
 
-static void handle_lora_checkin(const health_event_t *evt)
+// Both check-in handlers return false for a device not in the table (not counted, see
+// s_checkin_seq in health_engine_task()).
+static bool handle_lora_checkin(const health_event_t *evt)
 {
     char id_str[16];
     snprintf(id_str, sizeof(id_str), "0x%08lX", (unsigned long)evt->lora.sensor_id);
 
     health_device_t *dev = find_device(HEALTH_DEV_LORA, id_str);
-    if (!dev) return;  // Not provisioned
+    if (!dev) return false;  // Not provisioned
 
     int64_t now = now_ms();
     dev->last_seen_ms  = now;
@@ -580,12 +582,13 @@ static void handle_lora_checkin(const health_event_t *evt)
     apply_rating(dev, new_rating, cause, now);
     dev->ever_seen = true;
     check_boot_sync_locked();
+    return true;
 }
 
-static void handle_ble_leak_checkin(const health_event_t *evt)
+static bool handle_ble_leak_checkin(const health_event_t *evt)
 {
     health_device_t *dev = find_device(HEALTH_DEV_BLE_LEAK, evt->ble_leak.mac_str);
-    if (!dev) return;
+    if (!dev) return false;
 
     int64_t now = now_ms();
     dev->last_seen_ms  = now;
@@ -598,6 +601,7 @@ static void handle_ble_leak_checkin(const health_event_t *evt)
     apply_rating(dev, new_rating, cause, now);
     dev->ever_seen = true;
     check_boot_sync_locked();
+    return true;
 }
 
 static void handle_valve_event(const char *mac, bool connected)
@@ -943,14 +947,17 @@ static void health_engine_task(void *param)
             /* Both sensor check-ins bump s_checkin_seq — this task is its single
              * writer. Valve events deliberately do NOT: they already couple their own
              * snapshot in iothub_task via the valve_linked delta gate, so counting them
-             * here would double-publish on every link edge. */
+             * here would double-publish on every link edge.
+             *
+             * Only for a device in the table. A sensor removed a moment ago (the leak
+             * scanner's whitelist lags a removal by up to 10 s) or a neighbour's LoRa sensor
+             * changed nothing a snapshot reports, and counting it drove extra post-provision
+             * pulse snapshots (E-18). */
             case HEALTH_EVT_LORA_CHECKIN:
-                handle_lora_checkin(&evt);
-                s_checkin_seq++;
+                if (handle_lora_checkin(&evt)) s_checkin_seq++;
                 break;
             case HEALTH_EVT_BLE_LEAK_CHECKIN:
-                handle_ble_leak_checkin(&evt);
-                s_checkin_seq++;
+                if (handle_ble_leak_checkin(&evt)) s_checkin_seq++;
                 break;
             case HEALTH_EVT_VALVE_CONNECTED:
                 handle_valve_event(evt.valve.mac, true);
