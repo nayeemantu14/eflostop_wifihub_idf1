@@ -277,9 +277,9 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
      - `.bss` and `.data` about the same as CP2 (36,280 / 21,572). The Phase E lanes added no statics, so a change of more than about ±40 B needs a look;
      - flash grows a few KB.
    - **Bench after flashing CP3.** Run the CP2 list below, plus:
-     - **Re-wet at the clear:** dry a sensor, then wet it again about 10–12 s later. Expect `rmleak_auto_cleared`, then `leak_detected` and `auto_close`, with the valve locked and closed. The exception is a pass that is also an MQTT (re)connect, where only `auto_close` may appear. There must be no "RMLEAK cleared externally (valve override)".
+     - **Re-wet at the clear:** dry a sensor, then wet it again about 10–12 s later. Expect `rmleak_auto_cleared`, then `leak_detected` and `auto_close`, with the valve locked and closed. The exception is a pass that is also an MQTT (re)connect, where `rmleak_auto_cleared` may be missing; `leak_detected` and `auto_close` still appear, and the valve stays locked. There must be no "RMLEAK cleared externally (valve override)".
      - **F-01, the hub's own clear across a relink:**
-       - (a) Latch a sensor leak. Take the valve out of RF range; do not power it off. Dry the sensor and wait for `rmleak_auto_cleared`, then restore the link. Expect "Applying pending RMLEAK command=0", "Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching" and "RMLEAK clear read back - the hub's own clear, not a valve override". There must be no "re-latching incident", no "RMLEAK cleared externally" and no `water_access_override_enabled`.
+       - (a) Latch a sensor leak. Take the valve out of RF range; do not power it off. Dry the sensor and wait for `rmleak_auto_cleared`, then restore the link. Expect "Applying pending RMLEAK command=0", then either "Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching" or "Reconnected: no active incident, valve clear" (this depends on timing). There must be no "re-latching incident", no "RMLEAK cleared externally" and no `water_access_override_enabled`. The next snapshot has no "Leak interlock latched", and shows `valve.rmleak:false` and `override_active:false`. (Do not require "RMLEAK clear read back": it prints only when an incident latches again before the clear is read back.)
        - (b) The same, with `leak_reset` sent while the valve is unlinked.
        - (c) The incident is latched and all sensors are dry; power-cycle the hub. Expect no `water_access_override_enabled`.
      - **Genuine button override still works:** latch a leak with the valve linked (RMLEAK set). Long-press the valve button. Expect "RMLEAK cleared externally (valve override) — starting 24h override window" and `water_access_override_enabled{trigger:"button"}`.
@@ -290,7 +290,7 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
        - **Pass:** the valve is CLOSED within about 3 s of "SETUP COMPLETE". There must be no "write attempt N/3 failed (rc=6)", no "valve write failed 3 times (rc=6)", no "reconnecting to re-apply", and no second GAP DISCONNECT.
        - **Acceptable lines:** "[CMD] … write: GATT busy - waiting", "… held behind the pending RMLEAK command", "… kept pending - GATT still busy, replaying it" and "Pending valve command=0 kept behind the RMLEAK command (GATT busy)". At setup completion with both slots pended, the host's "valve read-back rc=6 - position unconfirmed" is expected (pre-existing); the position then comes from the valve's own state notify.
      - **RMLEAK before CLOSE across a relink:** take the valve out of range and wet a BLE sensor ("RMLEAK write not ready. Queuing val=1", then "Valve write not ready. Queuing val=0"). Bring the valve back. "Applying pending RMLEAK command=1" (or its Replaying line) must come before the valve command.
-     - **CP3 sizes:** `.bss` about 36,285 (CP2 36,280, plus the council fixes' ~5 B); `.data` 21,572.
+     - **CP3 sizes:** `.bss` 36,280–36,288 is a pass (the council fixes' ~5 B can be absorbed by alignment fill); `.data` 21,572. More than about +40 B needs a look.
      - **Auto-clear:** wet a sensor (auto-close), then dry it. You should see "All sensors clear — auto-clear timer started (10s)", then about 10–12 s later "AUTO-CLEAR: all sensors clear for 10s" and `rmleak_auto_cleared {clear_after_seconds:10}`. The LED goes RED → amber for about 10 s → GREEN, and the valve stays closed.
      - **`valve_open` during a leak with the valve powered off:** the ack is `error` with "Valve is locked after a leak (RMLEAK)…".
      - **Sensors-only hub leak:** you see `leak_detected` and **no** `auto_close`, plus the UART line "AUTO-CLOSE: no provisioned valve - auto_close event not published".
@@ -507,3 +507,13 @@ The user asked for this before flashing CP3. It ran as run `wf_40fd522e-eda` (re
 **Commit subjects over 72 characters:** `44d3d43` joins the five listed in §10.
 
 **Next:** 🔨 Build checkpoint 3 of `d9fa9c8`, then the council's final vote on it. BLOCKs left after that go to the user. Then Phase G (MANUAL_TEST_PLAN.md, including every residual risk the council listed in `phaseE2F.json`).
+
+**Council final vote, Sunday 2026-09-27** (run `wf_1fd16b3a-fd2`, results in the scratchpad file `council_final.json`): **5/5 SHIP** on firmware `d9fa9c8`. F1, F4 and F5 confirmed that their F-01 and B1 blocks are resolved in the code. The non-blocking notes went into the CHANGELOG as known limitations and 2.1.5 items:
+- the stale-confirm false "button" window, in two routes;
+- the relink cap engaged with no replay token;
+- the live-path hold when the queue is full;
+- a busy command task for up to about 10 s;
+- the evaluate_leak re-assert queued after the give;
+- mbuf ENOMEM not bounded by the 30 s GATT timeout.
+
+The bench expectations were corrected in §7 (F-01(a), the re-wet exception, and the CP3 `.bss` range 36,280–36,288). Two stale comments are left for 2.1.5: the evaluate_leak ordering claim, and the Priority 2 re-latch note about LEAK_RESET. Changing them now would move firmware off the CP3 commit. The events' arrival order at a connect edge can differ from `ts` order, so the backend must order by `ts`. **Phase F is complete, pending a clean CP3.** Next is Phase G.

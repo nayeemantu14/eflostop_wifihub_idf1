@@ -202,7 +202,8 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     same link; it never forces a reconnect. Before this, the RMLEAK and close queued right after a
     reconnect's own replays could find the pool full and force a reconnect, so the valve closed a leak one or
     more 15–40 s reconnect cycles late. A valve that stops answering is still dropped by NimBLE's 30 s GATT
-    timeout.
+    timeout (that bound applies when the busy error comes from the procedure pool; a busy error from ATT
+    buffer exhaustion is retried every ~5 s for as long as the link stays up).
   - After that, the link is dropped and the command is re-applied when the valve reconnects. It used to be
     lost.
   - Forced reconnects are capped at 3 in a row. After that a failed write stays pending for the next natural
@@ -418,7 +419,9 @@ next snapshot) confirms it.
       empties the hub
   - New, council fixes:
     - `RULES_ENGINE`: `Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching`
-    - `RULES_ENGINE`: `RMLEAK clear read back - the hub's own clear, not a valve override`
+    - `RULES_ENGINE`: `RMLEAK clear read back - the hub's own clear, not a valve override` (only when an
+      incident is latched again before the hub's own clear is read back; a plain clear across a relink ends
+      silently, or with `Reconnected: no active incident, valve clear`)
     - `RULES_ENGINE`: `RECONNECT: RMLEAK clear not sent - no provisioned valve` (warning) and `RECONNECT:
       RMLEAK clear enqueue FAILED — valve interlock left set` (error)
     - `BLE_VALVE`: `[CMD] %s write: GATT busy - waiting` and `[CMD] %s read-back: GATT busy - waiting`, once
@@ -527,7 +530,19 @@ next snapshot) confirms it.
     for up to one wet burst of that sensor: about 15 s for a BLE sensor, minutes for a LoRa sensor. A
     `valve_open` in that gap is accepted. The valve stays closed unless it is opened, and the interlock
     re-latches (`auto_close`, closing the valve again) when the wet sensor is heard.
+  - **A slow RMLEAK read-back can still be read as a button press (pre-existing, planned for 2.1.5).** When
+    the hub re-asserts RMLEAK right after its own clear (a re-wet at the moment of an auto-clear, or at a
+    reconnect while a wet source is outside the trigger mask), the hub can take the valve's pre-clear 1 as
+    confirmation. If the re-assert's read-back then lands more than 5 s later (about twice the bench round
+    trip, marginal RF), the clear's 0 is read as a press: a false `water_access_override_enabled{trigger:
+    "button"}` and auto-close blocked for 24 h. The valve itself still ends closed with RMLEAK set.
   - Found in the final review and planned for 2.1.5:
+    - With the forced-relink cap engaged, a live command that fails on a ready link stays pended until a newer
+      command or the next reconnect (2.1.3 dropped it). A live command held behind a pended RMLEAK can wait the
+      same way if the 10-deep command queue is full. Under a sustained busy GATT pool one command can hold the
+      valve task for about 10 s.
+    - A leak re-assert decided in evaluate_leak is queued after the rules lock is released, so a `leak_reset`
+      that lands in that gap is overridden (the valve stays locked; fails closed).
     - A leak evaluated while provisioning is busy for more than 1 s (for example during a C2D save) is dropped
       by the rules engine, so the valve is not closed until that sensor reports again (up to 5 minutes for a
       BLE sensor; a LoRa sensor's next packet).
