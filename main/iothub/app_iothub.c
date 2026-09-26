@@ -857,7 +857,7 @@ static void reset_rules_state_hub_emptied(void)
 // every valve_linked/valve_unlinked until the next device-set change. Unknown now leaves
 // the detectors alone and retries the whole (idempotent) change on the next pass.
 //
-// The same comparison tells the rules engine when one valve was REPLACED by another.
+// The same comparison tells the rules engine when a valve is REPLACED or REMOVED.
 static void sync_valve_detectors(void)
 {
     prov_device_set_t set;   // ~376 B on the iothub stack (10 KB)
@@ -873,12 +873,15 @@ static void sync_valve_detectors(void)
 
     if (strcasecmp(mac, s_det_valve_mac) == 0) return;   // same valve (or still none)
 
-    // One real valve replaced by a DIFFERENT real valve (not a first valve, not a removal,
-    // which forget_unprovisioned() already covers): the rules engine's MAC-less valve leak
-    // source, and a latch it alone holds, would otherwise auto-close the new, dry valve on
-    // its first link (E-04). Decided before s_det_valve_mac takes the new MAC. Takes only
-    // the rules mutex; no other lock is held here.
-    if (have && s_det_valve_mac[0] != '\0') {
+    // A real valve replaced by a DIFFERENT one, or removed (not a first valve): the rules
+    // engine's MAC-less valve leak source, and a latch no other wet source holds, would
+    // otherwise act on the next valve. On a swap the new, dry valve was auto-closed on its
+    // first link (E-04). On a removal forget_unprovisioned() drops the source but leaves the
+    // latch to the 30 s all-clear, and a valve provisioned within it links open with RMLEAK
+    // clear, reads as a physical override and blocks auto-close for 24 h. A latch another
+    // source still holds is kept. Decided before s_det_valve_mac takes the new MAC. Takes
+    // only the rules mutex; no other lock is held here.
+    if (s_det_valve_mac[0] != '\0') {
         rules_engine_on_valve_replaced();
     }
 
