@@ -2072,16 +2072,23 @@ bool iothub_apply_provisioned_mac(void)
     if (a.has_valve) {
         // A link to another valve is dropped by ble_valve_set_target_mac() itself; this
         // (re)starts the search for the provisioned one.
+        //
+        // ALWAYS requested, even when the live link already is this valve (the MAC check
+        // only picks the log line). A decommission of this valve cleared the valve module's
+        // connect request and queued its DISCONNECT; a re-provision landing before that
+        // teardown completes (~0.5 s) still reads the old link as "connected", so without
+        // this CONNECT the drop that follows would never be rescanned (E-09). It goes
+        // through the command queue, after any DISCONNECT, and on a live link the scan only
+        // logs "Already connected".
         char current_mac[18];
         if (ble_valve_get_mac(current_mac)) {
             if (strcasecmp(current_mac, a.valve_mac) != 0) {
                 ESP_LOGW(IOTHUB_TAG, "Connected to wrong MAC, will reconnect to: %s", a.valve_mac);
-                ble_valve_connect();
             }
         } else {
             ESP_LOGI(IOTHUB_TAG, "Not connected, triggering connection to: %s", a.valve_mac);
-            ble_valve_connect();
         }
+        ble_valve_connect();
     }
     return true;
 }
