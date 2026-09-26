@@ -636,11 +636,14 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
     if (source_id && source != LEAK_SOURCE_VALVE) {
         sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
         if (sensor_meta_get(source_to_sensor_type(source), source_id, &meta)) {
-            cJSON *loc = cJSON_CreateObject();
-            cJSON_AddStringToObject(loc, "code",
-                sensor_meta_location_code_to_str(meta.location_code));
-            cJSON_AddStringToObject(loc, "label", meta.label);
-            cJSON_AddItemToObject(root, "location", loc);
+            // Created attached: cJSON_AddItemToObject() neither attaches nor frees the
+            // child when its key copy fails, so a detached object leaked at low heap.
+            cJSON *loc = cJSON_AddObjectToObject(root, "location");
+            if (loc) {
+                cJSON_AddStringToObject(loc, "code",
+                    sensor_meta_location_code_to_str(meta.location_code));
+                cJSON_AddStringToObject(loc, "label", meta.label);
+            }
         }
     }
 
