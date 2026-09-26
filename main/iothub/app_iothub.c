@@ -1108,6 +1108,22 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
     }
 }
 
+// Publish (or, offline, buffer) one rules-engine event taken from
+// rules_engine_take_pending_telemetry() and couple its snapshot, then free it. NULL is a
+// no-op. iothub_task only, like snap_request().
+static void publish_rules_telemetry(char *rules_json)
+{
+    if (!rules_json) return;
+    telemetry_v2_publish_rules_event(rules_json);
+    // Couple a snapshot: auto_close_blocked_override is low-priority (it is
+    // rate-limited and the override state is unchanged); all other rules
+    // events (auto_close, rmleak_cleared, override enable/re-enable) are
+    // safety-critical and flush at the HIGH cadence.
+    bool low = (strstr(rules_json, "auto_close_blocked_override") != NULL);
+    snap_request(SNAP_EVENT, low ? SNAP_TIER_LOW : SNAP_TIER_HIGH, "rules");
+    free(rules_json);
+}
+
 static void handle_c2d_command(const char *data, size_t data_len)
 {
     c2d_command_t cmd;
@@ -2850,6 +2866,15 @@ void iothub_task(void *param)
         // Periodic rules engine tick (auto-clear timeout, valve override detection)
         rules_engine_tick();
 
+        // Publish what the tick raised NOW, before Phase 2 evaluates this pass's item. The
+        // rules engine holds ONE pending event, so a wet report evaluated below replaced a
+        // tick's rmleak_auto_cleared with its auto_close, and the release never reached the
+        // cloud (F-08). Not on the (re)connect pass: its offline replay and lifecycle go
+        // first, so there the event is left for the Phase 3 take as before.
+        if (!g_needs_lifecycle) {
+            publish_rules_telemetry(rules_engine_take_pending_telemetry());
+        }
+
         // =================================================================
         // Phase 1: RECEIVE (always -- regardless of connection state)
         // =================================================================
@@ -3245,16 +3270,7 @@ void iothub_task(void *param)
         // (here). The rules engine still EVALUATES in Phase 2 and the valve close
         // is issued there — only the telemetry is held back, so this reorders the
         // wire, never the safety action.
-        if (auto_close_json) {
-            telemetry_v2_publish_rules_event(auto_close_json);
-            // Couple a snapshot: auto_close_blocked_override is low-priority (it is
-            // rate-limited and the override state is unchanged); all other rules
-            // events (auto_close, rmleak_cleared, override enable/re-enable) are
-            // safety-critical and flush at the HIGH cadence.
-            bool low = (strstr(auto_close_json, "auto_close_blocked_override") != NULL);
-            snap_request(SNAP_EVENT, low ? SNAP_TIER_LOW : SNAP_TIER_HIGH, "rules");
-            free(auto_close_json);
-        }
+        publish_rules_telemetry(auto_close_json);
 
         // ---- Fast boot/reconnect snapshot ARMING (valve-READY, no publish here) ----
         // Publish a snapshot as soon as the valve GATT setup completes (~20-30 s)
