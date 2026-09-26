@@ -94,7 +94,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 
 *After E1 or E3 the interlock is clear, so the user can then `valve_open` to restore water (two-step by design).*
 
-*Changed in firmware 2.1.4: the E1 dwell was 30 s (30–60 s in practice). A sensor that goes wet again 10–30 s after drying (up to about 60 s, which older firmware still held) now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout. Known limit: a re-wet that lands within about 2 s of the clear can instead be taken for a valve-button override (as in B3): no second `auto_close`, then `water_access_override_enabled{trigger:"button"}` and a 24 h window. The valve stays closed, but auto-close is blocked for those 24 h and `valve_open` is accepted while the sensor is still wet.*
+*Changed in firmware 2.1.4: the E1 dwell was 30 s (30–60 s in practice). A sensor that goes wet again 10–30 s after drying (up to about 60 s, which older firmware still held) now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout. A re-wet at the very moment of the clear is handled the same way: a newly latched incident always re-asserts RMLEAK and closes, so it is no longer misread as a valve-button override (before 2.1.4 it could start a false 24 h window, as in B3).*
 
 ---
 

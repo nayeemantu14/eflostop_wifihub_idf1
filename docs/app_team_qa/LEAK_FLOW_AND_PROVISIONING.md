@@ -93,10 +93,9 @@ refused while any leak is still active.)
 > still held) now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again);
 > the valve stays closed throughout.
 >
-> **Known limit:** a re-wet that lands within about 2 s of the clear can instead be taken for a
-> valve-button override. There is no second `auto_close`; the hub sends
-> `water_access_override_enabled{trigger:"button"}` and starts a 24 h window. The valve stays closed, but
-> auto-close is blocked for those 24 h and `valve_open` is accepted while the sensor is still wet.
+> A re-wet at the very moment of the clear is handled the same way: a newly latched incident always
+> re-asserts RMLEAK and closes. Before 2.1.4 that moment could be misread as a valve-button override and
+> start a false 24 h `water_access_override_enabled{trigger:"button"}` window.
 
 ---
 

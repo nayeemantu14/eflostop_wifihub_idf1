@@ -147,6 +147,14 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
 - **A valve re-provisioned right after its decommission is always linked.** A `provision` naming a valve now
   always requests the valve link. One sent before the old link's DISCONNECT used to leave the hub not
   rescanning after the valve's next drop, so the valve went "Valve offline" until a leak or a valve command.
+- **A leak that re-latches as the interlock is being released always re-locks the valve.** The rules tick runs
+  before the report that woke `iothub_task` is handled, and the hub's RMLEAK cache reads clear only once the
+  valve's read-back of the clear lands. A sensor reporting wet again in that moment (just as the auto-clear
+  fired, or just after a `leak_reset`) latched a new incident but found the valve "closed with RMLEAK set" and
+  did nothing. When the clear then landed, the hub read its own clear as a valve-button override
+  (`RMLEAK cleared externally (valve override) — starting 24h override window`) and blocked auto-close for
+  24 h while the sensor was wet. A newly latched incident now always re-asserts RMLEAK and CLOSE, queued
+  behind the clear so the valve ends locked, and publishes `auto_close`. The race predates 2.1.4.
 
 ### Changed
 
@@ -160,8 +168,8 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     the hub rating and on the fleet LED, which follows it.
   - A sensor that goes wet again 10–30 s after drying (up to about 60 s, counting the old idle wait) now
     produces a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again), where the old
-    dwell used to hold the interlock. The valve stays closed throughout. A re-wet that lands within about 2 s
-    of the clear can instead be taken for a valve-button override; see Known limitations.
+    dwell used to hold the interlock. The valve stays closed throughout, including for a re-wet at the very
+    moment of the clear (see Safety).
 
 ### Reliability
 
@@ -410,15 +418,6 @@ next snapshot) confirms it.
     state (RMLEAK, battery, connected), and during a swap from one valve to another so can the rules engine.
     That window is about 0.5 s on the bench, and up to the 5 s supervision timeout when the valve does not
     answer the terminate. After a decommission, auto-close no longer counts that link as a reachable valve.
-  - A re-wet at the moment of an RMLEAK auto-clear can be taken for a valve-button override. The rules tick
-    runs before the report that woke `iothub_task` is processed, and the hub's RMLEAK cache only reads clear
-    once the valve read-back of the clear lands. A sensor that reports wet again after the 10 s dwell has run
-    out but before the next 2 s rules tick, or before that read-back, latches a new incident but finds the
-    valve closed with RMLEAK still set, so no `auto_close` is sent. When the read-back shows RMLEAK clear,
-    the hub logs `RMLEAK cleared externally (valve override) — starting 24h override window` and sends
-    `water_access_override_enabled` with `trigger:"button"`. The valve stays closed, but auto-close is then
-    blocked for 24 h and `valve_open` is accepted while the sensor is still wet. The race predates 2.1.4,
-    when its window was up to 30 s wide (the idle wait); 2.1.4 narrows it to about 2 s plus the read-back.
   - Snapshot heap: cJSON prints a snapshot into a buffer that grows by doubling, so a snapshot needs about
     twice its printed size in one heap block. With NimBLE running the largest free block can be as small as
     7.5 KB (2.1.3 field log), so a hub with about 20 or more devices may fail to publish snapshots, retrying
