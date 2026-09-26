@@ -856,6 +856,8 @@ static void reset_rules_state_hub_emptied(void)
 // also gates the valve link-edge snapshot, so one busy read used to blank it and silence
 // every valve_linked/valve_unlinked until the next device-set change. Unknown now leaves
 // the detectors alone and retries the whole (idempotent) change on the next pass.
+//
+// The same comparison tells the rules engine when one valve was REPLACED by another.
 static void sync_valve_detectors(void)
 {
     prov_device_set_t set;   // ~376 B on the iothub stack (10 KB)
@@ -870,6 +872,15 @@ static void sync_valve_detectors(void)
     snprintf(mac, sizeof(mac), "%s", have ? set.valve_mac : "");
 
     if (strcasecmp(mac, s_det_valve_mac) == 0) return;   // same valve (or still none)
+
+    // One real valve replaced by a DIFFERENT real valve (not a first valve, not a removal,
+    // which forget_unprovisioned() already covers): the rules engine's MAC-less valve leak
+    // source, and a latch it alone holds, would otherwise auto-close the new, dry valve on
+    // its first link (E-04). Decided before s_det_valve_mac takes the new MAC. Takes only
+    // the rules mutex; no other lock is held here.
+    if (have && s_det_valve_mac[0] != '\0') {
+        rules_engine_on_valve_replaced();
+    }
 
     s_valve_pub_linked = have ? -1 : 0;
     s_valve_pub_wet    = 0;
