@@ -193,8 +193,9 @@ static const char *reset_reason_str(void)
     }
 }
 
-// false = the location object could not be allocated. The snapshot fails its whole build
-// on that (L14); the event path ignores it and ships without location, as before.
+// false = the location object, or its code or label, could not be allocated. The snapshot
+// fails its whole build on that (L14); the event path ignores it and ships whatever was
+// added, as before.
 static bool add_location_obj(cJSON *parent, sensor_type_t type,
                              const char *sensor_id)
 {
@@ -202,11 +203,11 @@ static bool add_location_obj(cJSON *parent, sensor_type_t type,
     bool have_meta = sensor_meta_get(type, sensor_id, &meta);
     cJSON *loc = cJSON_AddObjectToObject(parent, "location");   // created + attached, or NULL
     if (!loc) return false;
-    cJSON_AddStringToObject(loc, "code",
-        sensor_meta_location_code_to_str(
-            have_meta ? meta.location_code : LOC_UNKNOWN));
-    cJSON_AddStringToObject(loc, "label", have_meta ? meta.label : "");
-    return true;
+    if (!cJSON_AddStringToObject(loc, "code",
+            sensor_meta_location_code_to_str(
+                have_meta ? meta.location_code : LOC_UNKNOWN)))
+        return false;
+    return cJSON_AddStringToObject(loc, "label", have_meta ? meta.label : "") != NULL;
 }
 
 // location for a water-detection source. `location` is part of the required core
@@ -692,14 +693,36 @@ void telemetry_v2_publish_lifecycle(void)
 
 // ---- Snapshot -------------------------------------------------------------
 
+// build_envelope() does not fail a message over a scalar key it could not add, so that a
+// leak event still ships. A snapshot must not ship without one, so it checks its envelope
+// here. gateway.name is optional on the wire (sent only when set) and is not checked.
+static bool snapshot_envelope_complete(const cJSON *root)
+{
+    const cJSON *gw = cJSON_GetObjectItemCaseSensitive(root, "gateway");
+    return cJSON_GetObjectItemCaseSensitive(root, "schema") &&
+           cJSON_GetObjectItemCaseSensitive(root, "ts") &&
+           cJSON_GetObjectItemCaseSensitive(root, "type") &&
+           cJSON_GetObjectItemCaseSensitive(gw, "id") &&
+           cJSON_GetObjectItemCaseSensitive(gw, "short_id") &&
+           cJSON_GetObjectItemCaseSensitive(gw, "fw") &&
+           cJSON_GetObjectItemCaseSensitive(gw, "uptime_s");
+}
+
+// Every key the snapshot adds goes through this: one that could not be allocated fails
+// the whole build. Events do not use it - an event ships with whatever it has.
+#define SNAP_ADD(x) do { if (!(x)) goto fail; } while (0)
+
 bool telemetry_v2_publish_snapshot(const char *trigger)
 {
     cJSON *root = build_envelope("snapshot");
     if (!root) return false;   // pre-SNTP / alloc fail — treated as "not published"
+    if (!snapshot_envelope_complete(root)) goto fail;
 
     // Every container below is attached to its parent the moment it is created (data is
-    // the last root key anyway), so a single cJSON_Delete(root) frees everything on any
-    // allocation failure: no partial snapshot reaches the wire and nothing leaks (L14).
+    // the last root key anyway), and every add is checked (SNAP_ADD, add_location_obj). So
+    // an allocation failure anywhere in the build frees everything with one
+    // cJSON_Delete(root) and returns false - nothing leaks, and a snapshot missing a key is
+    // never published or counted as sent; the 5 s retry floor rebuilds it whole (L14).
     // The wire key order is unchanged — keys are still added in the same sequence.
     cJSON *data = cJSON_AddObjectToObject(root, "data");   // created + attached, or NULL
     if (!data) goto fail;
@@ -708,7 +731,7 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     // attribute each snapshot in its event-log-vs-UI-refresh model. (Named
     // `trigger` to avoid colliding with the system_health `char reason[192]` below.)
     if (trigger && trigger[0])
-        cJSON_AddStringToObject(data, "reason", trigger);
+        SNAP_ADD(cJSON_AddStringToObject(data, "reason", trigger));
 
     // ---- Fetch health device status for all provisioned devices ----
     health_device_status_t health[HEALTH_MAX_DEVICES];
@@ -734,8 +757,8 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
 
     cJSON *sys_health = cJSON_AddObjectToObject(data, "system_health");
     if (!sys_health) goto fail;
-    cJSON_AddStringToObject(sys_health, "rating",
-        health_rating_to_str(sys_rating));
+    SNAP_ADD(cJSON_AddStringToObject(sys_health, "rating",
+        health_rating_to_str(sys_rating)));
     // 192, not 128: the builder can now emit up to 7 comma-joined parts (leak, the
     // interlock, one valve cause, three sensor causes, syncing), and a leak part carries
     // a user-supplied label. The valve causes (offline / disconnected / battery critical /
@@ -751,7 +774,7 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     } else {
         build_system_health_reason(health, sys_rating, rollup_syncing, reason, sizeof(reason));
     }
-    cJSON_AddStringToObject(sys_health, "reason", reason);
+    SNAP_ADD(cJSON_AddStringToObject(sys_health, "reason", reason));
 
     // ---- valve ----
     cJSON *valve = cJSON_AddObjectToObject(data, "valve");
@@ -777,7 +800,7 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         // itself or the hub is reporting about it. Literal rather than
         // leak_identity_key() only because the enclosing object is statically the
         // valve; the dynamic sites all delegate. Always the provisioned MAC.
-        cJSON_AddStringToObject(valve, "valve_id", valve_hs->dev_id);
+        SNAP_ADD(cJSON_AddStringToObject(valve, "valve_id", valve_hs->dev_id));
 
         // Live data only from a link to THIS valve. A live MAC that differs from the
         // provisioned one is never trusted: it would publish another valve's state
@@ -791,35 +814,35 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
             // readings. Report them as unknown/null rather than as "closed"/0 %.
             bool ready = ble_valve_is_ready();
             int st = ble_valve_get_state();
-            cJSON_AddStringToObject(valve, "state",
-                !ready ? "unknown" : st == 1 ? "open" : st == 0 ? "closed" : "unknown");
+            SNAP_ADD(cJSON_AddStringToObject(valve, "state",
+                !ready ? "unknown" : st == 1 ? "open" : st == 0 ? "closed" : "unknown"));
             uint8_t batt = ble_valve_get_battery();
             if (ready && batt != 0xFF)
-                cJSON_AddNumberToObject(valve, "battery", batt);
+                SNAP_ADD(cJSON_AddNumberToObject(valve, "battery", batt));
             else
-                cJSON_AddNullToObject(valve, "battery");
-            cJSON_AddBoolToObject(valve, "leak_state", ble_valve_get_leak());
-            cJSON_AddBoolToObject(valve, "rmleak", ble_valve_get_rmleak_state());
-            cJSON_AddBoolToObject(valve, "connected", true);
+                SNAP_ADD(cJSON_AddNullToObject(valve, "battery"));
+            SNAP_ADD(cJSON_AddBoolToObject(valve, "leak_state", ble_valve_get_leak()));
+            SNAP_ADD(cJSON_AddBoolToObject(valve, "rmleak", ble_valve_get_rmleak_state()));
+            SNAP_ADD(cJSON_AddBoolToObject(valve, "connected", true));
 
             char valve_fw[32];
             if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
-                cJSON_AddStringToObject(valve, "fw_version", valve_fw);
+                SNAP_ADD(cJSON_AddStringToObject(valve, "fw_version", valve_fw));
             else
-                cJSON_AddNullToObject(valve, "fw_version");
+                SNAP_ADD(cJSON_AddNullToObject(valve, "fw_version"));
         } else {
-            cJSON_AddStringToObject(valve, "state", "disconnected");
-            cJSON_AddBoolToObject(valve, "connected", false);
+            SNAP_ADD(cJSON_AddStringToObject(valve, "state", "disconnected"));
+            SNAP_ADD(cJSON_AddBoolToObject(valve, "connected", false));
         }
 
         // Health metadata
-        cJSON_AddStringToObject(valve, "rating",
-            health_rating_to_str(valve_hs->rating));
+        SNAP_ADD(cJSON_AddStringToObject(valve, "rating",
+            health_rating_to_str(valve_hs->rating)));
         if (valve_hs->last_seen_age_s != UINT32_MAX) {
-            cJSON_AddNumberToObject(valve, "last_seen_age_s",
-                valve_hs->last_seen_age_s);
+            SNAP_ADD(cJSON_AddNumberToObject(valve, "last_seen_age_s",
+                valve_hs->last_seen_age_s));
         } else {
-            cJSON_AddNullToObject(valve, "last_seen_age_s");
+            SNAP_ADD(cJSON_AddNullToObject(valve, "last_seen_age_s"));
         }
     }
 
@@ -833,16 +856,16 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         cJSON *s = cJSON_CreateObject();
         if (!s) goto fail;
         cJSON_AddItemToArray(lora_arr, s);   // attached first: freed with root on failure
-        cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
-        cJSON_AddBoolToObject(s, "connected", health[i].connected);
-        cJSON_AddStringToObject(s, "rating",
-            health_rating_to_str(health[i].rating));
+        SNAP_ADD(cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id));
+        SNAP_ADD(cJSON_AddBoolToObject(s, "connected", health[i].connected));
+        SNAP_ADD(cJSON_AddStringToObject(s, "rating",
+            health_rating_to_str(health[i].rating)));
 
         if (health[i].last_seen_age_s != UINT32_MAX) {
-            cJSON_AddNumberToObject(s, "last_seen_age_s",
-                health[i].last_seen_age_s);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "last_seen_age_s",
+                health[i].last_seen_age_s));
         } else {
-            cJSON_AddNullToObject(s, "last_seen_age_s");
+            SNAP_ADD(cJSON_AddNullToObject(s, "last_seen_age_s"));
         }
 
         // Merge telemetry data from cache — only when the device is currently
@@ -876,26 +899,26 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
          * than plumbed — adding snr to the health event is a wider change than this
          * fix warrants, and rssi is the figure used for placement. */
         if (health[i].last_battery != 0xFF)
-            cJSON_AddNumberToObject(s, "battery", health[i].last_battery);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "battery", health[i].last_battery));
         else
-            cJSON_AddNullToObject(s, "battery");
+            SNAP_ADD(cJSON_AddNullToObject(s, "battery"));
 
         if (health[i].last_rssi != 0)
-            cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi));
         else
-            cJSON_AddNullToObject(s, "rssi");
+            SNAP_ADD(cJSON_AddNullToObject(s, "rssi"));
 
         /* health[i].leaking, never a literal false and never the cache's copy. An
          * offline-but-WET sensor used to publish leak_state:false in the same snapshot
          * whose system_health.reason said "Leak detected: <its label>" — a document
          * that contradicted itself, with the safer of the two values being the one a
          * consumer reading the array would take. Field stays boolean; schema unchanged. */
-        cJSON_AddBoolToObject(s, "leak_state", health[i].leaking);
+        SNAP_ADD(cJSON_AddBoolToObject(s, "leak_state", health[i].leaking));
 
         if (cached)
-            cJSON_AddNumberToObject(s, "snr", cached->snr);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "snr", cached->snr));
         else
-            cJSON_AddNullToObject(s, "snr");
+            SNAP_ADD(cJSON_AddNullToObject(s, "snr"));
 
         if (!add_location_obj(s, SENSOR_TYPE_LORA, health[i].dev_id)) goto fail;
     }
@@ -910,16 +933,16 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
         cJSON *s = cJSON_CreateObject();
         if (!s) goto fail;
         cJSON_AddItemToArray(ble_arr, s);    // attached first: freed with root on failure
-        cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id);
-        cJSON_AddBoolToObject(s, "connected", health[i].connected);
-        cJSON_AddStringToObject(s, "rating",
-            health_rating_to_str(health[i].rating));
+        SNAP_ADD(cJSON_AddStringToObject(s, "sensor_id", health[i].dev_id));
+        SNAP_ADD(cJSON_AddBoolToObject(s, "connected", health[i].connected));
+        SNAP_ADD(cJSON_AddStringToObject(s, "rating",
+            health_rating_to_str(health[i].rating)));
 
         if (health[i].last_seen_age_s != UINT32_MAX) {
-            cJSON_AddNumberToObject(s, "last_seen_age_s",
-                health[i].last_seen_age_s);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "last_seen_age_s",
+                health[i].last_seen_age_s));
         } else {
-            cJSON_AddNullToObject(s, "last_seen_age_s");
+            SNAP_ADD(cJSON_AddNullToObject(s, "last_seen_age_s"));
         }
 
         // Merge telemetry data from cache — only when the device is currently
@@ -962,24 +985,24 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
          * fw_version still comes from the cache: the health table does not carry it and
          * it cannot change at runtime, so staleness is not a concern for that one. */
         if (health[i].last_battery != 0xFF)
-            cJSON_AddNumberToObject(s, "battery", health[i].last_battery);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "battery", health[i].last_battery));
         else
-            cJSON_AddNullToObject(s, "battery");
+            SNAP_ADD(cJSON_AddNullToObject(s, "battery"));
 
         if (health[i].last_rssi != 0)
-            cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi);
+            SNAP_ADD(cJSON_AddNumberToObject(s, "rssi", health[i].last_rssi));
         else
-            cJSON_AddNullToObject(s, "rssi");
+            SNAP_ADD(cJSON_AddNullToObject(s, "rssi"));
 
         /* Always the health engine's wet/dry, connected or not — it is both the
          * freshest source and the one that cannot contradict system_health.reason for
          * an offline-but-wet sensor. */
-        cJSON_AddBoolToObject(s, "leak_state", health[i].leaking);
+        SNAP_ADD(cJSON_AddBoolToObject(s, "leak_state", health[i].leaking));
 
         if (cached && cached->fw_version[0])
-            cJSON_AddStringToObject(s, "fw_version", cached->fw_version);
+            SNAP_ADD(cJSON_AddStringToObject(s, "fw_version", cached->fw_version));
         else
-            cJSON_AddNullToObject(s, "fw_version");
+            SNAP_ADD(cJSON_AddNullToObject(s, "fw_version"));
 
         if (!add_location_obj(s, SENSOR_TYPE_BLE_LEAK, health[i].dev_id)) goto fail;
     }
@@ -992,8 +1015,8 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     if (provisioning_get_rules_config(&rules)) {
         cJSON *r = cJSON_AddObjectToObject(data, "rules");
         if (!r) goto fail;
-        cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled);
-        cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask);
+        SNAP_ADD(cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled));
+        SNAP_ADD(cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask));
     }
 
     // ---- Override window status ----
@@ -1005,12 +1028,12 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
     int32_t  ovr_remaining = -1;
     uint32_t ovr_expires   = 0;
     rules_engine_get_override_status(&ovr_active, &ovr_remaining, &ovr_expires);
-    cJSON_AddBoolToObject(data, "override_active", ovr_active);
+    SNAP_ADD(cJSON_AddBoolToObject(data, "override_active", ovr_active));
     if (ovr_active) {
         if (ovr_remaining >= 0)
-            cJSON_AddNumberToObject(data, "override_remaining_s", ovr_remaining);
+            SNAP_ADD(cJSON_AddNumberToObject(data, "override_remaining_s", ovr_remaining));
         if (ovr_expires > 0)
-            cJSON_AddNumberToObject(data, "expires_ts", (double)ovr_expires);
+            SNAP_ADD(cJSON_AddNumberToObject(data, "expires_ts", (double)ovr_expires));
     }
 
     return publish_json(root, "snapshot");
@@ -1020,6 +1043,8 @@ fail:
     cJSON_Delete(root);
     return false;
 }
+
+#undef SNAP_ADD
 
 // ---- Events ---------------------------------------------------------------
 
