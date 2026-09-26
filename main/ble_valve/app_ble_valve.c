@@ -154,6 +154,9 @@ static bool g_val_rmleak = false;
 // Commands pended for the provisioned valve's next setup completion (-1 = none, else the
 // value). Every access is under s_mac_lock, and a pend checks s_cmd_gen in the same
 // critical section (pending_update()), so it can never survive the valve-target flush.
+// gatt_mutex does not cover a CMD_WR_RELINK pend: finish_cmd_write() makes it after
+// write_cmd_with_retry() released the mutex, so a setup completion can run in between and
+// miss it. finish_cmd_write() therefore re-checks the link after pending.
 static int g_pending_valve_cmd = -1;
 static int g_pending_rmleak_cmd = -1;
 #define PEND_ANY (-2)   // pending_update(): match whatever the slot holds
@@ -1065,7 +1068,8 @@ static bool apply_pending_cmd(int *slot, uint16_t handle, bool is_rmleak)
 }
 
 // Queues the replay token at the FRONT of ble_cmd_queue (setup completion, NimBLE host task)
-// for the pended commands apply_pending_cmd() could not write. The command task replays them
+// for the pended commands apply_pending_cmd() could not write, or that the command task
+// pended just as a setup completed (finish_cmd_write()). The command task replays them
 // (replay_pending_cmds()) ahead of every command queued meanwhile, all of them newer, which
 // therefore still land last and win. At most one token is outstanding: it replays whatever
 // is pended when it is taken. A full queue leaves the commands pended for the next link.
@@ -2165,9 +2169,11 @@ static void start_scan(void)
 // attempt: a rediscovery zeroes it) and issues the read-back. Up to CMD_WRITE_ATTEMPTS
 // attempts, 200 ms then 400 ms apart, with gatt_mutex released in between so the host
 // task's replays are not held off. Command task only: it sleeps.
-// `slot` is the command's pending slot, updated under gatt_mutex, where setup completion's
-// replay re-checks it (apply_pending_cmd()). A live command clears whatever older command of
-// its kind is still pended once the host accepts it: replayed later, that one would undo it.
+// `slot` is the command's pending slot. An accepted write clears it under gatt_mutex, where
+// setup completion's replay re-checks it (apply_pending_cmd()); a CMD_WR_RELINK pend is made
+// after the mutex is released, by finish_cmd_write(). A live command clears whatever older
+// command of its kind is still pended once the host accepts it: replayed later, that one
+// would undo it.
 // A `replay` (of the command pended in *slot) is written only while the slot still holds it,
 // re-checked before every attempt, and leaves the slot once the host accepts it.
 // *conn_out = the link the last write went to (NONE when no attempt got that far).
@@ -2314,9 +2320,10 @@ static void drop_link_after_failed_write(int rc, uint16_t conn, const char *what
 // Settles a live hub command after write_cmd_with_retry(). Releases the settle barrier armed
 // at enqueue on every path: once we know whether the write went out (or that it will not now),
 // the snapshot has nothing left to wait for. `slot` is the command's pending slot, `conn` the
-// link the writes went to.
+// link the writes went to, `handle` its characteristic (NULL: a valve command deliberately
+// held behind a failed RMLEAK, which must not be replayed from here).
 static void finish_cmd_write(int rc, uint8_t val, uint32_t gen, int *slot, uint16_t conn,
-                             const char *what)
+                             const uint16_t *handle, const char *what)
 {
     if (rc == CMD_WR_STALE || (rc != 0 && !pending_update(slot, PEND_ANY, (int)val, gen)))
     {
@@ -2330,6 +2337,17 @@ static void finish_cmd_write(int rc, uint8_t val, uint32_t gen, int *slot, uint1
         // Pended above, for the provisioned valve's next setup completion.
         ESP_LOGW(BLE_TAG, "[CMD] %s write not ready. Queuing val=%u", what, val);
         request_valve_link();
+        // The link was found not ready under gatt_mutex, but the pend above lands after its
+        // release: a setup completion in between read the slot empty, and the command would
+        // sit pended on a ready link. Re-checked AFTER the pend, a link that is not ready yet
+        // sees the pend at its own completion; one that is ready now may have missed it, so
+        // replay it. If that completion did write it, the replay finds the slot empty.
+        if (handle && cmd_link_ready(*handle))
+        {
+            ESP_LOGW(BLE_TAG, "[CMD] %s val=%u pended as the link became ready - replaying it",
+                     what, val);
+            post_replay_token();
+        }
     }
     else if (rc != 0)
     {
@@ -2395,7 +2413,8 @@ static void write_valve_command(uint8_t val, uint32_t gen)
         val == 1)
     {
         ESP_LOGW(BLE_TAG, "[CMD] Valve=%u not written - kept behind the pending RMLEAK command", val);
-        finish_cmd_write(CMD_WR_RELINK, val, gen, &g_pending_valve_cmd, BLE_HS_CONN_HANDLE_NONE, "Valve");
+        finish_cmd_write(CMD_WR_RELINK, val, gen, &g_pending_valve_cmd, BLE_HS_CONN_HANDLE_NONE,
+                         NULL, "Valve");
         return;
     }
 
@@ -2449,7 +2468,7 @@ static void write_valve_command(uint8_t val, uint32_t gen)
     uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
     int rc = write_cmd_with_retry(&h_valve_char, val, gen, &g_pending_valve_cmd, false, &conn,
                                   "Valve", "position");
-    finish_cmd_write(rc, val, gen, &g_pending_valve_cmd, conn, "Valve");
+    finish_cmd_write(rc, val, gen, &g_pending_valve_cmd, conn, &h_valve_char, "Valve");
 }
 
 // -----------------------------------------------------------------------------
@@ -2499,7 +2518,7 @@ static void write_rmleak_command(uint8_t val, uint32_t gen)
     uint16_t conn = BLE_HS_CONN_HANDLE_NONE;
     int rc = write_cmd_with_retry(&h_rmleak_char, val, gen, &g_pending_rmleak_cmd, false, &conn,
                                   "RMLEAK", "interlock state");
-    finish_cmd_write(rc, val, gen, &g_pending_rmleak_cmd, conn, "RMLEAK");
+    finish_cmd_write(rc, val, gen, &g_pending_rmleak_cmd, conn, &h_rmleak_char, "RMLEAK");
 }
 
 // -----------------------------------------------------------------------------
