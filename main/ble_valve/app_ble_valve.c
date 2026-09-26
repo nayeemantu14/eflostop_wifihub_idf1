@@ -689,11 +689,12 @@ static void notify_hub_update(ble_update_type_t update_type, const char *disc_ma
                               : "");
         }
     }
-    /* Health engine: every notification proves the valve link is alive, so
-     * any data-bearing update (STATE/LEAK/RMLEAK/BATTERY) refreshes
-     * last_seen_ms — not just CONNECTED. Without this, last_seen_age_s in
-     * the snapshot would grow unboundedly even while battery NOTIFYs and
-     * state changes are arriving every few minutes. */
+    /* Health engine: a CONNECTED for every update that gets here, i.e. the link-up
+     * and each valve value that CHANGED (on_notify() calls this only on a change).
+     * It refreshes last_seen_ms and clears a stale disconnect. A steady valve's
+     * values do not change for hours, so last_seen_ms does not track a live link:
+     * the snapshot's last_seen_age_s for the valve comes from the link state
+     * instead (0 while linked, see health_get_device_status_all()). */
     if (update_type == BLE_UPD_DISCONNECTED)
         health_post_valve_event(disc_mac, false);
     else if (update_type != BLE_UPD_NONE) {

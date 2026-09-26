@@ -164,7 +164,8 @@ typedef struct {
                                         // padding before last_seen_age_s: no size change.
     uint8_t           cause;            // health_cause_t: why `rating` is what it is. Also
                                         // in that padding: no size change.
-    uint32_t          last_seen_age_s;  // UINT32_MAX = never seen
+    uint32_t          last_seen_age_s;  // UINT32_MAX = never seen. The valve: 0 while linked,
+                                        // else seconds since its link dropped
 } health_device_status_t;
 
 // Outcome of health_engine_reconcile_devices().

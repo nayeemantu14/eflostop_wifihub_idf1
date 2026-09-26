@@ -474,8 +474,15 @@ static bool enqueue_alert(health_device_t *dev, bool offline, health_rating_t ne
     alert.rssi        = dev->last_rssi;
     alert.offline     = offline;
 
-    if (offline && dev->last_seen_ms > 0) {
-        alert.offline_duration_s = (uint32_t)((now - dev->last_seen_ms) / 1000);
+    if (offline) {
+        /* The valve: from the drop. Its last_seen_ms moves only on a CONNECTED or a changed
+         * value, so measured from that a steady valve reported the hours since its last change
+         * plus the grace (E-16); see health_get_device_status_all(). */
+        int64_t since_ms = (dev->dev_type == HEALTH_DEV_VALVE && dev->disconnect_ms > 0)
+                           ? dev->disconnect_ms : dev->last_seen_ms;
+        if (since_ms > 0) {
+            alert.offline_duration_s = (uint32_t)((now - since_ms) / 1000);
+        }
     }
 
     const char *kind = offline ? "device_offline" : "device_recovered";
@@ -1381,6 +1388,15 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
         // Compute last_seen_age_s
         if (!src->ever_seen || src->last_seen_ms == 0) {
             dst->last_seen_age_s = UINT32_MAX;
+        } else if (src->dev_type == HEALTH_DEV_VALVE) {
+            /* The valve sits on a live link, and link supervision drops a link that stops
+             * answering, so while it is up the valve is being heard now: 0. Once it drops, the
+             * age runs from the drop. Its last_seen_ms moves only on a CONNECTED or a changed
+             * value, so a steady connected valve read "last seen 847 s ago" (E-16). That field
+             * keeps its meaning (0 = never connected this uptime) for compute_valve_rating()
+             * and handle_valve_resync(). */
+            dst->last_seen_age_s = (src->disconnect_ms == 0)
+                                   ? 0 : (uint32_t)((now - src->disconnect_ms) / 1000);
         } else {
             dst->last_seen_age_s = (uint32_t)((now - src->last_seen_ms) / 1000);
         }
