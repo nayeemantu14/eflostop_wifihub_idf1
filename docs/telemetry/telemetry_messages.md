@@ -8,7 +8,7 @@
 |---|---|
 | Document version | 5.0 (supersedes v2.0, which documented firmware 1.9.0) |
 | Firmware version | 2.1.4 — `CMakeLists.txt:12` |
-| Git commit | `12a9b9e9d40469e5773719e852c7a832609be7b6` |
+| Git commit | `a5a07eab6d0ef82481e2b9453cb9f951a7ff221f` |
 | Schema | `eflostop.v2` |
 | Topic | `devices/<device_id>/messages/events/` (QoS 1) |
 | Message count | 48 distinct messages across 8 families |
@@ -1702,7 +1702,7 @@ Response to leak_reset. override_cancelled appears only if a window was open. De
 
 ### R9 — The leak interlock cleared itself
 
-Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout.
+Every source dry for 10 seconds, so the hub released the latch itself. Does NOT re-open the valve; valve_open or the valve button does. Same identity rule as R8. Since 2.1.4 the dwell is 10 s (it was 30 s), and the hub polls every 2 s while the clear is pending, so this arrives about 10-12 s after the last source reports dry (it was 30-60 s). A sensor that goes wet again 10-30 s after drying (up to about 60 s, counting the old idle wait) therefore now gets a full clear and re-latch cycle (this event, then auto_close again); the valve stays closed throughout. Known limit: a re-wet that lands within about 2 s of the clear (before the next rules tick, or before the valve's read-back of the clear) can instead be taken for a valve-button override: no second auto_close, then water_access_override_enabled with trigger "button" and a 24 h window, so auto-close is blocked and valve_open is accepted while the sensor is still wet. The race predates 2.1.4, when its window was up to 30 s wide.
 
 ```json
 {

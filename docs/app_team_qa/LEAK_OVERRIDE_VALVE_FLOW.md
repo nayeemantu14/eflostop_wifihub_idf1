@@ -25,7 +25,7 @@ the valve off and reporting a leak are different code paths.
    ▲       auto_close      (locked)   override     auto-close paused)   end window    leak? → CLOSE
    │                                                                                  no leak? → stay)
    │   leak_reset (dry) / 10s auto-clear (RMLEAK lifted, valve stays closed) ─────────────┘
-   └── valve_open (only allowed once RMLEAK is clear)
+   └── valve_open (allowed once RMLEAK is clear and no incident is latched outside an override; see F2)
 ```
 
 ---
@@ -94,7 +94,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 
 *After E1 or E3 the interlock is clear, so the user can then `valve_open` to restore water (two-step by design).*
 
-*Changed in firmware 2.1.4: the E1 dwell was 30 s (30–60 s in practice). A sensor that goes wet again 10–30 s after drying now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout.*
+*Changed in firmware 2.1.4: the E1 dwell was 30 s (30–60 s in practice). A sensor that goes wet again 10–30 s after drying (up to about 60 s, which older firmware still held) now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout. Known limit: a re-wet that lands within about 2 s of the clear can instead be taken for a valve-button override (as in B3): no second `auto_close`, then `water_access_override_enabled{trigger:"button"}` and a 24 h window. The valve stays closed, but auto-close is blocked for those 24 h and `valve_open` is accepted while the sensor is still wet.*
 
 ---
 
@@ -103,7 +103,7 @@ cleared, or auto-close is off, the valve stays as it is (D3/D4/D7/D8).
 | # | Scenario | Valve | Events |
 |---|---|---|---|
 | **F1** | `valve_close` / `valve_set_state:closed` (manual) | **Closes** — but **RMLEAK NOT set, no incident latched** | `valve_state_changed{closed, rmleak:false}`, `cmd_ack{ok}` |
-| **F2** | `valve_open` / `valve_set_state:open` | **Opens if RMLEAK clear**; if RMLEAK set the **valve refuses** (interlock is enforced *valve-side*, the hub does not gate it) | `valve_state_changed` (optimistic, then a corrective notify to the true state if refused), `cmd_ack{ok}` |
+| **F2** | `valve_open` / `valve_set_state:open` | **Opens if RMLEAK is clear and no leak incident is latched outside an override window.** The hub gates it: while RMLEAK is set, or an incident is latched with no override window (even with the valve disconnected), it refuses and sends nothing to the valve. It also refuses at a valve battery of 10 % or less, and when no valve is set up. | Refused: `cmd_ack{error: "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, or use override to open the valve during a leak."}`, or `cmd_ack{error: "Valve battery critical (≤10 %): the valve will not open. Replace the batteries."}`, or `cmd_ack{error: "No valve is set up for this hub."}`. Otherwise `cmd_ack{ok}` (the open is queued), then `valve_state_changed` when the valve reports its new position |
 
 *F1 is the important contrast: a manual close is **not** the protected leak flow — it has no interlock and no 10 s auto-clear. Only auto-close (A1/D1/D6/reconnect) sets RMLEAK.*
 

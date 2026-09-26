@@ -89,8 +89,14 @@ after the last sensor reads dry. (`leak_reset` is the manual instant version of 
 refused while any leak is still active.)
 
 > **Changed in firmware 2.1.4:** the dwell was 30 s, and the clear landed 30–60 s after the last sensor
-> read dry. A sensor that goes wet again 10–30 s after drying now gets a full clear and re-latch cycle
-> (`rmleak_auto_cleared`, then `auto_close` again); the valve stays closed throughout.
+> read dry. A sensor that goes wet again 10–30 s after drying (up to about 60 s, which older firmware
+> still held) now gets a full clear and re-latch cycle (`rmleak_auto_cleared`, then `auto_close` again);
+> the valve stays closed throughout.
+>
+> **Known limit:** a re-wet that lands within about 2 s of the clear can instead be taken for a
+> valve-button override. There is no second `auto_close`; the hub sends
+> `water_access_override_enabled{trigger:"button"}` and starts a 24 h window. The valve stays closed, but
+> auto-close is blocked for those 24 h and `valve_open` is accepted while the sensor is still wet.
 
 ---
 
