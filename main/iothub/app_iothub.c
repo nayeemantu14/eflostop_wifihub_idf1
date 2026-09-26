@@ -733,7 +733,14 @@ static void arm_commission_snapshot(bool pulse)
 static void purge_telemetry_caches(void)
 {
     prov_device_set_t set;
-    if (!provisioning_get_device_set(&set)) return;   // unknown != "nothing provisioned"
+    if (!provisioning_get_device_set(&set)) {
+        // Unknown != "nothing provisioned". Owed like the rules purge and the detector sync:
+        // a skipped purge would keep a removed wet sensor's entry, and its re-add would then
+        // never emit leak_detected (S6). Re-running the whole change is harmless.
+        ESP_LOGW(IOTHUB_TAG, "Telemetry-cache purge: provisioning busy, retrying");
+        g_devset_changed = true;
+        return;
+    }
 
     int lora_purged = 0, ble_purged = 0;
 
@@ -2798,12 +2805,15 @@ void iothub_task(void *param)
         // block). If a snapshot is due but we can't publish (offline), idle at the
         // offline floor instead of tight-spinning; reconnect wakes us immediately via
         // telemetry_v2_wake_snapshot(). An empty hub publishes like any other.
+        // A device-set change still set here was re-raised by a failed apply (the loop top
+        // consumed it): retry at the 2 s poll like an owed BLE apply, not the 30 s idle cap.
         int64_t now_ms = snap_now_ms();
         int64_t delta  = s_snap_due_ms - now_ms;
         if (delta < 0) delta = 0;
         bool can_pub = mqtt_up;
         if (delta <= 0 && !can_pub) delta = SNAP_OFFLINE_FLOOR_MS;
-        int64_t base = (commission_pending || cloud_pending || s_ble_apply_owed) ? 2000 : 30000;
+        int64_t base = (commission_pending || cloud_pending || s_ble_apply_owed ||
+                        g_devset_changed) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
