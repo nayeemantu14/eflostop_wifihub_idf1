@@ -673,8 +673,13 @@ static void mark_mqtt_disconnected(void);  // forward declaration (used by iothu
 // mutex, and nothing else is held here (esp-mqtt task).
 static const char *valve_open_reject_reason(void)
 {
+    // The latch is read through the health engine's lock-free mirror as well as the rules
+    // getter: the getter returns false when the rules mutex is busy for 1 s, which would
+    // let an open through during a latched incident. A busy override getter likewise
+    // reads "no override", so a busy rules engine refuses rather than allows.
+    bool latched = health_is_interlock_held() || rules_engine_is_leak_incident_active();
     if (ble_valve_get_rmleak_state() ||
-        (rules_engine_is_leak_incident_active() && !rules_engine_is_override_window_active())) {
+        (latched && !rules_engine_is_override_window_active())) {
         return "Valve is locked after a leak (RMLEAK). Clear it with leak_reset first, "
                "or use override to open the valve during a leak.";
     }
