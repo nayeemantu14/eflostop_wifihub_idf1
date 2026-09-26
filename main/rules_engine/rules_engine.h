@@ -151,13 +151,18 @@ void rules_engine_reassert_rmleak_if_needed(void);
  * Priority 0: If 24h override window is active, skip auto-close but sync incident latch.
  * Priority 1: If any sensors are actively reporting leaks AND auto_close is enabled,
  *             close valve + assert RMLEAK. Single command regardless of sensor count.
- * Priority 2: Synchronize hub/valve RMLEAK state (handles reboot scenarios).
+ * Priority 2: Synchronize hub/valve RMLEAK state (handles reboot scenarios). A valve
+ *             RMLEAK 1 with no hub incident is NOT re-latched while the hub's own RMLEAK
+ *             clear is still owed (queued while the valve was unlinked or in GATT setup,
+ *             so the link-up read predates it): the clear is re-queued instead.
  */
 void rules_engine_on_valve_connected(void);
 
 /**
  * @brief Periodic tick — call from event loop (every ~30s).
  *        Checks override window expiry, auto-clear timeout, and valve-side override.
+ *        A valve-side override is an RMLEAK 1->0 edge on the provisioned valve during
+ *        the incident; a 0 the valve never rose from, or the hub's own clear, is not one.
  *        A window stamped before the clock synced is timed on uptime until the first
  *        valid clock, then re-based to it (started this boot) or expired (restored
  *        from an earlier boot, whose elapsed time is unknown). A real-epoch window

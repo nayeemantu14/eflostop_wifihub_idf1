@@ -70,6 +70,20 @@ static TickType_t g_last_auto_close_tick = 0;
  * event that actually carries new information. */
 static TickType_t g_last_reconnect_close_tick = 0;
 static TickType_t g_rmleak_assert_tick = 0;  // When RMLEAK was last written — grace period for override check
+/* The hub queued its own RMLEAK clear (auto-clear, leak_reset, override_enable) and has
+ * not yet seen it land. With the valve unlinked or still in GATT setup the clear is pended
+ * and the link-up cache still reads the valve's old RMLEAK 1: that is the hub's own clear
+ * in flight, never "valve RMLEAK active, hub incident clear" (a re-latch) nor, once it
+ * lands, a valve-button override (F-01). Cleared when the hub decides to assert RMLEAK
+ * again, when the ready valve reads RMLEAK 0 (tick: no incident latched, or Check 2), on
+ * a valve swap and on a full reset. RAM only, under g_mutex: false after a reboot, which
+ * keeps the fail-closed re-latch (the pended clear is lost with it). */
+static bool g_rmleak_clear_owed = false;
+/* Since the latch was set (or RMLEAK last re-asserted), the provisioned valve was ready
+ * and read RMLEAK 1 while no hub clear was owed. Check 2 reads a valve-button override
+ * only as a 1->0 edge from that 1, so a SET that never landed, or the hub's own clear,
+ * is not one. RAM only, under g_mutex. */
+static bool g_interlock_confirmed = false;
 static SemaphoreHandle_t g_mutex = NULL;
 
 // 24h override window state
@@ -522,6 +536,15 @@ static void add_interlock_device_id(cJSON *root)
     add_device_id(root, VALVE_SOURCE_ID, idbuf);
 }
 
+// The provisioned valve reads RMLEAK 1 under the latch. Must be called with g_mutex held.
+// While the hub still owes its own clear, that 1 is the value the clear is about to
+// overwrite, so it confirms nothing.
+static void note_interlock_seen(void)
+{
+    if (!g_rmleak_clear_owed)
+        g_interlock_confirmed = true;
+}
+
 // A false return from ble_valve_connect / _close / _open / _set_rmleak means either that
 // no valve is provisioned (the valve module then refuses every command: P0-a/c) or that
 // its command queue is full. Say which: the first is routine on a sensors-only hub, the
@@ -749,6 +772,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
                  leak_source_to_str(source), source_id ? source_id : "unknown");
         g_leak_incident_active = true;
         incident_save_to_nvs();
+        g_interlock_confirmed = false;
     }
 
     // 24h override window: block automatic valve closure but allow leak tracking.
@@ -803,10 +827,13 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // with the incident latched and no fresh grace, and tick Check 2 read the hub's own
     // clear as a valve-button override: a false 24 h window, auto-close blocked while wet.
     // Re-asserting a closed valve's RMLEAK is harmless; it also restarts the grace below.
+    // Both clears are queued under g_mutex, so this re-assert always lands after them. Nor
+    // is the cache trusted while a hub clear is still owed: its 1 may be the value that
+    // clear is about to overwrite (F-01).
     bool has_target = ble_valve_has_target_mac();
     int valve_state = ble_valve_get_state();
     bool rmleak_already = ble_valve_get_rmleak_state();
-    if (!new_incident && has_target && valve_state == 0 && rmleak_already) {
+    if (!new_incident && !g_rmleak_clear_owed && has_target && valve_state == 0 && rmleak_already) {
         ESP_LOGD(RULES_TAG, "Valve closed + RMLEAK active, no action needed");
         xSemaphoreGive(g_mutex);
         return;
@@ -828,6 +855,8 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     g_auto_close_triggered = true;
     g_last_auto_close_tick = now;
     g_rmleak_assert_tick = now;  // Grace period: don't check valve override until BLE write propagates
+    g_rmleak_clear_owed = false;    // RMLEAK is asserted below (reachable or pended)
+    g_interlock_confirmed = false;  // until the valve reads the new 1
 
     // Sample the link ONCE, here, and use the same value for the telemetry and for
     // the branch below. Reading ble_valve_is_connected() twice would let the event
@@ -1026,6 +1055,7 @@ bool rules_engine_reset_leak_incident(void)
     g_all_clear_since = 0;
     g_active_leak_count = 0;
     g_rmleak_assert_tick = 0;
+    g_interlock_confirmed = false;
     /* Clear the reconnect-event cooldown too: an explicit reset is the "start from a
      * clean slate" point, and a stale stamp would otherwise swallow the first
      * reconnect announcement of the NEXT incident. */
@@ -1073,14 +1103,24 @@ bool rules_engine_reset_leak_incident(void)
         ESP_LOGI(RULES_TAG, "LEAK_RESET: no active incident");
     }
 
-    xSemaphoreGive(g_mutex);
-
     // Always clear RMLEAK on valve — handles case where hub rebooted but
     // valve still has RMLEAK=1 from previous session
-    if (was_active || valve_rmleak) {
-        if (!ble_valve_set_rmleak(false))
-            valve_cmd_not_sent("LEAK_RESET: RMLEAK clear", "valve interlock left set");
-    }
+    //
+    // Queued BEFORE the give, on purpose (F-05). leak_reset runs on the esp-mqtt task and
+    // evaluate_leak() on iothub_task: queued after the give, a re-latch taking the mutex in
+    // that gap could queue its RMLEAK SET + CLOSE ahead of this clear, which then landed
+    // last and read as a valve-button override. The command FIFO now follows g_mutex order.
+    // Safe under the mutex: ble_valve_set_rmleak() is a portMUX section plus a 10 ms-bounded
+    // queue post, and nothing it takes waits on g_mutex.
+    bool clear_wanted = (was_active || valve_rmleak);
+    bool clear_sent = clear_wanted && ble_valve_set_rmleak(false);
+    if (clear_sent)
+        g_rmleak_clear_owed = true;
+
+    xSemaphoreGive(g_mutex);
+
+    if (clear_wanted && !clear_sent)
+        valve_cmd_not_sent("LEAK_RESET: RMLEAK clear", "valve interlock left set");
     return true;
 }
 
@@ -1128,6 +1168,8 @@ bool rules_engine_cancel_override(void)
             g_auto_close_triggered = true;
             g_rmleak_assert_tick = xTaskGetTickCount();
             g_all_clear_since = 0;
+            g_rmleak_clear_owed = false;
+            g_interlock_confirmed = false;
 
             xSemaphoreGive(g_mutex);
 
@@ -1171,6 +1213,7 @@ bool rules_engine_cancel_override(void)
     g_auto_close_triggered = false;
     g_all_clear_since = 0;
     g_rmleak_assert_tick = 0;
+    g_interlock_confirmed = false;
     if (needs_save) {
         incident_save_to_nvs();
     }
@@ -1242,6 +1285,8 @@ override_enable_result_t rules_engine_enable_override_remote(void)
     g_auto_close_triggered = false;
     g_all_clear_since = 0;
     g_rmleak_assert_tick = 0;
+    g_interlock_confirmed = false;
+    g_rmleak_clear_owed = true;   // the clear below is the hub's own, not a valve override
     start_override_window("c2d_command");   /* persists NVS + queues telemetry */
     xSemaphoreGive(g_mutex);
 
@@ -1313,6 +1358,7 @@ void rules_engine_on_valve_connected(void)
             ESP_LOGW(RULES_TAG, "Reconnected: valve RMLEAK active + override window — re-latching incident");
             g_leak_incident_active = true;
             incident_save_to_nvs();
+            g_interlock_confirmed = false;
         }
         ESP_LOGI(RULES_TAG, "Reconnected: override window active — skipping auto-close");
         xSemaphoreGive(g_mutex);
@@ -1335,8 +1381,13 @@ void rules_engine_on_valve_connected(void)
              * the event is pure noise.
              *
              * This path had neither of evaluate_leak's two guards, which is what
-             * turned a re-announced link into an unbounded storm. */
-            if (valve_state == 0 && valve_rmleak) {
+             * turned a re-announced link into an unbounded storm.
+             *
+             * Not while the hub still owes its own RMLEAK clear: the 1 read at link-up
+             * is then the value that clear (pended, applied after this) is about to
+             * overwrite, so the interlock is not in its end state. Re-assert below; the
+             * SET is queued after the clear. */
+            if (valve_state == 0 && valve_rmleak && !g_rmleak_clear_owed) {
                 ESP_LOGI(RULES_TAG,
                          "Reconnected with %d active leak(s) — valve already closed + RMLEAK asserted, nothing to do",
                          g_active_leak_count);
@@ -1345,6 +1396,7 @@ void rules_engine_on_valve_connected(void)
                 g_auto_close_triggered = true;
                 g_rmleak_assert_tick = xTaskGetTickCount();
                 g_all_clear_since = 0;
+                note_interlock_seen();
                 xSemaphoreGive(g_mutex);
                 return;
             }
@@ -1357,6 +1409,8 @@ void rules_engine_on_valve_connected(void)
             g_auto_close_triggered = true;
             g_rmleak_assert_tick = xTaskGetTickCount();
             g_all_clear_since = 0;
+            g_rmleak_clear_owed = false;
+            g_interlock_confirmed = false;
 
             /* RATE LIMIT THE EVENT, NEVER THE ACTION.
              *
@@ -1475,10 +1529,25 @@ void rules_engine_on_valve_connected(void)
         } else {
             ESP_LOGW(RULES_TAG, "Reconnected: hub incident active, valve closed + RMLEAK clear — re-asserting");
             g_rmleak_assert_tick = xTaskGetTickCount();
+            g_rmleak_clear_owed = false;
+            g_interlock_confirmed = false;
             xSemaphoreGive(g_mutex);
             if (!ble_valve_set_rmleak(true))
                 valve_cmd_not_sent("RECONNECT: RMLEAK re-assert", "interlock not applied");
         }
+    } else if (!hub_active && valve_rmleak && g_rmleak_clear_owed) {
+        // The hub cleared RMLEAK itself while the valve was unlinked or in GATT setup
+        // (auto-clear, leak_reset, override, or a clear whose writes failed). Setup reads
+        // the valve's old 1 and posts CONNECTED before the pended clear is written and
+        // read back, so this 1 is that clear still in flight: re-latching here turned the
+        // clear, once it landed, into a false valve-button override (F-01). Re-queue the
+        // clear (idempotent; covers a pend lost to a flush) under the mutex, like the
+        // other clears, so any later SET is queued after it.
+        ESP_LOGW(RULES_TAG, "Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching");
+        bool clear_sent = ble_valve_set_rmleak(false);
+        xSemaphoreGive(g_mutex);
+        if (!clear_sent)
+            valve_cmd_not_sent("RECONNECT: RMLEAK clear", "valve interlock left set");
     } else if (!hub_active && valve_rmleak) {
         // Valve has RMLEAK but hub lost incident (hub rebooted).
         // Conservatively re-latch the incident. If the valve has RMLEAK but hub
@@ -1486,9 +1555,11 @@ void rules_engine_on_valve_connected(void)
         ESP_LOGW(RULES_TAG, "Reconnected: valve RMLEAK active, hub incident clear — re-latching incident");
         g_leak_incident_active = true;
         incident_save_to_nvs();
+        g_interlock_confirmed = false;
         xSemaphoreGive(g_mutex);
     } else if (hub_active && valve_rmleak) {
         ESP_LOGI(RULES_TAG, "Reconnected: hub + valve RMLEAK in sync");
+        note_interlock_seen();
         xSemaphoreGive(g_mutex);
     } else {
         ESP_LOGI(RULES_TAG, "Reconnected: no active incident, valve clear");
@@ -1581,6 +1652,8 @@ void rules_engine_tick(void)
                     g_auto_close_triggered = true;
                     g_rmleak_assert_tick = xTaskGetTickCount();
                     g_all_clear_since = 0;
+                    g_rmleak_clear_owed = false;
+                    g_interlock_confirmed = false;
 
                     xSemaphoreGive(g_mutex);
 
@@ -1610,11 +1683,20 @@ void rules_engine_tick(void)
     }
 
     if (!g_leak_incident_active) {
+        // The hub's own clear has landed: the provisioned valve is ready and reads RMLEAK 0.
+        if (g_rmleak_clear_owed && ble_valve_is_ready() && !ble_valve_get_rmleak_state()) {
+            g_rmleak_clear_owed = false;
+        }
         xSemaphoreGive(g_mutex);
         return;
     }
 
     TickType_t now = xTaskGetTickCount();
+
+    // The interlock reached the valve: the 1 of Check 2's 1->0 edge.
+    if (ble_valve_is_ready() && ble_valve_get_rmleak_state()) {
+        note_interlock_seen();
+    }
 
     // Check 1: Auto-clear timeout (all sensors clear for AUTO_CLEAR_TIMEOUT_MS)
     if (g_all_clear_since != 0) {
@@ -1625,6 +1707,7 @@ void rules_engine_tick(void)
             incident_save_to_nvs();
             g_auto_close_triggered = false;
             g_all_clear_since = 0;
+            g_interlock_confirmed = false;
 
             cJSON *root = cJSON_CreateObject();
             if (root) {
@@ -1640,8 +1723,13 @@ void rules_engine_tick(void)
                 cJSON_Delete(root);
             }
 
+            // Queued under the mutex, like leak_reset's clear, so the command FIFO follows
+            // g_mutex order and the owed flag is set in the same hold (F-01).
+            bool clear_sent = ble_valve_set_rmleak(false);  // Does NOT open valve
+            if (clear_sent)
+                g_rmleak_clear_owed = true;
             xSemaphoreGive(g_mutex);
-            if (!ble_valve_set_rmleak(false))  // Does NOT open valve
+            if (!clear_sent)
                 valve_cmd_not_sent("AUTO-CLEAR: RMLEAK clear", "valve interlock left set");
             return;
         }
@@ -1670,17 +1758,28 @@ void rules_engine_tick(void)
             xSemaphoreGive(g_mutex);
             return;
         }
+        // Only a 1->0 EDGE is a physical override: the valve must have read RMLEAK 1 during
+        // this incident (a SET that never landed reads 0 too), and a 0 while the hub still
+        // owes its own clear is that clear landing. That 0 consumes the flag; the latch
+        // stays, and the all-clear timer or the next re-assert settles it.
         if (!ble_valve_get_rmleak_state()) {
-            // Physical override detected — the user cleared RMLEAK via the valve button.
-            // Start a 24h override window: automatic closures are blocked to guarantee
-            // water access, but leaks continue to be reported to the cloud.
-            ESP_LOGW(RULES_TAG, "RMLEAK cleared externally (valve override) — starting 24h override window");
-            g_leak_incident_active = false;
-            incident_save_to_nvs();
-            g_auto_close_triggered = false;
-            g_all_clear_since = 0;
+            if (g_rmleak_clear_owed) {
+                ESP_LOGI(RULES_TAG, "RMLEAK clear read back - the hub's own clear, not a valve override");
+                g_rmleak_clear_owed = false;
+                g_interlock_confirmed = false;
+            } else if (g_interlock_confirmed) {
+                // Physical override detected — the user cleared RMLEAK via the valve button.
+                // Start a 24h override window: automatic closures are blocked to guarantee
+                // water access, but leaks continue to be reported to the cloud.
+                ESP_LOGW(RULES_TAG, "RMLEAK cleared externally (valve override) — starting 24h override window");
+                g_leak_incident_active = false;
+                incident_save_to_nvs();
+                g_auto_close_triggered = false;
+                g_all_clear_since = 0;
+                g_interlock_confirmed = false;
 
-            start_override_window("button");
+                start_override_window("button");
+            }
         }
     }
     // Track valve ready state for transition detection
@@ -1782,6 +1881,8 @@ bool rules_engine_reset_all(void)
         g_last_reconnect_close_tick = 0;
         g_last_auto_close_tick      = 0;
         g_valve_was_ready           = false;
+        g_rmleak_clear_owed         = false;
+        g_interlock_confirmed       = false;
         g_active_leak_count         = 0;
         g_override_state            = OVERRIDE_STATE_INACTIVE;
         g_override_window_expiry    = 0;
@@ -1900,6 +2001,11 @@ void rules_engine_on_valve_replaced(void)
     uint8_t before = g_active_leak_count;
     track_leak_source(VALVE_SOURCE_ID, false);
     bool dropped = (g_active_leak_count < before);
+
+    /* The target change flushed any clear queued or pended for the old valve, and what
+     * the old valve read confirms nothing about the next one. */
+    g_rmleak_clear_owed = false;
+    g_interlock_confirmed = false;
 
     /* Nothing else wet: release the latch now, not on the 10 s all-clear. The new valve
      * usually links sooner, and on_valve_connected() would read a latched incident with
