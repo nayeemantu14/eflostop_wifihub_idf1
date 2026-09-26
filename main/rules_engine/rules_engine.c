@@ -534,6 +534,26 @@ static void valve_cmd_not_sent(const char *what, const char *consequence)
         ESP_LOGE(RULES_TAG, "%s enqueue FAILED — %s", what, consequence);
 }
 
+// provisioning_with_valve_target() callback. It runs under the provisioning mutex, so it
+// only records whether a valve is provisioned.
+static void note_valve_provisioned(const char *valve_mac, uint8_t ble_count, void *ctx)
+{
+    (void)ble_count;
+    *(bool *)ctx = (valve_mac != NULL);
+}
+
+// False only when provisioning DEFINITELY has no valve. Asks provisioning, not the BLE
+// link (a valve that is merely out of range is still this hub's), and a busy or
+// uninitialised provisioning manager answers true: callers use this to drop valve-only
+// output, and an uncertain read must never drop it. provisioning_get_valve_mac() cannot
+// tell those two apart. Call with g_mutex held (lock order g_mutex -> g_prov_mutex).
+static bool valve_provisioned_or_unknown(void)
+{
+    bool has_valve = true;   // kept when the callback does not run (busy / not initialised)
+    (void)provisioning_with_valve_target(note_valve_provisioned, &has_valve);
+    return has_valve;
+}
+
 static sensor_type_t source_to_sensor_type(leak_source_t source)
 {
     switch (source) {
@@ -806,8 +826,14 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // valve that no longer exists (and whose commands are refused).
     bool valve_reachable = has_target && ble_valve_is_connected();
 
-    // Build telemetry before releasing mutex
-    build_auto_close_telemetry(source, source_id, valve_reachable);
+    // Build telemetry before releasing mutex. Not on a hub with no provisioned valve:
+    // there is nothing to auto-close, and the leak itself is still reported
+    // (leak_detected). Only the event is skipped; the latch and the rest stay as above.
+    if (valve_provisioned_or_unknown()) {
+        build_auto_close_telemetry(source, source_id, valve_reachable);
+    } else {
+        ESP_LOGI(RULES_TAG, "AUTO-CLOSE: no provisioned valve - auto_close event not published");
+    }
 
     xSemaphoreGive(g_mutex);
 
