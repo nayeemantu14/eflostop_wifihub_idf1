@@ -4,6 +4,8 @@ Written for the user and for the next Claude Code session. It records where the 
 
 > **Resume here.** Read §1, §7, §10 and §11 first.
 >
+> **STATUS, Sunday 2026-09-27: phases A–G are COMPLETE.** Firmware `d9fa9c8` passed Build checkpoint 3 (§4b). The council voted 5/5 SHIP (§11). `MANUAL_TEST_PLAN.md` is committed (`d595633`). What remains is the user's bench campaign: start with the smoke subset in section S of the test plan, then the full plan. Nothing is pushed, and there is no PR. **Before any push, redact the Wi-Fi password in `6b84ae3`.**
+>
 > **Update, Saturday 2026-09-26.**
 > - **Build checkpoint 2 passed.** The user built `00beb81` at 07:20 (§4a).
 > - **Phase E (adversarial review) is done, and its fixes are committed.** Findings, decisions and commits are in §10.
@@ -46,8 +48,8 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | 🔨 Build checkpoint 2 | **passed** (build of `00beb81`, §4a) |
 | E: adversarial review | **done**; fixes committed `095b5d6` … `b245d94` plus docs (§10) |
 | 🔨 Build checkpoint 3 | **passed** (build of `d9fa9c8`, §4b) |
-| F: 5-specialist council | not started |
-| G: MANUAL_TEST_PLAN.md + summary | not started |
+| F: 5-specialist council | **done**: round 1 BLOCK (F-01, B1), both fixed; final vote 5/5 SHIP on `d9fa9c8` (§11) |
+| G: MANUAL_TEST_PLAN.md + summary | **done**: version grep clean; CP3 build summary in §4b; `docs/field_logs/2.1.4/MANUAL_TEST_PLAN.md` (`d595633`, 114 tests, traceability matrix, ~30 min smoke subset) |
 
 ---
 
