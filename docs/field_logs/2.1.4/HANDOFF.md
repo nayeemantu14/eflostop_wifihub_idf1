@@ -309,7 +309,8 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
      - **Sensors-only hub leak:** you see `leak_detected` and **no** `auto_close`, plus the UART line "AUTO-CLOSE: no provisioned valve - auto_close event not published".
      - **Connected valve:** `last_seen_age_s` stays 0 in snapshots.
      - **Valve swap** (flooded valve A → dry valve B): B is not auto-closed.
-     - **Remove and re-add a wet sensor within 10 s:** `leak_detected` and `auto_close` arrive at once.
+     - **Remove and re-add a wet sensor within 10 s:** `leak_detected` arrives at once; `auto_close` only if the 10 s auto-clear had already fired (otherwise the valve is still closed with RMLEAK set and nothing more is needed).
+     - **The full, code-verified procedure for all of the above is `docs/field_logs/2.1.4/MANUAL_TEST_PLAN.md`** (114 tests, traceability matrix, ~30 min smoke subset in its section S). Where this list and the test plan differ, the test plan wins.
 2. ~~**🔨 Build checkpoint 2 (user).**~~ Passed (§4a). Full clean build of the branch at its final commit. That is the last commit **before** this handoff update; the handoff commit is docs only.
 
    ```powershell

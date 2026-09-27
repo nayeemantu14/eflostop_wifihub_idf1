@@ -606,7 +606,7 @@ At least one field is required. Each present array does a **full replace** of th
 }
 ```
 
-Confirm the result two ways. Twin reported is republished **immediately** on a successful provision (FW 2.0.2 — before that it only refreshed on the next MQTT reconnect, so the twin could read stale for hours), carrying `auto_close_enabled`, `trigger_mask`, `valve_id` and the device counts. The snapshot that follows carries the same rules values under `data.rules`: a `commission` snapshot when the provision added a device, otherwise the command's own `event` snapshot. Since 2.1.4 a provision that adds no device (an identical re-send, a rules-only provision) does not restart the commission snapshot or the post-provision snapshot pulse.
+Confirm the result two ways. Twin reported is republished **immediately** on a successful provision (FW 2.0.2 — before that it only refreshed on the next MQTT reconnect, so the twin could read stale for hours), carrying `auto_close_enabled`, `trigger_mask`, `valve_id` and the device counts. The snapshots that follow carry the same rules values under `data.rules`. The command's own `event` snapshot comes first. When the provision added devices, a `boot` snapshot follows once every new device has been heard (or after the 150 s sync window), and a `commission` snapshot for a device first heard after that, within the post-provision window. Since 2.1.4 a provision that adds no device (an identical re-send, a rules-only provision) does not restart the commission snapshot or the post-provision snapshot pulse.
 
 Limits: 1 valve · up to 16 LoRa sensors · up to 16 BLE leak sensors.
 
@@ -661,12 +661,12 @@ Legacy text: `DECOMMISSION_BLE:00:80:E1:27:99:E7`
 ```
 What happens, in order:
 1. Erases all NVS provisioning data
-2. Clears all sensor metadata
-3. Clears hub identity (`hub_name`), DPS cache, and rules-engine persistent state (override window + incident latch)
-4. Clears the valve target MAC and disconnects the valve BLE
+2. Clears the valve target MAC and disconnects the valve BLE (first, since 2.1.4)
+3. Clears all sensor metadata
+4. Clears hub identity (`hub_name`), DPS cache, and rules-engine persistent state (override window + incident latch)
 5. Sends `cmd_ack` (envelope/`id` permitting)
-6. Restarts the device after ~3 seconds
-7. Hub boots unprovisioned and goes into captive-portal mode
+6. Publishes one last `decommission` snapshot with the empty-hub shape, clears the offline event buffer, and restarts after ~3 seconds
+7. Hub boots unprovisioned. Its Wi-Fi credentials are kept (only the hub's Wi-Fi reset button clears them), so it reconnects, re-registers with DPS, and publishes an empty `boot` snapshot followed by heartbeats. It does not open the captive portal.
 
 Legacy text: `DECOMMISSION_ALL` or `DECOMMISSION`
 

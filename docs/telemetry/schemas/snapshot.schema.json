@@ -200,7 +200,7 @@
                 "number",
                 "null"
               ],
-              "description": "The valve's link age. Since 2.1.4 it is 0 while the BLE link to the provisioned valve is up (link supervision drops a link that stops answering, so a linked valve is being heard now), and once disconnected the seconds since the link dropped. Up to 2.1.3 it was the seconds since the valve's last changed value or connect, which grew for hours on a steady, connected valve. Units: seconds. Range/enum: >= 0 when a number. Presence: whenever valve_id is present; explicit null when never seen this uptime.",
+              "description": "The valve's link age. Since 2.1.4 it is 0 while the BLE link to the provisioned valve is up (link supervision drops a link that stops answering, so a linked valve is being heard now), and once disconnected the seconds since the link dropped. During the valve's GATT setup after a drop (connected:true, state \"unknown\") it still counts from the drop until setup completes. Up to 2.1.3 it was the seconds since the valve's last changed value or connect, which grew for hours on a steady, connected valve. Units: seconds. Range/enum: >= 0 when a number. Presence: whenever valve_id is present; explicit null when never seen this uptime.",
               "x-source": "valve block of telemetry_v2_publish_snapshot() main/telemetry/telemetry_v2.c",
               "x-category": "12.2"
             }

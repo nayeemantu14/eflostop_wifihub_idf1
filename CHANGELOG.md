@@ -328,8 +328,10 @@ next snapshot) confirms it.
 
 ### Upgrade notes
 
-- **OTA from 2.1.3 keeps provisioning.** There is no change to any NVS namespace, key or layout, nor to the
-  partition table. The valve, sensors, sensor metadata, rules, hub name, DPS cache and snapshot interval all
+- **Upgrading from 2.1.3 keeps provisioning.** There is no change to any NVS namespace, key or layout, nor to
+  the partition table. (Neither 2.1.3 nor 2.1.4 contains an OTA client; an upgrade that rewrites only the app
+  image, such as `idf.py app-flash` or a full `idf.py flash`, which leaves the `nvs` and `nvs_prov`
+  partitions alone, keeps everything. Never `erase-flash`.) The valve, sensors, sensor metadata, rules, hub name, DPS cache and snapshot interval all
   carry over.
 - **Rolling back to 2.1.3 keeps provisioning too,** for the same reason. The 2.1.3 behaviour returns with it,
   including P0-a. A pre-sync event still in the offline buffer at the rollback and not yet time-stamped (the
