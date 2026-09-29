@@ -34,17 +34,39 @@ void wifi_task(void *pvParameter);
  * already linked stays linked, with its commands. Leak protection still outranks the portal:
  * while a leak response (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and
  * its connect run anyway until the valve takes it (app_ble_valve.c). The health engine holds
- * the BLE sensors' timeouts meanwhile (health_set_ble_scan_paused()). No time cap (product
- * decision): the window lasts until Wi-Fi is set up (the STA gets an IP) or the AP stops.
+ * the BLE sensors' timeouts meanwhile (health_set_ble_scan_paused()). No time cap before setup
+ * (product decision).
+ *
+ * The window closes when the setup AP stops (cb_ap_stopped()), not when the STA gets its IP:
+ * the phone that submitted the credentials is still on the SoftAP, which wifi_manager keeps up
+ * for WIFI_MANAGER_SHUTDOWN_AP_TIMER (60 s) after the IP so the portal page can load its success
+ * status, and resuming the dual-PHY scan at the IP starved the SoftAP again. BLE must never stay
+ * paused while the hub is on Wi-Fi, so two nets back that up:
+ *   - the STA loses that Wi-Fi before the AP stops: wifi_manager stops its AP-shutdown timer
+ *     and the SoftAP stays up as a router-fallback portal with the credentials saved, which
+ *     keeps BLE scanning, so cb_connection_lost() closes the window;
+ *   - the window is still open PORTAL_AP_STOP_MARGIN_MS past that timer (wifi_manager starts
+ *     the timer only if its AP_STARTED bit is set at the IP): wifi_task sends the STOP_AP
+ *     itself (portal_priority_net()).
  *
  * NOT for the fallback AP that wifi_manager opens after failed retries while credentials are
  * still saved (router outage): that is the field case BLE-from-boot leak protection is for,
  * so BLE keeps scanning there.
  *
- * Every transition runs on the wifi_manager task (the START_AP / STOP_AP callbacks and
- * cb_connection_ok), which is therefore the flag's only writer. They only set flags: nothing
- * here blocks, calls provisioning or touches NimBLE. */
+ * Every transition runs on the wifi_manager task (the START_AP, STOP_AP, GOT_IP and
+ * STA_DISCONNECTED callbacks), which is therefore the only writer of the flag and of
+ * s_setup_ok_tick; wifi_task only reads them. They only set flags: nothing here blocks, calls
+ * provisioning or touches NimBLE. */
 static volatile bool s_portal_priority = false;
+
+/* The tick of the GOT_IP that set Wi-Fi up in the open window (forced non-zero), 0 = none.
+ * Set by cb_connection_ok(); cleared when the window opens or closes, and by a requested
+ * disconnect in the window. */
+static volatile TickType_t s_setup_ok_tick = 0;
+
+/* How long past WIFI_MANAGER_SHUTDOWN_AP_TIMER the safety net waits for the setup AP to stop on
+ * its own: wifi_task checks every 5 s, so BLE resumes at most about 80 s after the IP. */
+#define PORTAL_AP_STOP_MARGIN_MS 15000
 
 /* For the window the wifi_manager task runs at PORTAL_TASK_PRIORITY: above the app tasks (5),
  * far below lwIP (18) and the Wi-Fi and BT tasks (20-23). Insurance only: the portal was short
@@ -93,8 +115,14 @@ static void portal_priority_close(const char *reason)
         return;
     health_set_ble_scan_paused(false);   // stamps the resume: each BLE sensor's timeout restarts
     s_portal_priority = false;
-    // Before anything else the caller does: cb_connection_ok's MQTT and iothub work runs at the
-    // task's own priority again.
+    s_setup_ok_tick = 0;
+    // The raise lasts as long as the window, so cb_connection_ok()'s work (the LED, the MQTT
+    // resume, the iothub wake) runs at PORTAL_TASK_PRIORITY when Wi-Fi is set up in it. That is
+    // harmless: none of it spins. Where it can block, on the net_status or the MQTT control
+    // mutex, the holder inherits the raised priority until it gives the mutex, so the wait is
+    // no longer than at the task's own priority. The rest are flags and non-blocking queue
+    // posts, and at most one esp_mqtt_client_start(), which creates the MQTT task at its own
+    // priority.
     if (s_wm_task != NULL)
     {
         vTaskPrioritySet(s_wm_task, WIFI_MANAGER_TASK_PRIORITY);
@@ -112,16 +140,43 @@ static void cb_ap_started(void *pvParameter)
     (void)pvParameter;
     const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
     if (sta == NULL || sta->sta.ssid[0] == '\0')
+    {
+        s_setup_ok_tick = 0;   // also a re-open after the portal's forget: no setup in it yet
         portal_priority_open();
+    }
     else if (!s_portal_priority)
         ESP_LOGI(WIFI_TAG, "SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on");
 }
 
-// WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected.
+// WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected. This
+// is where Wi-Fi setup ends the window: about 60 s after the IP, from wifi_manager's own timer,
+// or from the safety net below.
 static void cb_ap_stopped(void *pvParameter)
 {
     (void)pvParameter;
     portal_priority_close("AP stopped");
+}
+
+/* Safety net, on wifi_task: the window is open, Wi-Fi was set up in it, and the setup AP has not
+ * stopped PORTAL_AP_STOP_MARGIN_MS past WIFI_MANAGER_SHUTDOWN_AP_TIMER. wifi_manager starts no
+ * AP-shutdown timer if its AP_STARTED bit was clear at the IP, and its xTimerStart() does not
+ * wait for room in the timer queue. Sends the STOP_AP once per GOT_IP tick (*stop_sent_for,
+ * wifi_task's own). On the wifi_manager task it stops the AP if the STA is connected, and
+ * cb_ap_stopped() closes the window; if the STA is not, its disconnect reaches
+ * cb_connection_lost(), which closes the window or clears the tick. Nothing is written here:
+ * every window write stays on the wifi_manager task. */
+static void portal_priority_net(TickType_t *stop_sent_for)
+{
+    TickType_t setup = s_setup_ok_tick;
+    if (setup == 0 || setup == *stop_sent_for || !s_portal_priority)
+        return;
+    TickType_t elapsed = xTaskGetTickCount() - setup;
+    if (elapsed <= pdMS_TO_TICKS(WIFI_MANAGER_SHUTDOWN_AP_TIMER + PORTAL_AP_STOP_MARGIN_MS))
+        return;
+    *stop_sent_for = setup;
+    ESP_LOGW(WIFI_TAG, "portal priority: setup AP still up %u s after Wi-Fi connected - stopping it",
+             (unsigned)(elapsed / configTICK_RATE_HZ));
+    wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
 }
 
 // SoftAP station join/leave, so the bench can see a phone associate (wifi_manager silences the
@@ -177,9 +232,18 @@ void cb_connection_ok(void *pvParameter)
 
     ESP_LOGI(WIFI_TAG, "Connected! IP: %s", str_ip);
 
-    // Wi-Fi is set up: close the portal priority window, so BLE scanning resumes. A no-op
-    // when the window is not open (a router reconnect, or a boot with saved credentials).
-    portal_priority_close("Wi-Fi connected");
+    // Wi-Fi is set up, but the portal priority window stays open until the setup AP stops
+    // (cb_ap_stopped()): the phone that submitted the credentials is still on the SoftAP and
+    // loads the portal's success status from it. Only the time of this IP is kept, for
+    // cb_connection_lost() and the safety net. Nothing when the window is not open (a router
+    // reconnect, or a boot with saved credentials).
+    if (s_portal_priority)
+    {
+        TickType_t now = xTaskGetTickCount();
+        s_setup_ok_tick = (now != 0) ? now : 1;   // 0 means "no setup in this window"
+        ESP_LOGI(WIFI_TAG, "portal priority: Wi-Fi connected - BLE scanning stays paused until the setup AP stops (about %d s)",
+                 WIFI_MANAGER_SHUTDOWN_AP_TIMER / 1000);
+    }
 
     // BLE is not started here, and never waits for Wi-Fi: iothub_task starts it at boot
     // from the provisioned device set, together with leak protection.
@@ -205,6 +269,21 @@ void cb_connection_lost(void *pvParameter)
         ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", wifi_event->reason);
     }
 
+    // The STA lost the Wi-Fi it was set up with in this window, before the setup AP stopped.
+    // wifi_manager has just stopped its AP-shutdown timer, so the SoftAP stays up as a
+    // router-fallback portal with the credentials saved, which keeps BLE scanning: close the
+    // window, before the MQTT stop below (it can wait). Not after a requested disconnect (the
+    // 10 s reset, the portal's forget): wifi_manager zeroes the STA config before this callback
+    // and sends START_AP next, so the window stays open for the next setup.
+    if (s_portal_priority && s_setup_ok_tick != 0)
+    {
+        const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
+        if (sta != NULL && sta->sta.ssid[0] != '\0')
+            portal_priority_close("Wi-Fi lost after setup");
+        else
+            s_setup_ok_tick = 0;
+    }
+
     // Network LED -> "no internet" (ramp red). This also clears the MQTT flag
     // inside net_status so a later reconnect shows "connecting" first.
     net_status_set_wifi(false);
@@ -223,13 +302,16 @@ void wifi_task(void *pvParameter)
     // while it runs wifi_manager's handler, and that handler can block posting to the
     // wifi_manager task. The wifi_manager task creates the default loop, so a first try can
     // find none (ESP_ERR_INVALID_STATE, silent): retried every second until it is in.
+    // Each pass also runs the portal priority window's safety net (portal_priority_net()).
     bool ap_log_on = false;
+    TickType_t stop_sent_for = 0;   // the GOT_IP tick the net already sent a STOP_AP for
     while (1)
     {
         vTaskDelay(pdMS_TO_TICKS(ap_log_on ? 5000 : 1000));
         if (!ap_log_on)
             ap_log_on = (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                     &ap_station_event_handler, NULL) == ESP_OK);
+        portal_priority_net(&stop_sent_for);
     }
     vTaskDelete(NULL);
 }
