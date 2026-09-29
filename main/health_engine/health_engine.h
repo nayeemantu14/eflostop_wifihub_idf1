@@ -435,21 +435,23 @@ void health_set_ble_scan_paused(bool paused);
  * (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and its connect run
  * anyway. The hub is looking for the valve then, so the valve's hold
  * (health_set_ble_scan_paused()) ends HEALTH_VALVE_DISC_TIMEOUT_MS after the first such call
- * of the pause, while Wi-Fi setup still runs. A valve still not linked by then counts: one
- * never linked leaves the roll-up excuse (CRITICAL: RED LED, "Valve offline"), and one that
- * dropped goes CRITICAL (device_offline) once its own disconnect grace has run too. That
- * stays so after the leak clears and the hunt is held again, until the valve links: the hub
- * tried to reach it and could not. Any pended CLOSE counts, a cloud valve_close pended while
- * the setup AP is still up after the STA's IP included. With no such hunt, setup shows no RED
- * for the valve.
+ * since the pause began or the valve last linked, while Wi-Fi setup still runs. A valve still
+ * not linked by then counts: one never linked leaves the roll-up excuse (CRITICAL: RED LED,
+ * "Valve offline"), and one that dropped goes CRITICAL (device_offline) once its own
+ * disconnect grace has run too. That stays so after the leak clears and the hunt is held
+ * again, until the valve links: the hub tried to reach it and could not. Any pended CLOSE
+ * counts, a cloud valve_close pended while the setup AP is still up after the STA's IP
+ * included. With no such hunt, setup shows no RED for the valve.
  *
- * Only the first call of a pause stamps, and a call outside a pause does nothing. A CONNECTED
- * applied while the valve's link is up clears the stamp, as do the next pause and the valve's
- * removal from the table; the resume does not.
+ * Only that first call stamps: a later one, and any call outside a pause, does nothing. The
+ * stamp is cleared by a CONNECTED applied while the valve's link is up, so a hunt after that
+ * link drops stamps afresh, and by the next pause and the valve's removal from the table; the
+ * resume does not clear it.
  *
  * Lock-free (32-bit loads and one store), non-blocking, safe from any task and before
  * health_engine_init(). Its callers are the NimBLE host and valve command tasks, with no
- * valve link up. Logs one line when it stamps.
+ * valve link up; the command task repeats it on every portal poll while such a hunt runs.
+ * Logs one line when it stamps.
  */
 void health_note_valve_leak_hunt(void);
 

@@ -399,8 +399,9 @@ static bool leak_response_pending(void)
 // window opened (in a boot-time window it never is), and the portal waits out the incident.
 // Once the valve links and the pended commands are written, the window holds again and the
 // link stays up. The hub is looking for the valve then, so the health engine counts its
-// timeouts from the first such hunt of the pause (health_note_valve_leak_hunt(), called where
-// start_scan() lets the hunt run and where portal_priority_poll() finds one already running).
+// timeouts from the first such hunt since the pause began or the valve last linked
+// (health_note_valve_leak_hunt(), called where start_scan() lets the hunt run and on every
+// portal_priority_poll() pass while one runs).
 static bool portal_holds_valve(void)
 {
     return app_wifi_portal_priority_active() && !leak_response_pending();
