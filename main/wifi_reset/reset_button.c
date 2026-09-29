@@ -3,9 +3,16 @@
 #include <esp_wifi.h>
 #include <esp_netif.h>
 #include "esp_system.h"
+#include "nvs.h"
 #include "wifi_manager.h"
+#include "nvs_sync.h"   // wifi_manager's NVS mutex (in the component's src/, like wifi_manager.h)
 
 #define TAG "RESET_BTN"
+
+// wifi_manager's NVS namespace ("espwifimgr"). wifi_manager.c defines it with external linkage
+// but wifi_manager.h does not declare it, so it is declared here rather than the string being
+// repeated: the managed component stays its only definition.
+extern const char wifi_manager_nvs_namespace[];
 
 // ---------------------------------------------------------------------------
 // Event types posted to the shared queue (by ISR and timer callback)
@@ -66,6 +73,69 @@ static void hold_timer_cb(TimerHandle_t xTimer)
 }
 
 // ---------------------------------------------------------------------------
+// Erase wifi_manager's saved STA credentials straight from NVS (see execute_wifi_reset()).
+// Returns with the component's NVS mutex still HELD if it was obtained: the caller reboots.
+// ---------------------------------------------------------------------------
+static void erase_wifi_credentials(void)
+{
+    /* The mutex serialises wifi_manager's own read-compare-write of the config. It is taken
+     * and never given back: held through esp_restart(), it keeps any later wifi_manager save
+     * (a GOT_IP, if the router comes back just then) from writing back the credentials still
+     * in its RAM copy. NVS itself is thread-safe, so if the mutex is not free within 3 s (a
+     * wifi_manager save whose commit failed returns without giving it) the erase goes ahead
+     * without it. */
+    if (!nvs_sync_lock(pdMS_TO_TICKS(3000))) {
+        ESP_LOGW(TAG, "Wi-Fi NVS lock busy for 3 s - erasing without it");
+    }
+
+    /* The "ssid" and "password" KEYS are erased, not overwritten: absent keys are the factory
+     * state. wifi_manager_fetch_wifi_sta_config() then returns false at the first key, and
+     * LOAD_AND_RESTORE opens the portal about 0.7 s after the reboot. The zero blobs its own
+     * erase writes read the same way (it returns false for an empty SSID), and both states
+     * already occur with 2.1.3, so an upgrade or a downgrade reads either one as "nothing
+     * saved". "settings" (the SoftAP's own) is kept. These keys are the only copy: wifi_manager
+     * runs the driver with WIFI_STORAGE_RAM.
+     * Probed read-only first: NVS_READWRITE creates the namespace on a hub that never saved
+     * one, so ESP_ERR_NVS_NOT_FOUND there means nothing was ever saved. */
+    nvs_handle_t h;
+    int erased = 0;
+    esp_err_t err = nvs_open(wifi_manager_nvs_namespace, NVS_READONLY, &h);
+    if (err == ESP_OK) {
+        nvs_close(h);
+        err = nvs_open(wifi_manager_nvs_namespace, NVS_READWRITE, &h);
+    }
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    } else if (err == ESP_OK) {
+        const char *const keys[] = { "ssid", "password" };
+        for (int i = 0; i < 2; i++) {
+            esp_err_t rc = nvs_erase_key(h, keys[i]);
+            if (rc == ESP_OK) {
+                erased++;
+            } else if (rc != ESP_ERR_NVS_NOT_FOUND && err == ESP_OK) {
+                err = rc;   // keep the first failure, still try the other key
+            }
+        }
+        if (erased > 0) {
+            esp_err_t rc = nvs_commit(h);
+            if (err == ESP_OK) {
+                err = rc;
+            }
+        }
+        nvs_close(h);
+    }
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi credential erase failed (%s) - rebooting anyway",
+                 esp_err_to_name(err));
+    } else if (erased > 0) {
+        ESP_LOGI(TAG, "Wi-Fi credentials erased from NVS");
+    } else {
+        ESP_LOGI(TAG, "No Wi-Fi credentials saved - nothing to erase");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WiFi reset action
 // ---------------------------------------------------------------------------
 static void execute_wifi_reset(void)
@@ -74,10 +144,19 @@ static void execute_wifi_reset(void)
 
     /*
      * Clear ONLY the WiFi credentials, then reboot so the hub comes up fresh in
-     * AP mode for reconfiguration.
+     * AP mode for reconfiguration. Whatever the STA is doing: connected, idle on a
+     * router-outage fallback portal, or already in the setup portal.
      *
-     * wifi_manager_disconnect_async() disconnects STA and memsets the stored WiFi
-     * config to 0 + saves it (default "nvs" partition only — credentials erased).
+     * wifi_manager_disconnect_async() comes first: with the STA connected it leaves
+     * the router cleanly ("WiFi Disconnected. Reason: 8"), and wifi_manager's
+     * STA_DISCONNECTED handler zeroes its RAM copy and saves that. That handler is
+     * wifi_manager's only erase, though, and an idle STA never reaches it: no
+     * disconnect event comes. On the router-outage fallback portal the STA is idle
+     * (START_AP stops the retry timer), so a reset there used to keep the credentials,
+     * and with them a fallback AP that keeps BLE scanning: a customer whose router
+     * password changed could not reconfigure the hub (2026-09-29 bench capture). So
+     * after the 2 s wait erase_wifi_credentials() erases them straight from NVS, in
+     * every state, and keeps wifi_manager from saving them again before the reboot.
      *
      * We then reboot. A fresh boot gives the SoftAP captive portal a less fragmented
      * heap than the running one, with no MQTT/TLS session loaded (without Wi-Fi
@@ -91,13 +170,10 @@ static void execute_wifi_reset(void)
      *
      * BLE does not SCAN beside this portal, though. With no credentials saved, the
      * portal priority window (app_wifi.c) pauses the leak scanner and the valve hunt
-     * until the STA gets an IP: continuous scanning left the SoftAP so little radio
+     * while the setup portal is up: continuous scanning left the SoftAP so little radio
      * time that no phone could join. A valve already linked stays linked. The window
-     * opens only if the credentials really are gone after the reboot, and the erase
-     * above runs in wifi_manager's STA_DISCONNECTED handler, which an idle STA does not
-     * reach (2026-09-29 bench capture). A reset while the STA is idle, e.g. on a
-     * router-outage fallback portal, can therefore keep them, and that portal then
-     * keeps BLE scanning.
+     * opens only if the credentials really are gone after the reboot, which the erase
+     * above now makes sure of.
      *
      * The reboot does NOT forget provisioned devices: commissioning (valve / LoRa
      * / BLE-leak sensors), hub identity, and DPS cache live in the dedicated
@@ -109,8 +185,10 @@ static void execute_wifi_reset(void)
                   "(commissioning preserved in nvs_prov)...");
     wifi_manager_disconnect_async();
 
-    // Let wifi_manager commit the cleared credentials to NVS before we reboot.
+    // Let wifi_manager finish the disconnect, and its own save, before the erase.
     vTaskDelay(pdMS_TO_TICKS(2000));
+
+    erase_wifi_credentials();   // holds wifi_manager's NVS mutex through the restart
 
     ESP_LOGW(TAG, "Rebooting into AP mode...");
     esp_restart();
