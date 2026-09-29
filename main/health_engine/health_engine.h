@@ -292,8 +292,8 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
  * @brief Check whether boot sync is complete.
  *        Complete when all provisioned devices have checked in once,
  *        or the boot window (HEALTH_BOOT_SYNC_TIMEOUT_MS) has elapsed. While BLE
- *        scanning is paused (health_set_ble_scan_paused()) and a BLE sensor has never
- *        been heard, that timeout waits until a full window after the resume.
+ *        scanning is paused (health_set_ble_scan_paused()) and a BLE sensor or the valve
+ *        has never been heard, that timeout waits until a full window after the resume.
  *        Fails OPEN (returns true) if the engine is not up or the mutex is busy,
  *        so a caller can never get stuck in the "syncing" state.
  *
@@ -397,19 +397,23 @@ bool health_is_interlock_held(void);
  * @brief Tell the health engine that BLE scanning is paused, or has resumed.
  *
  * Called for the portal priority window (app_wifi.c): while the Wi-Fi setup portal is open
- * with no credentials saved, the hub pauses BLE scanning and is not listening to its BLE
- * leak sensors, so their silence says nothing about them. Meanwhile a BLE sensor that was
- * online stays online (no device_offline), and one never heard stays excused from the
- * roll-up ("syncing"). On resume each BLE sensor gets a fresh full window from that moment
- * (HEALTH_BLE_LEAK_TIMEOUT_MS, HEALTH_ROLLUP_UNHEARD_MS) before it can be rated offline or
- * counted as unheard. The snapshot gate (health_is_boot_sync_complete()) likewise does not
- * time out while a BLE sensor never heard is not being listened to, nor until its own
- * window has passed after the resume, so the first snapshot after Wi-Fi setup waits for
- * those sensors as it would after a boot.
+ * with no credentials saved, the hub pauses BLE scanning. It is not listening to its BLE
+ * leak sensors and not hunting for its valve, so their silence says nothing about them.
+ * Meanwhile a BLE sensor that was online stays online (no device_offline), and one never
+ * heard stays excused from the roll-up ("syncing"). A valve that dropped stays in its
+ * WARNING disconnect grace ("Valve disconnected", no device_offline), and one never linked
+ * stays excused. On resume each gets a fresh full window from that moment before it can be
+ * rated offline or counted as unheard: a BLE sensor HEALTH_BLE_LEAK_TIMEOUT_MS
+ * (HEALTH_ROLLUP_UNHEARD_MS), the valve HEALTH_VALVE_DISC_TIMEOUT_MS. The snapshot gate
+ * (health_is_boot_sync_complete()) likewise does not time out while a BLE sensor or the
+ * valve never heard is not being listened to, nor until its own window has passed after the
+ * resume, so the first snapshot after Wi-Fi setup waits for them as it would after a boot.
  *
- * It only ever DELAYS such a verdict: a sensor already offline, or already counting as
+ * It only ever DELAYS such a verdict: a device already offline, or already counting as
  * unheard, stays so until it is heard, so the pause can never fake a recovery. LoRa sensors
- * and the valve are not affected. last_seen_age_s keeps its real value.
+ * are not affected. The valve is held even while a pended leak response makes its hunt run
+ * in the window (that leak already rates the system CRITICAL). The valve's snapshot
+ * `connected` stays its real link state, and last_seen_age_s keeps its real value.
  *
  * Lock-free (one 32-bit store), non-blocking, safe from any task and before
  * health_engine_init(). Its caller is the wifi_manager task. Idempotent: a resume with no
