@@ -2839,6 +2839,8 @@ static void on_stack_sync(void)
 //   Once it stops holding (the window closed, or a leak response was pended): restart a hunt
 //   it held (s_hunt_held), whichever edge this poll saw, and when the window closes any hunt
 //   that is wanted with no link up or being made.
+//   While a leak response lets a hunt or a connect run in the window, on every pass: tell the
+//   health engine, which counts the valve's timeouts from it (health_note_valve_leak_hunt()).
 // g_connect_requested is never touched. start_scan() and handle_valve_disc() check the
 // window themselves, so nothing new starts in between.
 static void portal_priority_poll(void)
@@ -2860,16 +2862,20 @@ static void portal_priority_poll(void)
                 ESP_LOGI(BLE_TAG, "[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio%s",
                          valve_conn_handle != BLE_HS_CONN_HANDLE_NONE ? " (valve link kept)" : "");
             else
-            {
                 ESP_LOGW(BLE_TAG, "[PORTAL] Valve hunt not paused - a leak response is pending");
-                // A hunt already running for it never reaches start_scan()'s exception path,
-                // so the valve's timeouts count from here (portal_holds_valve()).
-                if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE &&
-                    (is_scanning || g_connecting || ble_gap_conn_active()))
-                    health_note_valve_leak_hunt();
-            }
         }
     }
+
+    // A hunt or a connect that a leak response lets run in the window: the valve's timeouts
+    // count from it (portal_holds_valve()). On every pass, not only where start_scan() lets a
+    // hunt run: a hunt already running when the window opens never gets there, nor does one
+    // that runs on across a window closed and reopened between two passes, and a CONNECTED
+    // applied just as the link drops can clear the stamp after the drop's hunt found it set.
+    // The health engine stamps only while it holds no stamp, and logs only then, so a repeat
+    // costs two loads.
+    if (on && !hold && valve_conn_handle == BLE_HS_CONN_HANDLE_NONE &&
+        (is_scanning || g_connecting || ble_gap_conn_active()))
+        health_note_valve_leak_hunt();
 
     if (hold)
     {

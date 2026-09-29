@@ -753,7 +753,9 @@ static void handle_valve_event(const char *mac, bool connected)
          * Only while the link is up NOW, read on this task as handle_valve_resync() does:
          * every changed valve value posts a CONNECTED too, and one queued just before a drop
          * is applied after the drop's hunt stamped, which it must not undo. The valve module
-         * clears its ready bits before it posts the DISCONNECTED and starts that hunt. */
+         * clears its ready bits before it posts the DISCONNECTED and starts that hunt. A drop
+         * between the check and the store still loses the stamp: the valve module's portal
+         * poll notes the running hunt again within a second. */
         if (s_valve_hunt_s != 0 && ble_valve_is_ready()) s_valve_hunt_s = 0;
     } else if (dev->disconnect_ms == 0) {
         // LATCH the stamp. This was an unconditional `dev->disconnect_ms = now`,
