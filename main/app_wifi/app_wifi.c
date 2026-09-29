@@ -34,8 +34,8 @@ void wifi_task(void *pvParameter);
  * already linked stays linked, with its commands. Leak protection still outranks the portal:
  * while a leak response (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and
  * its connect run anyway until the valve takes it (app_ble_valve.c). The health engine holds
- * the BLE sensors' timeouts meanwhile (health_set_ble_scan_paused()). No time cap before setup
- * (product decision).
+ * the BLE sensors' and the valve's timeouts meanwhile (health_set_ble_scan_paused()). No time
+ * cap before setup (product decision).
  *
  * The window closes when the setup AP stops (cb_ap_stopped()), not when the STA gets its IP:
  * the phone that submitted the credentials is still on the SoftAP, which wifi_manager keeps up
@@ -113,7 +113,7 @@ static void portal_priority_close(const char *reason)
 {
     if (!s_portal_priority)
         return;
-    health_set_ble_scan_paused(false);   // stamps the resume: each BLE sensor's timeout restarts
+    health_set_ble_scan_paused(false);   // stamps the resume: the sensors' and valve's timeouts restart
     s_portal_priority = false;
     s_setup_ok_tick = 0;
     // The raise lasts as long as the window, so cb_connection_ok()'s work (the LED, the MQTT
