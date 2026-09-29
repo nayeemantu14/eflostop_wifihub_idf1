@@ -1400,20 +1400,21 @@ bool health_is_interlock_held(void)
  * only keeps later verdicts from being reached (compute_sensor_rating(),
  * compute_valve_rating(), the excuse latch and the gate in check_boot_sync_locked()), and the
  * resume starts their clock. Single writer (the wifi_manager task), so the read-then-store
- * needs no lock. */
+ * needs no lock. The two log lines are bench anchors from 5b5d70e and name only the BLE
+ * sensors' timeout; the valve's HEALTH_VALVE_DISC_TIMEOUT_MS is held and restarts with it. */
 void health_set_ble_scan_paused(bool paused)
 {
     uint32_t v = s_ble_listen_s;
     if (paused) {
         if (v == BLE_LISTEN_PAUSED) return;
         s_ble_listen_s = BLE_LISTEN_PAUSED;
-        ESP_LOGI(HEALTH_TAG, "BLE scanning paused - BLE sensor and valve timeouts held");
+        ESP_LOGI(HEALTH_TAG, "BLE scanning paused - BLE sensor timeouts held");
     } else {
         if (v != BLE_LISTEN_PAUSED) return;   // no pause to end: nothing to stamp
         uint32_t t = now_s();
         s_ble_listen_s = (t != 0) ? t : 1;    // 0 means "never paused"
-        ESP_LOGI(HEALTH_TAG, "BLE scanning resumed - BLE timeouts restart now (sensors %d s, valve %d s)",
-                 HEALTH_BLE_LEAK_TIMEOUT_MS / 1000, HEALTH_VALVE_DISC_TIMEOUT_MS / 1000);
+        ESP_LOGI(HEALTH_TAG, "BLE scanning resumed - BLE sensor timeouts restart now (%d s)",
+                 HEALTH_BLE_LEAK_TIMEOUT_MS / 1000);
     }
 }
 
