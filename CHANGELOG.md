@@ -133,9 +133,16 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     its valve. A valve already offline stays offline, a dropped valve whose last battery reading was 10 % or
     less still reads critical, and the snapshot's valve `connected` and `last_seen_age_s` keep their real
     values.
+  - **Except after a leak-close hunt that has not reached the valve.** While a pended leak close runs the valve
+    hunt in the window (above), the hub is looking for the valve, so the valve's hold ends 180 s after that
+    hunt started, with setup still running. A valve the hunt has not reached by then counts: one never linked
+    counts as unheard (critical, red fleet LED, "Valve offline"), and one whose link dropped goes offline
+    (`device_offline`) once its own 180 s grace has run too. That stays so after the leak clears and the hunt
+    is held again, until the valve links. After the resume the earlier of the two ends applies. With no such
+    hunt, setup shows no red for the valve (user decision, 2026-09-29).
   - The first-snapshot gate also waits while a BLE sensor or the valve has not been heard, for the whole pause
-    and up to 180 s after it, so the first snapshot after setup does not list them as syncing. LoRa sensors are
-    not held.
+    and up to 180 s after it (the valve only while its hold lasts), so the first snapshot after setup does not
+    list them as syncing. LoRa sensors are not held.
   - **Task priority.** The Wi-Fi manager task runs at priority 8 during the window (normally 5) and is set back
     to its configured priority when the window closes. The portal's HTTP and DNS server tasks are not raised.
   - **Not for the router-outage fallback portal.** The SoftAP the hub opens after it failed to rejoin its saved
@@ -507,6 +514,10 @@ next snapshot) confirms it.
     - `HEALTH_ENGINE`: `BLE scanning paused - BLE sensor timeouts held` and `BLE scanning resumed - BLE sensor
       timeouts restart now (%d s)` (`600 s`). They name only the BLE sensors, but the valve's 180 s is held
       and restarts with them.
+    - `HEALTH_ENGINE`: `Valve hunt for a pended leak response during the scan pause - valve timeouts count from
+      now (%d s)` (`180 s`), once, right after `[PORTAL] Leak response pending …` or `[PORTAL] Valve hunt not
+      paused …`: the valve's hold ends 180 s later (see *Safety*). In the same window it prints again only
+      after the valve has linked and dropped.
     - `BLE_LEAK`: `Scan paused - Wi-Fi setup portal has the radio` and `Scan resumed - Wi-Fi setup portal closed`
     - `BLE_VALVE`: `[SCAN] Valve scan held - Wi-Fi setup portal has the radio`
     - `BLE_VALVE`: `[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio` (followed by ` (valve link
@@ -534,9 +545,13 @@ next snapshot) confirms it.
   - Same text, new conditions (portal window):
     - `HEALTH_ENGINE` `Boot sync: timeout (%lu s) — snapshot gate open; unheard devices still excused for a
       further %lld s`: not while BLE scanning is paused with a BLE sensor or the valve not yet heard, nor
-      within 180 s after the resume; the further excuse of such a device then counts from the resume.
+      within 180 s after the resume; the further excuse of such a device then counts from the resume. The valve
+      keeps the gate shut only while its hold lasts, which a hunt for a pended leak close in the window ends
+      180 s after that hunt.
     - `HEALTH_ENGINE` `Roll-up grace expired (%lu s) — %d unheard device(s) now count`: for a BLE sensor, never
-      earlier than 600 s after scanning resumed; for a valve not linked yet, never earlier than 180 s after it.
+      earlier than 600 s after scanning resumed; for a valve not linked yet, never earlier than 180 s after it,
+      unless a hunt for a pended leak close in the window has not reached it: then 180 s after that hunt, with
+      setup still running.
     - `BLE_LEAK` `Extended passive scan started (1M + Coded PHY)` and `BLE_VALVE` `[SCAN] Starting scan for
       provisioned valve %s...`: not while the window is open, except the valve hunt for a pended leak close.
   - Same text, new conditions (council fixes):
@@ -632,12 +647,16 @@ next snapshot) confirms it.
       meanwhile is reported offline only 600 s after scanning resumes, and a valve that fails, 180 s after.
     - On a valve hub the valve is not linked during a portal opened at boot, unless a leak close is pended. It
       reads "syncing" (white fleet LED) until it links, and counts as unheard only if it is still not linked
-      180 s after scanning resumes. A valve whose link drops in the window reads "Valve disconnected" (yellow)
-      for as long. A valve open, or an RMLEAK clear, pended meanwhile waits for the window to close.
-    - The valve stays held even while a pended leak close runs its hunt in the window. The leak rates the hub
-      critical while it lasts. Once it clears, a valve that hunt could not reach reads "syncing" or "Valve
-      disconnected", not offline, until 180 s after scanning resumes, however long setup takes. A cloud
-      `valve_close` pended between the IP and the SoftAP stopping runs the hunt the same way, with no leak.
+      180 s after scanning resumes, or 180 s after a leak-close hunt that has not reached it (next item). A
+      valve whose link drops in the window reads "Valve disconnected" (yellow) for as long, with the same
+      exception. A valve open, or an RMLEAK clear, pended meanwhile waits for the window to close.
+    - A pended leak close runs the valve hunt in the window, and if that hunt has not reached the valve 180 s
+      after it started, the valve counts, with setup still running: the fleet LED turns red ("Valve offline"),
+      and a valve whose link had dropped raises `device_offline`. That stays so after the leak clears, until
+      the valve links, so a short leak during setup with the valve off or out of range leaves the hub red. Any
+      pended close runs the hunt, so a cloud `valve_close` pended between the IP and the SoftAP stopping does
+      the same with no leak. Accepted (user decision, 2026-09-29): the hub tried to close the valve and could
+      not reach it.
     - On a hub with BLE sensors or a valve, the first snapshot after setup waits for scanning to resume and
       then for those devices to be heard (at most 180 s after the resume), so it normally comes about 60 s or
       more after the hub gets its IP. The lifecycle message and the buffered events still go out at the
