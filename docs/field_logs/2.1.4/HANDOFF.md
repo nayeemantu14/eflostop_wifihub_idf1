@@ -2,7 +2,9 @@
 
 Written for the user and for the next Claude Code session. It records where the 2.1.4 fix job stands and how to pick it up again.
 
-> **Resume here.** Read §1, §7, §10 and §11 first.
+> **Resume here.** Read §12 first, then §1, §7, §10 and §11.
+>
+> **Update, Tuesday 2026-09-29: captive portal fix; Build checkpoint 4 is next.** The bench capture (`C:\Users\antun\Desktop\UART logs.txt`, hub `GW-7C4FADAE69C8`, 2 BLE sensors, no valve) showed that after the 10 s reset a phone could not join the SoftAP: no DHCP lease was ever given. BLE scanning, which 2.1.4 starts at boot, starved the SoftAP of radio time. The fix is the portal priority window (§12). The last firmware commit is now **`ca4835f`**. Next: 🔨 Build checkpoint 4 (same commands as CP3), then T4-10 (rewritten) and the smoke subset. The test plan's VAL-01 still pins `d9fa9c8` and is re-baselined at CP4 (see its header note). Open questions for the user are listed in §12.
 >
 > **STATUS, Sunday 2026-09-27: phases A–G are COMPLETE.** Firmware `d9fa9c8` passed Build checkpoint 3 (§4b). The council voted 5/5 SHIP (§11). `MANUAL_TEST_PLAN.md` is committed (`d595633`). What remains is the user's bench campaign: start with the smoke subset in section S of the test plan, then the full plan. Nothing is pushed, and there is no PR. **Before any push, redact the Wi-Fi password in `6b84ae3`.**
 >
@@ -436,7 +438,7 @@ Phase E material:
 | E-16 | A connected valve's `last_seen_age_s` and its `offline_duration_s` were inflated (user decision: fix now) | `fe4d0b0` |
 | E-17 | A skipped cache purge was never retried, and owed changes polled only every 30 s | `cfbeeb3` |
 | E-18 | Unknown devices' check-ins drove pulse snapshots | `a55119f` |
-| E-21 | A stale Wi-Fi reset comment (the portal is not BLE-free any more) | `5788eaf` |
+| E-21 | A stale Wi-Fi reset comment (the portal is not BLE-free any more). Revised 2026-09-29: BLE scanning pauses beside a no-credentials portal (§12) | `5788eaf`, `f65a95b` |
 | E-22 | A stamped offline event could be written back past 512 B | `307ed19` |
 | user | No `auto_close` on a hub with no valve (user decision) | `502178c` |
 | user | RMLEAK auto-clear changed from 30 s to 10 s, with a 2 s loop poll while pending (user request, approved) | `75a4a59` |
@@ -533,3 +535,43 @@ The user asked for this before flashing CP3. It ran as run `wf_40fd522e-eda` (re
 - mbuf ENOMEM not bounded by the 30 s GATT timeout.
 
 The bench expectations were corrected in §7 (F-01(a), the re-wet exception, and the CP3 `.bss` range 36,280–36,288). Two stale comments are left for 2.1.5: the evaluate_leak ordering claim, and the Priority 2 re-latch note about LEAK_RESET. Changing them now would move firmware off the CP3 commit. The events' arrival order at a connect edge can differ from `ts` order, so the backend must order by `ts`. **Phase F is complete, pending a clean CP3.** Next is Phase G.
+
+---
+
+## 12. Captive portal fix: the portal priority window (Tuesday 2026-09-29)
+
+**Defect.** On `d9fa9c8` the setup portal was unusable after a Wi-Fi reset on any hub with a valve or a BLE sensor. The SoftAP, DHCP and DNS servers all started, and the phone saw the SSID, but it never got a lease ("Unable to join the network"). Root cause (RCA in the session scratchpad, `portal_rca.json` / `portal_rca.txt`, not committed): the continuous 1M + Coded leak scan, and on a valve hub the valve hunt and its 100 %-duty connect initiator, take the radio from an idle-STA SoftAP under software coexistence. 2.1.3 never started BLE in AP mode.
+
+**Fix (user decisions, 2026-09-29).** While the portal is up and **no Wi-Fi credentials are saved**, BLE scanning pauses:
+- the leak scanner cancels its scan and starts none;
+- the valve hunt and new connects are held;
+- NimBLE stays up, and a linked valve stays linked and takes its commands.
+
+The rest of the design:
+- **Leak response wins.** A leak close pended for an unlinked valve still hunts and links it.
+- **Health hold.** The BLE sensors' offline and unheard timeouts, and the snapshot gate, are held and restart at the resume.
+- **Priority.** `wifi_manager` runs at priority 8.
+- **Duration.** There is no time cap: the window closes when the STA gets an IP or the AP stops.
+- **Fallback AP.** The router-outage fallback AP, opened while credentials are still saved, does NOT open the window; BLE keeps scanning there.
+- **Reset button.** The 10 s reset's erase behaviour is unchanged.
+- **Other tasks.** SNTP, DPS, the 2 s cloud poll, SAS and MQTT are all gated on the STA IP, so they are idle in the window.
+
+| SHA | What |
+|---|---|
+| `5b5d70e` | Health hold: `health_set_ble_scan_paused()`, BLE sensor timeouts held while paused and restarted at the resume |
+| `f65a95b` | The window: START_AP/STOP_AP callbacks, `app_wifi_portal_priority_active()`, the scanner and valve-hunt gates, SoftAP station join/leave logs, the E-21 comment |
+| `03c69a7` | `wifi_manager` task raised to 8 in the window (`httpd` and `dns_server` not raised: see below) |
+| `b548d50` | Review fix: a pended leak close still hunts the valve in the window; level-triggered cancels (including NimBLE's own connect re-attempt); a held hunt always restarts; `is_scanning` set before the scan starts |
+| `529f6d1` | Review fix: restore `WIFI_MANAGER_TASK_PRIORITY`, not a sampled (possibly inherited) priority |
+| `efd6d84` | Review fix: the snapshot gate waits for never-heard BLE sensors while paused and for 180 s after the resume, so the first snapshot after setup does not show them as syncing |
+| `ca4835f` | Review fix: log when the valve hunt is stopped for the portal |
+
+**Open for the user:**
+1. **Reconfiguration lockout risk.** Suppose the router's SSID or password changes. The fallback portal keeps BLE scanning, so a phone may be unable to join it. The 10 s reset does not erase the credentials while the STA is idle (its erase runs only in wifi_manager's STA_DISCONNECTED handler), so after the reboot the hub is back on the fallback AP. The RCA recommended making the reset erase the credentials itself (or flagging the reset so that the window opens after it). The user decided to keep the reset's erase as it is and to open the window only when no credentials are saved. T4-10 Part D records whether the lockout happens on the bench.
+2. **Valve hubs in a boot-time window.**
+   - The valve is not linked unless a leak close is pended.
+   - Its 180 s sync excuse is not held (the valve is outside the health hold), so the roll-up goes CRITICAL and the fleet LED turns RED during Wi-Fi setup.
+   - An OPEN, or an RMLEAK clear, pended in the window waits for the window to close.
+3. **`httpd` and `dns_server` are not raised.** Their handles are private to the managed component. `xTaskGetHandle()` is not linked, and it is IRAM-resident, so linking it would cost 512 B of heap.
+4. **Portal success page.** BLE scanning resumes at `Connected! IP`, while the SoftAP stays up another 60 s for the page's success check. The bench records what the phone shows after the save (T4-10 A8).
+5. **Pre-existing, not the portal.** With `CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT`, a valve link that fails with 0x3E is re-attempted by NimBLE with no DISCONNECT event to the app. If the re-attempt cannot be issued (for example `BLE_HS_EBUSY` while the leak scan runs, since `CONFIG_BT_NIMBLE_HOST_ALLOW_CONNECT_WITH_SCAN` is off), `valve_conn_handle` is left stale, and later relinks are refused as "Already connected". Worth a 2.1.5 look.

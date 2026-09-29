@@ -177,6 +177,20 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
 
 ### Changed
 
+- **Wi-Fi setup portal: BLE scanning pauses while no Wi-Fi credentials are saved.**
+  - On the 2.1.4 development builds a phone could not join the setup portal after a Wi-Fi reset: BLE scanning,
+    which now starts at boot, took the radio from the SoftAP and no DHCP lease was given. 2.1.3 never started
+    BLE in AP mode.
+  - While the portal is up with no credentials saved (first setup, or after the 10 s reset), the BLE leak
+    scan and the valve hunt pause, until the hub gets an IP address. There is no time cap. NimBLE stays up,
+    and a valve already linked stays linked and takes its commands. A leak close pended for an unlinked
+    valve (a LoRa leak during setup) still hunts the valve until the close is written.
+  - BLE sensors are not heard during the pause. Their offline and unheard timeouts, and the snapshot gate,
+    are held and restart when scanning resumes, so no `device_offline` is raised for the pause. A BLE leak
+    during the pause is reported in the sensor's first burst after it.
+  - The router-outage fallback portal (credentials still saved) is unchanged: BLE keeps scanning there.
+  - The `wifi_manager` task runs at priority 8 (it is 5) during that pause.
+
 - **The RMLEAK interlock auto-clears 10 s after every leak source is dry (it was 30 s).**
   - `AUTO_CLEAR_TIMEOUT_MS` is 10 s. While an auto-clear is pending, `iothub_task` polls every 2 s instead of
     idling for up to 30 s, so the interlock is released about 10–12 s after the last leak source reports dry.
@@ -514,8 +528,12 @@ next snapshot) confirms it.
   - An override restored after a power cut with no internet ends 24 h after the power-on if the clock has
     not synced by then. That is later than its real expiry, since the hub cannot know how long the power was
     off.
-  - Captive portal after a Wi-Fi reset: on a hub with a valve or a BLE sensor, BLE now starts at boot and
-    runs beside the SoftAP portal, which therefore has less free heap than on 2.1.3.
+  - Captive portal after a Wi-Fi reset: on a hub with a valve or a BLE sensor, NimBLE now starts at boot and
+    runs beside the SoftAP portal, which therefore has less free heap than on 2.1.3. While no Wi-Fi
+    credentials are saved, BLE scanning pauses (see Changed). The router-outage fallback portal, opened
+    while credentials are still saved, keeps BLE scanning, so a phone may fail to join it; and the 10 s
+    reset does not erase the credentials while the STA is idle there. A hub whose router SSID or password
+    changed may therefore not be reconfigurable from its portal.
   - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
     oldest held events, as it already could after the sync.
   - **A leak latched while the valve was out of reach can still be read as a button press at the reconnect
