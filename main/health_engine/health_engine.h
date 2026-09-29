@@ -391,6 +391,27 @@ void health_set_interlock_held(bool held);
  */
 bool health_is_interlock_held(void);
 
+/**
+ * @brief Tell the health engine that BLE scanning is paused, or has resumed.
+ *
+ * Called for the portal priority window (app_wifi.c): while the Wi-Fi setup portal is open
+ * with no credentials saved, the hub pauses BLE scanning and is not listening to its BLE
+ * leak sensors, so their silence says nothing about them. Meanwhile a BLE sensor that was
+ * online stays online (no device_offline), and one never heard stays excused from the
+ * roll-up ("syncing"). On resume each BLE sensor gets a fresh full window from that moment
+ * (HEALTH_BLE_LEAK_TIMEOUT_MS, HEALTH_ROLLUP_UNHEARD_MS) before it can be rated offline or
+ * counted as unheard.
+ *
+ * It only ever DELAYS such a verdict: a sensor already offline, or already counting as
+ * unheard, stays so until it is heard, so the pause can never fake a recovery. LoRa sensors
+ * and the valve are not affected. last_seen_age_s keeps its real value.
+ *
+ * Lock-free (one 32-bit store), non-blocking, safe from any task and before
+ * health_engine_init(). Its caller is the wifi_manager task. Idempotent: a resume with no
+ * pause before it stamps nothing.
+ */
+void health_set_ble_scan_paused(bool paused);
+
 // ---------------------------------------------------------------------------
 // Convenience inline helpers (for hook sites)
 // ---------------------------------------------------------------------------

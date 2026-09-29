@@ -96,6 +96,13 @@ static volatile bool s_valve_batt_crit = false;
 // NOT under s_mutex: the writer already holds the rules-engine mutex, and taking
 // s_mutex there would create the one lock ordering this module has otherwise avoided.
 static volatile bool s_interlock_held = false;
+/* Whether the hub is listening to its BLE leak sensors (health_set_ble_scan_paused()):
+ * 0 = scanning never paused, BLE_LISTEN_PAUSED = paused now, else the monotonic second
+ * (now_s()) at which scanning last resumed. ONE 32-bit word, so a lock-free read gets the
+ * state and its stamp together. Written only by the setter, on the wifi_manager task, which
+ * must not take s_mutex; read where the timeouts are evaluated, under s_mutex. */
+#define BLE_LISTEN_PAUSED UINT32_MAX
+static volatile uint32_t s_ble_listen_s = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -196,6 +203,30 @@ static health_device_t *find_valve_for(const char *mac)
 // Forward declaration (defined after evaluate_timeouts)
 static void check_boot_sync_locked(void);
 
+/* Seconds for which a BLE sensor's silence is still excused because the hub was not
+ * listening (see s_ble_listen_s): the whole `window_s` while scanning is paused (its clock
+ * has not started), what is left of it after the resume, else 0. */
+static uint32_t ble_hold_left_s(uint32_t t_s, uint32_t window_s)
+{
+    uint32_t v = s_ble_listen_s;              // one read: the state and its stamp together
+    if (v == BLE_LISTEN_PAUSED) return window_s;
+    if (v == 0) return 0;
+    int32_t elapsed = (int32_t)(t_s - v);     // < 0: resumed after t_s was sampled
+    if (elapsed < 0) elapsed = 0;
+    return ((uint32_t)elapsed < window_s) ? (window_s - (uint32_t)elapsed) : 0;
+}
+
+/* A BLE sensor whose silence is excused by a scan pause: it was online at its last
+ * evaluation (cause is not LINK) and the hold has not run out. Never one already offline,
+ * so the hold only delays an offline verdict and can never fake a recovery. Shared by
+ * compute_sensor_rating() and the snapshot's `connected`, so the two agree. */
+static bool ble_silence_held(const health_device_t *dev, int64_t now)
+{
+    return dev->dev_type == HEALTH_DEV_BLE_LEAK && dev->last_seen_ms != 0 &&
+           dev->cause != HEALTH_CAUSE_LINK &&
+           ble_hold_left_s((uint32_t)(now / 1000), HEALTH_BLE_LEAK_TIMEOUT_MS / 1000) > 0;
+}
+
 // ---------------------------------------------------------------------------
 // Rating calculation
 // ---------------------------------------------------------------------------
@@ -222,7 +253,10 @@ static health_rating_t compute_sensor_rating(const health_device_t *dev, int64_t
                           ? HEALTH_LORA_TIMEOUT_MS
                           : HEALTH_BLE_LEAK_TIMEOUT_MS;
 
-    if (dev->last_seen_ms == 0 || (now - dev->last_seen_ms) > timeout_ms) {
+    /* Not while the hub was not listening: a BLE sensor online when scanning paused stays
+     * online until a full timeout has passed since scanning resumed (ble_silence_held()). */
+    if ((dev->last_seen_ms == 0 || (now - dev->last_seen_ms) > timeout_ms) &&
+        !ble_silence_held(dev, now)) {
         *cause = HEALTH_CAUSE_LINK;
         return HEALTH_CRITICAL;
     }
@@ -840,18 +874,30 @@ static void check_boot_sync_locked(void)
              * excused for 600 s" at t=435 s when the real deadline was t=885 s; a
              * diagnostic line that has to be corrected by hand is worse than no line. */
             uint32_t further_s = 0;
+            bool ble_paused = false;   // an unheard BLE sensor whose window has not started
             for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
                 const health_device_t *d = &s_devices[i];
                 if (!rollup_unheard_locked(d)) continue;
                 uint32_t elapsed_s = t_s - d->added_s;
                 uint32_t window_s  = (uint32_t)d->excuse_s;
                 uint32_t left_s = (elapsed_s < window_s) ? (window_s - elapsed_s) : 0;
+                // A BLE sensor's excuse is held by a scan pause too (see the latch below).
+                if (d->dev_type == HEALTH_DEV_BLE_LEAK) {
+                    uint32_t hold_s = ble_hold_left_s(t_s, HEALTH_ROLLUP_UNHEARD_MS / 1000);
+                    if (hold_s > left_s) left_s = hold_s;
+                    if (s_ble_listen_s == BLE_LISTEN_PAUSED) ble_paused = true;
+                }
                 if (left_s > further_s) further_s = left_s;
             }
             ESP_LOGW(HEALTH_TAG, "Boot sync: timeout (%lu s) — snapshot gate open; "
                      "unheard devices still excused for a further %lld s",
                      (unsigned long)(s_boot_sync_timeout_ms / 1000),
                      (long long)further_s);
+            // While paused, that figure is only a floor: those sensors' window has not started.
+            if (ble_paused) {
+                ESP_LOGI(HEALTH_TAG, "Boot sync: BLE scanning is paused - unheard BLE sensors "
+                         "stay excused until %d s after it resumes", HEALTH_ROLLUP_UNHEARD_MS / 1000);
+            }
         }
         if (s_boot_sync_done) edge = true;
     }
@@ -866,6 +912,11 @@ static void check_boot_sync_locked(void)
         health_device_t *d = &s_devices[i];
         if (!d->in_use || d->excuse_done) continue;
         if ((uint32_t)(t_s - d->added_s) < (uint32_t)d->excuse_s) continue;
+        /* A BLE sensor is not counted as unheard while the hub is not listening to it, nor
+         * until a full HEALTH_ROLLUP_UNHEARD_MS after scanning resumed (s_ble_listen_s). An
+         * excuse already latched stays latched (the check above): a pause never re-excuses. */
+        if (d->dev_type == HEALTH_DEV_BLE_LEAK &&
+            ble_hold_left_s(t_s, HEALTH_ROLLUP_UNHEARD_MS / 1000) > 0) continue;
 
         bool was_unheard = rollup_unheard_locked(d);
         d->excuse_done = true;
@@ -1291,6 +1342,26 @@ bool health_is_interlock_held(void)
     return s_interlock_held;
 }
 
+/* One store per transition and no re-roll: neither edge changes a rating by itself. The pause
+ * only keeps later verdicts from being reached (compute_sensor_rating(), the excuse latch in
+ * check_boot_sync_locked()), and the resume starts their clock. Single writer (the
+ * wifi_manager task), so the read-then-store needs no lock. */
+void health_set_ble_scan_paused(bool paused)
+{
+    uint32_t v = s_ble_listen_s;
+    if (paused) {
+        if (v == BLE_LISTEN_PAUSED) return;
+        s_ble_listen_s = BLE_LISTEN_PAUSED;
+        ESP_LOGI(HEALTH_TAG, "BLE scanning paused - BLE sensor timeouts held");
+    } else {
+        if (v != BLE_LISTEN_PAUSED) return;   // no pause to end: nothing to stamp
+        uint32_t t = now_s();
+        s_ble_listen_s = (t != 0) ? t : 1;    // 0 means "never paused"
+        ESP_LOGI(HEALTH_TAG, "BLE scanning resumed - BLE sensor timeouts restart now (%d s)",
+                 HEALTH_BLE_LEAK_TIMEOUT_MS / 1000);
+    }
+}
+
 bool health_pop_alert(health_alert_t *out)
 {
     if (!s_alert_queue || !out) return false;
@@ -1388,7 +1459,8 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
                 uint32_t timeout = (src->dev_type == HEALTH_DEV_LORA)
                                     ? HEALTH_LORA_TIMEOUT_MS
                                     : HEALTH_BLE_LEAK_TIMEOUT_MS;
-                dst->connected = ((now - src->last_seen_ms) <= timeout);
+                dst->connected = ((now - src->last_seen_ms) <= timeout) ||
+                                 ble_silence_held(src, now);   // same hold as its rating
             }
         }
 
