@@ -291,7 +291,9 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
 /**
  * @brief Check whether boot sync is complete.
  *        Complete when all provisioned devices have checked in once,
- *        or the boot window (HEALTH_BOOT_SYNC_TIMEOUT_MS) has elapsed.
+ *        or the boot window (HEALTH_BOOT_SYNC_TIMEOUT_MS) has elapsed. While BLE
+ *        scanning is paused (health_set_ble_scan_paused()) and a BLE sensor has never
+ *        been heard, that timeout waits until a full window after the resume.
  *        Fails OPEN (returns true) if the engine is not up or the mutex is busy,
  *        so a caller can never get stuck in the "syncing" state.
  *
@@ -400,7 +402,10 @@ bool health_is_interlock_held(void);
  * online stays online (no device_offline), and one never heard stays excused from the
  * roll-up ("syncing"). On resume each BLE sensor gets a fresh full window from that moment
  * (HEALTH_BLE_LEAK_TIMEOUT_MS, HEALTH_ROLLUP_UNHEARD_MS) before it can be rated offline or
- * counted as unheard.
+ * counted as unheard. The snapshot gate (health_is_boot_sync_complete()) likewise does not
+ * time out while a BLE sensor never heard is not being listened to, nor until its own
+ * window has passed after the resume, so the first snapshot after Wi-Fi setup waits for
+ * those sensors as it would after a boot.
  *
  * It only ever DELAYS such a verdict: a sensor already offline, or already counting as
  * unheard, stays so until it is heard, so the pause can never fake a recovery. LoRa sensors

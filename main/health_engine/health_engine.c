@@ -227,6 +227,22 @@ static bool ble_silence_held(const health_device_t *dev, int64_t now)
            ble_hold_left_s((uint32_t)(now / 1000), HEALTH_BLE_LEAK_TIMEOUT_MS / 1000) > 0;
 }
 
+/* The snapshot gate's timeout (check_boot_sync_locked()) waits for a BLE sensor never heard
+ * while the hub is not listening to it, and for a full gate window after scanning resumed,
+ * as after a boot. Otherwise a scan pause longer than the window opens the gate with those
+ * sensors unheard, and the first snapshot after Wi-Fi setup (BOOT, which opens no refresh
+ * window) reports them as syncing until the next heartbeat. Only delays the gate: it still
+ * opens as soon as every device is heard. Call with s_mutex held. */
+static bool ble_gate_held_locked(uint32_t t_s)
+{
+    if (ble_hold_left_s(t_s, s_boot_sync_timeout_ms / 1000) == 0) return false;
+    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
+        const health_device_t *d = &s_devices[i];
+        if (d->in_use && !d->ever_seen && d->dev_type == HEALTH_DEV_BLE_LEAK) return true;
+    }
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Rating calculation
 // ---------------------------------------------------------------------------
@@ -867,14 +883,14 @@ static void check_boot_sync_locked(void)
         if (all_seen) {
             s_boot_sync_done = true;
             ESP_LOGI(HEALTH_TAG, "Boot sync: all devices seen");
-        } else if ((now_ms() - s_boot_start_ms) >= s_boot_sync_timeout_ms) {
+        } else if ((now_ms() - s_boot_start_ms) >= s_boot_sync_timeout_ms &&
+                   !ble_gate_held_locked(t_s)) {
             s_boot_sync_done = true;
             /* State the REMAINING excuse, not a constant: the longest time any unheard
              * device is still kept out of the roll-up. A bench capture once read "still
              * excused for 600 s" at t=435 s when the real deadline was t=885 s; a
              * diagnostic line that has to be corrected by hand is worse than no line. */
             uint32_t further_s = 0;
-            bool ble_paused = false;   // an unheard BLE sensor whose window has not started
             for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
                 const health_device_t *d = &s_devices[i];
                 if (!rollup_unheard_locked(d)) continue;
@@ -882,10 +898,11 @@ static void check_boot_sync_locked(void)
                 uint32_t window_s  = (uint32_t)d->excuse_s;
                 uint32_t left_s = (elapsed_s < window_s) ? (window_s - elapsed_s) : 0;
                 // A BLE sensor's excuse is held by a scan pause too (see the latch below).
+                // The gate does not time out while one is unheard during a pause
+                // (ble_gate_held_locked()), so this hold counts from the resume.
                 if (d->dev_type == HEALTH_DEV_BLE_LEAK) {
                     uint32_t hold_s = ble_hold_left_s(t_s, HEALTH_ROLLUP_UNHEARD_MS / 1000);
                     if (hold_s > left_s) left_s = hold_s;
-                    if (s_ble_listen_s == BLE_LISTEN_PAUSED) ble_paused = true;
                 }
                 if (left_s > further_s) further_s = left_s;
             }
@@ -893,11 +910,6 @@ static void check_boot_sync_locked(void)
                      "unheard devices still excused for a further %lld s",
                      (unsigned long)(s_boot_sync_timeout_ms / 1000),
                      (long long)further_s);
-            // While paused, that figure is only a floor: those sensors' window has not started.
-            if (ble_paused) {
-                ESP_LOGI(HEALTH_TAG, "Boot sync: BLE scanning is paused - unheard BLE sensors "
-                         "stay excused until %d s after it resumes", HEALTH_ROLLUP_UNHEARD_MS / 1000);
-            }
         }
         if (s_boot_sync_done) edge = true;
     }
