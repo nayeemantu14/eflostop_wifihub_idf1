@@ -2986,10 +2986,11 @@ void iothub_task(void *param)
 
         if (has_valve && ble_upd_type == BLE_UPD_LEAK) {
             // Sample the valve BEFORE the rules engine runs. rules_engine_evaluate_leak()
-            // queues an RMLEAK write, and the cached rmleak flips only when that write
-            // completes on the ble_valve task — so reading the getters at publish time
-            // yields false or true depending purely on write timing (observed on the
-            // bench: leak_detected shipped rmleak:false 40 ms after RMLEAK=1 was issued,
+            // queues an RMLEAK write, and the cached rmleak flips only when the valve
+            // reports the value back (the read-back or its notify, through on_notify()),
+            // never at the write — so reading the getters at publish time yields false
+            // or true depending purely on read-back timing (observed on the bench:
+            // leak_detected shipped rmleak:false 40 ms after RMLEAK=1 was issued,
             // contradicting the auto_close beside it).
             //
             // These values are the valve's state as of the moment this update was
@@ -3428,8 +3429,10 @@ void iothub_task(void *param)
             // to every reason: a heartbeat landing mid-command is equally stale.
             //
             // Bounded by ble_valve_cmd_settling()'s own deadline; the +100 ms
-            // deferral feeds the select timeout at the top of the loop, and the
-            // BLE_UPD_STATE that follows the write wakes us sooner than that.
+            // deferral feeds the select timeout at the top of the loop. That re-poll
+            // is what ends the deferral once the write is issued: the release posts
+            // nothing to ble_update_queue. The valve's later BLE_UPD_STATE /
+            // BLE_UPD_RMLEAK requests the follow-up snapshot.
             bool settling = gate_ok && ble_valve_cmd_settling();
 
             if (settling) {
