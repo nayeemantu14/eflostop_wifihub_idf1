@@ -207,17 +207,21 @@ static int g_pending_rmleak_cmd = -1;
 #define CMD_ITEM_IS_REPLAY(item)  (((item) & 0xFFu) == CMD_REPLAY_TOKEN)
 
 // ---- Hub-issued command settle barrier -------------------------------------
-// ble_valve_open/close/set_rmleak only ENQUEUE onto ble_cmd_queue; the cached
-// valve state (g_val_state / g_val_rmleak) is written later, on the ble_valve
-// task, inside write_valve_command() / write_rmleak_command(). iothub_task runs
-// at the same priority, so it is not preempted and can publish an event AND its
-// coupled snapshot before that write lands — reporting the PRE-transition valve
-// state in a snapshot the UI renders.
+// ble_valve_open/close/set_rmleak only ENQUEUE onto ble_cmd_queue; the command
+// task writes the command later, and the cached valve state (g_val_state /
+// g_val_rmleak) changes only when the valve reports the new value back (its
+// notify or the read-back, through on_notify()), never at the write. iothub_task
+// runs at the same priority, so it is not preempted and can publish an event AND
+// its coupled snapshot before the write goes out.
 //
-// The enqueue arms this barrier; each write_* exit releases it. The snapshot
-// flush block consults ble_valve_cmd_settling() and defers while it is set. The
-// deadline is the backstop for commands that never reach GATT (link down, mutex
-// timeout) so the snapshot is at worst late, never blocked.
+// The enqueue arms this barrier; the command task releases it once the write is
+// issued, pended or dropped (finish_cmd_write()), NOT at the valve's report. A
+// snapshot built in between can still show the PRE-command value: the report's
+// own update (BLE_UPD_STATE / BLE_UPD_RMLEAK, posted only on a change) requests
+// the snapshot that shows the new one (app_iothub.c). The snapshot flush block
+// consults ble_valve_cmd_settling() and defers while it is set. The deadline is
+// the backstop for commands that never reach GATT (link down, mutex timeout) so
+// the snapshot is at worst late, never blocked.
 #define VALVE_CMD_SETTLE_MS 1500
 
 static atomic_int      g_cmd_inflight    = 0;
@@ -2707,9 +2711,11 @@ static void write_rmleak_command(uint8_t val, uint32_t gen)
     // feeding it one optimistic and one honest input is how that
     // inference goes wrong.
     //
-    // The wake stays — it refreshes valve liveness in the health engine
-    // and BLE_UPD_RMLEAK emits no D2C event of its own, so it is a wake,
-    // not traffic.
+    // The valve's report posts BLE_UPD_RMLEAK (on_notify(), on a change).
+    // It refreshes valve liveness in the health engine and emits no D2C
+    // event of its own; iothub_task couples a snapshot to it, so the cloud
+    // gets the interlock state the valve reports within the 5 s clamp,
+    // not at the next heartbeat.
     //
     // READ-BACK IS MANDATORY HERE, unlike the position path where it is
     // only a backstop. The valve echoes CUSTOM_STM_VALVESTATE from its own

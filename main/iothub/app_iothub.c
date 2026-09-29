@@ -3231,9 +3231,19 @@ void iothub_task(void *param)
                                                          connected_mac);
                         snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "valve_state_changed");
                     }
+                } else if (ble_upd_type == BLE_UPD_RMLEAK) {
+                    // The valve reported a new RMLEAK value (its notify, or the read-back
+                    // after a hub write). No event: the rules engine publishes its own
+                    // (auto_close, rmleak_auto_cleared, override, ...). But the snapshot
+                    // reads the cache, which changes only now, and the rules event's
+                    // snapshot usually goes first (bench, auto-clear: RMLEAK=0 written at
+                    // 219.871 s, snapshot at 220.181 s still rmleak:true, read-back at
+                    // 221.061 s), so the cloud showed the valve locked until the next
+                    // heartbeat. app_ble_valve.c posts this only on a change and never
+                    // during GATT setup, and a request still pending coalesces with it.
+                    snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "rmleak");
                 }
                 // BLE_UPD_BATTERY: no event — included in snapshot
-                // BLE_UPD_RMLEAK: handled by rules engine events
                 // BLE_UPD_CONNECTED: lifecycle/snapshot handles this
             }
         }
@@ -3408,12 +3418,14 @@ void iothub_task(void *param)
                            || !snap_window_suppressing();
 
             // Settle gate: a hub-issued valve command (auto-close, C2D
-            // valve_open/close, override) is only QUEUED by ble_valve_*; the
-            // cached valve state is written later on the ble_valve task. Both
+            // valve_open/close, override) is only QUEUED by ble_valve_*. Both
             // tasks are priority 5, so without this we can publish the event and
-            // its coupled snapshot in the same loop iteration and report the
-            // PRE-transition valve.state — which the UI renders. Applies to every
-            // reason: a heartbeat landing mid-command is equally stale.
+            // its coupled snapshot in the same loop iteration, before the command
+            // is even written. The barrier ends when the write is issued, not at
+            // the valve's report of the new value, which alone changes the cached
+            // valve.state / rmleak (app_ble_valve.c): that report's BLE_UPD_STATE /
+            // BLE_UPD_RMLEAK requests the snapshot that shows it (above). Applies
+            // to every reason: a heartbeat landing mid-command is equally stale.
             //
             // Bounded by ble_valve_cmd_settling()'s own deadline; the +100 ms
             // deferral feeds the select timeout at the top of the loop, and the

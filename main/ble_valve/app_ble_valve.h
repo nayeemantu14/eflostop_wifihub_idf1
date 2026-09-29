@@ -158,15 +158,15 @@ extern "C"
     bool ble_valve_hunt_scanning(void);
 
     /**
-     * @brief True while a hub-issued valve command has been queued but its effect
-     *        on the cached valve state has not yet landed.
+     * @brief True while a hub-issued valve command has been queued but the
+     *        ble_valve task has not yet issued, pended or dropped its write.
      *
-     * ble_valve_open/close/set_rmleak only enqueue; the cache is written later on
-     * the ble_valve task. Publishing a snapshot in that window reports the
-     * PRE-transition valve state, which the UI then renders. The snapshot flush
-     * block defers while this is true. Self-clearing after VALVE_CMD_SETTLE_MS so
-     * a command that never reaches GATT (link down, mutex timeout) makes the
-     * snapshot late, never blocked.
+     * ble_valve_open/close/set_rmleak only enqueue. The snapshot flush block
+     * defers while this is true. It clears at the write, before the valve reports
+     * the new value, and only that report changes the cached valve state: its
+     * BLE_UPD_STATE / BLE_UPD_RMLEAK requests the snapshot that shows it.
+     * Self-clearing after VALVE_CMD_SETTLE_MS so a command that never reaches GATT
+     * (link down, mutex timeout) makes the snapshot late, never blocked.
      */
     bool ble_valve_cmd_settling(void);
 

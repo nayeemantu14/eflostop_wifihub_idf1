@@ -887,16 +887,17 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // last source dries. The reconciliation still closes on connect as before.
     //
     // Both calls are QUEUE POSTS ONLY — neither writes the cached valve state.
-    // The cache is written later, on the ble_valve task, inside
-    // write_rmleak_command() / write_valve_command(). RMLEAK-before-close
-    // ordering therefore holds only because both land on the same FIFO
-    // (ble_cmd_queue) drained by one task.
+    // The ble_valve task writes them later, in write_rmleak_command() /
+    // write_valve_command(), and the cache changes only when the valve reports
+    // the new values back. RMLEAK-before-close ordering therefore holds only
+    // because both land on the same FIFO (ble_cmd_queue) drained by one task.
     //
     // Because we run on iothub_task and the writes land on ble_valve task, the
-    // snapshot coupled to this event could otherwise flush while the cache still
-    // holds the PRE-close state. ble_valve_open/close/set_rmleak arm a settle
-    // barrier on enqueue; the snapshot flush block honours it via
-    // ble_valve_cmd_settling() and defers until the write lands (or ~1.5 s).
+    // snapshot coupled to this event could otherwise flush before they go out.
+    // ble_valve_open/close/set_rmleak arm a settle barrier on enqueue; the
+    // snapshot flush block honours it via ble_valve_cmd_settling() and defers
+    // until the writes are issued (or ~1.5 s). The valve's reports then post
+    // BLE_UPD_STATE / BLE_UPD_RMLEAK, which request the snapshot that shows them.
     if (valve_reachable) {
         // Enqueue failures are surfaced, not swallowed: a full command queue means
         // the interlock/close never reaches the valve, and silence there looks
