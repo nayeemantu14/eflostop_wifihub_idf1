@@ -83,11 +83,21 @@ static void execute_wifi_reset(void)
      * heap than the running one, with no MQTT/TLS session loaded (without Wi-Fi
      * there is no cloud bring-up), so it stays responsive under a phone's DNS/HTTP
      * probe storm. It is NOT a BLE-free heap any more: since 2.1.4 iothub_task
-     * starts NimBLE, the valve link and the leak scanner at boot, with no Wi-Fi gate,
-     * on any hub with a valve or a BLE sensor (leak protection must not wait for
-     * Wi-Fi), so they run beside the portal. The old ~130 KB figure predates that; the
-     * portal's heap next to BLE is recorded on the bench (S21: free, min_ever,
-     * largest block while a phone drives the portal).
+     * starts NimBLE at boot, with no Wi-Fi gate, on any hub with a valve or a BLE
+     * sensor (leak protection must not wait for Wi-Fi), and NimBLE stays initialised
+     * beside the portal. The old ~130 KB figure predates that; the portal's heap next
+     * to BLE is recorded on the bench (S21: free, min_ever, largest block while a
+     * phone drives the portal).
+     *
+     * BLE does not SCAN beside this portal, though. With no credentials saved, the
+     * portal priority window (app_wifi.c) pauses the leak scanner and the valve hunt
+     * until the STA gets an IP: continuous scanning left the SoftAP so little radio
+     * time that no phone could join. A valve already linked stays linked. The window
+     * opens only if the credentials really are gone after the reboot, and the erase
+     * above runs in wifi_manager's STA_DISCONNECTED handler, which an idle STA does not
+     * reach (2026-09-29 bench capture). A reset while the STA is idle, e.g. on a
+     * router-outage fallback portal, can therefore keep them, and that portal then
+     * keeps BLE scanning.
      *
      * The reboot does NOT forget provisioned devices: commissioning (valve / LoRa
      * / BLE-leak sensors), hub identity, and DPS cache live in the dedicated

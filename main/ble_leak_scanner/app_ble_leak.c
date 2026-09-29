@@ -22,6 +22,8 @@
 #include "host/ble_gap.h"
 #include "provisioning_manager/provisioning_manager.h"
 #include "health_engine/health_engine.h"
+#include "app_wifi/portal_priority.h"
+#include "ble_valve/app_ble_valve.h"
 
 /* ---------------------------------------------------------
  * Constants
@@ -482,6 +484,12 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
  * --------------------------------------------------------- */
 static void start_passive_scan(void)
 {
+    // Portal priority window (app_wifi.c): the SoftAP has the radio. Checked at every start,
+    // since at boot the window can open before or after BLE comes up. The scan task's loop
+    // starts the scan again when the window closes.
+    if (app_wifi_portal_priority_active())
+        return;
+
 #if MYNEWT_VAL(BLE_EXT_ADV)
     // 1M PHY params — catches legacy WB leak sensors
     struct ble_gap_ext_disc_params uncoded_params = {0};
@@ -565,10 +573,38 @@ static void ble_leak_scan_task(void *param)
 
     TickType_t last_whitelist_reload = xTaskGetTickCount();
     TickType_t last_heartbeat_log = xTaskGetTickCount();
+    bool portal_paused = false;   // this task's view of the portal priority window
 
     for (;;) {
+        // Portal priority window (app_wifi.c): no scan of ours while it is open. Only OUR
+        // scan is cancelled: a valve hunt belongs to the valve module, which stops it on its
+        // own task, and cancelling it here would leave that module believing it still scans
+        // (its is_scanning would then block every later hunt).
+        if (app_wifi_portal_priority_active()) {
+            if (!portal_paused) {
+                portal_paused = true;
+                ESP_LOGI(BLE_LEAK_TAG, "Scan paused - Wi-Fi setup portal has the radio");
+            }
+            s_scan_restart_needed = false;
+            if (ble_gap_disc_active() && !ble_valve_hunt_scanning()) {
+                int rc = ble_gap_disc_cancel();
+                if (rc != 0 && rc != BLE_HS_EALREADY) {
+                    ESP_LOGW(BLE_LEAK_TAG, "Scan cancel failed: %d, will retry", rc);
+                }
+            }
+        }
+        else if (portal_paused) {
+            portal_paused = false;
+            s_scan_restart_needed = false;
+            ESP_LOGI(BLE_LEAK_TAG, "Scan resumed - Wi-Fi setup portal closed");
+            // A valve hunt already running forwards our advertisements (the valve module's
+            // GAP handler), and the self-heal below starts our scan once it ends.
+            if (!ble_gap_disc_active()) {
+                start_passive_scan();
+            }
+        }
         // Handle scan restart if needed
-        if (s_scan_restart_needed) {
+        else if (s_scan_restart_needed) {
             s_scan_restart_needed = false;
             vTaskDelay(pdMS_TO_TICKS(SCAN_RESTART_DELAY_MS));
             start_passive_scan();

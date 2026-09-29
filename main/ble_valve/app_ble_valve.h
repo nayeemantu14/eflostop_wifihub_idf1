@@ -151,6 +151,13 @@ extern "C"
     bool ble_valve_is_connected(void);
 
     /**
+     * @brief True while the valve module's own scan (the hunt for the provisioned valve) is
+     * running. The leak scanner reads it so that, in the portal priority window, it cancels
+     * only its own scan and never the hunt, which the valve module stops itself.
+     */
+    bool ble_valve_hunt_scanning(void);
+
+    /**
      * @brief True while a hub-issued valve command has been queued but its effect
      *        on the cached valve state has not yet landed.
      *

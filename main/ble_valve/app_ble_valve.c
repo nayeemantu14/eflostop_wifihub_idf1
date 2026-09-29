@@ -1,6 +1,7 @@
 #include "app_ble_valve.h"
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "health_engine/health_engine.h"
+#include "app_wifi/portal_priority.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -1668,6 +1669,13 @@ static void handle_valve_disc(const ble_addr_t *addr)
         if (g_connecting)
             return;
 
+        // Portal priority window (app_wifi.c): no new connect initiator, whose default scan
+        // (10 ms every 10 ms) would take the radio back from the SoftAP. A report queued in
+        // the host before the hunt was cancelled can still land here. The hunt restarts when
+        // the window closes (portal_priority_poll()).
+        if (app_wifi_portal_priority_active())
+            return;
+
         ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched - connecting to provisioned valve: %s",
                  discovered_mac);
 
@@ -1684,6 +1692,14 @@ static void handle_valve_disc(const ble_addr_t *addr)
             ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
             g_connecting = false;
             start_scan();
+        }
+        else if (app_wifi_portal_priority_active())
+        {
+            // The window opened while this connect was being issued, possibly after the
+            // command task's poll looked for one to cancel: cancel it here. Its CONNECT
+            // (status BLE_HS_EAPP) clears g_connecting, and its rescan is held.
+            int crc = ble_gap_conn_cancel();
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve connect cancelled - Wi-Fi setup portal opened (rc=%d)", crc);
         }
     }
 }
@@ -2113,6 +2129,16 @@ static void start_scan(void)
         return;
     }
 
+    // Portal priority window (app_wifi.c): no valve hunt while the Wi-Fi setup portal has the
+    // radio. The one choke point for every hunt: CONNECT, a failed connect, a disconnect, the
+    // stack sync and a pended command's link request. g_connect_requested is left as it is,
+    // so the command task restarts the hunt when the window closes (portal_priority_poll()).
+    if (app_wifi_portal_priority_active())
+    {
+        ESP_LOGI(BLE_TAG, "[SCAN] Valve scan held - Wi-Fi setup portal has the radio");
+        return;
+    }
+
     if (is_scanning)
         return;
 
@@ -2182,7 +2208,17 @@ static void start_scan(void)
 #endif
 
     if (rc == 0)
+    {
         is_scanning = true;
+        // The window opened after the check above, possibly after the command task's poll
+        // looked for a hunt to cancel (this can run on the NimBLE host task): cancel it here.
+        if (app_wifi_portal_priority_active())
+        {
+            ble_gap_disc_cancel();
+            is_scanning = false;
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve scan cancelled - Wi-Fi setup portal opened");
+        }
+    }
     else
         ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_disc rc=%d", rc);
 }
@@ -2729,6 +2765,57 @@ static void on_stack_sync(void)
 }
 
 // -----------------------------------------------------------------------------
+// PORTAL PRIORITY WINDOW
+// -----------------------------------------------------------------------------
+// How often the command task re-reads the window when no command arrives.
+#define PORTAL_POLL_MS 1000
+
+// The command task's side of the portal priority window (app_wifi.c), run on every pass of
+// its loop, so at least every PORTAL_POLL_MS: the window's owner (the wifi_manager task)
+// only sets a flag, and the NimBLE cancels are issued here, on the task that already issues
+// the module's other cancels (BLE_CMD_DISCONNECT).
+//   Opening: cancel a connect in flight and the valve hunt. A link already up stays up, and
+//   its commands still run (a LoRa-triggered close still reaches a linked valve).
+//   Closing: restart the hunt when a link is wanted and none is up or being made.
+// g_connect_requested is never touched. start_scan() and handle_valve_disc() check the
+// window themselves, so nothing new starts in between.
+static void portal_priority_poll(void)
+{
+    static bool s_paused = false;   // command task only: the window as last applied here
+    bool on = app_wifi_portal_priority_active();
+    if (on == s_paused)
+        return;
+    s_paused = on;
+
+    // A hub with no provisioned valve has no hunt to pause: stay quiet there.
+    bool has_valve = ble_valve_has_target_mac();
+    if (on)
+    {
+        if (has_valve)
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio%s",
+                     valve_conn_handle != BLE_HS_CONN_HANDLE_NONE ? " (valve link kept)" : "");
+        if (g_connecting)
+        {
+            // Its CONNECT (status BLE_HS_EAPP) clears g_connecting; the rescan it asks for is held.
+            int crc = ble_gap_conn_cancel();
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve connect in flight cancelled (rc=%d)", crc);
+        }
+        if (is_scanning)
+        {
+            ble_gap_disc_cancel();
+            is_scanning = false;
+        }
+    }
+    else
+    {
+        if (has_valve)
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve hunt resumed - Wi-Fi setup portal closed");
+        if (g_connect_requested && !g_connecting && valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
+            start_scan();
+    }
+}
+
+// -----------------------------------------------------------------------------
 // BLE COMMAND TASK
 // -----------------------------------------------------------------------------
 static void ble_valve_task(void *pvParameters)
@@ -2740,7 +2827,8 @@ static void ble_valve_task(void *pvParameters)
 
     while (1)
     {
-        if (xQueueReceive(ble_cmd_queue, &item, portMAX_DELAY) != pdTRUE)
+        portal_priority_poll();
+        if (xQueueReceive(ble_cmd_queue, &item, pdMS_TO_TICKS(PORTAL_POLL_MS)) != pdTRUE)
             continue;
 
         // The generation the command was issued under (see s_cmd_gen): a valve write from
@@ -3231,6 +3319,11 @@ bool ble_valve_get_rmleak_state(void)
 bool ble_valve_is_connected(void)
 {
     return valve_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+}
+
+bool ble_valve_hunt_scanning(void)
+{
+    return is_scanning;
 }
 
 void ble_valve_cancel_pending_close(void)
