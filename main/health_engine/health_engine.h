@@ -412,7 +412,9 @@ bool health_is_interlock_held(void);
  * It only ever DELAYS such a verdict: a device already offline, or already counting as
  * unheard, stays so until it is heard, so the pause can never fake a recovery. LoRa sensors
  * are not affected. The valve is held even while a pended leak response makes its hunt run
- * in the window (that leak already rates the system CRITICAL). The valve's snapshot
+ * in the window, and after that leak clears: the leak rates the system CRITICAL only while
+ * it lasts, and a valve the hunt could not reach then reads "syncing" or "Valve
+ * disconnected" until HEALTH_VALVE_DISC_TIMEOUT_MS after the resume. The valve's snapshot
  * `connected` stays its real link state, and last_seen_age_s keeps its real value.
  *
  * Lock-free (one 32-bit store), non-blocking, safe from any task and before

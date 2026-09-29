@@ -449,9 +449,13 @@ static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t 
  * grace as long (valve_offline_held()), so both cases still get the same treatment.
  * Otherwise a valve hub would read RED during Wi-Fi setup only because it had stopped looking
  * for its valve. An excuse already latched stays latched, and a valve already offline stays
- * offline. Accepted edge: with a leak response pended the valve hunt runs in the window
- * (app_ble_valve.c) while the hold still applies, but that leak already rates the system
- * CRITICAL.
+ * offline. Known edge: with a leak response pended the valve hunt runs in the window
+ * (app_ble_valve.c) while the hold still applies. That leak rates the system CRITICAL only
+ * while it lasts. Once it clears the hunt is held again, and a valve the hunt looked for and
+ * could not reach stays held like any other: still excused ("syncing") if it never linked, in
+ * its WARNING grace ("Valve disconnected") if it dropped, until HEALTH_VALVE_DISC_TIMEOUT_MS
+ * after the resume. A cloud valve_close pended after the STA's IP, while the setup AP is still
+ * up, runs the hunt the same way with no leak at all, for at most that last minute.
  *
  * A device reporting a LEAK is never excluded, whatever ever_seen says. If we know it is
  * wet then we have plainly heard from it, and suppressing that to keep the boot LED tidy
