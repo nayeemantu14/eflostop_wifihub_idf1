@@ -31,9 +31,11 @@ void wifi_task(void *pvParameter);
  * In the window the leak scanner and the valve hunt start nothing new, and each cancels its
  * own scan and connect attempt on its own task (both read the flag at every start: at boot,
  * START_AP and the BLE start come in no fixed order). NimBLE stays initialised, and a valve
- * already linked stays linked, with its commands. The health engine holds the BLE sensors'
- * timeouts meanwhile (health_set_ble_scan_paused()). No time cap (product decision): the
- * window lasts until Wi-Fi is set up (the STA gets an IP) or the AP stops.
+ * already linked stays linked, with its commands. Leak protection still outranks the portal:
+ * while a leak response (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and
+ * its connect run anyway until the valve takes it (app_ble_valve.c). The health engine holds
+ * the BLE sensors' timeouts meanwhile (health_set_ble_scan_paused()). No time cap (product
+ * decision): the window lasts until Wi-Fi is set up (the STA gets an IP) or the AP stops.
  *
  * NOT for the fallback AP that wifi_manager opens after failed retries while credentials are
  * still saved (router outage): that is the field case BLE-from-boot leak protection is for,
