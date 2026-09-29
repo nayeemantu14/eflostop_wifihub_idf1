@@ -48,6 +48,11 @@ SYNCING_RE = re.compile(r"^Syncing - waiting for (\d+) devices?$")
 HUB_GENERATED = {"device_offline", "device_recovered", "auto_close",
                  "auto_close_blocked_override"}
 LEAK_EVENTS = {"leak_detected", "leak_cleared"}
+# Events the rules engine raises. iothub_task publishes them after a pass's device events,
+# so one of them (or a snapshot) ends the MQTT (re)connect pass on the wire.
+RULES_EVENTS = {"auto_close", "auto_close_blocked_override", "auto_close_reenabled",
+                "rmleak_cleared", "rmleak_auto_cleared", "water_access_override_enabled",
+                "water_access_override_expired"}
 
 # Keys that must never appear anywhere on the wire again. `device_id` joined this
 # set in 2.1.0: it was the last surviving third spelling of an identity, used by
@@ -68,6 +73,25 @@ LORA_RE = re.compile(r"^0x[0-9A-F]{8}$")
 
 # The one identity key a message about a device is allowed to carry.
 IDENTITY_KEYS = ("valve_id", "sensor_id")
+
+# 2.1.4 snapshot sensor-array elements (snapshot.schema.json): every key, always. The hub
+# builds each element in one pass and drops the whole snapshot if any add fails, so a
+# missing key or a malformed id is a corrupted message, never a legitimate state.
+SENSOR_KEYS = {
+    "lora_sensors": ("sensor_id", "connected", "rating", "last_seen_age_s", "battery",
+                     "leak_state", "rssi", "snr", "location"),
+    "ble_leak_sensors": ("sensor_id", "connected", "rating", "last_seen_age_s", "battery",
+                         "leak_state", "rssi", "fw_version", "location"),
+}
+SENSOR_ID_RE = {"lora_sensors": LORA_RE, "ble_leak_sensors": MAC_RE}
+
+# Two messages whose (ts - gateway.uptime_s) differ by more than this came from different
+# boots (a replayed event keeps its own uptime_s and is stamped on the same clock).
+BOOT_SPLIT_S = 5
+
+# The MQTT (re)connect pass publishes its lifecycle, device events and rules event within a
+# loop pass, so a message more than this after the lifecycle is from a later pass.
+RECONNECT_PASS_S = 5
 
 
 def is_id(v):
@@ -96,6 +120,56 @@ def is_num(v):
 def is_battery(v):
     """A battery value: a number, or null for unknown (0xFF on the hub). Never a bool."""
     return v is None or (isinstance(v, (int, float)) and not isinstance(v, bool))
+
+
+def elements(d, arr):
+    """The objects of a snapshot sensor array; a malformed array or element is skipped here
+    (check_sensor_array() reports it)."""
+    items = d.get(arr)
+    return [x for x in items if isinstance(x, dict)] if isinstance(items, list) else []
+
+
+def check_sensor_array(d, arr):
+    """One snapshot sensor array: every element whole, its id an UPPERCASE id of its kind.
+    walk_keys() / _at() do not look inside arrays, so the ids are checked here."""
+    if arr not in d:
+        return [f"data.{arr} missing (must be present, [] when empty)"]
+    items = d[arr]
+    if not isinstance(items, list):
+        return [f"data.{arr} is {type(items).__name__}, expected an array ([] when empty)"]
+    f = []
+    seen = set()
+    for i, s in enumerate(items):
+        where = f"data.{arr}[{i}]"
+        if not isinstance(s, dict):
+            f.append(f"{where} is {type(s).__name__}, expected an object")
+            continue
+        missing = [k for k in SENSOR_KEYS[arr] if k not in s]
+        if missing:
+            f.append(f"{where} is missing {missing} (keys: {list(s)})")
+        if "sensor_id" in s:
+            sid = s["sensor_id"]
+            if not (isinstance(sid, str) and SENSOR_ID_RE[arr].match(sid)):
+                kind = "MAC" if arr == "ble_leak_sensors" else "0x + 8 hex digits"
+                f.append(f"{where}.sensor_id = {sid!r} is not an UPPERCASE {kind}")
+            elif sid in seen:
+                f.append(f"{where}.sensor_id {sid} is listed twice")
+            seen.add(sid if isinstance(sid, str) else repr(sid))
+        for k in ("connected", "leak_state"):
+            if k in s and not isinstance(s[k], bool):
+                f.append(f"{where}.{k} = {s[k]!r}, expected true or false")
+        if "rating" in s and s["rating"] not in RATINGS:
+            f.append(f"{where}.rating = {s['rating']!r} not a valid rating")
+        for k in ("last_seen_age_s", "battery", "rssi", "snr"):
+            if k in s and not is_battery(s[k]):      # a number, or null
+                f.append(f"{where}.{k} = {s[k]!r}, expected a number or null")
+        if "fw_version" in s and not (s["fw_version"] is None or isinstance(s["fw_version"], str)):
+            f.append(f"{where}.fw_version = {s['fw_version']!r}, expected a string or null")
+        loc = s.get("location")
+        if "location" in s and not (isinstance(loc, dict) and isinstance(loc.get("code"), str)
+                                    and isinstance(loc.get("label"), str)):
+            f.append(f"{where}.location = {loc!r}, expected {{code, label}} strings")
+    return f
 
 
 def check_valve(valve):
@@ -138,8 +212,8 @@ def check_system_health(d):
         return f
 
     valve = d.get("valve") if isinstance(d.get("valve"), dict) else {}
-    devices = ([valve] if valve else []) + list(d.get("lora_sensors", [])) \
-        + list(d.get("ble_leak_sensors", []))
+    sensors = elements(d, "lora_sensors") + elements(d, "ble_leak_sensors")
+    devices = ([valve] if valve else []) + sensors
 
     # Empty hub (BUG-3/5/6): valve {}, both arrays [], its own reason, excellent.
     empty = not devices
@@ -179,8 +253,7 @@ def check_system_health(d):
         f.append(f"system {rating!r} but no device is {rating!r} and no interlock floor")
 
     # A wet sensor is critical and named (leak outranks every other cause).
-    wet = [x for x in d.get("lora_sensors", []) + d.get("ble_leak_sensors", [])
-           if x.get("leak_state") is True]
+    wet = [x for x in sensors if x.get("leak_state") is True]
     leak_named = any(p.startswith("Leak detected: ") or re.match(r"^\d+ leaks detected$", p)
                      for p in parts)
     if wet and (rating != "critical" or not leak_named):
@@ -274,14 +347,7 @@ def check(msg):
             f.append("data.valve missing (must be present, {} when no valve)")
         f += check_valve(d.get("valve", {}))
         for arr in ("lora_sensors", "ble_leak_sensors"):
-            if arr not in d:
-                f.append(f"data.{arr} missing (must be present, [] when empty)")
-            for i, s in enumerate(d.get(arr, [])):
-                if "sensor_id" not in s:
-                    f.append(f"data.{arr}[{i}] has no sensor_id (keys: {list(s)})")
-                if "battery" not in s or not is_battery(s["battery"]):
-                    f.append(f"data.{arr}[{i}].battery = {s.get('battery', '<missing>')!r}, "
-                             f"expected a number or null (always present)")
+            f += check_sensor_array(d, arr)
         if "override_active" not in d:
             f.append("data.override_active missing (unconditional on snapshots)")
         f += check_override_times(d, "snapshot")
@@ -440,6 +506,76 @@ def check_ordering(msgs):
     return fails
 
 
+def check_release_order(msgs):
+    """F-08 (2.1.4): the auto-clear's release reaches the cloud before a re-wet's re-lock.
+
+    rmleak_auto_cleared fires only after every leak source has been dry for 10 s, so it
+    must not follow the leak_detected of a device with no leak_cleared for it in between
+    and a ts no older than it (the same pass can give both one ts): that device was wet
+    again before the release was published. F-08's exception is the pass in which MQTT
+    (re)connects: its lifecycle and device events go out first and the rules event after
+    them, so a release that follows a lifecycle within RECONNECT_PASS_S, with no snapshot or
+    other rules event in between, is not flagged.
+
+    What is wet is forgotten at a lifecycle, a new boot seen in (ts - uptime_s), an ok
+    provision or decommission (a wet sensor removed is forgotten by the rules engine
+    without a leak_cleared), and a snapshot that no longer lists the device or shows it
+    dry, so a leak_cleared the capture missed does not linger. One the offline buffer
+    overwrote (`Buffer full, oldest event overwritten`, T6-14) can still be flagged:
+    classify that FAIL with the UART log (VAL-15 step 3). Checked per gateway, in arrival
+    order, like the ordering above.
+    """
+    fails = []
+    wet = {}                # gateway id -> {device id: ts of its leak_detected}
+    boot = {}               # gateway id -> ts - uptime_s of its last message
+    reconnect = {}          # gateway id -> ts of a lifecycle whose pass may still be running
+    for i, m in enumerate(msgs):
+        gw_obj = m.get("gateway") or {}
+        gw = gw_obj.get("id")
+        d = m.get("data") or {}
+        ev = d.get("event")
+        ts, up = m.get("ts"), gw_obj.get("uptime_s")
+        mine = wet.setdefault(gw, {})
+        if is_num(ts) and is_num(up):
+            if gw in boot and abs((ts - up) - boot[gw]) > BOOT_SPLIT_S:
+                mine.clear()
+            boot[gw] = ts - up
+        ident = d.get("valve_id") or d.get("sensor_id")
+        if m.get("type") == "lifecycle":
+            mine.clear()
+            reconnect[gw] = ts
+            continue
+        if m.get("type") == "snapshot":
+            still = {x.get("sensor_id") for x in
+                     elements(d, "lora_sensors") + elements(d, "ble_leak_sensors")
+                     if x.get("leak_state") is not False}
+            valve = d.get("valve")
+            if isinstance(valve, dict) and not (valve.get("connected") is True
+                                                and valve.get("leak_state") is False):
+                still.add(valve.get("valve_id"))
+            for k in [k for k in mine if k not in still]:
+                del mine[k]
+            reconnect[gw] = None
+        elif ev == "cmd_ack" and d.get("status") == "ok" \
+                and d.get("cmd") in {"provision", "decommission"}:
+            mine.clear()
+        elif ev == "leak_detected" and ident:
+            mine[ident] = ts
+        elif ev == "leak_cleared" and ident:
+            mine.pop(ident, None)
+        elif ev == "rmleak_auto_cleared" and is_num(ts) and not (
+                is_num(reconnect.get(gw)) and ts - reconnect[gw] <= RECONNECT_PASS_S):
+            late = sorted(k for k, t in mine.items() if is_num(t) and ts >= t)
+            if late:
+                fails.append(
+                    f"message {i+1}: rmleak_auto_cleared came after the leak_detected of "
+                    f"{', '.join(late)} with no leak_cleared in between: the release must "
+                    f"precede the re-wet's leak_detected and auto_close (F-08)")
+        if ev in RULES_EVENTS:
+            reconnect[gw] = None
+    return fails
+
+
 def check_valveless_auto_close(msgs):
     """2.1.4: a hub with no provisioned valve publishes no auto_close.
 
@@ -475,7 +611,7 @@ def _at(d, path):
     cur = d
     for part in path.split(".")[1:]:
         if part.endswith("[]"):
-            return None            # array walk — value checked per element elsewhere
+            return None            # array walk — the snapshot sensor arrays are checked per element in check_sensor_array()
         if not isinstance(cur, dict):
             return None
         cur = cur.get(part)
@@ -542,7 +678,7 @@ def main():
             for x in fails:
                 print(f"    FAIL  {x}")
 
-    order_fails = check_ordering(msgs)
+    order_fails = check_ordering(msgs) + check_release_order(msgs)
     if order_fails:
         print("\n--- ORDERING (cause before consequence) ---")
         for x in order_fails:
