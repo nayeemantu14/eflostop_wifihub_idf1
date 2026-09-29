@@ -22,7 +22,7 @@ into pushes, and `type:"snapshot"` messages are the single source of truth that 
 Add a new event, **`valve_battery_critical`**, published when the valve's battery reaches a critical
 level. It must be **followed by a snapshot** so the UI shows the new battery value right away.
 
-Use the same template as the existing leak events. Reference (a BLE sensor `leak_cleared`):
+It follows the envelope and style of the existing leak events. Reference (a BLE sensor `leak_cleared`):
 
 ```json
 {
@@ -42,8 +42,8 @@ Use the same template as the existing leak events. Reference (a BLE sensor `leak
 }
 ```
 
-Expected shape for the new event. Confirm each key against the code during research; this is my
-reading of the existing conventions, not a spec you can skip checking:
+**Required payload for the new event. I have approved this shape; it is the contract, not a
+suggestion:**
 
 ```json
 {
@@ -57,7 +57,6 @@ reading of the existing conventions, not a spec you can skip checking:
     "valve_id": "00:80:E1:27:F7:BB",
     "leak_state": false,
     "battery": 9,
-    "location": { "code": "unknown", "label": "" },
     "valve_state": "open",
     "rmleak": false,
     "fw_version": "x.y.z"
@@ -65,19 +64,31 @@ reading of the existing conventions, not a spec you can skip checking:
 }
 ```
 
-Template rules:
-- Same envelope (`build_envelope("event")`) and the same required core in the same order: `event`,
-  `source_type`, `<identity>`, `leak_state`, `battery`, `location`.
-- Since 2.1.0 the identity key is named for the device type. The valve emits **`valve_id`**, not
-  `sensor_id` (`identity_key_for_source()` / `leak_identity_key()`). The valve has no location
-  metadata, so `location` is whatever `add_location_for_source(LEAK_SOURCE_VALVE, …)` emits today.
-  The valve link has no cached RSSI, so `rssi` is omitted. The valve extras (`valve_state`, `rmleak`,
-  `fw_version`) follow `telemetry_v2_publish_leak_event()`'s `has_valve_ext` branch.
-- **Reuse, don't fork.** Prefer extending the existing publisher and struct (`telem_leak_event_t` /
-  `telemetry_v2_publish_leak_event()` or a sibling that shares its core-builder) over a hand-rolled
-  copy that will drift.
-- Additive only. The schema stays `eflostop.v2`, and no existing message changes shape. Any extra key
-  (for example a `threshold`) needs my approval in the plan.
+Payload rules:
+- Same envelope as every other event (`build_envelope("event")`: `schema`, `ts`, `gateway{…}`, `type`).
+- `data` carries **exactly these keys, in this order**: `event`, `source_type`, `valve_id`,
+  `leak_state`, `battery`, `valve_state`, `rmleak`, `fw_version`. There is **no `location`** and
+  **no `rssi`**. No other key may be added without my approval (for example a `threshold`).
+- Key types and values:
+  - `event`: the literal `"valve_battery_critical"`.
+  - `source_type`: `"valve"`, from `leak_source_to_str(LEAK_SOURCE_VALVE)`, not a new literal.
+  - `valve_id`: the uppercase valve MAC, under the key from `identity_key_for_source(LEAK_SOURCE_VALVE)`.
+  - `leak_state`: bool, the valve flood-probe state.
+  - `battery`: integer percent, the reading that triggered the event.
+  - `valve_state`: `"open"`, `"closed"` or `"unknown"`.
+  - `rmleak`: bool.
+  - `fw_version`: the valve firmware string. It is **omitted** when the DIS read failed, the same
+    rule the valve leak event uses. It is the only conditional key.
+- Every value comes from **one sample**: the Phase 2 snapshot of valve state in `iothub_task`
+  (`vlk_mac`, `vlk_batt`, `vlk_wet`, `vlk_state`, `vlk_rmleak`, `vlk_fw`). Nothing is re-read live at
+  publish time. `battery` must equal the value that tripped the threshold.
+- The key list is the valve `leak_detected` payload with `location` removed. Neither existing
+  publisher produces it as-is:
+  - `telemetry_v2_publish_leak_event()` always emits `location`, via `add_location_for_source()`.
+  - `telemetry_v2_publish_valve_event()` uses a different key order (`valve_state` before `battery`)
+    and re-reads live values through the `ble_valve_get_*()` getters.
+  How to produce it without a drifting hand-rolled copy is decision **D8** below.
+- Additive only. The schema stays `eflostop.v2`, and no existing message changes shape or key order.
 
 ## What I already know about the code (verify, then build on it)
 
@@ -101,6 +112,11 @@ Template rules:
 - Docs and contract: `docs/telemetry/` (TELEMETRY_REFERENCE.md event table, telemetry_messages.md,
   `schemas/`, `fields.json`, `field_registry.csv`, the `*_data.py` catalogue generators,
   `validate_capture.py`). The hub version is `PROJECT_VER` in the top-level `CMakeLists.txt` **only**.
+- `validate_capture.py` treats `location` as "required core, every source" for `LEAK_EVENTS`. **Do
+  not** add `valve_battery_critical` to `LEAK_EVENTS`, or the validator will fail every capture of it.
+  Give it its own rule: the exact key list and order above, `source_type == "valve"`, the identity
+  `valve_id`, no `location`, no `rssi`, and `battery` at or below the critical threshold. Anywhere the
+  docs say "every device event carries `location`", add this event as a documented exception.
 - Feature docs convention: `docs/<feature>/{PLAN,DECISIONS,FEATURE_TRACKER,TEST_PLAN}.md`. Use
   `docs/valve_battery_critical/`. Read `docs/event_snapshots/` and `docs/health_leak_led/` first: they
   are the house style for plans, trackers and test plans.
@@ -147,8 +163,12 @@ Write the merged findings to `docs/valve_battery_critical/PLAN.md` § Research.
     already carries battery, but state the tradeoff for the app team.
   - **D7 Offline behavior.** Buffered and replayed like leak events, with the event ordered before
     its snapshot.
-  - **D8 Identity key.** `valve_id` per the 2.1.0 convention (the template shows `sensor_id` only
-    because it is a sensor event).
+  - **D8 Publisher.** How to emit the approved payload (no `location`, exact key order) while reusing
+    the existing core instead of copying it. Options: factor the shared core out of
+    `telemetry_v2_publish_leak_event()` behind a helper that lets the caller skip `location`, or add
+    a dedicated `telemetry_v2_publish_valve_battery_event()` built on that same helper. Existing leak
+    and `valve_state_changed` payloads must stay **byte-for-byte identical**. State which one you
+    chose and prove the no-change claim.
   - **D9 Test injection.** How I can force battery values on the bench without draining a real
     battery: a Kconfig-gated debug hook (default **off**, compiled out of production) or a C2D debug
     command. It must be impossible to enable by accident in a release build.
@@ -195,8 +215,11 @@ wrong output) with `file:line`:
 3. **Concurrency and ordering**: task context of every new call, NimBLE preemption between sample
    and publish, event-before-snapshot ordering (online and offline replay), snapshot rate cap and
    coalescing with a simultaneous health or leak event.
-4. **Contract drift**: key names, order and types vs the template and the leak event; `valve_id` vs
-   `sensor_id`; docs, schemas, `fields.json` and `validate_capture.py` all updated and consistent.
+4. **Contract drift**: `data` keys exactly `event, source_type, valve_id, leak_state, battery,
+   valve_state, rmleak, fw_version` in that order, with the types above; no `location`, no `rssi`,
+   no `sensor_id`; existing leak and `valve_state_changed` payloads unchanged; docs, schemas,
+   `fields.json` and `validate_capture.py` updated and consistent (and the new event kept out of
+   `LEAK_EVENTS`).
 5. **Regression**: `leak_detected/cleared`, `valve_state_changed`, `valve_linked/unlinked`
    snapshots, heartbeat re-arm, fast boot snapshot, offline drain, and memory or stack of
    `iothub_task`.
@@ -237,7 +260,8 @@ Write `docs/valve_battery_critical/TEST_PLAN.md` in the house style (`docs/event
   JSON, and explicit **P/F criteria**. Cover at least:
   - B0 build and version banner.
   - B1 cross above → at/below threshold: exactly **one** event, then **one** snapshot. The event comes
-    first, and the snapshot's valve `battery` equals the event's `battery`.
+    first, and the snapshot's valve `battery` equals the event's `battery`. The event's `data` keys
+    are exactly the approved list, in order, with no `location` and no `rssi`.
   - B2 further drops below threshold: no new event (snapshot and heartbeat still update battery).
   - B3 jitter around the threshold: no repeat.
   - B4 recovery past re-arm, then a drop again: fires again.
@@ -257,8 +281,8 @@ Write `docs/valve_battery_critical/TEST_PLAN.md` in the house style (`docs/event
    applies.
 2. For each test ID, produce a table: *Assertion | Expected | Observed (quoted line or `ts`) |
    PASS/FAIL/INCONCLUSIVE*. Check event counts, event→snapshot ordering and latency (`ts` and UART
-   timestamps), the `gateway.fw` value, key names, order and types vs the template, and battery
-   consistency between event and snapshot.
+   timestamps), the `gateway.fw` value, the exact `data` key list, order and types vs the approved
+   payload (no `location`, no `rssi`), and battery consistency between event and snapshot.
 3. Missing evidence is **INCONCLUSIVE**, never PASS. Tell me exactly what to recapture.
 4. On FAIL: root-cause it from the logs to `file:line`, propose the fix, and send it back through
    Phase 4 (review) before asking me to retest.
