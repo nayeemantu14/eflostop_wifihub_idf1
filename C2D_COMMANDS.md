@@ -610,7 +610,7 @@ Confirm the result two ways. Twin reported is republished **immediately** on a s
 
 Limits: 1 valve · up to 16 LoRa sensors · up to 16 BLE leak sensors.
 
-What happens: config saved to NVS, health devices reloaded, and (if a valve MAC was set) the hub starts connecting to it over BLE. A lifecycle + snapshot telemetry follows.
+What happens: config saved to NVS, health devices reloaded, and (if a valve MAC was set) the hub starts connecting to it over BLE. The `cmd_ack`, the refreshed twin reported and the command's own `event` snapshot follow (above). No lifecycle message follows a provision: since 2.1.4 the hub sends lifecycle only on an MQTT (re)connect, provisioned or not. (Up to 2.1.3 a hub that connected while unprovisioned held its lifecycle back and sent it after the first provision.)
 
 | Error detail | Why |
 |--------------|-----|

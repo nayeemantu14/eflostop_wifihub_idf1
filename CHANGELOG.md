@@ -62,6 +62,17 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     hub, before its ack: the removal's own save writes the default config. A `provision` or `rules_config`
     sent straight after the removal is therefore never overwritten back to true / 7. A `provision` that itself
     leaves no device resets them too; rules keys in that payload apply on top of the defaults.
+- **Found on the 2.1.4 bench, also in 2.1.3: after the 10 s auto-clear the cloud kept showing the valve
+  locked.**
+  - The hub publishes `rmleak_auto_cleared` and its snapshot as it writes RMLEAK=0, but the snapshot's
+    `valve.rmleak` changes only when the valve reports the new value back, about 1 s later. That report
+    requested no snapshot, so the snapshot read `"rmleak":true` and the next one came with the heartbeat (up
+    to 300 s at the default interval).
+  - The valve's report of a new RMLEAK value now requests an `event` snapshot. It follows the release
+    snapshot within about 5 s (the minimum spacing between snapshots); when the report comes first, the
+    release snapshot already reads `false` and is the only one. No event is added.
+  - The same gap is closed for `leak_reset`, `override_enable`, an RMLEAK clear or re-assert at a reconnect,
+    and an RMLEAK set on a valve that was already closed.
 
 ### Safety
 
@@ -587,6 +598,9 @@ next snapshot) confirms it.
       the countdown from the power-on for a window restored with the clock lost, instead of -1 or 0.
     - `OFFLINE_BUF` `Stamped pre-sync event [%s]: ts=%lld (%lld s before this replay)`: also for an event too
       close to 512 B to be stamped in flash at the sync.
+    - `IOTHUB` `SNAP trigger=event:%s`: new label `rmleak`, for the snapshot requested when the valve reports a
+      new RMLEAK value (right after `Event: BLE Update type=4`), at most about 5 s after the snapshot before it
+      (see *Fixed*).
   - Gone from the 2.1.4 development builds: `IOTHUB` `Hub empty: rules config reset to defaults failed`. On the
     emptying command, `PROVISIONING` `Setting rules config: auto_close=enabled triggers=0x07` and `Rules config
     saved to NVS` no longer appear; the removal's own save logs `Config saved to NVS successfully`.
@@ -629,8 +643,9 @@ next snapshot) confirms it.
     checkpoint 2, plus about 5 B of `.bss` from the council fixes), plus about 50 B of
     permanent heap for the two per-tag log levels set at boot. Both come out of the heap (2.1.3 field
     minimum: 2972 B free). The NimBLE host task also uses about 54 B more of its fixed stack on the valve
-    notify path. The captive-portal fix adds about 15 B of `.bss` and about 40 B of permanent heap (the
-    SoftAP station-log event handler); build checkpoint 4 confirms the static figure.
+    notify path. The captive-portal fix and "go red" add 24 B of `.bss` (36,304 B at build checkpoint 4,
+    36,280 B at checkpoint 3) and about 40 B of permanent heap (the SoftAP station-log event handler). The
+    RMLEAK snapshot fix adds no static RAM.
   - An override started before the clock synced and then restored after a software reset cannot be re-based,
     because its elapsed time is unknown, so it ends at the first clock sync, possibly hours early. That fails
     toward auto-close.

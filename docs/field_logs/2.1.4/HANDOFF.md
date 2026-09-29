@@ -2,9 +2,11 @@
 
 Written for the user and for the next Claude Code session. It records where the 2.1.4 fix job stands and how to pick it up again.
 
-> **Resume here.** Read §12, §12a and §12b first, then §1, §7, §10 and §11.
+> **Resume here.** Read §13 first, then §12-§12c, then §1, §7, §10 and §11.
 >
-> **Update, Tuesday 2026-09-29 (latest): "go red"; Build checkpoint 4 is still next.** The user decided §12a's open question 2: once a pended leak response has made the hub hunt for its valve in the portal window and that hunt has not reached the valve, the valve's health hold ends 180 s after the hunt, so the valve counts (RED, "Valve offline") while setup is still running. Firmware commits `9951bf4` … `46a1f0a` (§12b); the last firmware commit is now **`46a1f0a`**. Next: 🔨 Build checkpoint 4 of `46a1f0a` (§12b), then the smoke subset and T4-10 Parts A-I.
+> **Update, Tuesday 2026-09-29 (latest): CP4 passed, first bench session, D1 fixed; Build checkpoint 5 is next.** Build checkpoint 4 of `46a1f0a` passed (§13). The first bench session on it found one defect, D1 (T5-03 step 3: after the auto-clear the cloud kept `"rmleak":true` until the next heartbeat; the same code is in 2.1.3). The user chose a firmware fix: `4e6fe71` and `f424d65` (comments only), so the last firmware commit is now **`f424d65`**. The user also waived, for 2.1.4, the T4-10 steps that need a LoRa sensor (D2): "go red" is covered by code review and the 5/5 council only. The captive-portal test (T4-10) has still not run. Next: VAL-01 for 🔨 Build checkpoint 5 of `f424d65` (an incremental build of it from 17:00 already has the expected sizes, §13), then T4-10 Part F, the valve-hub A-steps and Part D (§13 "Run next"). A later session's logs (17:20) show `min_ever` 1,184 B on the router-outage fallback portal, not yet analysed (§13).
+>
+> **Update, Tuesday 2026-09-29 (later still): "go red"; Build checkpoint 4 is still next.** The user decided §12a's open question 2: once a pended leak response has made the hub hunt for its valve in the portal window and that hunt has not reached the valve, the valve's health hold ends 180 s after the hunt, so the valve counts (RED, "Valve offline") while setup is still running. Firmware commits `9951bf4` … `46a1f0a` (§12b); the last firmware commit is now **`46a1f0a`**. Next: 🔨 Build checkpoint 4 of `46a1f0a` (§12b), then the smoke subset and T4-10 Parts A-I.
 >
 > **Update, Tuesday 2026-09-29 (later): portal follow-up; Build checkpoint 4 is still next.** The user decided that the 10 s reset must always erase the Wi-Fi credentials, superseding "leave it": during a router outage it used to keep them, and the fallback portal it rebooted into keeps BLE scanning, so a changed router password could lock the customer out. The lead decided to close the portal window when the setup SoftAP stops (about 60 s after the IP) instead of at the IP, so the phone can load the success page, and to hold the valve's health verdicts during the pause like the BLE sensors'. Firmware commits `93b8629` … `cc66d72` (§12a); the last firmware commit was then **`cc66d72`** (now `46a1f0a`, see the latest update above). Next: 🔨 Build checkpoint 4 (§12a, §12b), then the smoke subset (step 10 is the portal) and T4-10 Parts A-H. The questions still open for the user are at the end of §12a.
 >
@@ -55,7 +57,7 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | E: adversarial review | **done**; fixes committed `095b5d6` … `b245d94` plus docs (§10) |
 | 🔨 Build checkpoint 3 | **passed** (build of `d9fa9c8`, §4b) |
 | F: 5-specialist council | **done**: round 1 BLOCK (F-01, B1), both fixed; final vote 5/5 SHIP on `d9fa9c8` (§11) |
-| Captive-portal regression (2026-09-29) | fixed in `5b5d70e` … `ca4835f` (docs `b7783d0`, `ac73cc6`); follow-up `93b8629` … `cc66d72` and its docs commit (§12a); "go red" `9951bf4` … `46a1f0a` and its docs commit (§12b); 🔨 **Build checkpoint 4 of `46a1f0a` next** (§12b) |
+| Captive-portal regression (2026-09-29) | fixed in `5b5d70e` … `ca4835f` (docs `b7783d0`, `ac73cc6`); follow-up `93b8629` … `cc66d72` and its docs commit (§12a); "go red" `9951bf4` … `46a1f0a` and its docs commit (§12b); Build checkpoint 4 of `46a1f0a` **passed** (§13); the D1 fix `4e6fe71`, `f424d65`; 🔨 **Build checkpoint 5 of `f424d65` next** (§13) |
 | G: MANUAL_TEST_PLAN.md + summary | **done**: version grep clean; CP3 build summary in §4b; `docs/field_logs/2.1.4/MANUAL_TEST_PLAN.md` (`d595633`, 114 tests, traceability matrix, ~30 min smoke subset) |
 
 ---
@@ -123,7 +125,7 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 
 **Things to check in review, or on the bench (these go into MANUAL_TEST_PLAN):**
 - **Bonded valve.** It must reconnect normally. `[CONNECT] MAC=` (the identity address) must equal the provisioned MAC, and "is not the provisioned valve" must never appear. If the STM32WB valve's identity address ever differs from the MAC it advertises, every reconnect would be rejected.
-- **Neighbour valve** (the second valve `00:80:E1:27:7E:C5` on the bench). Test with no valve provisioned, and with a different valve provisioned. The hub must never connect, never send CLOSE, never answer the passkey. Expect `[SCAN] No provisioned valve - not scanning for valves` or `[SCAN] Starting scan for provisioned valve <MAC>`.
+- **Neighbour valve** (the second valve `00:80:E1:27:7E:C5` on the bench). Test with no valve provisioned, and with a different valve provisioned. The hub must never connect, never send CLOSE, never answer the passkey. Expect `[SCAN] No provisioned valve - not scanning for valves` or `[SCAN] Starting scan for provisioned valve <MAC>`. *(Corrected 2026-09-29, §13: with no valve provisioned the line is `[CMD] CONNECT refused - no provisioned valve`, once at boot, as in the next item; no valve scan is requested.)*
 - **Sensors-only hub (P0-b).**
   - Expect `Starting BLE (valve=none, BLE sensors=N)`, the scanner hearing the sensors, and `[CMD] CONNECT refused - no provisioned valve` once at boot.
   - A leak logs "AUTO-CLOSE: no provisioned valve - nothing to close".
@@ -692,3 +694,81 @@ Five specialists (RTOS, memory/build, BLE/coexistence, Wi-Fi/portal, leak safety
 - **Test plan:** the T4-10 pass criterion "no `device_offline` for the valve within 180 s after `portal priority OFF`" now excepts a valve dropped in the window after a leak-response hunt that came before the resume (due at T + 180-210 s by design).
 
 **Next: 🔨 Build checkpoint 4 (CP4)** of firmware **`46a1f0a`**, the last commit that changes `main/`; everything after it is docs. Use the §12c gates above (they supersede §12a's size line), then flash, run the smoke subset, then T4-10 Parts A-I. Re-baseline VAL-01 and EC-1 with the CP4 figures (the firmware under test is `46a1f0a`). Open for the user: §12a items 1 and 3-5 (item 2 is decided), and the router-rejoin issue above.
+
+---
+
+## 13. CP4 build and first bench session (2026-09-29)
+
+### 13a. Build checkpoint 4: PASS
+
+The user built firmware `46a1f0a` (clean build through the VS Code ESP-IDF extension, `.bin` written 14:48:06 +1000) and flashed it. No `build_cp4.log` was saved. The whole build is in `C:\Users\antun\AppData\Roaming\Code\logs\20260925T101823\window1\exthost\output_logging_20260925T122215\4-ESP-IDF.log`: the warnings at L2061-2084, `[1298/1298]` at L2102, no `error:`, `Flash Done` at L2165 (the "Build task failed" at L1327-1328 are the earlier compiler-crash runs). The boot banner's ELF SHA256 matched the build, and the version reads 2.1.4. The test plan's VAL-01 and EC-1 now record these figures.
+
+| | CP3 (`d9fa9c8`) | CP4 (`46a1f0a`) | CP4 vs CP3 |
+|---|---|---|---|
+| Warnings | the four from `master` | the same four: `app_ble_valve.c:106:9` `BLE_HS_ATT_ERR` redefined; `app_lora.cpp:185:5` ×2 (`rx_flow_ctrl_thresh`, `flags`); `app_lora.cpp:160:13` `switch_sync_word` unused | none new |
+| IRAM | 16,384 (100 %) | 16,384 (100 %) | 0 |
+| DIRAM `.text` / `.data` / `.bss` | 113,387 / 21,572 / 36,280 | 113,387 / 21,572 / 36,304 | 0 / 0 / +24 (+0 over `cc66d72`: the "go red" word landed in alignment padding, as §12b predicted) |
+| Flash `.text` / `.rodata` | 1,016,642 / 360,188 | 1,019,510 / 362,364 | +2,868 / +2,176 |
+| App `.bin` | 1,528,576 | 1,533,616 (0x1766B0); 563,536 B = 26.87 % of the partition free (`idf.py` prints "27%") | +5,040 (+336 over `cc66d72`) |
+| ELF SHA256 | — | `5549e78ac872a599d3b7d8c484e7e55e2003a6c629b3e12f240c75866bcf26a2` | |
+| `sdkconfig` SHA256 | not recorded | `ef9757960686328ba288f9c7532a6ffc96ad3dac61e683ed7f0780e988ef98c3` (dated 2026-06-26): the reference from now on | |
+
+Heap on the CP4 image (valve + up to 4 BLE sensors): 59,916 / 59,728 / 31,744 at boot, then 33,384 / **20,576** / 17,408 at 10 s, after TLS and MQTT (`free` / `min_ever` / `largest_blk`). `free` stayed at 33,384-33,428 whatever the device set, and `min_ever` never fell below 20,576 in 1,520 s. The lowest `largest_blk` was 8,192 at 650 s, during a snapshot with the valve and 4 BLE sensors, and it recovered (the floor is 7,168). Sensors-only (1 sensor, 60 s): 33,388 / 20,576 / 17,408. T6-07, T6-08 and VAL-13 were not run, so there is no like-for-like figure yet.
+
+### 13b. The first bench session
+
+One POWERON boot of hub `GW-7C4FADAE69C8`, about 1,520 s. The full validation (every test the session touched, with UART and IoT Hub line evidence) is `cp4_validation_report.md` in the session scratchpad (`C:\Users\antun\AppData\Local\Temp\claude\c--Work-Projects-EfloStop-2-Firmware-Production-eFloStop-WiFiHub-idf1\ee520eed-0dc0-45ef-bdfe-91bf0b44762d\scratchpad\`, not committed). Its line numbers refer to the Desktop captures as they were at 15:47. **Both Desktop files were overwritten at 17:20 by a later session (13e).** The CP4 captures survive only in that scratchpad: `cp4val\uart_trunc.txt` (the UART log, line-numbered) and `cp4val\cloud.json` (the 74 IoT Hub messages; `d1docs\cp4_iothub_rebuilt.txt` is a capture rebuilt from them for the validator).
+
+- **Pass:** VAL-01 / EC-1 for CP4 and smoke step 1; the validator (74 of 74, no ORDERING block, no no-valve `auto_close` block; again 74 of 74 with the `0e7f3c3` checks); the boot lines, the B.2 grep and the E lines (only the known gpio ISR line; the one B.2 hit is the genuine valve press below); C2D §4.9 prov-003 (a category replace keeps the valve) and prov-004 (lower-case MACs: upper-case on the wire, a case-insensitive reconcile).
+- **Partial, every step that ran passed:** T3-02, T4-01 (sensors-only variant), T3-01, T5-10 (three read-backs in 0.88-1.22 s), T3-15 = T5-08 (a genuine valve long-press started the 24 h window; the valve firmware sends an unsolicited RMLEAK=0 only from `processLongPress`), T5-07, T5-01, DEC-01, DEC-03, DEC-04 (the P0 removals inside the window, steps 3, 4 and 8, were not run), DEC-07 (dry re-add only), DEC-09, DEC-10, DEC-14, T6-05 / T6-06, T6-09, T4-14 / EC-10, T5-14.
+- **Fail:** T5-03 step 3 (D1).
+- **Not run:** T4-10 (the captive portal, the top priority: saved credentials got an IP at 2.9 s, and there was no reset press) and smoke steps 2-10; DEC-19; 91 of the plan's 114 test headings in all.
+
+**Defects and decisions.**
+
+| # | Finding | Decision / state |
+|---|---|---|
+| D1 | T5-03 step 3: after the 10 s auto-clear the only snapshot (`event:rules`, 0.35 s after `AUTO-CLEAR`) read the closed valve as `"rmleak":true`. The valve's RMLEAK=0 read-back came 0.88 s later and requested no snapshot (`// BLE_UPD_RMLEAK: handled by rules engine events`), and the settle barrier ends when the write is issued. The cloud showed the valve locked until the next heartbeat (the next snapshot came only because the valve was opened, 15.7 s later). Moderate, no safety impact; the same code is in 2.1.3. DEC-06 step 3, T5-05 (c) and VAL-09 step 3 have the same gap. | **User: fix the firmware.** `4e6fe71`: the valve's report of a new RMLEAK value requests an `event` snapshot labelled `rmleak`, with no D2C event and no new static; `f424d65`: two comments `4e6fe71` left stale. Plan, CHANGELOG and TELEMETRY_REFERENCE §9.3 updated. Needs CP5 (13c). |
+| D2 | T4-10 depends on a LoRa sensor: A6, A7, B2-B6, G2, H1-H2 and I1-I5 wet L, because BLE sensors are not scanned in the window, and none was provisioned (`LoRa sensors: 0`; `LoRa Task Started` prints whether or not a radio is fitted). That includes both "go red" checks (B3, I4). EC-2 did not name T4-10, and it said the production board has no SX1262. | **User: waive them for 2.1.4.** They are recorded `Blocked (waived)`, and "go red" is covered by code review and the 5/5 portal council only (§12b, §12c). The waiver is written into T4-10 (preconditions and pass rule), M.2 and EC-2. |
+| D3 | Bench: sensor `2B:A5` is dead (on the whitelist about 856 s, never heard). The firmware handled it correctly: the grace expired at 599.86 s, the LED went RED with no `device_offline`, then GREEN after its removal. | Replace it, or run with 3 sensors and record the deviation. It blocks the `SS-V4` smoke start state and T4-10 A3/A8, not Part F. |
+| D4 | Tooling: `validate_capture.py` did not check the snapshot sensor-array elements (the garbled UART line passed), and its ORDERING block did not test F-08 although the plan said it did. | Fixed in `0e7f3c3` (element checks against the schema; the F-08 release order, with the MQTT-reconnect exception). |
+| D5 | Plan and docs text, each checked against the code: the T4-01 sensors-only line (and §3a above); the T3-01 snapshot label and line order; DEC-09's `0x216`; the unheard grace (599-605 s); DEC-01's `valve_linked` taken by the boot snapshot; T5-03's "within 5 s"; VAL-01's `:106` and 26.87 %; the IoT Hub name (`resi-apex-iot-dev`, resource group `resi-apex-rg-dev`, not `wd-core-iothub-poc`); `C2D_COMMANDS.md` (no lifecycle follows a provision); `TELEMETRY_REFERENCE.md` (the removed provisioning gate). | Fixed in the docs commit after `0e7f3c3`. |
+| D6 | Procedure: the UART log was a terminal copy without `--timestamps` (U:176, U:1027 and U:1064 are corrupted: use the IoT copies); the snapshot interval stayed at 300 s; the IoT capture came from VS Code and its first 5 messages were from the previous image; no `build_cp4.log`. | Bench notes below. |
+
+Checked and cleared in the report: the `RMLEAK cleared externally` at about 244 s was a real valve long-press, handled as designed; `Link was not the provisioned valve - hub not notified`, `decom-b-002` accepted twice (no id de-duplication), no `device_offline` for the never-heard `2B:A5`, and the twin's null `valve_mac` / `valve_device_id` are all by design. To watch, not yet explained: a permanent 188 B step in `free` at about 1,235 s; a 201 s gap in `29:FC`'s bursts while the valve link was up; orphaned `sensor_meta` entries after sensors are replaced by a `provision` (pre-existing).
+
+### 13c. The D1 fix and Build checkpoint 5
+
+| SHA | What |
+|---|---|
+| `4e6fe71` | fix(iothub): request a snapshot when the valve reports a new RMLEAK. `app_iothub.c`, in the provisioned-valve (`vlk_mac_ok`) block: `else if (ble_upd_type == BLE_UPD_RMLEAK) snap_request(SNAP_EVENT, SNAP_TIER_HIGH, "rmleak")`. Comment corrections in `app_ble_valve.c`/`.h` and `rules_engine.c`: the cache changes only at the valve's report, and the settle barrier ends when the write is issued |
+| `f424d65` | docs(iothub): two comments in `app_iothub.c` that `4e6fe71` left stale (comments only) |
+| `0e7f3c3` | tools(telemetry): the validator's sensor-array element checks and F-08 order (D4) |
+| the docs commit after `0e7f3c3` | Docs: MANUAL_TEST_PLAN.md (header note, 0.2, 0.5, 0.7-0.9, 0.15, 0.18, 5.0, T5-03, DEC-01, DEC-04, DEC-06, DEC-08, DEC-09, T3-01, T3-07, T4-01, T4-10, T5-05, T5-10, T5-13, VAL-01, VAL-09, VAL-15, EC-1, EC-2, M.2, A.2, B.1), CHANGELOG (*Fixed*, the serial-log label, the heap figure), `C2D_COMMANDS.md` §4.9, `TELEMETRY_REFERENCE.md` (lifecycle gate, §9.3), this section |
+
+**Behaviour.** `notify_hub_update(BLE_UPD_RMLEAK)` posts only when the valve's report changes the cached value (`on_notify()`, never during GATT setup) and only for the provisioned valve. `snap_request()` only pulls a deadline earlier, so the request coalesces with one already pending (the rules event's own `rules` snapshot keeps its label) and is otherwise held to 5 s after the last publish. After the auto-clear the cloud now gets the release snapshot (which can still read `true`), then `SNAP trigger=event:rmleak` about 5 s later with `"rmleak":false`; when the read-back lands first there is one snapshot, already `false`. The same holds for `leak_reset`, `override_enable`, a reconnect's re-assert or clear, and an RMLEAK set on a valve already closed. No log line is new or changed; the label prints through `SNAP trigger=event:%s`. Memory: 0 B of `.bss`/`.data`, no IRAM, about 20 B of flash `.text`; the `"rmleak"` string can merge with the telemetry key.
+
+**CP5 (VAL-01 of `f424d65`).** A full rebuild (`idf.py fullclean`, then `idf.py build *> "$env:TEMP\build_cp5.log"`) and the VAL-01 steps. Expected: the same four warnings; DIRAM `.text` exactly 113,387 (any change is a newly linked IRAM function: stop and look); `.bss` 36,304 ± a few bytes; `.data` 21,572; flash `.text` about +20 B and `.rodata` +0 to +7 B over CP4; `.bin` about 1,533,632 B; `sdkconfig` SHA256 `ef97579…c3`; record the ELF SHA256 and check the boot banner's prefix.
+
+**Found after this section was drafted (17:21):** `build\` already holds an **incremental** build from 17:00:12 of the working tree at `f424d65` (no uncommitted change under `main/`), flashed (the VS Code log L2168-2269, `Flash Done` at L2269). It recompiled the 8 files that changed or include `app_ble_valve.h` and printed only the known `app_ble_valve.c:106` warning (`app_lora.cpp` was not recompiled, so its three warnings could not print). Its figures, from the log and the ELF: flash `.text` 1,019,526 (+16), `.rodata` 362,364 (+0), DIRAM `.text` 113,387, `.bss` 36,304, `.data` 21,572, IRAM 16,384 (100 %); `.bin` 1,533,632 B (0x1766C0, 26.87 % free); ELF SHA256 `9dc3a9e9a3d849a2132f523389152897c0180cb45788ae356e6c3bb332eae05e`; `sdkconfig` unchanged. Every size matches the CP5 expectation. VAL-01 still needs the full rebuild for the warning check (steps 2-3) and the step 1 record.
+
+### 13d. Bench notes for the next session
+
+- **Capture:** `idf.py -p COM30 monitor --timestamps`, then Ctrl+T Ctrl+L. Start the IoT capture after flashing, with the Azure CLI on the right hub: `az iot hub monitor-events -n resi-apex-iot-dev -g resi-apex-rg-dev -d GW-7C4FADAE69C8 --content-type application/json --properties sys --timeout 0` in Git Bash (plan 0.7). Keep a copy of each session's logs before the next one overwrites them.
+- **Twin snapshot interval 60 s** (plan 0.9); it stayed at 300 s in this session.
+- **Sensor `2B:A5` is dead** (D3). First-heard times on this bench were 133 s (`29:FC`) and 163 s (`B6:8E`), longer than the plan's "about 100 s": allow about 170 s.
+- Forget `WiFi-Hub-69C8` on the phone before a portal run, and don't touch the valve button outside T3-15.
+- For every portal boot, record the heap rows (A1, A3, A4, A5, A8, A9, F2) and check that `free` is stable across repeated resets (§12c). `min_ever` below 8,192 B or `largest_blk` below 7,168 B is a finding.
+
+### 13e. A later session on the CP5 image (logs of 17:20, not analysed)
+
+The Desktop captures were overwritten at 17:20 by a later session on the 17:00 image (boot banner `ELF file SHA256: 9dc3a9e9a…`; its compile time still reads 14:45:55 because the app descriptor was not recompiled). Valve hub with 2 BLE sensors: Wi-Fi was lost at 50 s and the router-outage fallback AP came up at 80 s (`SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`, no `portal priority ON`); two leaks were closed and auto-cleared offline (RMLEAK before CLOSE, the events buffered); a PC joined the fallback SoftAP (DHCP lease 10.10.0.3, many DNS replies); a reset press at 446 s was released early. **MONITOR `min_ever` fell from 20,992 B to 18,204 B (320 s), 10,380 B (380 s) and 1,184 B by 450 s, with `largest_blk` 11,776 B.** By the T4-10 heap rule that is a finding; it has not been analysed. The IoT capture holds 3 messages (lifecycle and 2 snapshots) and validates 3 of 3.
+
+### 13f. Run next (in order)
+
+0. **VAL-01 for Build checkpoint 5** (13c), then flash that build. Before more fallback-portal runs, look at 13e's heap floor.
+1. **T4-10 Part F, F1-F4, about 15 min.** The hub is already sensors-only (3 BLE sensors, no valve). F1: hold the reset 10 s; expect `RESET_BTN: Wi-Fi credentials erased from NVS` before `Rebooting into AP mode...`, then `portal priority ON (no Wi-Fi credentials) - BLE scanning paused`, `prio 5 -> 8`, `BLE_LEAK: Scan paused - Wi-Fi setup portal has the radio`, no `Extended passive scan started`, LED WHITE. F2: the phone joins and gets `DHCP server assigned IP` within 5 s, and the page loads; **no lease is the 2026-09-29 failure**. F3: a wrong password keeps the window. F4: the real credentials, then `portal priority OFF (AP stopped)` 60 ± 5 s after `Connected! IP`, each sensor's `eleak … leak=0`, `Boot sync: all devices seen`, no `device_offline`, "Connected!" on the phone.
+2. **Smoke step 10 / T4-10 A1-A5 and A8-A11 on a valve hub, about 15 min.** Provision the valve with `{"schema":"eflostop.cmd","ver":1,"id":"s10-valve","cmd":"provision","payload":{"valve_id":"00:80:E1:27:F7:BB"}}` (the 3 sensors stay), wait for SETUP COMPLETE and GREEN, then run it with 3 sensors and record the deviation. Also expect `Valve scan held` and WHITE in the window, no `Roll-up grace expired`, and after OFF `[PORTAL] Valve hunt resumed`, then `SETUP COMPLETE`.
+3. **T4-10 Part D (router outage, D1-D6).** It also covers T4-02 row 1 and T5-12 step 1. D1 must show the fallback AP with scanning on and **no** `portal priority ON`. If D4 hits the known rejoin issue (§12c), record it and power-cycle.
+4. T4-10 B1, Part E (`B6:8E` as sensor D), H3-H4, T6-14 (Part C), and T4-14 rows 1 and 4 (grep the portal capture for the site password; clear the valve bond first so that a fresh passkey pairing happens).
+5. T5-03 on CP5 (D1: `SNAP trigger=event:rmleak` with `"rmleak":false` about 5 s after the release snapshot); replace `2B:A5` and run the chained `SS-V4` smoke, steps 2-11, in one capture (step 7 needs the PSU); then sections 1-6 and VAL-02…VAL-14.
