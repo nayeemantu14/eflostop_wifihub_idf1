@@ -8,7 +8,7 @@
 | Date | 2026-09-27 |
 | Sources of truth | The firmware at `d9fa9c8` (`main/`), which wins over any document; `CHANGELOG.md` (2.1.4); the approved plan (scenarios S1-S26); `docs/field_logs/2.1.4/HANDOFF.md` §7, §10, §11; the round 1 and round 2 review records and both council votes |
 
-> **Update 2026-09-29: portal priority window (firmware after `d9fa9c8`).** The 2026-09-29 bench capture showed that on `d9fa9c8` a phone could not join the SoftAP portal after a Wi-Fi reset: BLE scanning (the leak scanner, and on a valve hub the valve hunt) took the radio from the SoftAP, and no DHCP lease was ever given. Seven firmware commits on `fix/2.1.4` fix it: `5b5d70e`, `f65a95b`, `03c69a7`, `b548d50`, `529f6d1`, `efd6d84`, `ca4835f` (`main/app_wifi`, `main/ble_leak_scanner`, `main/ble_valve`, `main/health_engine`, `main/wifi_reset`). While the portal is up and no Wi-Fi credentials are saved, BLE scanning pauses: NimBLE stays up, a linked valve stays linked, and a leak close pended for an unlinked valve still hunts it. The BLE sensors' health timeouts and the snapshot gate are held and restart at the resume. The router-outage fallback portal keeps BLE scanning. **Until this plan is re-baselined at Build checkpoint 4:** the firmware under test is `ca4835f`, not `d9fa9c8`; VAL-01's `git diff --stat d9fa9c8 HEAD -- main …` lists exactly those files (run it against `ca4835f` instead, which must print nothing); the size figures of VAL-01 steps 4-5 and EC-1 are CP3's and move by a few bytes of `.bss` and about 2 KB of flash, with IRAM unchanged (still 16,384 B): record the CP4 figures. Every other quoted line is unchanged, except in T4-10 (rewritten for the window) and T6-13.
+> **Update 2026-09-29: portal priority window (firmware after `d9fa9c8`).** The 2026-09-29 bench capture showed that on `d9fa9c8` a phone could not join the SoftAP portal after a Wi-Fi reset: BLE scanning (the leak scanner, and on a valve hub the valve hunt) took the radio from the SoftAP, and no DHCP lease was ever given. Seven firmware commits on `fix/2.1.4` fix it: `5b5d70e`, `f65a95b`, `03c69a7`, `b548d50`, `529f6d1`, `efd6d84`, `ca4835f` (`main/app_wifi`, `main/ble_leak_scanner`, `main/ble_valve`, `main/health_engine`, `main/wifi_reset`). While the portal is up and no Wi-Fi credentials are saved, BLE scanning pauses: NimBLE stays up, a linked valve stays linked, and a leak close pended for an unlinked valve still hunts it. The BLE sensors' health timeouts and the snapshot gate are held and restart at the resume. The router-outage fallback portal keeps BLE scanning. **Until this plan is re-baselined at Build checkpoint 4:** the firmware under test is `ca4835f`, not `d9fa9c8`; VAL-01's `git diff --stat d9fa9c8 HEAD -- main …` lists exactly those files (run it against `ca4835f` instead, which must print nothing); the size figures of VAL-01 steps 4-5 and EC-1 are CP3's and move by a few bytes of `.bss` and about 2 KB of flash, with IRAM unchanged (still 16,384 B): record the CP4 figures. Every other quoted line is unchanged, except in T4-10 (rewritten for the window), T6-13, and the portal checks added elsewhere: T4-02 row 1 and T5-12 step 1 (the router-fallback line), T6-14 step 3, the 0.15 row for the window, smoke step 10 (now run on `SS-V4`), the portal rows of M.2 and M.4, and Appendices A.2, B.1 and B.2 (which follow the CHANGELOG).
 
 ## How to use this document
 
@@ -584,6 +584,7 @@ All the figures below come from the code at `d9fa9c8`. A test's expected time is
 | SAS token | `SAS_TTL_SEC` 24 h, `SAS_RENEW_MARGIN_SEC` 6 h | renewed at about 18 h uptime (`IOTHUB: SAS: token renewed (valid %d h, expires ts=%ld)`, format) | — |
 | cmd_ack after the C2D arrives | — | < 1 s | ≤ 5 s (≤ 12 s for `override_enable`) |
 | MQTT keepalive (WAN-only outage detection) | `cfg->session.keepalive = 60` (`app_iothub.c`) | esp-mqtt can take up to about 2× keepalive to notice a WAN-only outage (Wi-Fi still associated) | `IOTHUB: Disconnected.` within **≤ 120 s** of unplugging the WAN. Keep the WAN out for **at least 3 min** in any test that needs the drop. "No `Pub snapshot`" rules apply only **after** the drop is logged (`IOTHUB: Disconnected.` and `TELEMETRY_V2: MQTT connected = false`); a publish before that is not a failure. |
+| Portal priority window (Wi-Fi setup portal with no credentials saved) | `PORTAL_TASK_PRIORITY` 8 (`app_wifi.c`); `PORTAL_POLL_MS` 1 s (`app_ble_valve.c`); the scan task's 500 ms loop (`app_ble_leak.c`); `HEALTH_BLE_LEAK_TIMEOUT_MS` 600 s and the 180 s gate, both from the resume (`health_engine.c`) | opens at the SoftAP start, about 0.7 s after boot; no time cap; closes at `Connected! IP` (or when the AP stops) | the leak scanner reacts ≤ 0.5 s and the valve task ≤ 1 s after a window edge; a BLE sensor's `device_offline` or `Roll-up grace expired` no earlier than 600 s after `portal priority OFF`; with a BLE sensor still unheard, `Boot sync: timeout` 180–185 s after it |
 | Valve battery reading (valve FW) | — | Good 10 min, Low 60 s, Critical ~20 s | first reading ≤ 10 min 30 s after a PSU change; then ≤ 70 s (Low), ≤ 30 s (Critical) |
 
 ### 0.16 Test IDs, priorities and standard start states
@@ -745,6 +746,21 @@ Every requirement of this release maps to the tests that verify it (a normal Pas
 | E-21 | Captive portal no longer BLE-free: NimBLE is up beside it, and BLE scanning pauses while no Wi-Fi credentials are saved (portal priority window, 2026-09-29) | T4-10 | T6-13 (= T4-10) |
 | E-22 | Rollback: stamped pre-sync entries over 512 B; unstamped ones | T4-03, VAL-03 (= T6-04) | — |
 
+**Portal priority window (the 2026-09-29 captive-portal fix, commits `5b5d70e` … `ca4835f`)**
+
+| Item | What 2.1.4 must do | Main tests | Also |
+|---|---|---|---|
+| Window opens only with no credentials | `HEALTH_ENGINE: BLE scanning paused - BLE sensor timeouts held`, `APP_WIFI: portal priority ON (no Wi-Fi credentials) - BLE scanning paused` and `portal priority: wifi_manager task prio 5 -> 8 (httpd, dns_server not raised)` at the SoftAP start after the 10 s reset or at first setup; never after a boot with saved credentials | T4-10 A3, E1, F1 | T4-10 A11, T6-14 step 3, smoke step 10 |
+| Phone joins the portal, valve hub | `APP_WIFI: SoftAP: station … joined, AID=%u`, then `esp_netif_lwip: DHCP server assigned IP to a client` within 5 s, DNS replies, the page loads and saves; valve powered (A) and powered off (B) | T4-10 A4, B1 | T6-14 step 3, smoke step 10 |
+| Phone joins the portal, sensors-only hub | the same on the 2026-09-29 unit (`GW-7C4FADAE69C8`, 2 BLE sensors, no valve) | T4-10 F2 | — |
+| SoftAP station log | `SoftAP: station … joined, AID=%u` and `… left, AID=%u, reason=%u` on any SoftAP | T4-10 A4, F2 | T4-10 D3 |
+| Scanning paused in the window | no `Extended passive scan started` and no `[SCAN] Starting scan for provisioned valve` between `portal priority ON` and `OFF`, except the leak-response hunt; NimBLE stays up; a linked valve stays linked | T4-10 A3, A10, F1 | T4-10 G1 |
+| Leak response outranks the portal | a LoRa leak in the window hunts and links an unlinked valve (`[PORTAL] Leak response pending …`) and closes it RMLEAK first; that hunt stops when the close is withdrawn (`[PORTAL] Valve hunt stopped …`) | T4-10 A6, B2-B4 | T4-10 G2 |
+| Router-fallback AP keeps BLE | `SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`, **no** `portal priority ON`, scanning and a BLE leak close continue | T4-10 D1, D2 | T4-02 row 1, T5-12 step 1 |
+| Window closes at the STA IP | `Connected! IP`, `BLE scanning resumed - BLE sensor timeouts restart now (600 s)`, `portal priority OFF (Wi-Fi connected) - BLE scanning resumed`; the leak scan and the valve hunt resume within 1 s | T4-10 A8, F3 | T4-10 E4, G3, T6-14 step 3, smoke step 10 |
+| Sensors heard again after setup | every BLE sensor's `eleak … — leak=0` within about 100 s of the resume; a sensor wetted in the window reports its leak in its first burst after it | T4-10 A8, E4, F3 | smoke step 10 |
+| No false `device_offline` (health hold) | no `device_offline` and no BLE `Roll-up grace expired` for the pause; fresh 600 s from `portal priority OFF`; the snapshot gate waits for BLE sensors not yet heard; an absent sensor goes offline 600 s after the resume, never earlier | T4-10 E2-E4 | T4-10 A10, F3, smoke step 10 |
+
 ### M.3 Round 2 findings (fixed) and other F-findings
 
 | Item | What 2.1.4 must do | Main tests | Also |
@@ -785,7 +801,9 @@ Every requirement of this release maps to the tests that verify it (a normal Pas
 | Heap budget: about 181 B more static RAM and about 50 B of permanent heap | VAL-01, VAL-13 |
 | An override started before the sync and restored after a software reset ends at the first sync (E-03 case B) | T4-09 Part B |
 | An override restored after a power cut with no internet ends 24 h after the power-on | T4-09 A2, A6 |
-| The captive portal runs beside NimBLE with less free heap; the router-fallback portal keeps BLE scanning, and the 10 s reset does not erase credentials while the STA is idle | T4-10 (Parts A, D) |
+| The captive portal runs beside NimBLE with less free heap; while no credentials are saved BLE sensors are not heard and a lost valve link is not re-found (unless a leak close is pended); the pause has no cap; on a valve hub the valve counts as unheard after 180 s and the LED turns RED during setup | T4-10 (Parts A, B, E; heap table) |
+| The router-fallback portal keeps BLE scanning, so a phone may fail to join it | T4-10 D3 |
+| The 10 s reset erases the Wi-Fi credentials only while the hub is connected to the router; during a router outage it reboots with the old ones | T4-10 D4 |
 | Up to 16 events fit in the offline buffer; the oldest is overwritten | T6-14, T4-08 step 5 |
 | F-03: a leak latched while the valve was out of reach can be read as a button press at the reconnect | T4-12 (T3-20) |
 | F-02: after a restart during a leak the interlock can be released for one wet report | T4-11 Part A (T3-21), T3-15 step 5 |
@@ -1153,10 +1171,10 @@ In the tests below, A (section 4, section 5) and `<S1>` (section 3) are `<BLE1>`
 | 7 | **T2-01** steps 1, 3, 4 and 5 (the valve power-cycle fast path; skip the wait of step 2). **Only if the bench PSU is ready.** Without a PSU, record `Blocked (no PSU)` here and run T2-01 in the full campaign. | 5 min | BUG-1/S17: valve battery ≤ 10 % → valve and hub `critical`, "Valve battery critical", RED, no health event; `valve_open` refused with "Valve battery critical (≤10 %): the valve will not open. Replace the batteries."; recovery to GREEN | valve open, PSU at GOOD |
 | 8 | **T3-01** steps 1-4 and 9 (step 2: wait 1 min). | 4 min | P0-a: after the valve decommission the hub never scans for, links to or commands the powered neighbour; a leak publishes `leak_detected` and **no** `auto_close`; `valve_open` refused "No valve is set up for this hub."; BUG-5 `"valve":{}`; `rmleak_auto_cleared` without `valve_id` | `<BLE1>`…`<BLE3>`, no valve |
 | 9 | **DEC-11**, short form: send `dec-11-s1` (trigger mask 3); remove `<BLE1>` and `<BLE2>` (ids `smoke-9a`, `smoke-9b`); wet `<BLE3>`; remove `<BLE3>` (id `smoke-9c`) while it is wet; watch one heartbeat. Expected as DEC-11 steps 1-6 with `<BLE3>` in place of `<BLE4>` (the reason reads "Leak detected: Ensuite, Leak interlock latched"). | 4 min | BUG-3/BUG-6: one `event` snapshot of the empty shape (R-EMPTY) with `"rules":{"auto_close_enabled":true,"trigger_mask":7}` and no "Leak interlock latched"; LED `rating=unprovisioned color=WHITE`; a `heartbeat` 60 s later (−1/+3 s) | empty |
-| 10 | **T4-10** A2-A4 and A8, short form (added 2026-09-29): hold the Wi-Fi reset button 10 s, join `WiFi-Hub-<SHORT>` from the phone and open the portal, then submit the site credentials. | 6 min | the portal fix: at boot `APP_WIFI: portal priority ON (no Wi-Fi credentials) - BLE scanning paused` and, while the portal is up, no `Extended passive scan started`; the phone's `APP_WIFI: SoftAP: station … joined` followed by `DHCP server assigned IP to a client` within 5 s, and the page loads; after the submit, `portal priority OFF (Wi-Fi connected) - BLE scanning resumed` and `Extended passive scan started` within about 1 s (or the valve hunt first) | online, same devices |
+| 10 | **T4-10** A2-A4 and A8, short form (added 2026-09-29). First re-provision `SS-V4` with `ss-v4m` (0.8): the step 9 hub is empty, and an empty hub starts no BLE. Wait until the valve and `<BLE1>`…`<BLE4>` are heard. Then hold the Wi-Fi reset button 10 s, join `WiFi-Hub-<SHORT>` from the phone and open the portal, then submit the site credentials. | 9 min | the portal fix, on a valve hub: `APP_WIFI: WiFi Disconnected. Reason: 8` before `RESET_BTN: Rebooting into AP mode...` (the credentials were erased); after the reboot `APP_WIFI: portal priority ON (no Wi-Fi credentials) - BLE scanning paused`, `portal priority: wifi_manager task prio 5 -> 8 (httpd, dns_server not raised)`, `BLE_LEAK: Scan paused - Wi-Fi setup portal has the radio` and `BLE_VALVE: [SCAN] Valve scan held - Wi-Fi setup portal has the radio`; while the portal is up **no** `Extended passive scan started` and **no** `[SCAN] Starting scan for provisioned valve`; the phone's `APP_WIFI: SoftAP: station … joined, AID=%u` followed by `esp_netif_lwip: DHCP server assigned IP to a client` within 5 s, and the page loads; after the submit `Connected! IP`, `HEALTH_ENGINE: BLE scanning resumed - BLE sensor timeouts restart now (600 s)`, `portal priority OFF (Wi-Fi connected) - BLE scanning resumed`, `BLE_LEAK: Scan resumed - Wi-Fi setup portal closed`, `[PORTAL] Valve hunt resumed - Wi-Fi setup portal closed`, `[SCAN] Starting scan for provisioned valve`, `SETUP COMPLETE - READY FOR GATT`; each `<BLE1>`…`<BLE4>` `eleak … — leak=0` again within about 100 s (the hunt forwards their reports until the valve links); **no** `device_offline` | `SS-V4`, online |
 | 11 | **VAL-15** step 1 on `SMOKE_iothub.txt`. | 1 min | the wire contract of every smoke message: 0 FAIL, no `--- ORDERING` block, no `--- AUTO_CLOSE FROM A HUB WITH NO VALVE` block | — |
 
-**Total:** about 41 min with step 7, about 36 min without it.
+**Total:** about 44 min with step 7, about 39 min without it.
 
 The step 9 removal commands (one line each):
 
@@ -1168,7 +1186,7 @@ The step 9 removal commands (one line each):
 
 **Smoke pass rule.** Every step passes (step 7 may be `Blocked (no PSU)` only). Any `Guru Meditation`, `abort()`, `stack overflow`, watchdog, unplanned reboot, `RMLEAK cleared externally`, `write attempt … (rc=6)` or `Snapshot not built - out of memory` anywhere in `SMOKE_uart.txt` fails the smoke run (Appendix B.2 has the grep).
 
-**After the smoke run:** re-provision `SS-V4` with `ss-v4m` (0.8) and open the valve.
+**After the smoke run:** the hub is back on `SS-V4` (step 10). Open the valve if it is closed.
 
 | Step | Result | Notes |
 |---|---|---|
@@ -3961,7 +3979,7 @@ Expected lifecycle (values vary; the keys, their order and `provisioned:true` mu
 
 | # | Action | Expected UART | Expected IoT Hub | LED | Tolerance | P/F | Notes |
 |---|---|---|---|---|---|---|---|
-| 1 | Router off. Power-cycle the hub. | As T4-01 row 1 up to `IOTHUB: QueueSet Initialized. Event loop starting...`, and the NimBLE lines. **No** `Connected! IP`, **no** `Initializing SNTP...`, **no** `Time synced`. `APP_WIFI: WiFi Disconnected. Reason: %d` **(format)** may repeat while the hub retries. | nothing (no network) | `rating=startup color=OFF` → `rating=syncing color=WHITE`. Network LED ramp red. | `Starting BLE …` ≤ 3000 ms uptime | | The Wi-Fi manager may start its own SoftAP after its retries; that is expected and does not stop protection. |
+| 1 | Router off. Power-cycle the hub. | As T4-01 row 1 up to `IOTHUB: QueueSet Initialized. Event loop starting...`, and the NimBLE lines. **No** `Connected! IP`, **no** `Initializing SNTP...`, **no** `Time synced`. `APP_WIFI: WiFi Disconnected. Reason: %d` **(format)** may repeat while the hub retries. | nothing (no network) | `rating=startup color=OFF` → `rating=syncing color=WHITE`. Network LED ramp red. | `Starting BLE …` ≤ 3000 ms uptime | | The Wi-Fi manager may start its own SoftAP after its retries; that is expected and does not stop protection. That fallback SoftAP logs `APP_WIFI: SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`; a `portal priority ON` line here is a Fail (T4-10 D1). |
 | 2 | Wait for the valve link and for A-D to be heard. | T4-01 row 3 lines: `SETUP COMPLETE - READY FOR GATT`, `Reconnected: no active incident, valve clear`, one `eleak … leak=0` per sensor. | nothing | `rating=excellent color=GREEN effect=SOLID` | SETUP COMPLETE ≤ 60 s after boot | | Record the uptime of SETUP COMPLETE. |
 | 3 | Wet A. Note the PC time. | `BLE_LEAK: eleak %s — leak=%d batt=%d%% rssi=%d fw=%s` **(format)** with `<A>`, `leak=1`; `RULES_ENGINE: LEAK INCIDENT latched by %s sensor %s` **(format)** = `by ble_leak_sensor sensor <A>`; `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by %s sensor %s` **(format)**; `IOTHUB: Event: BLE Leak %s leak=%d batt=%d` **(format)**; then **for each event** (leak_detected, then auto_close): `TELEMETRY_V2: Time not synced (ts=%ld) - holding %s for replay; stamped when the clock syncs` **(format)** with `holding event`, followed by `OFFLINE_BUF: Stored event [%s] (%u bytes), %d buffered` **(format)**. On the valve side, in this order: `BLE_VALVE: [CMD] Writing RMLEAK=1`, `[DATA] RMLEAK=1 (ACTIVE)`, `[CMD] Writing Valve=0`, `[DATA] Valve State=0 (CLOSED)`. Then one more held event (valve_state_changed) with its `Time not synced …` and `Stored event …` lines. | nothing | `rating=critical color=RED effect=SOLID` | `eleak … leak=1` ≤ 15 s after wetting; `AUTO-CLOSE + RMLEAK triggered` ≤ 1 s after it; `[DATA] Valve State=0 (CLOSED)` ≤ 5 s after it | | Record: the uptime of `LEAK INCIDENT latched`, each `ts=` in the `Time not synced` lines (about the uptime in seconds), each `[ob_NN]` key. `Writing RMLEAK=1` must come before `Writing Valve=0`. |
 | 4 | Dry A. Note the PC time. | `eleak … leak=0` for `<A>`; `RULES_ENGINE: All leaks resolved — pending auto-close cancelled` may print; `RULES_ENGINE: All sensors clear — auto-clear timer started (%ds)` **(format)** = `(10s)`; one held `leak_cleared` (`Time not synced … holding event …`, `Stored event …`). About 10 s later: `RULES_ENGINE: AUTO-CLEAR: all sensors clear for %ds — clearing RMLEAK` **(format)** = `10s`; one held `rmleak_auto_cleared`; `BLE_VALVE: [CMD] Writing RMLEAK=0`; `[DATA] RMLEAK=0 (CLEAR)`. **No** `[CMD] Writing Valve=1`. | nothing | RED → `rating=warning color=YELLOW effect=SOLID` (interlock floor) → `rating=excellent color=GREEN effect=SOLID` at the auto-clear | `AUTO-CLEAR` 10-12 s after the `eleak … leak=0` line | | The valve stays CLOSED. Five events are now held (plus any health events, which are recorded, not failed). |
@@ -4249,13 +4267,17 @@ Expected expiry event (`data`):
 | `BLE_VALVE: [PORTAL] Valve hunt stopped - Wi-Fi setup portal has the radio` | that hunt stops because the pended close was withdrawn |
 | `HEALTH_ENGINE: BLE scanning resumed - BLE sensor timeouts restart now (600 s)` | window closes (first) |
 | `APP_WIFI: portal priority OFF (%s) - BLE scanning resumed` = `Wi-Fi connected` | window closes, right after `APP_WIFI: Connected! IP: %s` |
+| `APP_WIFI: portal priority OFF (AP stopped) - BLE scanning resumed` | only if the SoftAP stops while the window is open; not expected here (the window closes at `Connected! IP` first) |
+| `BLE_VALVE: [PORTAL] Valve hunt not paused - a leak response is pending` (W) | the window opens while a leak close is pended for an unlinked valve |
+| `BLE_VALVE: [PORTAL] Valve scan cancelled - Wi-Fi setup portal opened`; `[PORTAL] Valve connect cancelled - Wi-Fi setup portal opened (rc=%d)`; `[PORTAL] Valve connect in flight cancelled (rc=%d)` | the window opened (or a pended leak close was written or withdrawn) as a hunt or a connect was starting or running: race lines at a window edge, record them |
+| `BLE_LEAK: Scan cancel failed: %d, will retry` (W) | should never appear; record it |
 
 **Part A — valve present (the normal install flow)**
 
 | # | Action | Expected UART | Expected IoT Hub | LED | Tolerance | P/F | Notes |
 |---|---|---|---|---|---|---|---|
 | A1 | Record three `MONITOR` lines (baseline, online). | `MONITOR: heap: free=%lu min_ever=%lu largest_blk=%lu uptime=%lus` **(format)** | — | GREEN | every 10 s | | Baseline row of the heap table. |
-| A2 | Hold the Wi-Fi reset button (GPIO 40) for more than 10 s. | `RESET_BTN: Button pressed — starting %d ms hold timer` **(format)** = `10000 ms`; `RESET_BTN: %d-second hold confirmed — executing WiFi reset` **(format)** = `10-second`; `RESET_BTN: === LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===`; `RESET_BTN: Erasing WiFi credentials, then rebooting into AP (commissioning preserved in nvs_prov)...`; `IOTHUB: WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)` and `APP_WIFI: WiFi Disconnected. Reason: %d` **(format)** = `8` (the STA was connected, so the erase ran); `RESET_BTN: Rebooting into AP mode...`; then one reboot | the MQTT connection drops | — | reboot about 2 s after `Erasing WiFi credentials …` | | This one reboot is intended. From here on, any further boot banner is a FAIL. No `Reason: 8` line means the credentials were not erased: see Part D4. |
+| A2 | Hold the Wi-Fi reset button (GPIO 40) for more than 10 s. | `RESET_BTN: Button pressed — starting %d ms hold timer` **(format)** = `10000 ms`; `RESET_BTN: %d-second hold confirmed — executing WiFi reset` **(format)** = `10-second`; `RESET_BTN: === LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===`; `RESET_BTN: Erasing WiFi credentials, then rebooting into AP (commissioning preserved in nvs_prov)...`; `IOTHUB: WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)` and `APP_WIFI: WiFi Disconnected. Reason: %d` **(format)** = `8` (the STA was connected, so the erase ran); `RESET_BTN: Rebooting into AP mode...`; then one reboot | the MQTT connection drops | — | reboot about 2 s after `Erasing WiFi credentials …` | | This one reboot is intended. From here on, any further boot banner is a FAIL. No `Reason: 8` line means the credentials were not erased: see Part D4. In the 2 s before the reboot the window can already open (the erase sends the SoftAP start): the window-open lines, `BLE_LEAK: Scan paused …` and `[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio (valve link kept)` may print there; they are expected. |
 | A3 | Watch the boot. | `APP_WIFI: AP SSID: WiFi-Hub-<SHORT>`; `esp_netif_lwip: DHCP server started on interface WIFI_AP_DEF with IP: 10.10.0.1` under 1 s after boot, with **no** `APP_WIFI: WiFi Disconnected. Reason: 2NN` line (no credentials left); the three window-open lines above; `IOTHUB: Starting BLE (valve=<VALVE>, BLE sensors=4)`; `BLE_VALVE: [HOST] NimBLE host task started`; `BLE_VALVE: [SCAN] Valve scan held - Wi-Fi setup portal has the radio` at least once; at about 3 s `BLE_LEAK: Scan paused - Wi-Fi setup portal has the radio`; `IOTHUB: Time synced: %s` **(format)** within 30 s although there is no Wi-Fi (the software restart kept the RTC time). **Not** present: `BLE_LEAK: Extended passive scan started (1M + Coded PHY)`, `BLE_VALVE: [SCAN] Starting scan for provisioned valve`, `SETUP COMPLETE - READY FOR GATT`, any `eleak` line. | nothing | OFF → WHITE, then RED about 180 s after boot; network LED ramp red | window lines ≤ 1 s after boot | | The valve does not link in this window: its hunt is held from boot. Its 180 s sync excuse is not held (user decision: the valve is not part of the health hold), so about 180 s after boot `Roll-up grace expired (180 s) — 1 unheard device(s) now count` prints for it and the fleet LED turns RED: record it. If `Time synced` does not print, expect `holding event for replay` instead of `Offline — buffering` in A6. |
 | A4 | With the phone, join the SoftAP `WiFi-Hub-<SHORT>`. Open the portal (it should pop up; otherwise browse to `http://10.10.0.1`). | `APP_WIFI: SoftAP: station <phone MAC> joined, AID=1`; `esp_netif_lwip: DHCP server assigned IP to a client, IP is: 10.10.0.2` (or `.3` …); `dns_server: Replying to DNS request for %s from %s` **(format)**; `MONITOR` lines continue | nothing | RED (A3) | lease ≤ 5 s after the join line | | Heap row "phone joined". **FAIL** if the phone reports "Unable to join", no join line prints, or no lease follows the join (the 2026-09-29 defect). The phone MAC may be a private (random) address. |
 | A5 | Refresh the AP list in the portal until the site SSID is listed. | `MONITOR` lines | nothing | — | — | | Heap row "AP list shown". Record whether the list loads first time (the page's own Wi-Fi scans run every 3.8 s: RCA cause 4, managed component, not changed). |
@@ -5401,7 +5423,7 @@ Select-String -Path t5_uart.txt -Pattern 'cleared externally|write attempt|faile
 
 1. Power the Wi-Fi router off.
    - Expect `W IOTHUB: WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)` and `I TELEMETRY_V2: MQTT connected = false`, within about 10 s.
-   - Keep the outage under about 10 min. If the Wi-Fi manager brings up its SoftAP meanwhile, that is its normal behaviour: carry on.
+   - Keep the outage under about 10 min. If the Wi-Fi manager brings up its SoftAP meanwhile, that is its normal behaviour: carry on. It logs `APP_WIFI: SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`, and BLE keeps scanning (step 2 needs it); a `portal priority ON` line is a Fail.
 2. Wet `<A>`. The valve must close exactly as in T5-03 step 1: RMLEAK before CLOSE, LED RED.
 3. Dry `<A>`. Wait for `AUTO-CLEAR: all sensors clear for 10s — clearing RMLEAK`, 10–12 s after the timer line.
 4. Within about 1 s of that `AUTO-CLEAR` line, re-wet `<A>` (the T5-04 case, offline).
@@ -6587,6 +6609,7 @@ static void log_stack_hwm(void)
 |---|---|---|---|
 | T6-13 | A (= T4-10 Part A) | | [ ] Pass [ ] Fail |
 | T6-13 | B (= T4-10 Part B) | | [ ] Pass [ ] Fail |
+| T6-13 | F (= T4-10 Part F, sensors-only hub) | | [ ] Pass [ ] Fail |
 
 ---
 
@@ -6607,9 +6630,9 @@ static void log_stack_hwm(void)
    - **Must not appear:** `OFFLINE_BUF: NVS write '%s' failed: %s` (format), any `ESP_ERR_NVS_NOT_ENOUGH_SPACE`, `OFFLINE_BUF: Event too large (%u bytes, max %d) - not buffered` (format).
    - **LED:** RED while wet, YELLOW for 10–12 s after each dry, then GREEN.
    - Leave `<BLE1>` dry.
-3. **With the WAN still unplugged, do a Wi-Fi reset:** hold the button 10 s. Expect the `RESET_BTN` lines of T6-13 step 2. The hub reboots into AP mode.
+3. **With the WAN still unplugged, do a Wi-Fi reset:** hold the button 10 s. Expect the `RESET_BTN` lines of T4-10 A2, with `APP_WIFI: WiFi Disconnected. Reason: 8` (Wi-Fi is still up, so the credentials are erased). The hub reboots into AP mode with the window-open lines of T4-10 A3 (`APP_WIFI: portal priority ON (no Wi-Fi credentials) - BLE scanning paused`): BLE scanning stays paused until `Connected! IP`.
    - Expect `OFFLINE_BUF: Init: 16 buffered event(s) pending from before reboot`.
-   - Complete the portal from the phone as in T6-13 steps 4 and 6 (the site SSID and password). Expect `APP_WIFI: Connected! IP: %s`. MQTT cannot connect yet: there is no WAN.
+   - Complete the portal from the phone as in T4-10 A4 and A8 (the join and the lease, then the site SSID and password). Expect `APP_WIFI: Connected! IP: %s`, then `APP_WIFI: portal priority OFF (Wi-Fi connected) - BLE scanning resumed`. MQTT cannot connect yet: there is no WAN.
 4. **Power-cycle the hub** (unplug for 5 s), with the WAN still unplugged. Expect:
    - `APP_WIFI: Connected! IP: %s` with no portal, so the credentials persisted;
    - `OFFLINE_BUF: Init: 16 buffered event(s) pending from before reboot`;
@@ -7397,7 +7420,8 @@ These are tested as **observe and record** (result `Known-limit`). M.4 gives the
   checkpoint 2, plus about 5 B of `.bss` from the council fixes), plus about 50 B of
   permanent heap for the two per-tag log levels set at boot. Both come out of the heap (2.1.3 field
   minimum: 2972 B free). The NimBLE host task also uses about 54 B more of its fixed stack on the valve
-  notify path.
+  notify path. The captive-portal fix adds about 11 B of `.bss` and about 40 B of permanent heap (the
+  SoftAP station-log event handler); build checkpoint 4 confirms the static figure.
 - An override started before the clock synced and then restored after a software reset cannot be re-based,
   because its elapsed time is unknown, so it ends at the first clock sync, possibly hours early. That fails
   toward auto-close.
@@ -7405,9 +7429,26 @@ These are tested as **observe and record** (result `Known-limit`). M.4 gives the
   not synced by then. That is later than its real expiry, since the hub cannot know how long the power was
   off.
 - Captive portal after a Wi-Fi reset: on a hub with a valve or a BLE sensor, NimBLE now starts at boot and
-  runs beside the SoftAP portal, which therefore has less free heap than on 2.1.3. While no Wi-Fi
-  credentials are saved, BLE scanning pauses so a phone can join. The router-outage fallback portal keeps
-  BLE scanning, and the 10 s reset does not erase credentials while the STA is idle (T4-10 Part D).
+  stays up beside the SoftAP portal, which therefore has less free heap than on 2.1.3.
+  - While no Wi-Fi credentials are saved, BLE scanning pauses so a phone can join (see *Safety*). During
+    that pause BLE leak sensors are not heard, and a lost valve link is not re-found unless a leak close is
+    pended for it. LoRa sensors and an established valve link keep working.
+  - The pause has no time cap. If setup is abandoned for hours, a BLE sensor that fails meanwhile is reported
+    offline only 600 s after scanning resumes.
+  - On a valve hub the valve is not linked during a portal opened at boot, unless a leak close is pended. Its
+    180 s sync excuse is not held, so about 180 s after boot the hub reads critical and the fleet LED turns
+    red until Wi-Fi is set up. A valve open, or an RMLEAK clear, pended meanwhile waits for the window to
+    close.
+  - The router-outage fallback portal (credentials still saved) keeps BLE scanning, so a phone may fail to
+    join it, as it did on the development builds. The portal page's own Wi-Fi scan every 3.8 s (the
+    wifi_manager component) is unchanged.
+- **The 10 s reset button erases the Wi-Fi credentials only while the hub is connected to the router
+  (pre-existing, not changed in 2.1.4).** The erase runs in the Wi-Fi manager's disconnect handler, which a
+  disconnect reaches only when there is a link to drop. During a router outage (the hub idle on its fallback
+  portal) the button still reboots the hub, but with the old credentials: it retries the router and then
+  opens the fallback portal again, with BLE scanning and without the portal priority window. A hub whose
+  router SSID or password changed while the router was unreachable can therefore be set up again only from
+  that fallback portal.
 - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
   oldest held events, as it already could after the sync.
 - **A leak latched while the valve was out of reach can still be read as a button press at the reconnect
@@ -7537,6 +7578,36 @@ These are tested as **observe and record** (result `Known-limit`). M.4 gives the
 
   `GATT busy - waiting` is normal when a reconnect replays commands while new ones are queued. None of
   these should repeat for long.
+- New, Wi-Fi setup portal (the portal priority window, see *Safety*):
+  - `APP_WIFI`: `portal priority ON (no Wi-Fi credentials) - BLE scanning paused` (warning), then `portal
+    priority: wifi_manager task prio %u -> %u (httpd, dns_server not raised)` (`5 -> 8`)
+  - `APP_WIFI`: `portal priority OFF (%s) - BLE scanning resumed` (`Wi-Fi connected`, or `AP stopped`)
+  - `APP_WIFI`: `SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`
+  - `APP_WIFI`: `SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X joined, AID=%u` and `SoftAP: station
+    %02X:%02X:%02X:%02X:%02X:%02X left, AID=%u, reason=%u`, on any SoftAP, window or not
+  - `HEALTH_ENGINE`: `BLE scanning paused - BLE sensor timeouts held` and `BLE scanning resumed - BLE sensor
+    timeouts restart now (%d s)` (`600 s`)
+  - `BLE_LEAK`: `Scan paused - Wi-Fi setup portal has the radio` and `Scan resumed - Wi-Fi setup portal closed`
+  - `BLE_VALVE`: `[SCAN] Valve scan held - Wi-Fi setup portal has the radio`
+  - `BLE_VALVE`: `[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio` (followed by ` (valve link
+    kept)` when the valve is linked), `[PORTAL] Valve hunt stopped - Wi-Fi setup portal has the radio` and
+    `[PORTAL] Valve hunt resumed - Wi-Fi setup portal closed`
+  - `BLE_VALVE` (warnings): `[PORTAL] Leak response pending - valve hunt runs despite the Wi-Fi setup portal`
+    and `[PORTAL] Valve hunt not paused - a leak response is pending`
+  - `BLE_VALVE`, when the window opens as a hunt or a connect is starting or running: `[PORTAL] Valve scan
+    cancelled - Wi-Fi setup portal opened`, `[PORTAL] Valve connect cancelled - Wi-Fi setup portal opened
+    (rc=%d)` and `[PORTAL] Valve connect in flight cancelled (rc=%d)`
+  - `BLE_LEAK`: `Scan cancel failed: %d, will retry` (warning; should never appear)
+
+  `portal priority ON` must never appear on the router-outage fallback portal.
+- Same text, new conditions (portal window):
+  - `HEALTH_ENGINE` `Boot sync: timeout (%lu s) — snapshot gate open; unheard devices still excused for a
+    further %lld s`: not while BLE scanning is paused with a BLE sensor not yet heard, nor within 180 s after
+    the resume; the further excuse of such a sensor then counts from the resume.
+  - `HEALTH_ENGINE` `Roll-up grace expired (%lu s) — %d unheard device(s) now count`: for a BLE sensor, never
+    earlier than 600 s after scanning resumed.
+  - `BLE_LEAK` `Extended passive scan started (1M + Coded PHY)` and `BLE_VALVE` `[SCAN] Starting scan for
+    provisioned valve %s...`: not while the window is open, except the valve hunt for a pended leak close.
 - Same text, new conditions (council fixes):
   - `RULES_ENGINE` `RMLEAK cleared externally (valve override) — starting 24h override window`: only when
     the valve was seen with RMLEAK set during the incident and no hub clear is owed.
@@ -7583,7 +7654,7 @@ These are tested as **observe and record** (result `Known-limit`). M.4 gives the
 Run this over every UART capture of the campaign (PowerShell, in the capture folder). Any hit needs the test's own rules to excuse it; the "Allowed only in" column lists the tests that expect the line.
 
 ```powershell
-Select-String -Path .\*_uart.txt -Pattern 'Guru Meditation','abort\(\)','stack overflow','Task watchdog got triggered','assert failed','could not be added','RMLEAK cleared externally','inferring physical override','write attempt .* \(rc=6\)','reconnecting to re-apply','Snapshot not built - out of memory','Message not built','LOW HEAP WARNING','SAS: esp_mqtt_set_config failed','ENQUEUE FAILED','NVS: incident save failed','ESP_ERR_NVS','Dropped a buffered pre-sync event','Buffer full, oldest event overwritten' | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line)" }
+Select-String -Path .\*_uart.txt -Pattern 'Guru Meditation','abort\(\)','stack overflow','Task watchdog got triggered','assert failed','could not be added','RMLEAK cleared externally','inferring physical override','write attempt .* \(rc=6\)','reconnecting to re-apply','Snapshot not built - out of memory','Message not built','LOW HEAP WARNING','SAS: esp_mqtt_set_config failed','ENQUEUE FAILED','NVS: incident save failed','ESP_ERR_NVS','Dropped a buffered pre-sync event','Buffer full, oldest event overwritten','portal priority ON','Scan cancel failed' | ForEach-Object { "$($_.Filename):$($_.LineNumber): $($_.Line)" }
 ```
 
 | Line (substring) | Allowed only in |
@@ -7601,6 +7672,8 @@ Select-String -Path .\*_uart.txt -Pattern 'Guru Meditation','abort\(\)','stack o
 | `Dropped a buffered pre-sync event [%s] - …` | nowhere (CHANGELOG: never in a normal run) |
 | `Dropped a buffered event from an earlier power cycle that was never time-stamped` | T4-04, T4-09 Part B, T6-14 step 5 |
 | `Buffer full, oldest event overwritten` | T6-14, T4-08 (24 h run) |
+| `portal priority ON (no Wi-Fi credentials) - BLE scanning paused` | T4-10 (Parts A, B, E, F, G, and A2 before its reboot), T6-14 step 3, smoke step 10. Anywhere else, above all on a router-fallback SoftAP, it is a Fail: it pauses BLE leak protection |
+| `Scan cancel failed: %d, will retry` | nowhere (record it with the test) |
 | The site Wi-Fi password, or the valve passkey digits | nowhere (T4-14) |
 
 **N17 section-wide rule (IoT Hub capture).** In every test, a snapshot whose `valve` is `{}` and whose `ble_leak_sensors` and `lora_sensors` are both `[]` while the twin or UART shows devices provisioned (`Device table loaded: N device(s)` with N > 0) is a **Fail**: 2.1.4 skips the snapshot when the health-table copy fails, and the 5 s retry publishes the real one. The validator does not check this; look for it in the snapshot at each device-set change.
