@@ -88,15 +88,28 @@ static void erase_wifi_credentials(void)
         ESP_LOGW(TAG, "Wi-Fi NVS lock busy for 3 s - erasing without it");
     }
 
-    /* The "ssid" and "password" KEYS are erased, not overwritten: absent keys are the factory
-     * state. wifi_manager_fetch_wifi_sta_config() then returns false at the first key, and
-     * LOAD_AND_RESTORE opens the portal about 0.7 s after the reboot. The zero blobs its own
-     * erase writes read the same way (it returns false for an empty SSID), and both states
-     * already occur with 2.1.3, so an upgrade or a downgrade reads either one as "nothing
-     * saved". "settings" (the SoftAP's own) is kept. These keys are the only copy: wifi_manager
-     * runs the driver with WIFI_STORAGE_RAM.
+    /* A saved "ssid" and "password" are overwritten with zero blobs of their own sizes, the
+     * state wifi_manager's own erase leaves and 2.1.3 already reads as "nothing saved":
+     * wifi_manager_fetch_wifi_sta_config() reads all three keys, closes its handle and returns
+     * false for the empty SSID, and LOAD_AND_RESTORE opens the portal about 0.7 s after the
+     * reboot. The keys are NOT erased: "settings" (the SoftAP's own) is kept, so the namespace
+     * stays, and the fetch returns at a missing key without closing its NVS handle, leaking
+     * ~50 B of heap on every boot until Wi-Fi is set up. Only a key that exists is written (no
+     * key is created), and zeros over the zeros wifi_manager already saved on a connected STA
+     * cost no flash write: NVS skips an unchanged value. A key that cannot be written (NVS
+     * full) is erased instead, which also reads as "nothing saved".
+     * "ssid" first, and the password only once the SSID is cleared: a saved SSID whose password
+     * is gone reads as "nothing saved" (no reconnect) yet leaves the SSID in wifi_manager's RAM
+     * copy, which keeps the portal window shut (a fallback AP that keeps BLE scanning). An
+     * empty SSID beside a password left behind (a failure, or power lost between the two)
+     * reads as the factory state. These keys are the only copy: wifi_manager runs the driver
+     * with WIFI_STORAGE_RAM.
      * Probed read-only first: NVS_READWRITE creates the namespace on a hub that never saved
      * one, so ESP_ERR_NVS_NOT_FOUND there means nothing was ever saved. */
+    static const uint8_t zeros[64] = { 0 };   // .rodata (flash): the larger blob's size
+    static const struct { const char *key; size_t len; } creds[] = {
+        { "ssid", 32 }, { "password", 64 },   // the blob sizes wifi_manager saves and reads
+    };
     nvs_handle_t h;
     int erased = 0;
     esp_err_t err = nvs_open(wifi_manager_nvs_namespace, NVS_READONLY, &h);
@@ -107,13 +120,20 @@ static void erase_wifi_credentials(void)
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         err = ESP_OK;
     } else if (err == ESP_OK) {
-        const char *const keys[] = { "ssid", "password" };
-        for (int i = 0; i < 2; i++) {
-            esp_err_t rc = nvs_erase_key(h, keys[i]);
+        for (int i = 0; i < 2 && err == ESP_OK; i++) {   // stops at an SSID not cleared
+            size_t len = 0;
+            esp_err_t rc = nvs_get_blob(h, creds[i].key, NULL, &len);   // size only: saved?
+            if (rc == ESP_ERR_NVS_NOT_FOUND) {
+                continue;
+            }
+            rc = nvs_set_blob(h, creds[i].key, zeros, creds[i].len);
+            if (rc != ESP_OK) {
+                rc = nvs_erase_key(h, creds[i].key);
+            }
             if (rc == ESP_OK) {
                 erased++;
-            } else if (rc != ESP_ERR_NVS_NOT_FOUND && err == ESP_OK) {
-                err = rc;   // keep the first failure, still try the other key
+            } else {
+                err = rc;
             }
         }
         if (erased > 0) {
