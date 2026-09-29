@@ -2875,6 +2875,7 @@ static void portal_priority_poll(void)
             ble_gap_disc_cancel();
             is_scanning = false;
             s_hunt_held = true;
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve hunt stopped - Wi-Fi setup portal has the radio");
         }
         return;
     }
