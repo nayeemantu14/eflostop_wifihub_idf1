@@ -52,10 +52,13 @@ static volatile bool s_portal_priority = false;
  * "dns_server") keep their priority: their handles are private to the managed component, and
  * the one lookup by name, xTaskGetHandle(), is not linked in this image and is IRAM-resident
  * (CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH is off). Linking it would add about 0.4 KB of
- * IRAM, which on the ESP32-S3 moves the IRAM/DRAM split up by 512 B of heap. */
+ * IRAM, which on the ESP32-S3 moves the IRAM/DRAM split up by 512 B of heap.
+ * Closing the window restores WIFI_MANAGER_TASK_PRIORITY, the priority wifi_manager.c creates
+ * the task with, not a sampled value: uxTaskPriorityGet() returns the effective priority,
+ * which can include one inherited through a mutex, and restoring that would make it the
+ * task's base priority for good. */
 #define PORTAL_TASK_PRIORITY 8
 static TaskHandle_t s_wm_task = NULL;   // the raised wifi_manager task; NULL = none raised
-static UBaseType_t  s_wm_prio = 0;      // its priority before the raise
 
 bool app_wifi_portal_priority_active(void)
 {
@@ -78,7 +81,6 @@ static void portal_priority_open(void)
     if (prio < PORTAL_TASK_PRIORITY)
     {
         s_wm_task = self;
-        s_wm_prio = prio;
         vTaskPrioritySet(self, PORTAL_TASK_PRIORITY);
     }
     ESP_LOGI(WIFI_TAG, "portal priority: wifi_manager task prio %u -> %u (httpd, dns_server not raised)",
@@ -95,7 +97,7 @@ static void portal_priority_close(const char *reason)
     // task's own priority again.
     if (s_wm_task != NULL)
     {
-        vTaskPrioritySet(s_wm_task, s_wm_prio);
+        vTaskPrioritySet(s_wm_task, WIFI_MANAGER_TASK_PRIORITY);
         s_wm_task = NULL;
     }
     ESP_LOGI(WIFI_TAG, "portal priority OFF (%s) - BLE scanning resumed", reason);
