@@ -293,7 +293,8 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
  *        Complete when all provisioned devices have checked in once,
  *        or the boot window (HEALTH_BOOT_SYNC_TIMEOUT_MS) has elapsed. While BLE
  *        scanning is paused (health_set_ble_scan_paused()) and a BLE sensor or the valve
- *        has never been heard, that timeout waits until a full window after the resume.
+ *        has never been heard, that timeout waits until a full window after the resume;
+ *        for the valve, no longer than its own hold (health_note_valve_leak_hunt()).
  *        Fails OPEN (returns true) if the engine is not up or the mutex is busy,
  *        so a caller can never get stuck in the "syncing" state.
  *
@@ -402,26 +403,55 @@ bool health_is_interlock_held(void);
  * Meanwhile a BLE sensor that was online stays online (no device_offline), and one never
  * heard stays excused from the roll-up ("syncing"). A valve that dropped stays in its
  * WARNING disconnect grace ("Valve disconnected", no device_offline), and one never linked
- * stays excused. On resume each gets a fresh full window from that moment before it can be
- * rated offline or counted as unheard: a BLE sensor HEALTH_BLE_LEAK_TIMEOUT_MS
- * (HEALTH_ROLLUP_UNHEARD_MS), the valve HEALTH_VALVE_DISC_TIMEOUT_MS. The snapshot gate
- * (health_is_boot_sync_complete()) likewise does not time out while a BLE sensor or the
- * valve never heard is not being listened to, nor until its own window has passed after the
- * resume, so the first snapshot after Wi-Fi setup waits for them as it would after a boot.
+ * stays excused, unless a leak response makes the hub hunt for it (see below). On resume each
+ * gets a fresh full window from that moment before it can be rated offline or counted as
+ * unheard: a BLE sensor HEALTH_BLE_LEAK_TIMEOUT_MS (HEALTH_ROLLUP_UNHEARD_MS), the valve
+ * HEALTH_VALVE_DISC_TIMEOUT_MS. The snapshot gate (health_is_boot_sync_complete()) likewise
+ * does not time out while a BLE sensor or the valve never heard is not being listened to, nor
+ * until its own window has passed after the resume, so the first snapshot after Wi-Fi setup
+ * waits for them as it would after a boot. The valve holds the gate only while its own hold
+ * lasts.
  *
  * It only ever DELAYS such a verdict: a device already offline, or already counting as
  * unheard, stays so until it is heard, so the pause can never fake a recovery. LoRa sensors
- * are not affected. The valve is held even while a pended leak response makes its hunt run
- * in the window, and after that leak clears: the leak rates the system CRITICAL only while
- * it lasts, and a valve the hunt could not reach then reads "syncing" or "Valve
- * disconnected" until HEALTH_VALVE_DISC_TIMEOUT_MS after the resume. The valve's snapshot
- * `connected` stays its real link state, and last_seen_age_s keeps its real value.
+ * are not affected. The valve's hold ends early once a pended leak response makes the hub
+ * hunt for it in the pause (health_note_valve_leak_hunt()): HEALTH_VALVE_DISC_TIMEOUT_MS
+ * after that hunt started, even while Wi-Fi setup still runs, and after the resume at the
+ * earlier of the two ends. The valve's snapshot `connected` stays its real link state, and
+ * last_seen_age_s keeps its real value.
  *
- * Lock-free (one 32-bit store), non-blocking, safe from any task and before
+ * Lock-free (32-bit stores only), non-blocking, safe from any task and before
  * health_engine_init(). Its caller is the wifi_manager task. Idempotent: a resume with no
- * pause before it stamps nothing.
+ * pause before it stamps nothing. A pause also clears health_note_valve_leak_hunt()'s stamp,
+ * before the pause is stored; the resume keeps it.
  */
 void health_set_ble_scan_paused(bool paused);
+
+/**
+ * @brief Tell the health engine that the hub is hunting for its valve, for a pended leak
+ *        response, while BLE scanning is paused.
+ *
+ * The one exception to the portal priority window (app_ble_valve.c): while a leak response
+ * (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and its connect run
+ * anyway. The hub is looking for the valve then, so the valve's hold
+ * (health_set_ble_scan_paused()) ends HEALTH_VALVE_DISC_TIMEOUT_MS after the first such call
+ * of the pause, while Wi-Fi setup still runs. A valve still not linked by then counts: one
+ * never linked leaves the roll-up excuse (CRITICAL: RED LED, "Valve offline"), and one that
+ * dropped goes CRITICAL (device_offline) once its own disconnect grace has run too. That
+ * stays so after the leak clears and the hunt is held again, until the valve links: the hub
+ * tried to reach it and could not. Any pended CLOSE counts, a cloud valve_close pended while
+ * the setup AP is still up after the STA's IP included. With no such hunt, setup shows no RED
+ * for the valve.
+ *
+ * Only the first call of a pause stamps, and a call outside a pause does nothing. A CONNECTED
+ * applied while the valve's link is up clears the stamp, as do the next pause and the valve's
+ * removal from the table; the resume does not.
+ *
+ * Lock-free (32-bit loads and one store), non-blocking, safe from any task and before
+ * health_engine_init(). Its callers are the NimBLE host and valve command tasks, with no
+ * valve link up. Logs one line when it stamps.
+ */
+void health_note_valve_leak_hunt(void);
 
 // ---------------------------------------------------------------------------
 // Convenience inline helpers (for hook sites)

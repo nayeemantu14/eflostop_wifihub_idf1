@@ -398,7 +398,9 @@ static bool leak_response_pending(void)
 // connect run anyway, so a LoRa-triggered close reaches a valve that was not linked when the
 // window opened (in a boot-time window it never is), and the portal waits out the incident.
 // Once the valve links and the pended commands are written, the window holds again and the
-// link stays up.
+// link stays up. The hub is looking for the valve then, so the health engine counts its
+// timeouts from the first such hunt of the pause (health_note_valve_leak_hunt(), called where
+// start_scan() lets the hunt run and where portal_priority_poll() finds one already running).
 static bool portal_holds_valve(void)
 {
     return app_wifi_portal_priority_active() && !leak_response_pending();
@@ -2178,7 +2180,10 @@ static void start_scan(void)
         return;
 
     if (portal)
+    {
         ESP_LOGW(BLE_TAG, "[PORTAL] Leak response pending - valve hunt runs despite the Wi-Fi setup portal");
+        health_note_valve_leak_hunt();   // valve timeouts count from here (portal_holds_valve())
+    }
 
     // Cancel any active scan (e.g. BLE leak scanner) before starting valve scan
     ble_gap_disc_cancel();
@@ -2855,7 +2860,14 @@ static void portal_priority_poll(void)
                 ESP_LOGI(BLE_TAG, "[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio%s",
                          valve_conn_handle != BLE_HS_CONN_HANDLE_NONE ? " (valve link kept)" : "");
             else
+            {
                 ESP_LOGW(BLE_TAG, "[PORTAL] Valve hunt not paused - a leak response is pending");
+                // A hunt already running for it never reaches start_scan()'s exception path,
+                // so the valve's timeouts count from here (portal_holds_valve()).
+                if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE &&
+                    (is_scanning || g_connecting || ble_gap_conn_active()))
+                    health_note_valve_leak_hunt();
+            }
         }
     }
 
