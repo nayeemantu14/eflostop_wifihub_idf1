@@ -44,6 +44,17 @@ void wifi_task(void *pvParameter);
  * here blocks, calls provisioning or touches NimBLE. */
 static volatile bool s_portal_priority = false;
 
+/* For the window the wifi_manager task runs at PORTAL_TASK_PRIORITY: above the app tasks (5),
+ * far below lwIP (18) and the Wi-Fi and BT tasks (20-23). Insurance only: the portal was short
+ * of radio time, not CPU. Only this task is raised. The HTTP and DNS server tasks ("httpd",
+ * "dns_server") keep their priority: their handles are private to the managed component, and
+ * the one lookup by name, xTaskGetHandle(), is not linked in this image and is IRAM-resident
+ * (CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH is off). Linking it would add about 0.4 KB of
+ * IRAM, which on the ESP32-S3 moves the IRAM/DRAM split up by 512 B of heap. */
+#define PORTAL_TASK_PRIORITY 8
+static TaskHandle_t s_wm_task = NULL;   // the raised wifi_manager task; NULL = none raised
+static UBaseType_t  s_wm_prio = 0;      // its priority before the raise
+
 bool app_wifi_portal_priority_active(void)
 {
     return s_portal_priority;
@@ -58,6 +69,18 @@ static void portal_priority_open(void)
     health_set_ble_scan_paused(true);
     s_portal_priority = true;
     ESP_LOGW(WIFI_TAG, "portal priority ON (no Wi-Fi credentials) - BLE scanning paused");
+
+    // The callbacks run on the wifi_manager task itself, so it raises its own priority.
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    UBaseType_t prio = uxTaskPriorityGet(self);
+    if (prio < PORTAL_TASK_PRIORITY)
+    {
+        s_wm_task = self;
+        s_wm_prio = prio;
+        vTaskPrioritySet(self, PORTAL_TASK_PRIORITY);
+    }
+    ESP_LOGI(WIFI_TAG, "portal priority: wifi_manager task prio %u -> %u (httpd, dns_server not raised)",
+             (unsigned)prio, (unsigned)uxTaskPriorityGet(self));
 }
 
 static void portal_priority_close(const char *reason)
@@ -66,6 +89,13 @@ static void portal_priority_close(const char *reason)
         return;
     health_set_ble_scan_paused(false);   // stamps the resume: each BLE sensor's timeout restarts
     s_portal_priority = false;
+    // Before anything else the caller does: cb_connection_ok's MQTT and iothub work runs at the
+    // task's own priority again.
+    if (s_wm_task != NULL)
+    {
+        vTaskPrioritySet(s_wm_task, s_wm_prio);
+        s_wm_task = NULL;
+    }
     ESP_LOGI(WIFI_TAG, "portal priority OFF (%s) - BLE scanning resumed", reason);
 }
 
