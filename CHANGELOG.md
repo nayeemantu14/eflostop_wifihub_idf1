@@ -108,8 +108,16 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
   - **The portal priority window.** While the setup portal is up and no Wi-Fi credentials are saved (first
     setup, or after the 10 s reset erased them), the BLE leak scan and the valve hunt pause: nothing new
     starts, and a scan or connect attempt already running is cancelled within about 1 s. NimBLE stays up, and a
-    valve already linked stays linked and takes its commands. The window closes when the hub gets an IP address
-    from the router (or the SoftAP stops), with no time cap, and scanning resumes within about 1 s.
+    valve already linked stays linked and takes its commands. There is no time cap before Wi-Fi is set up.
+  - **The window closes when the setup SoftAP stops,** about 60 s after the hub gets an IP address from the
+    router, and scanning resumes within about 1 s. The phone that submitted the credentials is still on the
+    SoftAP during that minute and loads the portal's "Connected!" page from it; resuming the scan at the IP
+    would starve the SoftAP again. BLE never stays paused while the hub is on Wi-Fi:
+    - if the hub loses that Wi-Fi before the SoftAP stops, the window closes at once. The SoftAP then stays up
+      as a router-outage fallback portal with the credentials saved, which keeps BLE scanning;
+    - if the SoftAP is still up about 75 s after the IP (for example because the Wi-Fi manager did not start
+      its 60 s shutdown timer), the hub stops it itself and the window closes, so scanning resumes at most
+      about 80 s after the IP.
   - **Leak response outranks the portal.** While a leak close (RMLEAK, then CLOSE) is pended for a valve that is
     not linked, for example after a LoRa leak during setup, the valve hunt and its connect run anyway until the
     valve has taken it (RMLEAK first). The window then holds again, with the link kept.
@@ -117,19 +125,38 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     pause began stays online, and one not heard yet stays excused ("syncing"). Each gets a full 600 s from the
     moment scanning resumes before it can be declared offline or counted as unheard, so the pause itself raises
     no `device_offline`. A sensor already offline stays offline, and a BLE sensor that leaks during the pause
-    is reported in its first burst after the resume. The first-snapshot gate also waits while a BLE
-    sensor has not been heard, for the whole pause and up to 180 s after it, so the first snapshot after setup
-    does not list the sensors as syncing. LoRa sensors and the valve are not held.
+    is reported in its first burst after the resume.
+  - **The valve is held the same way,** because the hub is not looking for it while the hunt is paused. A valve
+    not linked yet stays excused ("syncing"), and one whose link drops stays in its "Valve disconnected"
+    warning grace, until 180 s (its own offline timeout) after scanning resumes. A valve hub therefore no
+    longer reads critical, with a red fleet LED, during Wi-Fi setup only because the hub stopped looking for
+    its valve. A valve already offline stays offline, a dropped valve whose last battery reading was 10 % or
+    less still reads critical, and the snapshot's valve `connected` and `last_seen_age_s` keep their real
+    values.
+  - The first-snapshot gate also waits while a BLE sensor or the valve has not been heard, for the whole pause
+    and up to 180 s after it, so the first snapshot after setup does not list them as syncing. LoRa sensors are
+    not held.
   - **Task priority.** The Wi-Fi manager task runs at priority 8 during the window (normally 5) and is set back
     to its configured priority when the window closes. The portal's HTTP and DNS server tasks are not raised.
   - **Not for the router-outage fallback portal.** The SoftAP the hub opens after it failed to rejoin its saved
     router keeps full BLE scanning, so leak protection during a router outage is unchanged.
-  - **Protection while the portal is open with no credentials saved.** BLE leak sensors are not scanned, and a
-    valve link that is lost is not re-found unless a leak close is pended for it. LoRa sensors, the rules
-    engine and an established valve link keep working, so a LoRa leak still closes the valve. This is still
-    more than 2.1.3 had: 2.1.3 started neither BLE nor the rules engine until the hub had a Wi-Fi IP address
-    (N1), so it had no leak protection at all during setup.
-  - The UART log now shows a phone joining and leaving the SoftAP, and the window's edges (see *Serial log*).
+  - **The 10 s Wi-Fi reset always erases the saved Wi-Fi credentials,** whatever the hub's Wi-Fi is doing:
+    connected, idle on the router-outage fallback portal, or already in the setup portal. The Wi-Fi manager
+    erases them only in its disconnect handler, which an idle connection never reaches, so a reset during a
+    router outage used to reboot the hub with the old credentials, back onto the fallback portal. That portal
+    keeps BLE scanning, so a phone may not be able to join it, and a hub whose router SSID or password had
+    changed could not be set up again. The reset now also overwrites the saved SSID and password in NVS
+    itself, with the empty values the Wi-Fi manager's own erase writes, and keeps the Wi-Fi manager from
+    saving them back before the reboot. The hub comes back in the setup portal, with the portal priority
+    window, about 1 s after boot. This is the recovery path when the router's SSID or password changes. The
+    SoftAP's own settings and all provisioning (in `nvs_prov`) are kept, and no NVS key is added.
+  - **Protection while the window is open** (no credentials saved, and the minute after setup). BLE leak
+    sensors are not scanned, and a valve link that is lost is not re-found unless a leak close is pended for
+    it. LoRa sensors, the rules engine and an established valve link keep working, so a LoRa leak still closes
+    the valve. This is still more than 2.1.3 had: 2.1.3 started neither BLE nor the rules engine until the hub
+    had a Wi-Fi IP address (N1), so it had no leak protection at all during setup.
+  - The UART log now shows a phone joining and leaving the SoftAP, the window's edges, and the reset's erase
+    (see *Serial log*).
 - **The override window before the first clock sync.**
   - A window started before the clock synced (a valve long-press while the router is down) was stamped with
     an expiry in 1970. It ended the moment the clock synced, and with no internet it never expired at all.
@@ -468,12 +495,18 @@ next snapshot) confirms it.
   - New, Wi-Fi setup portal (the portal priority window, see *Safety*):
     - `APP_WIFI`: `portal priority ON (no Wi-Fi credentials) - BLE scanning paused` (warning), then `portal
       priority: wifi_manager task prio %u -> %u (httpd, dns_server not raised)` (`5 -> 8`)
-    - `APP_WIFI`: `portal priority OFF (%s) - BLE scanning resumed` (`Wi-Fi connected`, or `AP stopped`)
+    - `APP_WIFI`: `portal priority: Wi-Fi connected - BLE scanning stays paused until the setup AP stops (about
+      %d s)` (`60`), right after `Connected! IP: %s` when Wi-Fi is set up in the window
+    - `APP_WIFI`: `portal priority OFF (%s) - BLE scanning resumed`: `AP stopped` (normally about 60 s after
+      `Connected! IP`), or `Wi-Fi lost after setup`
+    - `APP_WIFI` (warning): `portal priority: setup AP still up %u s after Wi-Fi connected - stopping it` (the
+      safety net; should never appear)
     - `APP_WIFI`: `SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`
     - `APP_WIFI`: `SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X joined, AID=%u` and `SoftAP: station
       %02X:%02X:%02X:%02X:%02X:%02X left, AID=%u, reason=%u`, on any SoftAP, window or not
     - `HEALTH_ENGINE`: `BLE scanning paused - BLE sensor timeouts held` and `BLE scanning resumed - BLE sensor
-      timeouts restart now (%d s)` (`600 s`)
+      timeouts restart now (%d s)` (`600 s`). They name only the BLE sensors, but the valve's 180 s is held
+      and restarts with them.
     - `BLE_LEAK`: `Scan paused - Wi-Fi setup portal has the radio` and `Scan resumed - Wi-Fi setup portal closed`
     - `BLE_VALVE`: `[SCAN] Valve scan held - Wi-Fi setup portal has the radio`
     - `BLE_VALVE`: `[PORTAL] Valve hunt paused - Wi-Fi setup portal has the radio` (followed by ` (valve link
@@ -487,12 +520,23 @@ next snapshot) confirms it.
     - `BLE_LEAK`: `Scan cancel failed: %d, will retry` (warning; should never appear)
 
     `portal priority ON` must never appear on the router-outage fallback portal.
+  - New, the 10 s Wi-Fi reset (see *Safety*). `RESET_BTN` prints one outcome line about 2 s after `Erasing
+    WiFi credentials, then rebooting into AP (commissioning preserved in nvs_prov)...`, just before
+    `Rebooting into AP mode...`:
+    - `Wi-Fi credentials erased from NVS`
+    - `No Wi-Fi credentials saved - nothing to erase` (nothing was ever saved)
+    - `Wi-Fi credential erase failed (%s) - rebooting anyway` (error; should never appear)
+
+    The warning `Wi-Fi NVS lock busy for 3 s - erasing without it` can come before it and should never appear
+    either. `APP_WIFI` `WiFi Disconnected. Reason: 8` between `Erasing WiFi credentials …` and the outcome
+    line still shows that the hub was connected when the button was pressed. With an idle connection it does
+    not print, and the credentials are erased all the same.
   - Same text, new conditions (portal window):
     - `HEALTH_ENGINE` `Boot sync: timeout (%lu s) — snapshot gate open; unheard devices still excused for a
-      further %lld s`: not while BLE scanning is paused with a BLE sensor not yet heard, nor within 180 s after
-      the resume; the further excuse of such a sensor then counts from the resume.
+      further %lld s`: not while BLE scanning is paused with a BLE sensor or the valve not yet heard, nor
+      within 180 s after the resume; the further excuse of such a device then counts from the resume.
     - `HEALTH_ENGINE` `Roll-up grace expired (%lu s) — %d unheard device(s) now count`: for a BLE sensor, never
-      earlier than 600 s after scanning resumed.
+      earlier than 600 s after scanning resumed; for a valve not linked yet, never earlier than 180 s after it.
     - `BLE_LEAK` `Extended passive scan started (1M + Coded PHY)` and `BLE_VALVE` `[SCAN] Starting scan for
       provisioned valve %s...`: not while the window is open, except the valve hunt for a pended leak close.
   - Same text, new conditions (council fixes):
@@ -535,6 +579,8 @@ next snapshot) confirms it.
     `... flushed or superseded meanwhile - not requeued`, `... not written - it follows the requeued RMLEAK
     command`, `... kept for the next link, behind the RMLEAK command` and `Pending %s command=%d not applied,
     command queue full - kept for the next link`.
+  - Gone from the 2.1.4 development builds (portal window): the `Wi-Fi connected` reason of `APP_WIFI` `portal
+    priority OFF (%s) - BLE scanning resumed`. The window no longer closes at `Connected! IP`.
 - **The NimBLE bond store** may still hold a bond to a neighbour's valve made under 2.1.3's name match. It is no
   longer used, and 2.1.4 does not delete it.
 - **Not changed in 2.1.4:**
@@ -568,7 +614,7 @@ next snapshot) confirms it.
     checkpoint 2, plus about 5 B of `.bss` from the council fixes), plus about 50 B of
     permanent heap for the two per-tag log levels set at boot. Both come out of the heap (2.1.3 field
     minimum: 2972 B free). The NimBLE host task also uses about 54 B more of its fixed stack on the valve
-    notify path. The captive-portal fix adds about 11 B of `.bss` and about 40 B of permanent heap (the
+    notify path. The captive-portal fix adds about 15 B of `.bss` and about 40 B of permanent heap (the
     SoftAP station-log event handler); build checkpoint 4 confirms the static figure.
   - An override started before the clock synced and then restored after a software reset cannot be re-based,
     because its elapsed time is unknown, so it ends at the first clock sync, possibly hours early. That fails
@@ -578,25 +624,31 @@ next snapshot) confirms it.
     off.
   - Captive portal after a Wi-Fi reset: on a hub with a valve or a BLE sensor, NimBLE now starts at boot and
     stays up beside the SoftAP portal, which therefore has less free heap than on 2.1.3.
-    - While no Wi-Fi credentials are saved, BLE scanning pauses so a phone can join (see *Safety*). During
-      that pause BLE leak sensors are not heard, and a lost valve link is not re-found unless a leak close is
-      pended for it. LoRa sensors and an established valve link keep working.
-    - The pause has no time cap. If setup is abandoned for hours, a BLE sensor that fails meanwhile is reported
-      offline only 600 s after scanning resumes.
-    - On a valve hub the valve is not linked during a portal opened at boot, unless a leak close is pended. Its
-      180 s sync excuse is not held, so about 180 s after boot the hub reads critical and the fleet LED turns
-      red until Wi-Fi is set up. A valve open, or an RMLEAK clear, pended meanwhile waits for the window to
-      close.
+    - While no Wi-Fi credentials are saved, and for about a minute after Wi-Fi is set up, BLE scanning pauses
+      so a phone can join and finish (see *Safety*). During that pause BLE leak sensors are not heard, and a
+      lost valve link is not re-found unless a leak close is pended for it. LoRa sensors and an established
+      valve link keep working.
+    - The pause has no time cap before setup. If setup is abandoned for hours, a BLE sensor that fails
+      meanwhile is reported offline only 600 s after scanning resumes, and a valve that fails, 180 s after.
+    - On a valve hub the valve is not linked during a portal opened at boot, unless a leak close is pended. It
+      reads "syncing" (white fleet LED) until it links, and counts as unheard only if it is still not linked
+      180 s after scanning resumes. A valve whose link drops in the window reads "Valve disconnected" (yellow)
+      for as long. A valve open, or an RMLEAK clear, pended meanwhile waits for the window to close.
+    - The valve stays held even while a pended leak close runs its hunt in the window. The leak rates the hub
+      critical while it lasts. Once it clears, a valve that hunt could not reach reads "syncing" or "Valve
+      disconnected", not offline, until 180 s after scanning resumes, however long setup takes. A cloud
+      `valve_close` pended between the IP and the SoftAP stopping runs the hunt the same way, with no leak.
+    - On a hub with BLE sensors or a valve, the first snapshot after setup waits for scanning to resume and
+      then for those devices to be heard (at most 180 s after the resume), so it normally comes about 60 s or
+      more after the hub gets its IP. The lifecycle message and the buffered events still go out at the
+      connect.
     - The router-outage fallback portal (credentials still saved) keeps BLE scanning, so a phone may fail to
-      join it, as it did on the development builds. The portal page's own Wi-Fi scan every 3.8 s (the
-      wifi_manager component) is unchanged.
-  - **The 10 s reset button erases the Wi-Fi credentials only while the hub is connected to the router
-    (pre-existing, not changed in 2.1.4).** The erase runs in the Wi-Fi manager's disconnect handler, which a
-    disconnect reaches only when there is a link to drop. During a router outage (the hub idle on its fallback
-    portal) the button still reboots the hub, but with the old credentials: it retries the router and then
-    opens the fallback portal again, with BLE scanning and without the portal priority window. A hub whose
-    router SSID or password changed while the router was unreachable can therefore be set up again only from
-    that fallback portal.
+      join it, as it did on the development builds. The 10 s reset then brings the hub back in the setup
+      portal, with the window (see *Safety*). The portal page's own Wi-Fi scan every 3.8 s (the wifi_manager
+      component) is unchanged.
+    - The portal page's own disconnect button erases the credentials only while the hub is connected to the
+      router, as in 2.1.3 (the Wi-Fi manager component): on the fallback portal, with the connection idle, it
+      erases nothing. Use the 10 s reset there.
   - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
     oldest held events, as it already could after the sync.
   - **A leak latched while the valve was out of reach can still be read as a button press at the reconnect
