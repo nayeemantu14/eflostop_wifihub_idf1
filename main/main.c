@@ -41,6 +41,9 @@ __attribute__((unused)) static const char TAG[] = "main";
  * --------------------------------------------------------- */
 void app_main(void)
 {
+	/* count failed allocations from here on (monitoring_init() reports them) */
+	monitoring_alloc_fail_hook_init();
+
 	/* initialize NVS — required by Wi-Fi, BLE, and other subsystems */
 	esp_err_t ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
