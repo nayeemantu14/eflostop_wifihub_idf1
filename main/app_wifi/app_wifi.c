@@ -215,15 +215,24 @@ static const char *radio_hold_reason(TickType_t now)
  * race): nothing tried the router again, and on the 2026-09-29 bench the hub never rejoined
  * once the router was back. So while the SoftAP is up with credentials saved and the STA is
  * down (router_fallback()), wifi_task asks wifi_manager for a connect once no attempt has
- * started for ROUTER_RETRY_MS and none is in flight. BLE is paused RADIO_HOLD_RETRY_LEAD_MS
- * ahead (s_retry_until), so the leak scanner (500 ms loop) and the valve hunt (1 s poll) are off
- * the radio when the connect's scan for the router starts. The order is
+ * started or ended for ROUTER_RETRY_MS and none is in flight. BLE is paused
+ * RADIO_HOLD_RETRY_LEAD_MS ahead (s_retry_until), so the leak scanner (500 ms loop) and the valve
+ * hunt (1 s poll) are off the radio when the connect's scan for the router starts. The order is
  * wifi_manager_connect_async() (CONNECTION_REQUEST_USER): a failure starts no retry timer and no
  * AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves the
  * config only if it changed. The config tried is the one in RAM: the saved one, unless a portal
  * submit that failed replaced it (then what was typed, until a reboot reloads the saved one).
  * The same covers "Wi-Fi lost after setup", where wifi_manager's own retry timer keeps running:
  * its attempts come about every 10 s, so the 30 s rule adds none.
+ *
+ * Counted from an attempt's end too, not only its start: every lost-link disconnect arms
+ * wifi_manager's one-shot retry timer (WIFI_MANAGER_RETRY_TIMER, 5 s) before our
+ * STA_DISCONNECTED callback runs, and with the SoftAP up nothing stops it. The first link loss
+ * while the SoftAP is up (within 60 s of a rejoin, or of a setup) can come 30 s or more after
+ * the last attempt started, and a retry sent then would still be connecting when that timer's
+ * CONNECT_STA arrives, which reboots the hub (below). ROUTER_RETRY_MS after the last disconnect
+ * the timer has fired (its attempt then counts) or START_AP has stopped it. On the fallback AP a
+ * retry therefore comes ROUTER_RETRY_MS after the previous one failed: about every 33-37 s.
  *
  * Never a second connect while one is in flight: wifi_manager's CONNECT_STA would then call
  * esp_wifi_set_config() on a connecting STA, which fails ("sta is connecting, cannot set
@@ -235,16 +244,17 @@ static const char *radio_hold_reason(TickType_t now)
  * in wifi_manager's own retries always could.
  *
  * Attempts are tracked on the wifi_manager task: its CONNECT_STA callback starts one
- * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), and its STA_DISCONNECTED
- * and GOT_IP callbacks end it. An attempt that neither fails nor gets its IP (associated, with
- * no DHCP answer) keeps the retry off until the STA's next disconnect, since a second connect
- * could reboot the hub; its radio hold still ends at the cap. */
-#define ROUTER_RETRY_MS          30000    // a retry once no attempt has started for this long
+ * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), its STA_DISCONNECTED
+ * callback ends it and stamps s_attempt_tick again (a lost link too), and its GOT_IP callback
+ * ends it. An attempt that neither fails nor gets its IP (associated, with no DHCP answer) keeps
+ * the retry off until the STA's next disconnect, since a second connect could reboot the hub;
+ * its radio hold still ends at the cap. */
+#define ROUTER_RETRY_MS          30000    // a retry once no attempt has started or ended this long
 #define ROUTER_RETRY_PAGE_MAX_MS 300000   // an open portal page defers one at most this long
 
 static volatile bool s_ap_up = false;               // the SoftAP is up; wifi_manager task only
 static volatile bool s_attempt_in_flight = false;   // wifi_manager task only
-static volatile TickType_t s_attempt_tick = 0;      // the last attempt's start; wifi_manager task only
+static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end; wifi_manager task only
 
 // WM_ORDER_START_AP (wifi_manager task), once the SoftAP, HTTP and DNS servers are up. The STA
 // config is what LOAD_AND_RESTORE read from NVS (all zero when nothing is saved), or what a
@@ -431,10 +441,14 @@ void cb_connection_lost(void *pvParameter)
         ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", wifi_event->reason);
     }
 
-    // The link was lost, or a connect attempt ended: its radio hold keeps only its tail.
+    // The link was lost, or a connect attempt ended: its radio hold keeps only its tail. The
+    // router retry counts from here too: this disconnect may have armed wifi_manager's own retry
+    // timer (see the router retry above).
     s_sta_connected = false;
     s_attempt_in_flight = false;
-    if (hold_running(s_connect_until, xTaskGetTickCount()))
+    TickType_t now = xTaskGetTickCount();
+    s_attempt_tick = (now != 0) ? now : 1;   // 0 means "no attempt yet"
+    if (hold_running(s_connect_until, now))
         s_connect_until = hold_deadline(RADIO_HOLD_CONNECT_TAIL_MS);
 
     // The STA lost the Wi-Fi it was set up with in this window, before the setup AP stopped.
@@ -520,7 +534,7 @@ static void router_retry(wifi_task_state_t *st)
         st->defer_logged = false;
         return;
     }
-    // Since the last attempt started; no attempt yet counts as long ago.
+    // Since the last attempt started or ended; no attempt yet counts as long ago.
     TickType_t age = (s_attempt_tick != 0) ? now - s_attempt_tick
                                             : pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS);
     if (s_attempt_in_flight || s_retry_until != 0 || age < pdMS_TO_TICKS(ROUTER_RETRY_MS))
@@ -540,8 +554,8 @@ static void router_retry(wifi_task_state_t *st)
     s_retry_until = hold_deadline(RADIO_HOLD_RETRY_MS);
     radio_hold_log(st);   // its ON line comes before the retry's
     vTaskDelay(pdMS_TO_TICKS(RADIO_HOLD_RETRY_LEAD_MS));
-    // Again after the pause: an attempt may have started meanwhile (a portal submit), or the STA
-    // or the SoftAP changed state. Then nothing is sent and the pre-pause ends.
+    // Again after the pause: an attempt may have started (a portal submit) or ended meanwhile, or
+    // the STA or the SoftAP changed state. Then nothing is sent and the pre-pause ends.
     if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != st->retry_mark)
     {
         s_retry_until = 0;
