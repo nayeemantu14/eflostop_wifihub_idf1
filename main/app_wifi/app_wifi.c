@@ -53,7 +53,7 @@ void wifi_task(void *pvParameter);
  *
  * NOT for the fallback AP that wifi_manager opens after failed retries while credentials are
  * still saved (router outage): that is the field case BLE-from-boot leak protection is for,
- * so BLE keeps scanning there.
+ * so BLE keeps scanning there, apart from the few-second Wi-Fi radio holds below.
  *
  * Every transition runs on the wifi_manager task (the START_AP, STOP_AP, GOT_IP and
  * STA_DISCONNECTED callbacks), which is therefore the only writer of the flag and of
@@ -135,6 +135,70 @@ static void portal_priority_close(const char *reason)
     ESP_LOGI(WIFI_TAG, "portal priority OFF (%s) - BLE scanning resumed", reason);
 }
 
+/* ---- Wi-Fi radio hold ---------------------------------------------------------------------
+ * While the STA is not connected, BLE scanning also stops for a few seconds around each Wi-Fi
+ * scan and each STA connect attempt, so they get the radio: the window's starvation on a small
+ * scale. On the 2026-09-29 bench (router off, then on again) the router-fallback AP's page never
+ * got past "Scanning for networks..." with many networks in range, and the connect attempts
+ * ended NO_AP_FOUND (201): beside the continuous 1M + Coded leak scan (on a valve hub also the
+ * valve hunt) a Wi-Fi scan hears next to nothing, and a connect attempt starts with a scan for
+ * the SSID.
+ *
+ * A hold is a deadline (a tick, 0 = none), never a flag, so it always ends. Each has one writer:
+ *   - s_scan_until (wifi_manager task): from a Wi-Fi scan order (the portal page's GET /ap.json
+ *     asks for one about every 3.8 s) until RADIO_HOLD_SCAN_TAIL_MS after its SCAN_DONE, at most
+ *     RADIO_HOLD_SCAN_MS. The tail outlasts the page's next request, so BLE stays paused while
+ *     the page is open and its list fills; with no page open, no scan is asked for.
+ *   - s_connect_until (wifi_manager task): from a CONNECT_STA order (wifi_manager's own retries,
+ *     a portal submit) until RADIO_HOLD_CONNECT_TAIL_MS after its disconnect, or its IP, at most
+ *     RADIO_HOLD_CONNECT_MS.
+ * None while the STA is connected (it has its air time then, and BLE never pauses for nothing):
+ * app_wifi_radio_hold_active() reads false and the callbacks set nothing. None is set in the
+ * portal window either, where BLE is paused already. Unlike the window: no health hold (the
+ * sensors' and the valve's timeouts, minutes long, keep running through a few seconds), no
+ * priority raise, and in the BLE modules no [PORTAL] lines and no valve go-red stamp. They
+ * otherwise treat a hold like the window, the valve's leak-response exception included
+ * (app_ble_leak.c, app_ble_valve.c). wifi_task prints each hold's start and end
+ * (radio_hold_log()). The callbacks only store ticks and flags. */
+#define RADIO_HOLD_SCAN_MS         6000    // a Wi-Fi scan until its SCAN_DONE (a cap: ~2 s is usual)
+#define RADIO_HOLD_SCAN_TAIL_MS    4000    // after the SCAN_DONE: past the page's next request
+#define RADIO_HOLD_CONNECT_MS      10000   // a connect attempt until its disconnect or IP (a cap)
+#define RADIO_HOLD_CONNECT_TAIL_MS 1000    // after the attempt's disconnect
+#define RADIO_HOLD_MAX_MS          RADIO_HOLD_CONNECT_MS   // the furthest deadline ever set
+
+static volatile bool s_sta_connected = false;     // the STA has its IP; wifi_manager task only
+static volatile TickType_t s_scan_until = 0;      // wifi_manager task only
+static volatile TickType_t s_connect_until = 0;   // wifi_manager task only
+
+// The deadline is set and still ahead, by at most RADIO_HOLD_MAX_MS. Without that bound a deadline
+// left unchanged for 2^31 ticks (248 days at 100 Hz) would read as ahead again, for 248 days; with
+// it, for at most RADIO_HOLD_MAX_MS once every 2^32 ticks.
+static bool hold_running(TickType_t until, TickType_t now)
+{
+    int32_t left = (int32_t)(until - now);
+    return until != 0 && left > 0 && left <= (int32_t)pdMS_TO_TICKS(RADIO_HOLD_MAX_MS);
+}
+
+static TickType_t hold_deadline(uint32_t ms)
+{
+    TickType_t t = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
+    return (t != 0) ? t : 1;   // 0 means "no hold"
+}
+
+bool app_wifi_radio_hold_active(void)
+{
+    if (s_sta_connected)
+        return false;
+    TickType_t now = xTaskGetTickCount();
+    return hold_running(s_scan_until, now) || hold_running(s_connect_until, now);
+}
+
+// For the log: the hold that is on, the connect attempt's first.
+static const char *radio_hold_reason(TickType_t now)
+{
+    return hold_running(s_connect_until, now) ? "connect attempt" : "Wi-Fi scan";
+}
+
 // WM_ORDER_START_AP (wifi_manager task), once the SoftAP, HTTP and DNS servers are up. The STA
 // config is what LOAD_AND_RESTORE read from NVS (all zero when nothing is saved), or what a
 // requested disconnect zeroed and saved just before sending this START_AP. This task writes
@@ -159,6 +223,34 @@ static void cb_ap_stopped(void *pvParameter)
 {
     (void)pvParameter;
     portal_priority_close("AP stopped");
+}
+
+// WM_ORDER_CONNECT_STA (wifi_manager task), after wifi_manager's esp_wifi_connect(): a connect
+// attempt started, unless the STA already has its IP (wifi_manager then connects nothing).
+static void cb_connect_sta(void *pvParameter)
+{
+    (void)pvParameter;
+    if (s_sta_connected)
+        return;
+    if (!s_portal_priority)
+        s_connect_until = hold_deadline(RADIO_HOLD_CONNECT_MS);
+}
+
+// WM_ORDER_START_WIFI_SCAN (wifi_manager task): the portal page asked for the network list. Also
+// when wifi_manager skipped the scan (one already running, or its start failed): the cap ends it.
+static void cb_scan_start(void *pvParameter)
+{
+    (void)pvParameter;
+    if (!s_sta_connected && !s_portal_priority)
+        s_scan_until = hold_deadline(RADIO_HOLD_SCAN_MS);
+}
+
+// WM_EVENT_SCAN_DONE (wifi_manager task), once the list is rebuilt: only the tail is left.
+static void cb_scan_done(void *pvParameter)
+{
+    (void)pvParameter;
+    if (hold_running(s_scan_until, xTaskGetTickCount()))
+        s_scan_until = hold_deadline(RADIO_HOLD_SCAN_TAIL_MS);
 }
 
 /* Safety net, on wifi_task: the window is open, Wi-Fi was set up in it, and the setup AP has not
@@ -225,6 +317,10 @@ void app_wifi_start()
     wifi_manager_set_callback(WM_ORDER_STOP_AP, &cb_ap_stopped);
     wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
     wifi_manager_set_callback(WM_EVENT_STA_DISCONNECTED, &cb_connection_lost);
+    // The Wi-Fi radio hold's. Nothing else registers these three.
+    wifi_manager_set_callback(WM_ORDER_CONNECT_STA, &cb_connect_sta);
+    wifi_manager_set_callback(WM_ORDER_START_WIFI_SCAN, &cb_scan_start);
+    wifi_manager_set_callback(WM_EVENT_SCAN_DONE, &cb_scan_done);
     xTaskCreate(&wifi_task, "wifi_task", 4096, NULL, 5, &wifiTaskHandle);
 }
 
@@ -235,6 +331,11 @@ void cb_connection_ok(void *pvParameter)
     esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
 
     ESP_LOGI(WIFI_TAG, "Connected! IP: %s", str_ip);
+
+    // The STA has its air time now: no Wi-Fi radio hold, and BLE resumes at once.
+    s_sta_connected = true;
+    s_scan_until = 0;
+    s_connect_until = 0;
 
     // Wi-Fi is set up, but the portal priority window stays open until the setup AP stops
     // (cb_ap_stopped()): the phone that submitted the credentials is still on the SoftAP and
@@ -273,6 +374,11 @@ void cb_connection_lost(void *pvParameter)
         ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", wifi_event->reason);
     }
 
+    // The link was lost, or a connect attempt ended: its radio hold keeps only its tail.
+    s_sta_connected = false;
+    if (hold_running(s_connect_until, xTaskGetTickCount()))
+        s_connect_until = hold_deadline(RADIO_HOLD_CONNECT_TAIL_MS);
+
     // The STA lost the Wi-Fi it was set up with in this window, before the setup AP stopped.
     // wifi_manager has just stopped its AP-shutdown timer, so the SoftAP stays up as a
     // router-fallback portal with the credentials saved, which keeps BLE scanning: close the
@@ -297,6 +403,33 @@ void cb_connection_lost(void *pvParameter)
     iothub_suspend_mqtt();
 }
 
+// wifi_task's own state for the Wi-Fi radio hold's log lines.
+typedef struct
+{
+    bool hold_on;            // a hold's ON line is printed, its OFF line not yet
+    TickType_t hold_since;   // when that ON line was printed
+} wifi_task_state_t;
+
+// Prints each Wi-Fi radio hold's start and end as wifi_task sees them. It looks on every pass,
+// every second while the STA is down (the only time a hold can run), so a line is at most about
+// a second late, and holds that chain (an open portal page's scans) print one pair.
+static void radio_hold_log(wifi_task_state_t *st)
+{
+    bool on = app_wifi_radio_hold_active();
+    if (on == st->hold_on)
+        return;
+    TickType_t now = xTaskGetTickCount();
+    st->hold_on = on;
+    if (on)
+    {
+        st->hold_since = now;
+        ESP_LOGI(WIFI_TAG, "Wi-Fi radio hold ON (%s) - BLE scanning paused", radio_hold_reason(now));
+    }
+    else
+        ESP_LOGI(WIFI_TAG, "Wi-Fi radio hold OFF after %u s - BLE scanning resumed",
+                 (unsigned)((now - st->hold_since + configTICK_RATE_HZ / 2) / configTICK_RATE_HZ));
+}
+
 void wifi_task(void *pvParameter)
 {
     (void)pvParameter;
@@ -306,16 +439,21 @@ void wifi_task(void *pvParameter)
     // while it runs wifi_manager's handler, and that handler can block posting to the
     // wifi_manager task. The wifi_manager task creates the default loop, so a first try can
     // find none (ESP_ERR_INVALID_STATE, silent): retried every second until it is in.
-    // Each pass also runs the portal priority window's safety net (portal_priority_net()).
+    // Each pass also runs the portal priority window's safety net (portal_priority_net()) and the
+    // Wi-Fi radio hold's log (radio_hold_log()): every second while the STA is down or a hold's
+    // OFF line is still due, else every 5 s.
     bool ap_log_on = false;
     TickType_t stop_sent_for = 0;   // the GOT_IP tick the net already sent a STOP_AP for
+    wifi_task_state_t st = { 0 };
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(ap_log_on ? 5000 : 1000));
+        bool fast = !ap_log_on || !s_sta_connected || st.hold_on;
+        vTaskDelay(pdMS_TO_TICKS(fast ? 1000 : 5000));
         if (!ap_log_on)
             ap_log_on = (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                     &ap_station_event_handler, NULL) == ESP_OK);
         portal_priority_net(&stop_sent_for);
+        radio_hold_log(&st);
     }
     vTaskDelete(NULL);
 }

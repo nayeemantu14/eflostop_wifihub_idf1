@@ -484,10 +484,10 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
  * --------------------------------------------------------- */
 static void start_passive_scan(void)
 {
-    // Portal priority window (app_wifi.c): the SoftAP has the radio. Checked at every start,
-    // since at boot the window can open before or after BLE comes up. The scan task's loop
-    // starts the scan again when the window closes.
-    if (app_wifi_portal_priority_active())
+    // Portal priority window or a Wi-Fi radio hold (app_wifi.c): Wi-Fi has the radio. Checked at
+    // every start, since at boot the window can open before or after BLE comes up. The scan
+    // task's loop starts the scan again when both are over.
+    if (app_wifi_portal_priority_active() || app_wifi_radio_hold_active())
         return;
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
@@ -573,18 +573,24 @@ static void ble_leak_scan_task(void *param)
 
     TickType_t last_whitelist_reload = xTaskGetTickCount();
     TickType_t last_heartbeat_log = xTaskGetTickCount();
-    bool portal_paused = false;   // this task's view of the portal priority window
+    bool paused = false;          // this task's view of the window or a Wi-Fi radio hold
+    bool portal_paused = false;   // the window's own pause, for its log lines
 
     for (;;) {
-        // Portal priority window (app_wifi.c): no scan of ours while it is open. Only OUR
-        // scan is cancelled: a valve hunt belongs to the valve module, which stops it on its
-        // own task, and cancelling it here would leave that module believing it still scans
-        // (its is_scanning would then block every later hunt).
-        if (app_wifi_portal_priority_active()) {
-            if (!portal_paused) {
+        // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no scan of ours while
+        // either is on. Only OUR scan is cancelled: a valve hunt belongs to the valve module,
+        // which stops it on its own task, and cancelling it here would leave that module
+        // believing it still scans (its is_scanning would then block every later hunt).
+        // A hold, a few seconds around a Wi-Fi scan or connect attempt, logs nothing here:
+        // app_wifi.c prints its start and end, and the restart below "Extended passive scan
+        // started".
+        bool portal = app_wifi_portal_priority_active();
+        if (portal || app_wifi_radio_hold_active()) {
+            if (portal && !portal_paused) {
                 portal_paused = true;
                 ESP_LOGI(BLE_LEAK_TAG, "Scan paused - Wi-Fi setup portal has the radio");
             }
+            paused = true;
             s_scan_restart_needed = false;
             if (ble_gap_disc_active() && !ble_valve_hunt_scanning()) {
                 int rc = ble_gap_disc_cancel();
@@ -593,10 +599,13 @@ static void ble_leak_scan_task(void *param)
                 }
             }
         }
-        else if (portal_paused) {
-            portal_paused = false;
+        else if (paused) {
+            paused = false;
             s_scan_restart_needed = false;
-            ESP_LOGI(BLE_LEAK_TAG, "Scan resumed - Wi-Fi setup portal closed");
+            if (portal_paused) {
+                portal_paused = false;
+                ESP_LOGI(BLE_LEAK_TAG, "Scan resumed - Wi-Fi setup portal closed");
+            }
             // A valve hunt already running forwards our advertisements (the valve module's
             // GAP handler), and the self-heal below starts our scan once it ends.
             if (!ble_gap_disc_active()) {

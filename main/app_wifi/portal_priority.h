@@ -22,12 +22,31 @@ extern "C" {
  * success status. It closes earlier if the STA loses that Wi-Fi first, since the SoftAP then
  * stays up as a router-fallback portal. It is NOT opened for the fallback AP after failed
  * retries while credentials are still saved (router outage): BLE leak protection stays on
- * there. See app_wifi.c.
+ * there, apart from the short holds of app_wifi_radio_hold_active(). See app_wifi.c.
  *
  * Lock-free read of a flag written only by the wifi_manager task. Safe from any task
  * (the NimBLE host task included), and returns false before Wi-Fi starts.
  */
 bool app_wifi_portal_priority_active(void);
+
+/**
+ * @brief True while a Wi-Fi radio hold runs: the STA is not connected and Wi-Fi is scanning
+ *        or trying to connect, for a few seconds at a time.
+ *
+ * BLE scanning pauses for it as for the portal priority window, so a Wi-Fi scan (the portal
+ * page's network list) or a connect attempt (whose first step is a scan for the router) gets
+ * the radio: the leak scanner and the valve hunt start nothing new and cancel their own scans
+ * and connect attempts, and the valve hunt still runs while a leak response is pended. Unlike
+ * the window: no health hold, no [PORTAL] log lines and no valve go-red stamp. A hold lasts
+ * from a scan until a few seconds after it (so an open portal page, which asks for a scan
+ * about every 3.8 s, keeps BLE paused until it is closed), or from a connect attempt until
+ * about a second after it fails, or its IP. It is never on while the STA is connected, and
+ * none starts in the portal window. See app_wifi.c.
+ *
+ * Lock-free: reads tick deadlines, each written by a single task. Safe from any task (the
+ * NimBLE host task included), and returns false before Wi-Fi starts.
+ */
+bool app_wifi_radio_hold_active(void);
 
 #ifdef __cplusplus
 }
