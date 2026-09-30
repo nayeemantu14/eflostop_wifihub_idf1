@@ -177,6 +177,10 @@ static void execute_wifi_reset(void)
      * password changed could not reconfigure the hub (2026-09-29 bench capture). So
      * after the 2 s wait erase_wifi_credentials() erases them straight from NVS, in
      * every state, and keeps wifi_manager from saving them again before the reboot.
+     * To wifi_manager this disconnect is the portal's forget, and for an idle STA
+     * app_wifi.c's forget callback now posts that disconnect event itself, so the
+     * handler's erase (and its START_AP) runs within the 2 s too; the erase below
+     * still makes sure, the post being able to fail.
      *
      * We then reboot. A fresh boot gives the SoftAP captive portal a less fragmented
      * heap than the running one, with no MQTT/TLS session loaded (without Wi-Fi

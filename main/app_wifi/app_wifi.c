@@ -509,6 +509,54 @@ static void cb_scan_done(void *pvParameter)
         scan_hold_set(now, RADIO_HOLD_SCAN_TAIL_MS);
 }
 
+/* ---- The portal's forget ------------------------------------------------------------------
+ * The portal page's Disconnect (DELETE /connect.json) and the 10 s reset send wifi_manager a
+ * DISCONNECT_STA: it sets its user-disconnect bit and calls esp_wifi_disconnect(). Only its
+ * STA_DISCONNECTED handler acts on that bit: it zeroes the STA config in RAM, saves it (zero SSID
+ * and password blobs over the saved ones, under its NVS lock, which it gives back) and sends
+ * START_AP, whose callback opens the portal window (cb_ap_started()). A connected STA gets there.
+ * An idle one (on the router outage's fallback portal, between attempts) posts no disconnect
+ * event: nothing was erased, the router retry went on with the old credentials, and the bit
+ * stayed set, so the next disconnect that was not a user connect's (a router outage, maybe days
+ * after a new setup) would have erased whatever was saved then and reopened the portal, with BLE
+ * paused until someone sets Wi-Fi up again. So for an idle STA this callback posts that event
+ * itself (forget_post()): wifi_manager runs the same erase, save and START_AP as for a connected
+ * STA, the bit is used up, and the hub is where the 10 s reset leaves it, without the reboot.
+ * Other handlers see the event too: the default netif handler takes the STA interface down, which
+ * it already is, and cb_connection_lost() prints "WiFi Disconnected. Reason: 8", as for a
+ * connected STA's forget. With an attempt in flight, or the STA connected, the driver's own
+ * disconnect event follows, and wifi_manager erases unless that attempt was a user connect (a
+ * portal submit, the router retry, or one sent while the STA was connected), whose failure branch
+ * it takes first, leaving the bit set: cb_connection_lost() then posts the event, the STA being
+ * idle by then (s_forget_pending). The window, the router retry (no credentials: none) and the
+ * page (its scan view) then behave as after the reset. wifi_manager task only. */
+static volatile bool s_forget_pending = false;   // a forget waits for its disconnect; wifi_manager task only
+
+static void forget_post(void)
+{
+    wifi_event_sta_disconnected_t ev = { 0 };
+    ev.reason = WIFI_REASON_ASSOC_LEAVE;   // what a connected STA's forget reports
+    // A bounded wait: the event loop can itself be waiting for room in this task's queue.
+    esp_err_t err = esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &ev, sizeof(ev),
+                                   pdMS_TO_TICKS(100));
+    if (err == ESP_OK)
+        ESP_LOGW(WIFI_TAG, "Wi-Fi forget with the STA not connected - wifi_manager erases the saved network");
+    else
+        ESP_LOGE(WIFI_TAG, "Wi-Fi forget: disconnect event not posted (%s) - the saved network is kept",
+                 esp_err_to_name(err));
+}
+
+// WM_ORDER_DISCONNECT_STA (wifi_manager task), after wifi_manager's esp_wifi_disconnect(): the
+// portal's forget or the 10 s reset (see above).
+static void cb_disconnect_sta(void *pvParameter)
+{
+    (void)pvParameter;
+    if (s_sta_connected || s_attempt_in_flight)
+        s_forget_pending = true;
+    else
+        forget_post();
+}
+
 /* Safety net, on wifi_task: the window is open, Wi-Fi was set up in it, and the setup AP has not
  * stopped PORTAL_AP_STOP_MARGIN_MS past WIFI_MANAGER_SHUTDOWN_AP_TIMER. wifi_manager starts no
  * AP-shutdown timer if its AP_STARTED bit was clear at the IP, and its xTimerStart() does not
@@ -577,6 +625,8 @@ void app_wifi_start()
     wifi_manager_set_callback(WM_ORDER_CONNECT_STA, &cb_connect_sta);
     wifi_manager_set_callback(WM_ORDER_START_WIFI_SCAN, &cb_scan_start);
     wifi_manager_set_callback(WM_EVENT_SCAN_DONE, &cb_scan_done);
+    // The portal's forget and the 10 s reset. Nothing else registers it.
+    wifi_manager_set_callback(WM_ORDER_DISCONNECT_STA, &cb_disconnect_sta);
     xTaskCreate(&wifi_task, "wifi_task", 4096, NULL, 5, &wifiTaskHandle);
 }
 
@@ -658,6 +708,17 @@ void cb_connection_lost(void *pvParameter)
             portal_priority_close("Wi-Fi lost after setup");
         else
             s_setup_ok_tick = 0;
+    }
+
+    // A forget sent while an attempt ran or the STA was connected: if wifi_manager took a user
+    // connect's branch for this disconnect, it erased nothing and its disconnect bit is still set,
+    // so the forget's event is posted now, the STA being idle (see the portal's forget above).
+    if (s_forget_pending)
+    {
+        s_forget_pending = false;
+        const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
+        if (sta != NULL && sta->sta.ssid[0] != '\0')
+            forget_post();
     }
 
     // Network LED -> "no internet" (ramp red). This also clears the MQTT flag
