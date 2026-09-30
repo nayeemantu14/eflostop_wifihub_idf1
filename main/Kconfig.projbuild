@@ -1,0 +1,16 @@
+menu "eFloStop Hub"
+
+    config APP_BENCH_DIAG
+        bool "Bench diagnostics: the Wi-Fi driver's log at INFO"
+        default y
+        help
+            wifi_manager_start() turns the Wi-Fi driver's "wifi" log tag off. With this option,
+            app_wifi_start() sets it back to INFO right after, so the bench log carries the
+            driver's own lines: channel switches and CSA (csa_count), station join and leave,
+            and the STA's connect states. For the 2.1.4 G0 bench baseline (plan section 2.4).
+
+            Default y during 2.1.4 development only: WP10 turns it off for the release. The
+            driver prints many lines, and its connect line carries the router's SSID next to
+            its BSSID.
+
+endmenu

@@ -1,7 +1,9 @@
 #include "app_wifi.h"
 #include "wifi_manager.h"
+#include "http_app.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_timer.h"
 #include "net_status/net_status.h"
 #include "esp_wifi.h"
 
@@ -401,6 +403,33 @@ static const char *radio_hold_reason(TickType_t now)
 static volatile bool s_attempt_in_flight = false;   // wifi_manager task only
 static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end; wifi_manager task only
 
+/* ---- Wi-Fi channels (the G0 bench baseline) -------------------------------------------------
+ * The radio's channel at each SoftAP start, STA IP and STA link loss, with the router's: whether
+ * the router-fallback SoftAP follows the router's channel (plan section 4.5), and which channel a
+ * phone on the SoftAP had to follow. esp_wifi_get_channel() gives the radio's current channel,
+ * the SoftAP's while it is up; the router's comes from esp_wifi_sta_get_ap_info() at the IP. Log
+ * only, and all on the wifi_manager task (its callbacks), like wifi_manager's own esp_wifi_*
+ * calls. */
+static uint8_t s_router_channel = 0;   // the router's channel at the last IP, 0 = none yet; wifi_manager task only
+
+// The radio's primary channel now, 0 if the driver does not say.
+static unsigned radio_channel(void)
+{
+    uint8_t primary = 0;
+    wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+    if (esp_wifi_get_channel(&primary, &second) != ESP_OK)
+        return 0;
+    return primary;
+}
+
+// The router's channel from the STA's AP record, 0 if the STA is not associated. In a frame of
+// its own: the record is about 90 B.
+static __attribute__((noinline)) uint8_t router_channel(void)
+{
+    wifi_ap_record_t ap;
+    return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.primary : 0;
+}
+
 // WM_ORDER_START_AP (wifi_manager task), once the SoftAP, HTTP and DNS servers are up. The STA
 // config is what LOAD_AND_RESTORE read from NVS (all zero when nothing is saved), or what a
 // requested disconnect zeroed and saved just before sending this START_AP. This task writes
@@ -418,6 +447,14 @@ static void cb_ap_started(void *pvParameter)
     // retrying the router, as it does whenever the STA is down (router_retry()).
     else if (!s_portal_priority)
         ESP_LOGI(WIFI_TAG, "SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on");
+
+    // The channels (see above).
+    if (s_router_channel != 0)
+        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router last seen on %u",
+                 radio_channel(), (unsigned)wifi_settings.ap_channel, (unsigned)s_router_channel);
+    else
+        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router not joined since boot",
+                 radio_channel(), (unsigned)wifi_settings.ap_channel);
 }
 
 // WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected. This
@@ -579,18 +616,213 @@ static void portal_priority_net(TickType_t *stop_sent_for)
     wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
 }
 
+/* ---- Portal client log (the G0 bench baseline) --------------------------------------------
+ * When each phone on the SoftAP joined, got its DHCP lease, and first asked the captive DNS, got
+ * the captive-probe 302, loaded the page and called its API: join -> lease -> first DNS -> first
+ * 302 -> page for every phone, without a line per request. Store and log only: nothing here
+ * changes what the portal or the radio does.
+ *
+ * One entry per client, AP_CLIENTS_MAX of them (the SoftAP takes DEFAULT_AP_MAX_CONNECTIONS
+ * stations). A station's join claims one by MAC and stamps the time, and starts its "first" marks
+ * again; its lease adds its address; its leave keeps both, so its late requests still find it.
+ * The portal's activity hook (portal_activity(): the httpd task per request, the dns_server task
+ * per DNS query) finds the entry by address and prints the first request of each kind. A client
+ * not seen joining (one that joined before this log was registered, or a home-LAN client of the
+ * STA address: the portal's HTTP server answers there too) gets an entry of its own while one is
+ * free. Each SoftAP start begins a new session with an empty table.
+ * Written by the default event loop task (the SoftAP start, join, leave and lease events) and by
+ * the httpd and dns_server tasks, under s_ap_clients_lock: a spinlock held for one table scan,
+ * never while logging. */
+#define AP_CLIENTS_MAX DEFAULT_AP_MAX_CONNECTIONS
+_Static_assert(HTTP_APP_ACT_COUNT <= 8, "one bit per activity kind in ap_client_t.logged");
+
+typedef enum
+{
+    AP_CLIENT_FREE = 0,
+    AP_CLIENT_JOINED,      // a station on the SoftAP now
+    AP_CLIENT_LEFT,        // a station that left: kept for its late requests until the entry is needed
+    AP_CLIENT_ADDR_ONLY,   // a client seen only by its address
+} ap_client_state_t;
+
+typedef struct
+{
+    uint8_t mac[6];
+    uint8_t state;      // ap_client_state_t
+    uint8_t logged;     // one bit per http_app_activity_t printed since the join
+    uint32_t ip;        // network byte order, 0 = none yet
+    uint32_t join_ms;   // ap_now_ms() at the join, 0 = not seen joining
+} ap_client_t;
+
+static ap_client_t s_ap_clients[AP_CLIENTS_MAX];
+static portMUX_TYPE s_ap_clients_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static const char *const k_activity_names[HTTP_APP_ACT_COUNT] = {
+    [HTTP_APP_ACT_DNS] = "DNS query",
+    [HTTP_APP_ACT_PROBE_302] = "captive probe (302 sent)",
+    [HTTP_APP_ACT_PAGE] = "page request",
+    [HTTP_APP_ACT_API_USER] = "Connect/Disconnect request",
+    [HTTP_APP_ACT_API_BG] = "network list request",
+    [HTTP_APP_ACT_STATUS] = "status request",
+};
+
+// Milliseconds since boot, never 0 (0 means "not seen joining"). Wraps after 49 days, which
+// garbles only a delta across the wrap.
+static uint32_t ap_now_ms(void)
+{
+    uint32_t ms = (uint32_t)(esp_timer_get_time() / 1000);
+    return (ms != 0) ? ms : 1;
+}
+
+// Under the lock: the entry that holds this station; else, with claim, a free one first, then the
+// first that holds no station on the SoftAP now, cleared for it. -1 if none.
+static int ap_client_by_mac_locked(const uint8_t *mac, bool claim)
+{
+    int spare = -1;
+    for (int i = 0; i < AP_CLIENTS_MAX; i++)
+    {
+        const ap_client_t *c = &s_ap_clients[i];
+        if ((c->state == AP_CLIENT_JOINED || c->state == AP_CLIENT_LEFT) && memcmp(c->mac, mac, 6) == 0)
+            return i;
+        if (c->state == AP_CLIENT_FREE)
+        {
+            if (spare < 0 || s_ap_clients[spare].state != AP_CLIENT_FREE)
+                spare = i;
+        }
+        else if (c->state != AP_CLIENT_JOINED && spare < 0)
+            spare = i;
+    }
+    if (!claim || spare < 0)
+        return -1;
+    memset(&s_ap_clients[spare], 0, sizeof(s_ap_clients[spare]));
+    memcpy(s_ap_clients[spare].mac, mac, 6);
+    return spare;
+}
+
+// WIFI_EVENT_AP_START: a new portal session.
+static void ap_clients_reset(void)
+{
+    taskENTER_CRITICAL(&s_ap_clients_lock);
+    memset(s_ap_clients, 0, sizeof(s_ap_clients));
+    taskEXIT_CRITICAL(&s_ap_clients_lock);
+}
+
+static void ap_client_joined(const uint8_t *mac)
+{
+    uint32_t now = ap_now_ms();
+    taskENTER_CRITICAL(&s_ap_clients_lock);
+    int i = ap_client_by_mac_locked(mac, true);
+    if (i >= 0)
+    {
+        s_ap_clients[i].state = AP_CLIENT_JOINED;
+        s_ap_clients[i].logged = 0;
+        s_ap_clients[i].join_ms = now;
+    }
+    taskEXIT_CRITICAL(&s_ap_clients_lock);
+}
+
+static void ap_client_left(const uint8_t *mac)
+{
+    taskENTER_CRITICAL(&s_ap_clients_lock);
+    int i = ap_client_by_mac_locked(mac, false);
+    if (i >= 0)
+        s_ap_clients[i].state = AP_CLIENT_LEFT;
+    taskEXIT_CRITICAL(&s_ap_clients_lock);
+}
+
+// The station's lease: the address is its own from now on. Returns its join time, 0 if its join
+// was not seen.
+static uint32_t ap_client_leased(const uint8_t *mac, uint32_t ip)
+{
+    uint32_t join_ms = 0;
+    taskENTER_CRITICAL(&s_ap_clients_lock);
+    for (int k = 0; k < AP_CLIENTS_MAX; k++)
+    {
+        ap_client_t *c = &s_ap_clients[k];
+        if (c->state != AP_CLIENT_FREE && c->ip == ip && memcmp(c->mac, mac, 6) != 0)
+        {
+            c->ip = 0;   // an earlier holder of the address
+            if (c->state == AP_CLIENT_ADDR_ONLY)
+                c->state = AP_CLIENT_FREE;
+        }
+    }
+    int i = ap_client_by_mac_locked(mac, true);
+    if (i >= 0)
+    {
+        s_ap_clients[i].state = AP_CLIENT_JOINED;
+        s_ap_clients[i].ip = ip;
+        join_ms = s_ap_clients[i].join_ms;
+    }
+    taskEXIT_CRITICAL(&s_ap_clients_lock);
+    return join_ms;
+}
+
+// The portal's activity hook (http_app_set_activity_hook()), on the httpd task per request and
+// the dns_server task per DNS query: prints a client's first request of each kind (see above).
+// Never blocks but on the log's own lock, once per kind and client.
+static void portal_activity(http_app_activity_t kind, uint32_t client_ip)
+{
+    if (client_ip == 0 || (unsigned)kind >= HTTP_APP_ACT_COUNT)
+        return;
+    uint32_t now = ap_now_ms();
+    uint32_t join_ms = 0;
+    bool first = false;
+    taskENTER_CRITICAL(&s_ap_clients_lock);
+    int i = -1;
+    int spare = -1;
+    for (int k = 0; k < AP_CLIENTS_MAX && i < 0; k++)
+    {
+        if (s_ap_clients[k].state == AP_CLIENT_FREE)
+        {
+            if (spare < 0)
+                spare = k;
+        }
+        else if (s_ap_clients[k].ip == client_ip)
+            i = k;
+    }
+    if (i < 0 && spare >= 0)
+    {
+        i = spare;
+        memset(&s_ap_clients[i], 0, sizeof(s_ap_clients[i]));
+        s_ap_clients[i].state = AP_CLIENT_ADDR_ONLY;
+        s_ap_clients[i].ip = client_ip;
+    }
+    if (i >= 0 && !(s_ap_clients[i].logged & (1u << kind)))
+    {
+        s_ap_clients[i].logged |= (uint8_t)(1u << kind);
+        join_ms = s_ap_clients[i].join_ms;
+        first = true;
+    }
+    taskEXIT_CRITICAL(&s_ap_clients_lock);
+    if (!first)
+        return;
+    esp_ip4_addr_t ip = { .addr = client_ip };
+    if (join_ms != 0)
+        ESP_LOGI(WIFI_TAG, "portal client " IPSTR ": first %s, %lu ms after joining",
+                 IP2STR(&ip), k_activity_names[kind], (unsigned long)(now - join_ms));
+    else
+        ESP_LOGI(WIFI_TAG, "portal client " IPSTR ": first %s (no SoftAP join seen)",
+                 IP2STR(&ip), k_activity_names[kind]);
+}
+
 // SoftAP station join/leave, so the bench can see a phone associate (wifi_manager silences the
-// driver's own "wifi" log). MAC, AID and reason only: none of it is a credential.
+// driver's own "wifi" log). MAC, AID and reason only: none of it is a credential. It also feeds
+// the portal client log (above): a SoftAP start clears it, a join stamps the station's time.
 // Runs on the default event loop task.
 static void ap_station_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     (void)base;
+    if (id == WIFI_EVENT_AP_START)
+    {
+        ap_clients_reset();
+        return;
+    }
     if (data == NULL)
         return;
     if (id == WIFI_EVENT_AP_STACONNECTED)
     {
         const wifi_event_ap_staconnected_t *e = (const wifi_event_ap_staconnected_t *)data;
+        ap_client_joined(e->mac);
         ESP_LOGI(WIFI_TAG, "SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X joined, AID=%u",
                  e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5],
                  (unsigned)e->aid);
@@ -598,10 +830,32 @@ static void ap_station_event_handler(void *arg, esp_event_base_t base, int32_t i
     else if (id == WIFI_EVENT_AP_STADISCONNECTED)
     {
         const wifi_event_ap_stadisconnected_t *e = (const wifi_event_ap_stadisconnected_t *)data;
+        ap_client_left(e->mac);
         ESP_LOGI(WIFI_TAG, "SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X left, AID=%u, reason=%u",
                  e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5],
                  (unsigned)e->aid, (unsigned)e->reason);
     }
+}
+
+// IP_EVENT_AP_STAIPASSIGNED: the SoftAP's DHCP server gave a station its address, printed with
+// the time since the station's join. Runs on the default event loop task.
+static void ap_lease_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    (void)base;
+    if (id != IP_EVENT_AP_STAIPASSIGNED || data == NULL)
+        return;
+    const ip_event_ap_staipassigned_t *e = (const ip_event_ap_staipassigned_t *)data;
+    uint32_t now = ap_now_ms();
+    uint32_t join_ms = ap_client_leased(e->mac, e->ip.addr);
+    if (join_ms != 0)
+        ESP_LOGI(WIFI_TAG, "SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X got " IPSTR ", %lu ms after joining",
+                 e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5],
+                 IP2STR(&e->ip), (unsigned long)(now - join_ms));
+    else
+        ESP_LOGI(WIFI_TAG, "SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X got " IPSTR " (join not seen)",
+                 e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5],
+                 IP2STR(&e->ip));
 }
 
 void app_wifi_start()
@@ -612,6 +866,9 @@ void app_wifi_start()
     snprintf((char *)wifi_settings.ap_ssid, MAX_SSID_SIZE, "WiFi-Hub-%s", sid);
     ESP_LOGI(WIFI_TAG, "AP SSID: %s", (char *)wifi_settings.ap_ssid);
 
+    // The portal client log's activity hook: a plain store, so before the start, ahead of the
+    // portal's first request.
+    http_app_set_activity_hook(&portal_activity);
     wifi_manager_start();
     // The portal priority window's callbacks first: with no credentials saved, START_AP comes
     // about 0.7 s after the start (network and Wi-Fi init, the HTTP server), while these calls
@@ -627,6 +884,11 @@ void app_wifi_start()
     wifi_manager_set_callback(WM_EVENT_SCAN_DONE, &cb_scan_done);
     // The portal's forget and the 10 s reset. Nothing else registers it.
     wifi_manager_set_callback(WM_ORDER_DISCONNECT_STA, &cb_disconnect_sta);
+#if CONFIG_APP_BENCH_DIAG
+    // Bench build (main/Kconfig.projbuild): wifi_manager_start() turned the Wi-Fi driver's log
+    // off; back to INFO, so the bench log has its channel switch and CSA (csa_count) lines.
+    esp_log_level_set("wifi", ESP_LOG_INFO);
+#endif
     xTaskCreate(&wifi_task, "wifi_task", 4096, NULL, 5, &wifiTaskHandle);
 }
 
@@ -637,6 +899,12 @@ void cb_connection_ok(void *pvParameter)
     esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
 
     ESP_LOGI(WIFI_TAG, "Connected! IP: %s", str_ip);
+
+    // The channels (see above): the router's is kept for the next SoftAP start and link loss.
+    uint8_t router = router_channel();
+    if (router != 0)
+        s_router_channel = router;
+    ESP_LOGI(WIFI_TAG, "Wi-Fi channel at IP: radio %u, router %u", radio_channel(), (unsigned)router);
 
     // The STA has its air time now: no Wi-Fi radio hold, and BLE resumes at once. The attempt
     // that got here is over, and so is a page's chain.
@@ -683,6 +951,10 @@ void cb_connection_lost(void *pvParameter)
         wifi_event_sta_disconnected_t *wifi_event = (wifi_event_sta_disconnected_t *)pvParameter;
         ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", wifi_event->reason);
     }
+    // The channels (see above), for a link that was up: not for each failed connect attempt.
+    if (s_sta_connected)
+        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at link loss: radio %u, router was on %u",
+                 radio_channel(), (unsigned)s_router_channel);
 
     // The link was lost, or a connect attempt ended, and its radio hold with it (the deadline stays
     // for RADIO_HOLD_GAP_MS). The router retry counts from here too: this disconnect may have armed
@@ -883,25 +1155,29 @@ void wifi_task(void *pvParameter)
 {
     (void)pvParameter;
     // Initial "no internet" state is latched by net_status_init() at boot.
-    // The SoftAP station log (ap_station_event_handler) is registered here, not in a
-    // wifi_manager callback: registering takes the event loop's lock, which the loop holds
-    // while it runs wifi_manager's handler, and that handler can block posting to the
-    // wifi_manager task. The wifi_manager task creates the default loop, so a first try can
-    // find none (ESP_ERR_INVALID_STATE, silent): retried every second until it is in.
+    // The SoftAP station log (ap_station_event_handler) and its lease line (ap_lease_event_handler)
+    // are registered here, not in a wifi_manager callback: registering takes the event loop's
+    // lock, which the loop holds while it runs wifi_manager's handler, and that handler can block
+    // posting to the wifi_manager task. The wifi_manager task creates the default loop, so a first
+    // try can find none (ESP_ERR_INVALID_STATE, silent): retried every second until each is in.
     // Each pass also runs the portal priority window's safety net (portal_priority_net()), the
     // router retry (router_retry()) and the Wi-Fi radio hold's log (radio_hold_log()): every
     // second while the STA is down or a hold's OFF line or a page chain's last line is still due,
     // else every 5 s.
     bool ap_log_on = false;
+    bool lease_log_on = false;
     TickType_t stop_sent_for = 0;   // the GOT_IP tick the net already sent a STOP_AP for
     wifi_task_state_t st = { 0 };
     while (1)
     {
-        bool fast = !ap_log_on || !s_sta_connected || st.hold_on || st.page_on;
+        bool fast = !ap_log_on || !lease_log_on || !s_sta_connected || st.hold_on || st.page_on;
         vTaskDelay(pdMS_TO_TICKS(fast ? 1000 : 5000));
         if (!ap_log_on)
             ap_log_on = (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                     &ap_station_event_handler, NULL) == ESP_OK);
+        if (!lease_log_on)
+            lease_log_on = (esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED,
+                                                       &ap_lease_event_handler, NULL) == ESP_OK);
         portal_priority_net(&stop_sent_for);
         router_retry(&st);
         radio_hold_log(&st);
