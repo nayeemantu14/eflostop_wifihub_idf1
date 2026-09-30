@@ -780,9 +780,11 @@ static void radio_hold_log(wifi_task_state_t *st)
     st->submits = submits;
     if (st->page_on)
     {
+        // Done: the STA got its IP, or the portal's forget opened the window, which pauses BLE.
         st->page_on = false;
-        ESP_LOGI(WIFI_TAG, "Wi-Fi setup page idle, closed or done after %u s (%u of its scans stopped for BLE) - BLE scanning resumed",
-                 (unsigned)((now - st->page_since) / configTICK_RATE_HZ), (unsigned)s_page_stops);
+        ESP_LOGI(WIFI_TAG, "Wi-Fi setup page idle, closed or done after %u s (%u of its scans stopped for BLE) - %s",
+                 (unsigned)((now - st->page_since) / configTICK_RATE_HZ), (unsigned)s_page_stops,
+                 s_portal_priority ? "BLE stays paused for the setup portal" : "BLE scanning resumed");
     }
     bool on = app_wifi_radio_hold_active();
     if (on == st->hold_on)
