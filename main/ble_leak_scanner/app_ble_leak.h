@@ -49,9 +49,12 @@ void app_ble_leak_reset_tracking(void);
  * Can be called from any scan callback (e.g. the valve module's GAP
  * handler) so leak sensors are detected even while the valve module
  * owns the active scan.
+ * prim_phy: the report's primary PHY, BLE_HCI_LE_PHY_1M or
+ * BLE_HCI_LE_PHY_CODED (ext_disc.prim_phy; BLE_HCI_LE_PHY_1M for a
+ * legacy report), for the per-sensor burst log only.
  */
 void app_ble_leak_process_adv(const void *addr, int8_t rssi,
-                              const uint8_t *data, uint8_t data_len);
+                              const uint8_t *data, uint8_t data_len, uint8_t prim_phy);
 
 #ifdef __cplusplus
 }

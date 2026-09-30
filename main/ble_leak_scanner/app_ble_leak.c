@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "freertos/queue.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "provisioning_manager/provisioning_manager.h"
@@ -45,6 +46,13 @@
                                                  // sensor. A burst is several advertisements over
                                                  // a second or two; the health engine needs one
                                                  // of them, not all of them.
+#define BURST_GAP_MS            1500             // An advert burst ends after this long with none
+                                                 // (the burst log, burst_log())...
+#define BURST_MAX_MS            30000            // ... or once it spans this long (a sensor that
+                                                 // never pauses); below the 65.5 s burst clock wrap.
+#define BURST_PHY_1M            0x01             // burst_phy bits: the primary PHYs heard
+#define BURST_PHY_CODED         0x02
+#define BURST_PHY_OTHER         0x04
 
 /* ---------------------------------------------------------
  * Internal types
@@ -59,8 +67,16 @@ typedef struct {
     bool last_leak;
     char last_fw_version[12];
     bool seen;              // true after first advertisement received
+    // The advert burst being counted, for the burst log only (burst_log()). The count and the
+    // PHYs sit in what was padding before the ticks.
+    uint8_t burst_n;        // adverts heard in it so far (stops at 255); 0 = no burst open
+    uint8_t burst_phy;      // BURST_PHY_* bits of their primary PHYs
     TickType_t last_event_tick;    // last telemetry event (drives BLE_LEAK_HEARTBEAT_MS)
     TickType_t last_health_tick;   // last health check-in (drives HEALTH_CHECKIN_MIN_MS)
+    uint16_t burst_first_ms;       // burst clock (burst_now_ms()) at its first advert
+    uint16_t burst_last_ms;        // ... and at its last
+    uint16_t burst_dt_min;         // shortest and longest gap between two of its adverts, ms
+    uint16_t burst_dt_max;
 } sensor_state_t;
 
 /* ---------------------------------------------------------
@@ -85,7 +101,8 @@ static sensor_state_t s_sensors[MAX_TRACKED_SENSORS];
  * entries — an advertisement in between matched a half-written list. A spinlock rather
  * than a mutex because the reader is the NimBLE host task, which must never block on the
  * scan task. Sections hold for microseconds: NO logging, NO queue sends, and no calls
- * other than memcmp/memcpy/memset and the *_locked helpers below. */
+ * other than memcmp/memcpy/memset, the *_locked helpers below and the burst clock
+ * (burst_now_ms()). */
 static portMUX_TYPE s_wl_lock = portMUX_INITIALIZER_UNLOCKED;
 
 /* ---------------------------------------------------------
@@ -187,6 +204,43 @@ static int sensor_alloc_locked(const uint8_t *mac)
 }
 
 /* ---------------------------------------------------------
+ * Burst log (2.1.4 G0 bench baseline)
+ * A leak sensor (FW 1.1.0) sends its adverts in bursts: a 2.5 s one every 15 s while wet and
+ * about every 100 s dry, a 4 s one at a leak edge. For each provisioned sensor the hub counts
+ * the adverts it hears in a burst, the shortest and longest gap between two of them, and the
+ * primary PHYs they came on, and prints one line once the burst is over (BURST_GAP_MS with
+ * none): the sensor's real advert interval (the shortest gap) and how many adverts a radio mode
+ * loses. The NimBLE host task counts, in process_leak_adv()'s lookup section
+ * (burst_note_locked()); the scan task closes a burst and prints it outside the lock
+ * (burst_log()). Log only: nothing here changes what the scanner reports or its delta filter.
+ * --------------------------------------------------------- */
+
+// The burst clock: milliseconds since boot, low 16 bits (bursts and their gaps last seconds).
+// Safe in a critical section.
+static uint16_t burst_now_ms(void)
+{
+    return (uint16_t)(esp_timer_get_time() / 1000);
+}
+
+// Counts one advert into the sensor's open burst, or opens one. Call with s_wl_lock held.
+static void burst_note_locked(sensor_state_t *s, uint16_t now_ms, uint8_t phy_bit)
+{
+    if (s->burst_n == 0) {
+        s->burst_first_ms = now_ms;
+        s->burst_dt_min = UINT16_MAX;
+        s->burst_dt_max = 0;
+        s->burst_phy = 0;
+    } else {
+        uint16_t dt = (uint16_t)(now_ms - s->burst_last_ms);
+        if (dt < s->burst_dt_min) s->burst_dt_min = dt;
+        if (dt > s->burst_dt_max) s->burst_dt_max = dt;
+    }
+    s->burst_last_ms = now_ms;
+    s->burst_phy |= phy_bit;
+    if (s->burst_n < UINT8_MAX) s->burst_n++;
+}
+
+/* ---------------------------------------------------------
  * Reload whitelist from provisioning manager
  * --------------------------------------------------------- */
 /* Read the provisioned BLE MACs and convert them, in a frame of its OWN (noinline), so the
@@ -261,12 +315,58 @@ static void reload_whitelist(void)
 }
 
 /* ---------------------------------------------------------
+ * Scan task, every pass: prints and closes each sensor's burst that is over, BURST_GAP_MS
+ * after its last advert, or once it spans BURST_MAX_MS (see the burst log above). The clock is
+ * read inside the section, so an advert the host task counts just before cannot look old.
+ * --------------------------------------------------------- */
+static const char *const k_burst_phy[8] = {
+    "?", "1M", "Coded", "1M+Coded", "other", "1M+other", "Coded+other", "1M+Coded+other"
+};
+
+static void burst_log(void)
+{
+    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+        uint8_t mac[6] = {0};
+        uint8_t n = 0, phy = 0;
+        uint16_t span = 0, dt_min = 0, dt_max = 0;
+        taskENTER_CRITICAL(&s_wl_lock);
+        sensor_state_t *s = &s_sensors[i];
+        if (s->in_use && s->burst_n > 0) {
+            span = (uint16_t)(s->burst_last_ms - s->burst_first_ms);
+            if ((uint16_t)(burst_now_ms() - s->burst_last_ms) > BURST_GAP_MS || span >= BURST_MAX_MS) {
+                memcpy(mac, s->mac, 6);
+                n = s->burst_n;
+                phy = s->burst_phy;
+                dt_min = s->burst_dt_min;
+                dt_max = s->burst_dt_max;
+                s->burst_n = 0;
+            }
+        }
+        taskEXIT_CRITICAL(&s_wl_lock);
+        if (n == 0) {
+            continue;
+        }
+        // The MAC as mac_bytes_to_str() prints it: NimBLE stores it LSB first.
+        if (n == 1) {
+            ESP_LOGI(BLE_LEAK_TAG, "eleak %02X:%02X:%02X:%02X:%02X:%02X burst: n=1, phy=%s",
+                     mac[5], mac[4], mac[3], mac[2], mac[1], mac[0], k_burst_phy[phy & 7]);
+        } else {
+            ESP_LOGI(BLE_LEAK_TAG, "eleak %02X:%02X:%02X:%02X:%02X:%02X burst: n=%u in %u.%02u s, dT %u-%u ms, phy=%s",
+                     mac[5], mac[4], mac[3], mac[2], mac[1], mac[0], (unsigned)n,
+                     (unsigned)(span / 1000), (unsigned)((span % 1000) / 10),
+                     (unsigned)dt_min, (unsigned)dt_max, k_burst_phy[phy & 7]);
+        }
+    }
+}
+
+/* ---------------------------------------------------------
  * Common advertisement processing for leak sensors.
  * Called from both legacy (BLE_GAP_EVENT_DISC) and extended
- * (BLE_GAP_EVENT_EXT_DISC) event handlers.
+ * (BLE_GAP_EVENT_EXT_DISC) event handlers. prim_phy is the report's
+ * primary PHY (BLE_HCI_LE_PHY_*), for the burst log only.
  * --------------------------------------------------------- */
 static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
-                             const uint8_t *data, uint8_t data_len)
+                             const uint8_t *data, uint8_t data_len, uint8_t prim_phy)
 {
     // Parse advertisement fields
     struct ble_hs_adv_fields fields;
@@ -315,12 +415,20 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     memset(&snap, 0, sizeof(snap));
     bool listed;
     int slot = -1;
+    // The burst log's count rides in the same section (burst_note_locked()).
+    uint16_t burst_ms = burst_now_ms();
+    uint8_t phy_bit = (prim_phy == BLE_HCI_LE_PHY_1M)    ? BURST_PHY_1M
+                    : (prim_phy == BLE_HCI_LE_PHY_CODED) ? BURST_PHY_CODED
+                                                         : BURST_PHY_OTHER;
     taskENTER_CRITICAL(&s_wl_lock);
     listed = (whitelist_find_locked(adv_mac) >= 0);
     if (listed) {
         slot = sensor_find_locked(adv_mac);
         if (slot < 0) slot = sensor_alloc_locked(adv_mac);
-        if (slot >= 0) memcpy(&snap, &s_sensors[slot], sizeof(snap));
+        if (slot >= 0) {
+            burst_note_locked(&s_sensors[slot], burst_ms, phy_bit);
+            memcpy(&snap, &s_sensors[slot], sizeof(snap));
+        }
     }
     taskEXIT_CRITICAL(&s_wl_lock);
     if (!listed || slot < 0) {
@@ -446,9 +554,9 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
     switch (event->type) {
 
     case BLE_GAP_EVENT_DISC:
-        // Legacy advertisement received (fallback path)
+        // Legacy advertisement received (fallback path): always on the 1M PHY
         process_leak_adv(&event->disc.addr, event->disc.rssi,
-                         event->disc.data, event->disc.length_data);
+                         event->disc.data, event->disc.length_data, BLE_HCI_LE_PHY_1M);
         break;
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
@@ -460,7 +568,7 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
             break;
         }
 
-        process_leak_adv(&ext->addr, ext->rssi, ext->data, ext->length_data);
+        process_leak_adv(&ext->addr, ext->rssi, ext->data, ext->length_data, ext->prim_phy);
         break;
     }
 #endif
@@ -632,6 +740,9 @@ static void ble_leak_scan_task(void *param)
             last_whitelist_reload = xTaskGetTickCount();
         }
 
+        // The burst log: a line for each sensor's burst that is over (paused or not).
+        burst_log();
+
         // Periodic scan-alive heartbeat (every 60s)
         if ((xTaskGetTickCount() - last_heartbeat_log) >= pdMS_TO_TICKS(60000)) {
             ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors", s_whitelist_count);
@@ -681,10 +792,10 @@ void app_ble_leak_reset_tracking(void)
 }
 
 void app_ble_leak_process_adv(const void *addr, int8_t rssi,
-                              const uint8_t *data, uint8_t data_len)
+                              const uint8_t *data, uint8_t data_len, uint8_t prim_phy)
 {
     if (ble_leak_rx_queue == NULL || s_whitelist_count == 0) {
         return;
     }
-    process_leak_adv((const ble_addr_t *)addr, rssi, data, data_len);
+    process_leak_adv((const ble_addr_t *)addr, rssi, data, data_len, prim_phy);
 }

@@ -1762,7 +1762,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISC:
         // Forward to leak scanner so leak sensors are detected during valve scan
         app_ble_leak_process_adv(&event->disc.addr, event->disc.rssi,
-                                 event->disc.data, event->disc.length_data);
+                                 event->disc.data, event->disc.length_data, BLE_HCI_LE_PHY_1M);
         handle_valve_disc(&event->disc.addr);
         return 0;
 
@@ -1771,7 +1771,8 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         if (event->ext_disc.data_status == BLE_GAP_EXT_ADV_DATA_STATUS_COMPLETE) {
             // Forward to leak scanner so leak sensors are detected during valve scan
             app_ble_leak_process_adv(&event->ext_disc.addr, event->ext_disc.rssi,
-                                     event->ext_disc.data, event->ext_disc.length_data);
+                                     event->ext_disc.data, event->ext_disc.length_data,
+                                     event->ext_disc.prim_phy);
             handle_valve_disc(&event->ext_disc.addr);
         }
         return 0;
