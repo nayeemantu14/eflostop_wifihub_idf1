@@ -164,15 +164,17 @@ static void portal_priority_close(const char *reason)
  * the router retry's covers the retry's attempt, and an open page's scans cover one sent from it.
  * The valve hunt's 1 s poll can still reach into the start of the router retry's attempt.
  * An open page's chain is limited: it counts from its first scan hold (s_chain_start), holds
- * only in its first RADIO_HOLD_CHAIN_MS, and when it reaches that limit (scan_hold_set()) BLE
- * gets the next RADIO_HOLD_LISTEN_MS to listen (s_listen_from, radio_listening()), with no hold
- * of any kind: the page's scans, and a connect attempt then (a portal submit, wifi_manager's own
- * retry), run with BLE on. The router retry, the one attempt the hub times itself, waits it out
- * instead (router_retry()). Then the next scan the page asks for starts a new chain, never right
- * behind another hold. A wet sensor's heartbeat, 2.5 s every 15 s, puts 2.5 s of bursts into
- * every 15 s listen time, so with the page open it is still heard at least about every 45 s, and
- * the page no longer keeps the BLE sensors unheard until it is closed. A page closed and opened
- * again within its chain's 45 s rejoins it.
+ * only in its first RADIO_HOLD_CHAIN_MS, and from that limit BLE gets RADIO_HOLD_LISTEN_MS to
+ * listen (s_listen_from, radio_listening()), with no hold of any kind. The listen time is set
+ * when a hold reaches the limit (scan_hold_set()), or when the page asks for a scan after it
+ * (cb_scan_start()), so it comes whenever the page is still open. In it the page's scans, and a
+ * connect attempt (a portal submit, wifi_manager's own retry), run with BLE on; the router
+ * retry, the one attempt the hub times itself, waits it out instead (router_retry()). Then the
+ * next scan the page asks for starts a new chain, never right behind another hold. A wet
+ * sensor's heartbeat, 2.5 s every 15 s, puts 2.5 s of bursts into every 15 s listen time, so with
+ * the page open it is still heard at least about every 45 s, and the page no longer keeps the BLE
+ * sensors unheard until it is closed. A page closed and opened again within its chain's 45 s
+ * rejoins it.
  * None while the STA is connected (it has its air time then, and BLE never pauses for nothing):
  * app_wifi_radio_hold_active() reads false and the callbacks set nothing. None is set in the
  * portal window either, where BLE is paused already. Unlike the window: no health hold (the
@@ -229,9 +231,10 @@ static TickType_t hold_deadline(uint32_t ms)
     return (t != 0) ? t : 1;   // 0 means "no hold"
 }
 
-// The listen time after a chain that reached its limit (set up to RADIO_HOLD_SCAN_MS ahead: not
-// yet until then). A stale start reads as listening again for RADIO_HOLD_LISTEN_MS once every
-// 2^32 ticks, which only lets BLE scan and holds a router retry back.
+// A chain's listen time, from its limit (set by a hold that reaches it, up to RADIO_HOLD_SCAN_MS
+// ahead: not yet until then, or by a scan the page asks for after it). A stale start reads as
+// listening again for RADIO_HOLD_LISTEN_MS once every 2^32 ticks, which only lets BLE scan and
+// holds a router retry back.
 static bool radio_listening(TickType_t now)
 {
     TickType_t from = s_listen_from;
@@ -397,7 +400,13 @@ static void cb_scan_start(void *pvParameter)
         s_chain_start = (now != 0) ? now : 1;
     }
     else if (into >= pdMS_TO_TICKS(RADIO_HOLD_CHAIN_MS))
-        return;   // the chain's listen time: this scan runs with BLE on
+    {
+        // The chain's listen time: this scan runs with BLE on. Set here too, from the limit, if no
+        // hold reached it (the page's order came late): the page is still open.
+        TickType_t end = s_chain_start + pdMS_TO_TICKS(RADIO_HOLD_CHAIN_MS);
+        s_listen_from = (end != 0) ? end : 1;
+        return;
+    }
     scan_hold_set(RADIO_HOLD_SCAN_MS);
 }
 
