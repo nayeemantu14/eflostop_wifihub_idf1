@@ -38,12 +38,13 @@ bool app_wifi_portal_priority_active(void);
  * the radio: the leak scanner and the valve hunt start nothing new and cancel their own scans
  * and connect attempts, and the valve hunt still runs while a leak response is pended. Unlike
  * the window: no health hold, no [PORTAL] log lines and no valve go-red stamp. A hold lasts
- * from a scan until a few seconds after it (so an open portal page, which asks for a scan
- * about every 3.8 s, keeps BLE paused until it is closed), or from a connect attempt until it
- * fails, or its IP, for at most 2.5 s; for the hub's own router retry (30 s after the last
- * attempt, on a router-fallback AP) from half a second before the attempt, 2.5 s in all. Holds
- * never run back to back, an open page's scans apart. It is never on while the STA is
- * connected, and none starts in the portal window. See app_wifi.c.
+ * from a scan until a few seconds after it (an open portal page asks for a scan about every
+ * 3.8 s, so its holds chain, for 30 s at most: then BLE listens 15 s with no hold of any
+ * kind, before the next chain), or from a connect attempt until it fails, or its IP, for at
+ * most 2.5 s; for the hub's own router retry (30 s after the last attempt, on a router-fallback
+ * AP) from half a second before the attempt, 2.5 s in all. Holds never run back to back, an
+ * open page's scans apart. It is never on while the STA is connected, and none starts in the
+ * portal window. See app_wifi.c.
  *
  * Lock-free: reads tick deadlines, each written by a single task. Safe from any task (the
  * NimBLE host task included), and returns false before Wi-Fi starts.
