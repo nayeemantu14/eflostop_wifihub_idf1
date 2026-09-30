@@ -62,10 +62,11 @@ void app_main(void)
     net_status_init();   /* network status LED coordinator (after ledQueue exists) */
     setupFleetLEDTask(); /* GPIO 48 overall device-health roll-up LED (independent of GPIO 38 network LED) */
 	configureUART();
-	/* the managed wifi_manager / http_server components log the site Wi-Fi password at
-	 * INFO (on every boot, and when the captive portal saves it). managed_components must
-	 * not be edited, so cap those two tags at WARN before Wi-Fi starts; their warnings and
-	 * errors still show, and app_wifi logs the connect/IP lines itself. */
+	/* the wifi_manager / http_server tags of the setup portal's component (components/
+	 * wifi_portal) are capped at WARN before Wi-Fi starts; their warnings and errors still
+	 * show, and app_wifi logs the connect/IP lines itself. The cap was added because the
+	 * registry copy logged the site Wi-Fi password at INFO; since 2.1.4 (C1) the component
+	 * logs the SSID and the password's length only, and the cap stays. */
 	esp_log_level_set("wifi_manager", ESP_LOG_WARN);
 	esp_log_level_set("http_server", ESP_LOG_WARN);
     app_wifi_start();

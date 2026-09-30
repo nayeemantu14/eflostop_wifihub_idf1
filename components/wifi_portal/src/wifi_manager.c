@@ -250,7 +250,11 @@ esp_err_t wifi_manager_save_sta_config(){
 				return esp_err;
 			}
 			change = true;
-			ESP_LOGI(TAG, "wifi_manager_wrote wifi_sta_config: ssid:%s",wifi_manager_config_sta->sta.ssid);
+			/* LOCAL PATCH (2.1.4 C1): no credential in the log. The SSID is bounded: a 32-byte one has
+			 * no terminator, and %s would run on into the password stored right after it. */
+			ESP_LOGI(TAG, "wifi_manager_wrote wifi_sta_config: ssid:%.*s",
+					(int)strnlen((char*)wifi_manager_config_sta->sta.ssid, sizeof(wifi_manager_config_sta->sta.ssid)),
+					(char*)wifi_manager_config_sta->sta.ssid);
 
 		}
 
@@ -264,7 +268,8 @@ esp_err_t wifi_manager_save_sta_config(){
 				return esp_err;
 			}
 			change = true;
-			ESP_LOGI(TAG, "wifi_manager_wrote wifi_sta_config: password:%s",wifi_manager_config_sta->sta.password);
+			ESP_LOGI(TAG, "wifi_manager_wrote wifi_sta_config: pwd_len:%u",
+					(unsigned)strnlen((char*)wifi_manager_config_sta->sta.password, sizeof(wifi_manager_config_sta->sta.password)));
 		}
 
 		sz = sizeof(tmp_settings);
@@ -287,8 +292,11 @@ esp_err_t wifi_manager_save_sta_config(){
 			}
 			change = true;
 
-			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_ssid: %s",wifi_settings.ap_ssid);
-			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_pwd: %s",wifi_settings.ap_pwd);
+			/* LOCAL PATCH (2.1.4 C1): as above */
+			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_ssid: %.*s",
+					(int)strnlen((char*)wifi_settings.ap_ssid, sizeof(wifi_settings.ap_ssid)), (char*)wifi_settings.ap_ssid);
+			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_pwd_len: %u",
+					(unsigned)strnlen((char*)wifi_settings.ap_pwd, sizeof(wifi_settings.ap_pwd)));
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_channel: %i",wifi_settings.ap_channel);
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_hidden (1 = yes): %i",wifi_settings.ap_ssid_hidden);
 			ESP_LOGD(TAG, "wifi_manager_wrote wifi_settings: SoftAP_bandwidth (1 = 20MHz, 2 = 40MHz): %i",wifi_settings.ap_bandwidth);
@@ -374,9 +382,15 @@ bool wifi_manager_fetch_wifi_sta_config(){
 		nvs_sync_unlock();
 
 
-		ESP_LOGI(TAG, "wifi_manager_fetch_wifi_sta_config: ssid:%s password:%s",wifi_manager_config_sta->sta.ssid,wifi_manager_config_sta->sta.password);
-		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_ssid:%s",wifi_settings.ap_ssid);
-		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_pwd:%s",wifi_settings.ap_pwd);
+		/* LOCAL PATCH (2.1.4 C1): no credential in the log, and the SSIDs bounded (see the save above) */
+		ESP_LOGI(TAG, "wifi_manager_fetch_wifi_sta_config: ssid:%.*s pwd_len:%u",
+				(int)strnlen((char*)wifi_manager_config_sta->sta.ssid, sizeof(wifi_manager_config_sta->sta.ssid)),
+				(char*)wifi_manager_config_sta->sta.ssid,
+				(unsigned)strnlen((char*)wifi_manager_config_sta->sta.password, sizeof(wifi_manager_config_sta->sta.password)));
+		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_ssid:%.*s",
+				(int)strnlen((char*)wifi_settings.ap_ssid, sizeof(wifi_settings.ap_ssid)), (char*)wifi_settings.ap_ssid);
+		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_pwd_len:%u",
+				(unsigned)strnlen((char*)wifi_settings.ap_pwd, sizeof(wifi_settings.ap_pwd)));
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_channel:%i",wifi_settings.ap_channel);
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_hidden (1 = yes):%i",wifi_settings.ap_ssid_hidden);
 		ESP_LOGD(TAG, "wifi_manager_fetch_wifi_settings: SoftAP_bandwidth (1 = 20MHz, 2 = 40MHz)%i",wifi_settings.ap_bandwidth);

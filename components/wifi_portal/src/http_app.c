@@ -174,7 +174,8 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 			memset(config, 0x00, sizeof(wifi_config_t));
 			memcpy(config->sta.ssid, ssid, ssid_len);
 			memcpy(config->sta.password, password, password_len);
-			ESP_LOGI(TAG, "ssid: %s, password: %s", ssid, password);
+			/* LOCAL PATCH (2.1.4 C1): no credential in the log, the password's length only */
+			ESP_LOGI(TAG, "ssid: %s, pwd_len: %u", ssid, (unsigned)password_len);
 			ESP_LOGD(TAG, "http_server_post_handler: wifi_manager_connect_async() call");
 			wifi_manager_connect_async();
 
