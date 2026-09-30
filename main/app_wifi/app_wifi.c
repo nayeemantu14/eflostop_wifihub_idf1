@@ -166,12 +166,13 @@ static void portal_priority_close(const char *reason)
  * An open page's chain is limited: it counts from its first scan hold (s_chain_start), holds
  * only in its first RADIO_HOLD_CHAIN_MS, and when it reaches that limit (scan_hold_set()) BLE
  * gets the next RADIO_HOLD_LISTEN_MS to listen (s_listen_from, radio_listening()), with no hold
- * of any kind: the page's scans, and any connect attempt then (a portal submit, wifi_manager's
- * own retry, the router retry), run with BLE on. Then the next scan the page asks for starts a
- * new chain, never right behind another hold. A wet sensor's heartbeat, 2.5 s every 15 s, puts
- * 2.5 s of bursts into every 15 s listen time, so with the page open it is still heard at least
- * about every 45 s, and the page no longer keeps the BLE sensors unheard until it is closed. A
- * page closed and opened again within its chain's 45 s rejoins it.
+ * of any kind: the page's scans, and a connect attempt then (a portal submit, wifi_manager's own
+ * retry), run with BLE on. The router retry, the one attempt the hub times itself, waits it out
+ * instead (router_retry()). Then the next scan the page asks for starts a new chain, never right
+ * behind another hold. A wet sensor's heartbeat, 2.5 s every 15 s, puts 2.5 s of bursts into
+ * every 15 s listen time, so with the page open it is still heard at least about every 45 s, and
+ * the page no longer keeps the BLE sensors unheard until it is closed. A page closed and opened
+ * again within its chain's 45 s rejoins it.
  * None while the STA is connected (it has its air time then, and BLE never pauses for nothing):
  * app_wifi_radio_hold_active() reads false and the callbacks set nothing. None is set in the
  * portal window either, where BLE is paused already. Unlike the window: no health hold (the
@@ -230,7 +231,7 @@ static TickType_t hold_deadline(uint32_t ms)
 
 // The listen time after a chain that reached its limit (set up to RADIO_HOLD_SCAN_MS ahead: not
 // yet until then). A stale start reads as listening again for RADIO_HOLD_LISTEN_MS once every
-// 2^32 ticks, which only lets BLE scan.
+// 2^32 ticks, which only lets BLE scan and holds a router retry back.
 static bool radio_listening(TickType_t now)
 {
     TickType_t from = s_listen_from;
@@ -285,13 +286,15 @@ static const char *radio_hold_reason(TickType_t now)
  * restore at boot, or a portal submit: s_attempt_tick still 0). BLE is paused
  * RADIO_HOLD_RETRY_LEAD_MS ahead (s_retry_until), so the leak scanner (500 ms loop) is off the
  * radio when the connect's scan for the router starts; the valve hunt (1 s poll) may still be on.
- * That hold lasts RADIO_HOLD_RETRY_MS in all, the attempt's included (the radio hold above). The
- * order is wifi_manager_connect_async() (CONNECTION_REQUEST_USER): a failure starts no retry timer
- * and no AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves
- * the config only if it changed. The config tried is the one in RAM: the saved one, unless a
- * portal submit that failed replaced it (then what was typed, until a reboot reloads the saved
- * one), so after a mistyped submit the retries fail, router back or not, until a reboot or a new
- * submit.
+ * That hold lasts RADIO_HOLD_RETRY_MS in all, the attempt's included (the radio hold above). No
+ * retry starts in an open page's listen time, or so close before one that its hold would reach
+ * into it (radio_listening()), where its attempt would run with BLE on: it waits, 17.5 s at most
+ * (RADIO_HOLD_RETRY_MS + RADIO_HOLD_LISTEN_MS), after the page deferral below as well. The order
+ * is wifi_manager_connect_async() (CONNECTION_REQUEST_USER): a failure starts no retry timer and
+ * no AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves the
+ * config only if it changed. The config tried is the one in RAM: the saved one, unless a portal
+ * submit that failed replaced it (then what was typed, until a reboot reloads the saved one), so
+ * after a mistyped submit the retries fail, router back or not, until a reboot or a new submit.
  * wifi_manager's own retries, its first three after a link loss and its endless ones after
  * "Wi-Fi lost after setup" (the SoftAP stays up and its retry timer keeps running), come about
  * every 10 s, so the 30 s rule adds none beside them.
@@ -654,6 +657,11 @@ static void router_retry(wifi_task_state_t *st)
         return;
     }
     st->defer_logged = false;
+    // Not in a chain's listen time, nor so close before one that the hold would reach into it:
+    // the listen time masks every hold, so the attempt's scan for the router would run beside the
+    // leak scan. It waits, 17.5 s at most (see the router retry above).
+    if (radio_listening(now) || radio_listening(now + pdMS_TO_TICKS(RADIO_HOLD_RETRY_MS)))
+        return;
     // Not right behind another hold (see the radio hold above), unless a page's scans hold BLE
     // now: a retry that has waited out ROUTER_RETRY_PAGE_MAX_MS joins them.
     if (!hold_running(s_scan_until, now) && radio_hold_near(now))
