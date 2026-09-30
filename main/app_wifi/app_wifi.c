@@ -275,9 +275,14 @@ static const char *radio_hold_reason(TickType_t now)
  * wifi_manager retries a lost router 3 times, then opens the SoftAP as a router-fallback portal,
  * and its START_AP stops the retry timer (the LOCAL PATCH in wifi_manager.c, against a scan
  * race): nothing tried the router again, and on the 2026-09-29 bench the hub never rejoined
- * once the router was back. So while the SoftAP is up with credentials saved and the STA is
- * down (router_fallback()), wifi_task asks wifi_manager for a connect once no attempt has
- * started or ended for ROUTER_RETRY_MS and none is in flight. BLE is paused
+ * once the router was back. wifi_manager can also leave the STA idle for good with the SoftAP
+ * down: a portal submit while the STA is connected sets its user-request bit, which stays set
+ * since no attempt starts, so after the setup AP has stopped the next link loss takes its
+ * "user connect failed" branch, with no retry timer and no AP. So whenever the STA is down with
+ * credentials in its config, outside the portal window (router_fallback()), SoftAP up or not,
+ * wifi_task asks wifi_manager for a connect once no attempt has started or ended for
+ * ROUTER_RETRY_MS and none is in flight; never before wifi_manager's own first attempt (its
+ * restore at boot, or a portal submit: s_attempt_tick still 0). BLE is paused
  * RADIO_HOLD_RETRY_LEAD_MS ahead (s_retry_until), so the leak scanner (500 ms loop) is off the
  * radio when the connect's scan for the router starts; the valve hunt (1 s poll) may still be on.
  * That hold lasts RADIO_HOLD_RETRY_MS in all, the attempt's included (the radio hold above). The
@@ -287,17 +292,18 @@ static const char *radio_hold_reason(TickType_t now)
  * portal submit that failed replaced it (then what was typed, until a reboot reloads the saved
  * one), so after a mistyped submit the retries fail, router back or not, until a reboot or a new
  * submit.
- * The same covers "Wi-Fi lost after setup", where wifi_manager's own retry timer keeps running:
- * its attempts come about every 10 s, so the 30 s rule adds none.
+ * wifi_manager's own retries, its first three after a link loss and its endless ones after
+ * "Wi-Fi lost after setup" (the SoftAP stays up and its retry timer keeps running), come about
+ * every 10 s, so the 30 s rule adds none beside them.
  *
  * Counted from an attempt's end too, not only its start: every lost-link disconnect arms
  * wifi_manager's one-shot retry timer (WIFI_MANAGER_RETRY_TIMER, 5 s) before our
- * STA_DISCONNECTED callback runs, and with the SoftAP up nothing stops it. The first link loss
- * while the SoftAP is up (within 60 s of a rejoin, or of a setup) can come 30 s or more after
- * the last attempt started, and a retry sent then would still be connecting when that timer's
- * CONNECT_STA arrives, which reboots the hub (below). ROUTER_RETRY_MS after the last disconnect
- * the timer has fired (its attempt then counts) or START_AP has stopped it. On the fallback AP a
- * retry therefore comes ROUTER_RETRY_MS after the previous one failed: about every 33-36 s.
+ * STA_DISCONNECTED callback runs, and only START_AP stops it. A link loss can come long after
+ * the last attempt started (a link up for minutes), and a retry sent then would still be
+ * connecting when that timer's CONNECT_STA arrives, which reboots the hub (below).
+ * ROUTER_RETRY_MS after the last disconnect the timer has fired (its attempt then counts) or
+ * START_AP has stopped it. A retry therefore comes ROUTER_RETRY_MS after the previous one
+ * failed, on the fallback AP or with the SoftAP down: about every 33-36 s.
  *
  * Never a second connect while one is in flight: wifi_manager's CONNECT_STA would then call
  * esp_wifi_set_config() on a connecting STA, which fails ("sta is connecting, cannot set
@@ -321,7 +327,6 @@ static const char *radio_hold_reason(TickType_t now)
 #define ROUTER_RETRY_PAGE_MAX_MS  300000   // an open portal page defers one at most this long
 #define ROUTER_RETRY_PAGE_OPEN_MS 10000    // the page counts as open this long after a scan order
 
-static volatile bool s_ap_up = false;               // the SoftAP is up; wifi_manager task only
 static volatile bool s_attempt_in_flight = false;   // wifi_manager task only
 static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end; wifi_manager task only
 static volatile TickType_t s_scan_asked = 0;        // the last scan order; wifi_manager task only
@@ -333,15 +338,14 @@ static volatile TickType_t s_scan_asked = 0;        // the last scan order; wifi
 static void cb_ap_started(void *pvParameter)
 {
     (void)pvParameter;
-    s_ap_up = true;
     const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
     if (sta == NULL || sta->sta.ssid[0] == '\0')
     {
         s_setup_ok_tick = 0;   // also a re-open after the portal's forget: no setup in it yet
         portal_priority_open();
     }
-    // Router fallback: BLE scanning stays on apart from the radio holds, and wifi_task retries
-    // the router from here on (router_retry()).
+    // Router fallback: BLE scanning stays on apart from the radio holds, and wifi_task keeps
+    // retrying the router, as it does whenever the STA is down (router_retry()).
     else if (!s_portal_priority)
         ESP_LOGI(WIFI_TAG, "SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on");
 }
@@ -352,7 +356,6 @@ static void cb_ap_started(void *pvParameter)
 static void cb_ap_stopped(void *pvParameter)
 {
     (void)pvParameter;
-    s_ap_up = false;
     portal_priority_close("AP stopped");
 }
 
@@ -598,12 +601,13 @@ static void radio_hold_log(wifi_task_state_t *st)
     }
 }
 
-// The SoftAP is up with credentials in the STA config and the STA is down, outside the portal
-// window: wifi_manager's fallback after its retries, or a SoftAP left up by "Wi-Fi lost after
-// setup". The flags are the wifi_manager task's; a stale read costs one pass.
+// The STA is down with credentials in its config, outside the portal window, SoftAP up or not:
+// wifi_manager's fallback AP after its retries, a SoftAP left up by "Wi-Fi lost after setup", or
+// the STA left idle with no AP (see the router retry above). The flags are the wifi_manager
+// task's; a stale read costs one pass.
 static bool router_fallback(void)
 {
-    if (!s_ap_up || s_sta_connected || s_portal_priority)
+    if (s_sta_connected || s_portal_priority)
         return false;
     const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
     return sta != NULL && sta->sta.ssid[0] != '\0';
@@ -633,9 +637,11 @@ static void router_retry(wifi_task_state_t *st)
         st->defer_logged = false;
         return;
     }
-    // Since the last attempt started or ended; no attempt yet counts as long ago.
-    TickType_t age = (s_attempt_tick != 0) ? now - s_attempt_tick
-                                            : pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS);
+    // Since the last attempt started or ended. None before wifi_manager's first: at boot its
+    // restore's CONNECT_STA can still be queued, and a retry then would reach a connecting STA.
+    if (s_attempt_tick == 0)
+        return;
+    TickType_t age = now - s_attempt_tick;
     if (s_attempt_in_flight || st->retry_pending || age < pdMS_TO_TICKS(ROUTER_RETRY_MS))
         return;
     if (page_open(now) && age < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS))
@@ -658,8 +664,8 @@ static void router_retry(wifi_task_state_t *st)
     radio_hold_log(st);   // its ON line comes before the retry's
     vTaskDelay(pdMS_TO_TICKS(RADIO_HOLD_RETRY_LEAD_MS));
     // Again after the pause: an attempt may have started (a portal submit) or ended meanwhile, or
-    // the STA or the SoftAP changed state. Then nothing is sent, and the hold runs out: it covers
-    // an attempt that started in it, which took no hold of its own.
+    // the STA, the window or the config changed. Then nothing is sent, and the hold runs out: it
+    // covers an attempt that started in it, which took no hold of its own.
     if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != st->retry_mark)
         return;
     st->retry_pending = true;
