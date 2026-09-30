@@ -35,6 +35,7 @@ function to process requests, decode URLs, serve files, etc. etc.
 #define HTTP_APP_H_INCLUDED
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <esp_http_server.h>
 
 #ifdef __cplusplus
@@ -64,6 +65,43 @@ void http_app_stop();
  * @return ESP_OK in case of success, ESP_ERR_INVALID_ARG if the method is unsupported.
  */
 esp_err_t http_app_set_handler_hook( httpd_method_t method,  esp_err_t (*handler)(httpd_req_t *r)  );
+
+
+/* LOCAL PATCH (2.1.4 C10a): the activity hook */
+
+/**
+ * @brief What a portal client did, as reported to the activity hook.
+ */
+typedef enum http_app_activity_t {
+	HTTP_APP_ACT_DNS = 0,		/**< a query to the captive DNS (dns_server task) */
+	HTTP_APP_ACT_PROBE_302,		/**< a request for another host, answered with the 302 to the portal */
+	HTTP_APP_ACT_PAGE,			/**< the page or one of its assets */
+	HTTP_APP_ACT_API_USER,		/**< a user action on the page: POST or DELETE /connect.json */
+	HTTP_APP_ACT_API_BG,		/**< a request the page makes on its own: GET /ap.json */
+	HTTP_APP_ACT_STATUS,		/**< GET /status.json */
+	HTTP_APP_ACT_COUNT
+} http_app_activity_t;
+
+/**
+ * @brief The activity hook. Called on the httpd task for every request the portal answers itself
+ * (PROBE_302, PAGE, API_USER, API_BG, STATUS: not a user hook's URI nor a 404), at its start,
+ * and on the dns_server task for every DNS query it answers (DNS): so on two tasks at once.
+ * client_ip is the client's IPv4 address in network byte order (as esp_ip4_addr_t.addr),
+ * 0 if unknown. The request waits for the hook: it must be short and must not block.
+ */
+typedef void (*http_app_activity_hook_t)(http_app_activity_t kind, uint32_t client_ip);
+
+/**
+ * @brief sets the activity hook. NULL (the default) disables it. A plain store: it can be set
+ * before wifi_manager_start().
+ */
+void http_app_set_activity_hook(http_app_activity_hook_t hook);
+
+/**
+ * @brief reports one activity to the hook, if one is set. For the component's own tasks
+ * (the dns_server task).
+ */
+void http_app_note_activity(http_app_activity_t kind, uint32_t client_ip);
 
 
 #ifdef __cplusplus

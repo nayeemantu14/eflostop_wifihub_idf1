@@ -52,6 +52,7 @@ Contains the freeRTOS task for the DNS server that processes the requests.
 
 #include "wifi_manager.h"
 #include "dns_server.h"
+#include "http_app.h"
 
 static const char TAG[] = "dns_server";
 static TaskHandle_t task_dns_server = NULL;
@@ -128,6 +129,9 @@ void dns_server(void *pvParameters) {
         if ( length > 0   &&  ((length + sizeof(dns_answer_t)-1) < DNS_ANSWER_MAX_SIZE)   ) {
 
         	data[length] = '\0'; /*in case there's a bogus domain name that isn't null terminated */
+
+            /* LOCAL PATCH (2.1.4 C10a): the activity hook sees each query answered, and its sender */
+            http_app_note_activity(HTTP_APP_ACT_DNS, client.sin_addr.s_addr);
 
             /* Generate header message */
             memcpy(response, data, sizeof(dns_header_t));
