@@ -221,7 +221,8 @@ static const char *radio_hold_reason(TickType_t now)
  * wifi_manager_connect_async() (CONNECTION_REQUEST_USER): a failure starts no retry timer and no
  * AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves the
  * config only if it changed. The config tried is the one in RAM: the saved one, unless a portal
- * submit that failed replaced it (then what was typed, until a reboot reloads the saved one).
+ * submit that failed replaced it (then what was typed, until a reboot reloads the saved one), so
+ * after a mistyped submit the retries fail, router back or not, until a reboot or a new submit.
  * The same covers "Wi-Fi lost after setup", where wifi_manager's own retry timer keeps running:
  * its attempts come about every 10 s, so the 30 s rule adds none.
  *
@@ -562,7 +563,9 @@ static void router_retry(wifi_task_state_t *st)
         return;
     }
     st->retries++;
-    ESP_LOGI(WIFI_TAG, "router fallback: retrying the saved network (attempt %u)", st->retries);
+    // "configured", not "saved": after a portal submit that failed, the STA config in RAM holds
+    // what was typed (see the router retry above).
+    ESP_LOGI(WIFI_TAG, "router fallback: retrying the configured network (attempt %u)", st->retries);
     wifi_manager_connect_async();
 }
 
