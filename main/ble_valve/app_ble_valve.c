@@ -399,7 +399,7 @@ static bool leak_response_pending(void)
 }
 
 // True while the portal priority window, or a Wi-Fi radio hold (around a Wi-Fi scan or connect
-// attempt while the STA is down: a few seconds, or up to 30 s while a setup page is open), keeps
+// attempt while the STA is down: a few seconds, or up to 20 s while a setup page is in use), keeps
 // the valve hunt and new connects off the radio. Leak protection outranks both: while a leak
 // response is pended, the hunt and the connect run anyway, so a LoRa-triggered close reaches a
 // valve that was not linked when the window opened (in a boot-time window it never is), and the
@@ -408,7 +408,7 @@ static bool leak_response_pending(void)
 // so the health engine counts its timeouts from the first such hunt since the pause began or the
 // valve last linked (health_note_valve_leak_hunt(), called where start_scan() lets the hunt run
 // and on every portal_priority_poll() pass while one runs). A radio hold stamps nothing and logs
-// no [PORTAL] line: it lasts 30 s at most, with BLE on between, far below the valve's
+// no [PORTAL] line: it lasts about 20 s at most, with BLE on between, far below the valve's
 // minutes-long timeouts, and the health engine does not pause for it.
 static bool portal_holds_valve(void)
 {
@@ -2859,7 +2859,7 @@ static void on_stack_sync(void)
 //   is wanted with no link up or being made.
 //   While a leak response lets a hunt or a connect run in the window, on every pass: tell the
 //   health engine, which counts the valve's timeouts from it (health_note_valve_leak_hunt()).
-//   Not for a radio hold, which lasts 30 s at most and pauses no health timeout.
+//   Not for a radio hold, which lasts about 20 s at most and pauses no health timeout.
 // Only the window's edges and cancels are logged: app_wifi.c prints each radio hold's start
 // and end, and the hunt's restart prints its own "[SCAN] Starting scan" line.
 // g_connect_requested is never touched. start_scan() and handle_valve_disc() check the

@@ -581,8 +581,8 @@ static void ble_leak_scan_task(void *param)
         // either is on. Only OUR scan is cancelled: a valve hunt belongs to the valve module,
         // which stops it on its own task, and cancelling it here would leave that module
         // believing it still scans (its is_scanning would then block every later hunt).
-        // A hold (a few seconds around a Wi-Fi scan or connect attempt, up to 30 s while a
-        // setup page is open) logs nothing here: app_wifi.c prints its start and end, and the
+        // A hold (a few seconds around a Wi-Fi scan or connect attempt, up to 20 s while a
+        // setup page is in use) logs nothing here: app_wifi.c prints its start and end, and the
         // restart below "Extended passive scan started".
         bool portal = app_wifi_portal_priority_active();
         if (portal || app_wifi_radio_hold_active()) {

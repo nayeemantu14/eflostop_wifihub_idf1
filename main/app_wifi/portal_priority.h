@@ -31,21 +31,23 @@ bool app_wifi_portal_priority_active(void);
 
 /**
  * @brief True while a Wi-Fi radio hold runs: the STA is not connected and Wi-Fi is scanning
- *        or trying to connect, for a few seconds at a time, or up to 30 s while a setup page
- *        is open (then 15 s with none).
+ *        or trying to connect, for a few seconds at a time, or up to 8 s at a time while a
+ *        setup page is in use (then 4 s with none but a portal submit's).
  *
  * BLE scanning pauses for it as for the portal priority window, so a Wi-Fi scan (the portal
  * page's network list) or a connect attempt (whose first step is a scan for the router) gets
  * the radio: the leak scanner and the valve hunt start nothing new and cancel their own scans
  * and connect attempts, and the valve hunt still runs while a leak response is pended. Unlike
  * the window: no health hold, no [PORTAL] log lines and no valve go-red stamp. A hold lasts
- * from a scan until a few seconds after it (an open portal page asks for a scan about every
- * 3.8 s, so its holds chain, for 30 s at most: then BLE listens 15 s with no hold of any
- * kind, before the next chain), or from a connect attempt until it fails, or its IP, for at
- * most 2.5 s; for the hub's own router retry (30 s after the last attempt, while the STA is
- * down with credentials saved) from half a second before the attempt, 2.5 s in all, and never
- * in those 15 s. Holds never run back to back, an open page's scans apart. It is never on
- * while the STA is connected, and none starts in the portal window. See app_wifi.c.
+ * from a scan until a few seconds after it (a portal page in use asks for a scan about every
+ * 3.8 s, so its holds chain, in 12 s periods whose last 4 s have no hold, and after 3 min BLE
+ * listens 105 s with none, before the periods start over), from a portal submit until it
+ * fails, or its IP, for at most 7 s, through those 4 s too, or from another connect attempt
+ * until it fails, or its IP, for at most 2.5 s; for the hub's own router retry (30 s after the
+ * last attempt, while the STA is down with credentials saved) from half a second before the
+ * attempt, 2.5 s in all, and never in a page's 4 s or 105 s. Holds never run back to back, a
+ * page's scans and its submit apart. It is never on while the STA is connected, and none
+ * starts in the portal window. See app_wifi.c.
  *
  * Lock-free: reads tick deadlines, each written by a single task. Safe from any task (the
  * NimBLE host task included), and returns false before Wi-Fi starts.
