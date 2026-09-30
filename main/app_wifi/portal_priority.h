@@ -31,7 +31,8 @@ bool app_wifi_portal_priority_active(void);
 
 /**
  * @brief True while a Wi-Fi radio hold runs: the STA is not connected and Wi-Fi is scanning
- *        or trying to connect, for a few seconds at a time.
+ *        or trying to connect, for a few seconds at a time, or up to 30 s while a setup page
+ *        is open (then 15 s with none).
  *
  * BLE scanning pauses for it as for the portal priority window, so a Wi-Fi scan (the portal
  * page's network list) or a connect attempt (whose first step is a scan for the router) gets
@@ -42,9 +43,9 @@ bool app_wifi_portal_priority_active(void);
  * 3.8 s, so its holds chain, for 30 s at most: then BLE listens 15 s with no hold of any
  * kind, before the next chain), or from a connect attempt until it fails, or its IP, for at
  * most 2.5 s; for the hub's own router retry (30 s after the last attempt, while the STA is
- * down with credentials saved) from half a second before the attempt, 2.5 s in all. Holds
- * never run back to back, an open page's scans apart. It is never on while the STA is
- * connected, and none starts in the portal window. See app_wifi.c.
+ * down with credentials saved) from half a second before the attempt, 2.5 s in all, and never
+ * in those 15 s. Holds never run back to back, an open page's scans apart. It is never on
+ * while the STA is connected, and none starts in the portal window. See app_wifi.c.
  *
  * Lock-free: reads tick deadlines, each written by a single task. Safe from any task (the
  * NimBLE host task included), and returns false before Wi-Fi starts.

@@ -53,7 +53,8 @@ void wifi_task(void *pvParameter);
  *
  * NOT for the fallback AP that wifi_manager opens after failed retries while credentials are
  * still saved (router outage): that is the field case BLE-from-boot leak protection is for,
- * so BLE keeps scanning there, apart from the few-second Wi-Fi radio holds below.
+ * so BLE keeps scanning there, apart from the Wi-Fi radio holds below (a few seconds each, or
+ * up to 30 s in a row while a setup page is open).
  *
  * Every transition runs on the wifi_manager task (the START_AP, STOP_AP, GOT_IP and
  * STA_DISCONNECTED callbacks), which is therefore the only writer of the flag and of
@@ -142,7 +143,7 @@ static void portal_priority_close(const char *reason)
  * got past "Scanning for networks..." with many networks in range, and the connect attempts
  * ended NO_AP_FOUND (201): beside the continuous 1M + Coded leak scan (on a valve hub also the
  * valve hunt) a Wi-Fi scan hears next to nothing, and a connect attempt starts with a scan for
- * the SSID.
+ * the SSID. An open setup page's scan holds chain, though, for up to 30 s (below).
  *
  * A hold is a deadline (a tick, 0 = none), never a flag, so it always ends. Each has one writer:
  *   - s_scan_until (wifi_manager task): from a Wi-Fi scan order (the portal page's GET /ap.json
@@ -161,7 +162,9 @@ static void portal_priority_close(const char *reason)
  * run back to back either, the page's scans apart: none starts while another is on or ended less
  * than RADIO_HOLD_GAP_MS ago (radio_hold_near()), so BLE hears at least about 1 s between two,
  * and at least about 1 s of that burst. A connect attempt started then takes no hold of its own:
- * the router retry's covers the retry's attempt, and an open page's scans cover one sent from it.
+ * the router retry's covers the retry's attempt, and an open page's scans, while they hold, one
+ * sent from it. One that starts in the gap just after a hold ended (wifi_manager's own retry just
+ * after the page closed, say) runs with BLE on: the price of keeping holds apart.
  * The valve hunt's 1 s poll can still reach into the start of the router retry's attempt.
  * An open page's chain is limited: it counts from its first scan hold (s_chain_start), holds
  * only in its first RADIO_HOLD_CHAIN_MS, and from that limit BLE gets RADIO_HOLD_LISTEN_MS to
@@ -296,8 +299,11 @@ static const char *radio_hold_reason(TickType_t now)
  * is wifi_manager_connect_async() (CONNECTION_REQUEST_USER): a failure starts no retry timer and
  * no AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves the
  * config only if it changed. The config tried is the one in RAM: the saved one, unless a portal
- * submit that failed replaced it (then what was typed, until a reboot reloads the saved one), so
- * after a mistyped submit the retries fail, router back or not, until a reboot or a new submit.
+ * submit replaced it, one that failed or one wifi_manager ignored because the STA was connected
+ * (the one that leads to the idle state above): then what was typed, until a reboot reloads the
+ * saved one. So after a submit that does not match the router (a mistyped password, another
+ * SSID) the retries fail, router back or not, until a reboot or a new submit; in the idle state,
+ * with no SoftAP to submit from, until a reboot (or the 10 s reset).
  * wifi_manager's own retries, its first three after a link loss and its endless ones after
  * "Wi-Fi lost after setup" (the SoftAP stays up and its retry timer keeps running), come about
  * every 10 s, so the 30 s rule adds none beside them.
@@ -687,8 +693,8 @@ static void router_retry(wifi_task_state_t *st)
         return;
     st->retry_pending = true;
     st->retries++;
-    // "configured", not "saved": after a portal submit that failed, the STA config in RAM holds
-    // what was typed (see the router retry above).
+    // "configured", not "saved": after a portal submit that failed, or one made while the STA was
+    // connected, the STA config in RAM holds what was typed (see the router retry above).
     ESP_LOGI(WIFI_TAG, "router fallback: retrying the configured network (attempt %u)", st->retries);
     wifi_manager_connect_async();
 }
