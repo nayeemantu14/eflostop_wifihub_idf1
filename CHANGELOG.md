@@ -84,28 +84,40 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
     valve hunt) leave a Wi-Fi scan almost no air time. On the same bench the fallback portal page stayed on
     "Scanning for networks..." with many networks in range, and the connect attempts, which start with a scan
     for the router, ended "no AP found" (reason 201).
-  - **Router retry.** While the fallback SoftAP is up with credentials saved and Wi-Fi is not connected, the
-    hub asks the Wi-Fi manager to connect to the configured network once no attempt has started or ended for
-    30 s: about every 33-37 s. It rejoins within about 40 s of the router's Wi-Fi coming back, and the
-    fallback SoftAP stops about 60 s after that. A retry is never sent while an attempt is in flight, nor while
-    the portal page is open (a submit there sends its own connect), for at most 5 min after the last attempt.
-    A failed retry starts no Wi-Fi manager retry and changes nothing in NVS; a successful one saves the
-    credentials only if they changed (the Wi-Fi manager's rule).
+  - **Router retry.** Whenever Wi-Fi is not connected, credentials are saved and the setup portal's window is
+    not open, the hub asks the Wi-Fi manager to connect to the configured network once no attempt has started
+    or ended for 30 s: about every 33-36 s. That covers the fallback portal, and also a hub that the Wi-Fi
+    manager leaves idle with no SoftAP at all (see Known limitations). It rejoins within about 40 s of the
+    router's Wi-Fi coming back, and the fallback SoftAP stops about 60 s after that. A retry is never sent while
+    an attempt is in flight, nor before the Wi-Fi manager's own first attempt after boot, nor while the portal
+    page is open (a submit there sends its own connect; the page counts as open until 10 s after its last
+    network-list request), for at most 5 min after the last attempt. A failed retry starts no Wi-Fi manager
+    retry and changes nothing in NVS; a successful one saves the credentials only if they changed (the Wi-Fi
+    manager's rule).
   - **Wi-Fi radio holds.** While Wi-Fi is not connected, BLE scanning (the leak scan and the valve hunt) pauses
-    for a few seconds around each Wi-Fi scan and each connect attempt, then resumes:
-    - a connect attempt holds from its start until 1 s after it fails, or until its IP, at most 10 s (with the
-      router off an attempt takes about 5 s). The router retry pauses BLE 1 s before its attempt too;
-    - a Wi-Fi scan (the portal page asks for one every 3.8 s) holds until 4 s after it ends, at most 6 s. The
-      tail outlasts the page's next request, so BLE stays paused while the page is open, and its list fills.
+    around each Wi-Fi scan and each connect attempt, then resumes:
+    - a connect attempt holds from its start until it fails or gets its IP, for at most 2.5 s; the rest of a
+      longer attempt (with the router off an attempt takes about 5 s) runs with BLE on. The router retry's
+      hold starts 0.5 s before its attempt and lasts 2.5 s in all. With the leak scanner's 500 ms loop BLE is
+      off about 3 s at most, less than the 4 s burst a BLE leak sensor sends when it turns wet;
+    - holds never run back to back, the page's scans apart: none starts while another is on or ended less than
+      1.5 s ago, so BLE listens at least about 1 s between two;
+    - a Wi-Fi scan (the portal page asks for one about every 3.8 s) holds until 4 s after it ends, at most 6 s,
+      so an open page's holds chain and its list fills. The chain holds BLE for 30 s from its first scan; then
+      BLE listens for 15 s with no hold of any kind (the page's scans, a submit's connect and the Wi-Fi
+      manager's own attempts run with BLE on, and the list may fill more slowly; the router retry waits), and
+      the page's next scan starts a new chain. A wet BLE sensor (a 2.5 s burst every 15 s) is therefore heard
+      at least about every 45 s while a page is open.
 
     NimBLE stays up, a linked valve stays linked and takes its commands, and a leak close pended for a valve
     that is not linked still hunts it. Unlike the setup portal's window there is no health hold, no task
     priority raise and no `[PORTAL]` line: the sensors' 600 s and the valve's 180 s keep counting. No hold is
     set while Wi-Fi is connected, nor in the portal window (unchanged).
-  - **Trade-off (user decision, 2026-09-29).** During a router outage BLE leak sensors go unheard for a few
-    seconds at a time: about 4-7.5 s every 33-37 s on the fallback portal (13-21 % of the time), about 40-60 %
-    of the time during the Wi-Fi manager's own retries (the first 30-40 s of an outage), and the whole time
-    the portal page is open. See Known limitations for the leak latency this costs.
+  - **Trade-off (user decisions, 2026-09-29 and 2026-09-30).** During a router outage BLE leak sensors go
+    unheard for up to about 3 s at a time: once every 33-36 s with the router retry (about 7-9 % of the time),
+    about 25-33 % of the time while the Wi-Fi manager retries on its own (the first 30-40 s of an outage, and
+    a whole outage that follows a router flap), and 30 s of every 45 s or so while a portal page is open. See
+    Known limitations for the leak latency this costs.
   - The UART log shows each pause and each retry (see *Serial log*).
 
 ### Safety
@@ -192,8 +204,9 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
   - **Task priority.** The Wi-Fi manager task runs at priority 8 during the window (normally 5) and is set back
     to its configured priority when the window closes. The portal's HTTP and DNS server tasks are not raised.
   - **Not for the router-outage fallback portal.** The SoftAP the hub opens after it failed to rejoin its saved
-    router has no window and no health hold: BLE keeps scanning there, paused only by the few-second Wi-Fi
-    radio holds of the router-rejoin fix (see *Fixed*).
+    router has no window and no health hold: BLE keeps scanning there, paused only by the Wi-Fi radio holds of
+    the router-rejoin fix (about 3 s at most each, or 30 s of every 45 s or so while a portal page is open; see
+    *Fixed*).
   - **The 10 s Wi-Fi reset always erases the saved Wi-Fi credentials,** whatever the hub's Wi-Fi is doing:
     connected, idle on the router-outage fallback portal, or already in the setup portal. The Wi-Fi manager
     erases them only in its disconnect handler, which an idle connection never reaches, so a reset during a
@@ -591,17 +604,23 @@ next snapshot) confirms it.
     not print, and the credentials are erased all the same.
   - New, the router retry and the Wi-Fi radio holds (see *Fixed*), all `APP_WIFI`:
     - `Wi-Fi radio hold ON (%s) - BLE scanning paused`, with `connect attempt`, `router retry` or `Wi-Fi scan`,
-      within about 1 s of the pause starting (for the router retry, 1 s before its retry line)
+      within about 1 s of the pause starting (for the router retry, 0.5 s before its retry line)
     - `Wi-Fi radio hold OFF after %u s - BLE scanning resumed`, within about 1 s of the pause ending (the
-      duration is rounded to the second, ±1 s). Pauses that chain, as for an open portal page, print one pair.
-    - `router fallback: retrying the configured network (attempt %u)`, counted from 1 on each fallback portal.
-      "Configured", not "saved": after a portal submit that failed, the retry uses what was typed.
+      duration is rounded to the second, ±1 s): 1-4 s for a connect attempt or a router retry, 30 s for an
+      open portal page's chain. Pauses that chain, as an open page's scans, print one pair.
+    - `Wi-Fi radio hold: %d s limit for the setup page's scans - BLE listens %d s with no hold` (`30`, `15`),
+      right after that `OFF` line when an open page's chain reaches its limit (also after a connect attempt's
+      `OFF` when a late page request starts the listening time); no `ON` line follows for about 15 s
+    - `router fallback: retrying the configured network (attempt %u)`, counted from 1 after each loss of Wi-Fi
+      (the count restarts when Wi-Fi connects or the setup window opens), on the fallback portal or with no
+      SoftAP. "Configured", not "saved": after a portal submit that failed, the retry uses what was typed.
     - `router fallback: retry deferred - the Wi-Fi setup page is open`, once for each page session in which a
       retry falls due
 
     None prints while Wi-Fi is connected, apart from the `OFF` line within about 1 s after `Connected! IP`, and
     none in the portal window, apart from at most one pair right at its opening. A boot with saved credentials
-    normally prints one `connect attempt` pair around `Connected! IP`.
+    normally prints one `connect attempt` pair near `Connected! IP` (its `OFF` can come first: the pause lasts
+    at most 2.5 s).
   - Same text, new conditions (portal window):
     - `HEALTH_ENGINE` `Boot sync: timeout (%lu s) — snapshot gate open; unheard devices still excused for a
       further %lld s`: not while BLE scanning is paused with a BLE sensor or the valve not yet heard, nor
@@ -616,8 +635,8 @@ next snapshot) confirms it.
       provisioned valve %s...`: not while the window is open, except the valve hunt for a pended leak close.
   - Same text, new conditions (the router retry and the radio holds):
     - `APP_WIFI` `SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`: the text is
-      kept for the bench scripts, but BLE now pauses briefly for the fallback portal's Wi-Fi scans and connect
-      attempts. The router retries start from this line.
+      kept for the bench scripts, but BLE now pauses for the fallback portal's Wi-Fi scans and connect attempts.
+      The router retries follow it (they also run with no SoftAP, see Known limitations).
     - `BLE_LEAK` `Extended passive scan started (1M + Coded PHY)`, and `BLE_VALVE` `[SCAN] Starting scan for
       provisioned valve %s...` while the valve is not linked: also after each radio hold.
     - `APP_WIFI` `WiFi Disconnected. Reason: %d` (`201` while the router is off) and `NET_STATUS` `wifi=0
@@ -709,8 +728,8 @@ next snapshot) confirms it.
     minimum: 2972 B free). The NimBLE host task also uses about 54 B more of its fixed stack on the valve
     notify path. The captive-portal fix and "go red" add 24 B of `.bss` (36,304 B at build checkpoint 4,
     36,280 B at checkpoint 3) and about 40 B of permanent heap (the SoftAP station-log event handler). The
-    RMLEAK snapshot fix adds no static RAM. The router-rejoin fix adds about 24 B of `.bss` (about 36,328 B
-    expected at build checkpoint 5) and no heap.
+    RMLEAK snapshot fix adds no static RAM. The router-rejoin fix adds about 32-40 B of `.bss` (36,336 or
+    36,344 B expected at build checkpoint 5) and no heap.
   - An override started before the clock synced and then restored after a software reset cannot be re-based,
     because its elapsed time is unknown, so it ends at the first clock sync, possibly hours early. That fails
     toward auto-close.
@@ -748,35 +767,53 @@ next snapshot) confirms it.
       *Safety*).
     - The portal page's own disconnect button erases the credentials only while the hub is connected to the
       router, as in 2.1.3 (the Wi-Fi manager component): on the fallback portal, with the connection idle, it
-      erases nothing. Use the 10 s reset there.
-  - **Router outage: BLE pauses for Wi-Fi (the router-rejoin fix, see *Fixed*; accepted, user decision
-    2026-09-29).**
+      erases nothing at once. The router retry then rejoins with the old credentials, and the next loss of
+      Wi-Fi erases them and opens the setup portal. Use the 10 s reset there.
+  - **Router outage: BLE pauses for Wi-Fi (the router-rejoin fix, see *Fixed*; accepted, user decisions
+    2026-09-29 and 2026-09-30).**
     - The BLE leak sensor (firmware 1.1.0) advertises in bursts: for 4 s when it turns wet, then for 2.5 s
-      every 15 s while wet (every 100 s while dry). A wetting whose first burst falls inside a pause is heard
-      at its next wet burst, about 15-17 s late (up to about 30-45 s during the Wi-Fi manager's own retries),
-      and a wetting shorter than about 15 s can be missed altogether: no latch and no auto-close. LoRa sensors
-      and a linked valve are not affected.
-    - An open fallback portal page keeps BLE paused for as long as it stays open while the router is down: each
-      of its scan requests extends the pause. The fallback SoftAP is open (no password), so a laptop that once
-      joined it can rejoin by itself and open the page. Meanwhile BLE leak sensors are not heard, and with no
-      health hold every BLE sensor goes offline after 600 s, and a valve whose link drops, 180 s after the
-      drop. The router retry waits for the page for at most 5 min after the last attempt.
+      every 15 s while wet (every 100 s while dry), about one advertisement every 0.3-0.45 s. A connect
+      attempt's pause keeps BLE off about 3 s at most and leaves at least about 1 s of the 4 s burst outside
+      it, but a wetting whose first burst falls on a pause can still go unheard; it is then heard at its next
+      wet burst, about 15 s later. While a portal page is open the pauses last 30 s, and a wetting is heard
+      within about 45 s. A wetting shorter than that (about 15 s, or about 45 s with a page open) can be
+      missed altogether: no latch and no auto-close. LoRa sensors and a linked valve are not affected.
+    - An open portal page pauses BLE for 30 s of every 45 s or so while the router is down, with no health
+      hold. A dry BLE sensor (a 2.5 s burst every 100 s) can then keep falling in the pauses: with a page left
+      open for about 10 min or more it can go unheard for more than 600 s and be reported offline
+      (`device_offline`, red fleet LED) until the page is closed. That is a false alarm: a wet sensor is still
+      heard within about 45 s. The fallback SoftAP is open (no password), so a laptop that once joined it can
+      rejoin by itself and open the page. The router retry waits for the page for at most 5 min after the last
+      attempt, plus up to 17.5 s to stay out of BLE's 15 s listening time.
     - If the hub loses its router while the SoftAP is still up (within about 60 s of a rejoin or of a setup,
-      for example a router that restarts twice), the Wi-Fi manager keeps retrying about every 10 s for the
-      whole outage, each attempt with its pause, so BLE is paused about 40-60 % of the time until the router
+      for example a router that restarts twice), the Wi-Fi manager keeps retrying about every 7-10 s for the
+      whole outage, each attempt with its pause, so BLE is paused about 25-33 % of the time until the router
       is back. The router retry adds nothing there.
     - A portal submit that lands while a router retry's attempt is in flight reboots the hub (the Wi-Fi
       manager's `ESP_ERROR_CHECK` on a station that is still connecting), and what was typed is not saved.
-      Retries are not sent while the page is open, so this needs the page opened during an attempt, or left
-      open for more than 5 min. A submit during the Wi-Fi manager's own retries could always do this.
-    - After a submit on the fallback page that fails (a wrong password, or the router still down), the retries
-      use what was typed, not the saved credentials, so the hub does not rejoin until a reboot or a correct
-      submit.
-    - Pre-existing (the Wi-Fi manager component): after a portal submit while Wi-Fi is connected (in the setup
-      SoftAP's last minute, or on the page at the router address), the next loss of Wi-Fi after the SoftAP has
-      stopped starts no retry and no fallback SoftAP, and the hub stays offline until a reboot.
+      Retries are not sent while the page is open, but the page counts as open only while it asks for the
+      network list: a phone that puts the page in the background or locks its screen for more than about 10 s
+      stops asking, and a submit made just after it returns can meet a retry. A page left open for more than
+      5 min can meet one too. A submit during the Wi-Fi manager's own retries could always do this.
+    - A portal submit that lands in BLE's 15 s listening time runs its connect with BLE on and may fail (no AP
+      found) with the right password. Submit it again; once the page is closed the router retry also tries
+      what was typed.
+    - A mistyped password submitted on the fallback page (accepted, user decision 2026-09-30): the retries use
+      what was typed, not the saved credentials, so the hub does not rejoin until the right password is
+      submitted or the hub is restarted (a power cycle reloads the saved credentials).
+    - A portal submit while Wi-Fi is connected (in the setup SoftAP's last minute, or on the page at the router
+      address) is ignored by the Wi-Fi manager but replaces the configuration in RAM, and after the SoftAP has
+      stopped the next loss of Wi-Fi starts no Wi-Fi manager retry and no fallback SoftAP (pre-existing, the
+      Wi-Fi manager component). The router retry now covers this: the hub rejoins when the router is back if
+      what was submitted matches the router. If it does not (a wrong password, another network), no SoftAP
+      comes up to correct it from, and only a restart or the 10 s reset brings the hub back.
     - At every boot with saved credentials the first connect attempt pauses BLE, so the first leak scan and
-      the valve hunt start when that attempt ends, usually 2-4 s after boot (at most about 11 s).
+      the valve hunt start when that attempt ends or 2.5 s after it started, whichever is first: at most about
+      3-4 s after boot.
+    - The fallback SoftAP is open, and every station on it costs the hub heap. On the 2026-09-29 bench a laptop
+      that kept rejoining it, and flooding the portal's DNS server with its apps' lookups, took the lowest free
+      heap (`MONITOR` `min_ever`) to 1,184 B (the 2.1.3 field minimum is 2,972 B). The router-rejoin fix
+      neither causes nor removes this; it only ends the exposure sooner once the router is back.
   - Up to 16 events fit in the offline buffer. A long outage before the first clock sync can overwrite the
     oldest held events, as it already could after the sync.
   - **A leak latched while the valve was out of reach can still be read as a button press at the reconnect
