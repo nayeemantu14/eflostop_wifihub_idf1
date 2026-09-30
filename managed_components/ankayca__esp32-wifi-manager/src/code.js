@@ -12,11 +12,28 @@
   var selectedSSID = "";
   var refreshTimer = null;
   var statusTimer = null;
+  var currentView = "view-scan";
+
+  // ── Page Activity ───────────────────────────────────
+  // The hub sees this page only through GET ap.json. Each request also asks it for a
+  // Wi-Fi scan, which pauses its BLE leak-sensor scanning, and keeps it from starting a
+  // connect attempt of its own, which a Connect sent from here must never meet (the hub
+  // restarts). So ap.json is polled, in every view, only while someone uses the page:
+  // visible, with a touch, key, scroll or focus in the last IDLE_MS. Idle or hidden, the
+  // polling stops and the list stays as it is; the next activity refreshes it at once.
+  var IDLE_MS = 60000;
+  // A Connect waits until the polling has run this long: longer than a connect attempt
+  // the hub may have started just before the page was opened or used again.
+  var RESUME_GUARD_MS = 8000;
+  var lastActivity = Date.now();
+  var pollingSince = Date.now();
+  var idle = false;
 
   // ── View Management ─────────────────────────────────
   var views = ["view-scan", "view-password", "view-manual", "view-connecting", "view-details"];
 
   function showView(id) {
+    currentView = id;
     views.forEach(function (v) {
       $(v).style.display = v === id ? "" : "none";
     });
@@ -50,11 +67,55 @@
   }
   function startStatus() {
     stopStatus();
-    statusTimer = setInterval(checkStatus, 950);
+    statusTimer = setInterval(statusTick, 950);
   }
   function startRefresh() {
     stopRefresh();
-    refreshTimer = setInterval(refreshAP, 3800);
+    refreshTimer = setInterval(refreshTick, 3800);
+  }
+
+  function pageHidden() {
+    return document.visibilityState === "hidden";
+  }
+
+  // Every 3.8 s: the next network list, or the end of the polling once the page is idle.
+  function refreshTick() {
+    if (pageHidden() || Date.now() - lastActivity >= IDLE_MS) {
+      pauseRefresh();
+      return;
+    }
+    refreshAP();
+  }
+
+  function pauseRefresh() {
+    stopRefresh();
+    idle = true;
+    $("idle-hint").style.display = "";
+  }
+
+  // A touch, key, scroll or focus, or the page shown again: an idle page polls again at once.
+  function noteActivity() {
+    lastActivity = Date.now();
+    if (!idle || pageHidden()) return;
+    idle = false;
+    $("idle-hint").style.display = "none";
+    pollingSince = Date.now();
+    refreshAP();
+    startRefresh();
+  }
+
+  function onVisibility() {
+    if (pageHidden()) pauseRefresh();
+    else noteActivity();
+  }
+
+  // status.json asks the hub for nothing. It is read while a Connect's result or the
+  // connection details are on screen, which may be watched without a touch, and for the
+  // connected banner while the page is in use.
+  function statusTick() {
+    if (pageHidden()) return;
+    if (idle && currentView !== "view-connecting" && currentView !== "view-details") return;
+    checkStatus();
   }
 
   // ── Signal Helpers ──────────────────────────────────
@@ -186,7 +247,6 @@
   async function performConnect(ssid, pwd) {
     selectedSSID = ssid;
     stopStatus();
-    stopRefresh();
 
     // Reset connecting view
     $("state-loading").style.display = "";
@@ -198,6 +258,14 @@
 
     setStep(3);
     showView("view-connecting");
+
+    // The hub starts no connect attempt of its own while this page polls, but may have
+    // started one just before the polling (re)started: let it end first (Page Activity).
+    var wait = RESUME_GUARD_MS - (Date.now() - pollingSince);
+    if (wait > 0) {
+      await new Promise(function (resolve) { setTimeout(resolve, wait); });
+    }
+    stopRefresh();
 
     try {
       await fetch("connect.json", {
@@ -214,7 +282,7 @@
     }
 
     startStatus();
-    startRefresh();
+    if (!idle) startRefresh();
   }
 
   // ── Disconnect ──────────────────────────────────────
@@ -261,10 +329,30 @@
     });
   }
 
+  // ── Activity Tracking ───────────────────────────────
+  function initActivity() {
+    // Shown under the list while the polling is paused (Page Activity)
+    var hint = document.createElement("p");
+    hint.id = "idle-hint";
+    hint.className = "hint-text";
+    hint.style.display = "none";
+    hint.textContent = "Tap anywhere to refresh the list";
+    $("view-scan").insertBefore(hint, $("btn-hidden"));
+
+    ["pointerdown", "touchstart", "mousedown", "keydown", "input", "wheel", "scroll", "focusin"]
+      .forEach(function (type) {
+        document.addEventListener(type, noteActivity, { capture: true, passive: true });
+      });
+    window.addEventListener("focus", noteActivity);
+    window.addEventListener("pageshow", noteActivity);
+    document.addEventListener("visibilitychange", onVisibility);
+  }
+
   // ── Initialization ──────────────────────────────────
   function init() {
     initEyeToggles();
     initBackButtons();
+    initActivity();
 
     // ── Network list click (event delegation) ─────
     $("network-list").addEventListener("click", function (e) {
