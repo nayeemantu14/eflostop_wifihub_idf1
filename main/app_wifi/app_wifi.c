@@ -896,9 +896,10 @@ void app_wifi_start()
 
 void cb_connection_ok(void *pvParameter)
 {
-    ip_event_got_ip_t *param = (ip_event_got_ip_t *)pvParameter;
+    // The STA's IPv4 address: wifi_manager passes it as the parameter itself (wifi_manager.h).
+    esp_ip4_addr_t ip = { .addr = (uint32_t)(uintptr_t)pvParameter };
     char str_ip[16];
-    esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
+    esp_ip4addr_ntoa(&ip, str_ip, IP4ADDR_STRLEN_MAX);
 
     ESP_LOGI(WIFI_TAG, "Connected! IP: %s", str_ip);
 
@@ -948,11 +949,11 @@ void cb_connection_ok(void *pvParameter)
 
 void cb_connection_lost(void *pvParameter)
 {
-    if (pvParameter != NULL)
-    {
-        wifi_event_sta_disconnected_t *wifi_event = (wifi_event_sta_disconnected_t *)pvParameter;
-        ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", wifi_event->reason);
-    }
+    // The disconnect reason: wifi_manager passes it as the parameter itself, 0 if none was given
+    // (wifi_manager.h).
+    int reason = (int)(uintptr_t)pvParameter;
+    if (reason != 0)
+        ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", reason);
     // The channels (see above), for a link that was up: not for each failed connect attempt.
     if (s_sta_connected)
         ESP_LOGI(WIFI_TAG, "Wi-Fi channel at link loss: radio %u, router was on %u",

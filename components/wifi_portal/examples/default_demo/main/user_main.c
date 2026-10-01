@@ -57,11 +57,12 @@ void monitoring_task(void *pvParameter)
  * @brief this is an exemple of a callback that you can setup in your own app to get notified of wifi manager event.
  */
 void cb_connection_ok(void *pvParameter){
-	ip_event_got_ip_t* param = (ip_event_got_ip_t*)pvParameter;
+	/* the parameter is the IPv4 address itself (wifi_manager.h, wifi_manager_set_callback()) */
+	esp_ip4_addr_t ip = { .addr = (uint32_t)(uintptr_t)pvParameter };
 
 	/* transform IP to human readable string */
 	char str_ip[16];
-	esp_ip4addr_ntoa(&param->ip_info.ip, str_ip, IP4ADDR_STRLEN_MAX);
+	esp_ip4addr_ntoa(&ip, str_ip, IP4ADDR_STRLEN_MAX);
 
 	ESP_LOGI(TAG, "I have a connection and my IP is %s!", str_ip);
 }

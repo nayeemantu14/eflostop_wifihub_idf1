@@ -188,7 +188,10 @@ void wifi_manager_start(){
 	ESP_ERROR_CHECK(nvs_sync_create()); /* semaphore for thread synchronization on NVS memory */
 
 	/* memory allocation */
-	wifi_manager_queue = xQueueCreate( 3, sizeof( queue_message) );
+	/* LOCAL PATCH (2.1.4 C2h): 8 messages, not 3. The event handler and the task itself post with
+	 * portMAX_DELAY, so a full queue blocked the default event loop, or the task on its own queue.
+	 * 5 more 8-byte slots: +40 B of heap. */
+	wifi_manager_queue = xQueueCreate( 8, sizeof( queue_message) );
 	wifi_manager_json_mutex = xSemaphoreCreateMutex();
 	accessp_records = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * MAX_AP_NUM);
 	accessp_json = (char*)malloc(MAX_AP_NUM * JSON_ONE_APP_SIZE + 4); /* 4 bytes for json encapsulation of "[\n" and "]\0" */
@@ -596,9 +599,10 @@ static void wifi_manager_event_handler(void* arg, esp_event_base_t event_base, i
 		case WIFI_EVENT_SCAN_DONE:
 			ESP_LOGD(TAG, "WIFI_EVENT_SCAN_DONE");
 	    	xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
-			wifi_event_sta_scan_done_t* event_sta_scan_done = (wifi_event_sta_scan_done_t*)malloc(sizeof(wifi_event_sta_scan_done_t));
-			*event_sta_scan_done = *((wifi_event_sta_scan_done_t*)event_data);
-	    	wifi_manager_send_message(WM_EVENT_SCAN_DONE, event_sta_scan_done);
+			/* LOCAL PATCH (2.1.4 C2a): the scan's status is the message's parameter itself, so this
+			 * handler allocates nothing (an allocation that failed here crashed the hub) */
+			uint32_t scan_status = event_data ? ((wifi_event_sta_scan_done_t*)event_data)->status : 1;
+	    	wifi_manager_send_message(WM_EVENT_SCAN_DONE, (void*)(uintptr_t)scan_status);
 			break;
 
 		/* If esp_wifi_start() returns ESP_OK and the current Wi-Fi mode is Station or AP+Station, then this event will
@@ -672,14 +676,14 @@ static void wifi_manager_event_handler(void* arg, esp_event_base_t event_base, i
 		case WIFI_EVENT_STA_DISCONNECTED:
 			ESP_LOGI(TAG, "WIFI_EVENT_STA_DISCONNECTED");
 
-			wifi_event_sta_disconnected_t* wifi_event_sta_disconnected = (wifi_event_sta_disconnected_t*)malloc(sizeof(wifi_event_sta_disconnected_t));
-			*wifi_event_sta_disconnected =  *( (wifi_event_sta_disconnected_t*)event_data );
+			/* LOCAL PATCH (2.1.4 C2a): the reason is the message's parameter itself (see the scan above) */
+			uint8_t disconnect_reason = event_data ? ((wifi_event_sta_disconnected_t*)event_data)->reason : 0;
 
 			/* if a DISCONNECT message is posted while a scan is in progress this scan will NEVER end, causing scan to never work again. For this reason SCAN_BIT is cleared too */
 			xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_WIFI_CONNECTED_BIT | WIFI_MANAGER_SCAN_BIT);
 
 			/* post disconnect event with reason code */
-			wifi_manager_send_message(WM_EVENT_STA_DISCONNECTED, (void*)wifi_event_sta_disconnected );
+			wifi_manager_send_message(WM_EVENT_STA_DISCONNECTED, (void*)(uintptr_t)disconnect_reason );
 			break;
 
 		/* This event arises when the AP to which the station is connected changes its authentication mode, e.g., from no auth
@@ -742,9 +746,9 @@ static void wifi_manager_event_handler(void* arg, esp_event_base_t event_base, i
 		case IP_EVENT_STA_GOT_IP:
 			ESP_LOGI(TAG, "IP_EVENT_STA_GOT_IP");
 	        xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_WIFI_CONNECTED_BIT);
-	        ip_event_got_ip_t* ip_event_got_ip = (ip_event_got_ip_t*)malloc(sizeof(ip_event_got_ip_t));
-			*ip_event_got_ip =  *( (ip_event_got_ip_t*)event_data );
-	        wifi_manager_send_message(WM_EVENT_STA_GOT_IP, (void*)(ip_event_got_ip) );
+			/* LOCAL PATCH (2.1.4 C2a): the IPv4 address is the message's parameter itself (see the scan above) */
+			uint32_t got_ip = event_data ? ((ip_event_got_ip_t*)event_data)->ip_info.ip.addr : 0;
+	        wifi_manager_send_message(WM_EVENT_STA_GOT_IP, (void*)(uintptr_t)got_ip );
 			break;
 
 		/* This event arises when the IPV6 SLAAC support auto-configures an address for the ESP32, or when this address changes.
@@ -1004,9 +1008,10 @@ void wifi_manager( void * pvParameters ){
 			switch(msg.code){
 
 			case WM_EVENT_SCAN_DONE:{
-				wifi_event_sta_scan_done_t *evt_scan_done = (wifi_event_sta_scan_done_t*)msg.param;
+				/* LOCAL PATCH (2.1.4 C2a): the parameter is the scan's status (0 = success), not a pointer */
+				uint32_t scan_status = (uint32_t)(uintptr_t)msg.param;
 				/* only check for AP if the scan is succesful */
-				if(evt_scan_done->status == 0){
+				if(scan_status == 0){
 					/* As input param, it stores max AP number ap_records can hold. As output param, it receives the actual AP number this API returns.
 					* As a consequence, ap_num MUST be reset to MAX_AP_NUM at every scan */
 					ap_num = MAX_AP_NUM;
@@ -1025,7 +1030,6 @@ void wifi_manager( void * pvParameters ){
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
-				free(evt_scan_done);
 				}
 				break;
 
@@ -1101,8 +1105,9 @@ void wifi_manager( void * pvParameters ){
 				break;
 
 			case WM_EVENT_STA_DISCONNECTED:
-				;wifi_event_sta_disconnected_t* wifi_event_sta_disconnected = (wifi_event_sta_disconnected_t*)msg.param;
-				ESP_LOGI(TAG, "MESSAGE: EVENT_STA_DISCONNECTED with Reason code: %d", wifi_event_sta_disconnected->reason);
+				/* LOCAL PATCH (2.1.4 C2a): the parameter is the disconnect reason, not a pointer */
+				;uint8_t disconnect_reason = (uint8_t)(uintptr_t)msg.param;
+				ESP_LOGI(TAG, "MESSAGE: EVENT_STA_DISCONNECTED with Reason code: %d", disconnect_reason);
 
 				/* this even can be posted in numerous different conditions
 				 *
@@ -1230,7 +1235,6 @@ void wifi_manager( void * pvParameters ){
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
-				free(wifi_event_sta_disconnected);
 
 				break;
 
@@ -1290,14 +1294,15 @@ void wifi_manager( void * pvParameters ){
 
 			case WM_EVENT_STA_GOT_IP:
 				ESP_LOGI(TAG, "WM_EVENT_STA_GOT_IP");
-				ip_event_got_ip_t* ip_event_got_ip = (ip_event_got_ip_t*)msg.param; 
+				/* LOCAL PATCH (2.1.4 C2a): the parameter is the IPv4 address (network byte order), not a pointer */
+				uint32_t got_ip = (uint32_t)(uintptr_t)msg.param;
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 
 				/* reset connection requests bits -- doesn't matter if it was set or not */
 				xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
 
 				/* save IP as a string for the HTTP server host */
-				wifi_manager_safe_update_sta_ip_string(ip_event_got_ip->ip_info.ip.addr);
+				wifi_manager_safe_update_sta_ip_string(got_ip);
 
 				/* save wifi config in NVS if it wasn't a restored of a connection */
 				if(uxBits & WIFI_MANAGER_REQUEST_RESTORE_STA_BIT){
@@ -1338,9 +1343,8 @@ void wifi_manager( void * pvParameters ){
 
 				}
 
-				/* callback and free memory allocated for the void* param */
+				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
-				free(ip_event_got_ip);
 
 				break;
 

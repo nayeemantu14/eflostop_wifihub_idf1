@@ -403,6 +403,13 @@ void wifi_manager_safe_update_sta_ip_string(uint32_t ip);
 
 /**
  * @brief Register a callback to a custom function when specific event message_code happens.
+ *
+ * LOCAL PATCH (2.1.4 C2a): the callback's parameter is a scalar carried in the pointer, never a
+ * pointer to read (cast it with (uintptr_t)):
+ *  - WM_EVENT_STA_GOT_IP: the STA's IPv4 address in network byte order (esp_ip4_addr_t.addr);
+ *  - WM_EVENT_STA_DISCONNECTED: the disconnect reason (wifi_err_reason_t), 0 if none was given;
+ *  - WM_EVENT_SCAN_DONE: the scan's status, 0 = success;
+ *  - every other message: NULL.
  */
 void wifi_manager_set_callback(message_code_t message_code, void (*func_ptr)(void*) );
 
