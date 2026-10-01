@@ -40,7 +40,8 @@ _Static_assert(OFFLINE_BUF_MAX_ENTRIES <= 16, "s_presync_mask has one bit per ri
 static uint16_t s_presync_mask = 0;
 
 // store() runs on whichever task publishes an event while offline (iothub_task, or the
-// esp-mqtt task for a cmd_ack); drain and clear run on iothub_task. head/tail/count and
+// esp-mqtt task for a cmd_ack; since 2.1.4 WP2 that task uses try_store(), for a cmd_ack
+// the outbox refused for room); drain and clear run on iothub_task. head/tail/count and
 // the NVS slots are one ring, so every entry point holds this lock (N18). Static storage:
 // no heap. On a timeout each call fails safe (nothing stored, nothing drained, count 0)
 // rather than touching the ring unlocked.
@@ -174,7 +175,8 @@ static bool store_locked(const char *json, size_t len, bool presync)
     return true;
 }
 
-static bool store_common(const char *json, size_t len, bool presync)
+// wait = false: the lock is not waited for (offline_buffer_try_store()).
+static bool store_common(const char *json, size_t len, bool presync, bool wait)
 {
     if (!s_ready || !json || len == 0) return false;
 
@@ -186,7 +188,12 @@ static bool store_common(const char *json, size_t len, bool presync)
         return false;
     }
 
-    if (!ob_lock("store")) return false;
+    if (wait) {
+        if (!ob_lock("store")) return false;
+    } else if (xSemaphoreTake(s_lock, 0) != pdTRUE) {
+        ESP_LOGW(OB_TAG, "store: buffer busy - skipped, not waited for");
+        return false;
+    }
     bool ok = store_locked(json, len, presync);
     ob_unlock();
     return ok;
@@ -194,12 +201,17 @@ static bool store_common(const char *json, size_t len, bool presync)
 
 bool offline_buffer_store(const char *json, size_t len)
 {
-    return store_common(json, len, false);
+    return store_common(json, len, false, true);
+}
+
+bool offline_buffer_try_store(const char *json, size_t len)
+{
+    return store_common(json, len, false, false);
 }
 
 bool offline_buffer_store_presync(const char *json, size_t len)
 {
-    return store_common(json, len, true);
+    return store_common(json, len, true, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +418,8 @@ int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic)
 
     // The lock is held across the replay publishes. A store() that arrives meanwhile
     // waits up to OB_LOCK_TIMEOUT_MS and is then dropped (logged), never interleaved.
+    // Each publish takes esp-mqtt's API lock, so the esp-mqtt task, which holds that lock
+    // in its event handler, stores only through offline_buffer_try_store().
     if (!ob_lock("drain")) return 0;
     int published = (s_count > 0) ? drain_locked(client, topic) : 0;
     ob_unlock();

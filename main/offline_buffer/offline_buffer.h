@@ -22,7 +22,7 @@ void offline_buffer_init(void);
 /*
  * store / drain / count / clear may be called from any task: each holds the buffer's
  * mutex (1000 ms). On a timeout they fail safe - store returns false, drain publishes
- * nothing, count returns 0, clear does nothing - and log it.
+ * nothing, count returns 0, clear does nothing - and log it. try_store does not wait.
  */
 
 /**
@@ -35,6 +35,15 @@ void offline_buffer_init(void);
  *         OFFLINE_BUF_MAX_JSON_LEN (refused whole, never truncated into invalid JSON)
  */
 bool offline_buffer_store(const char *json, size_t len);
+
+/**
+ * @brief offline_buffer_store() that does not wait for the buffer's mutex: false at once
+ *        (logged) while another task holds it. For the esp-mqtt task (2.1.4 WP2), which
+ *        stores from inside its event handler with esp-mqtt's API lock held: the drain holds
+ *        the mutex while it waits for that lock in esp_mqtt_client_publish(), so a wait here
+ *        would stall both tasks for the whole timeout and store nothing.
+ */
+bool offline_buffer_try_store(const char *json, size_t len);
 
 /**
  * @brief Store an event built before the first clock sync: its envelope "ts" is the

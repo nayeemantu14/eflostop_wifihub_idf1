@@ -19,6 +19,7 @@
 #include "rules_engine.h"
 #include "offline_buffer.h"
 #include "hub_identity.h"
+#include "app_iothub.h"   // iothub_task_handle
 
 #define TELEM_TAG "TELEMETRY_V2"
 
@@ -167,10 +168,20 @@ static bool publish_json(cJSON *root, const char *type_hint)
         // queued. An event is kept for the replay rather than lost; iothub_task replays it
         // while connected (telemetry_v2_replay_owed()). Not for -1: that can be a message
         // esp-mqtt queued whose write failed, and esp-mqtt sends that one itself.
+        // Off iothub_task - the esp-mqtt task, for a cmd_ack, inside its event handler with
+        // esp-mqtt's API lock held - the buffer is not waited for: iothub_task's drain holds
+        // it while it waits for that lock (offline_buffer_drain()), so a wait would stall both
+        // tasks for the buffer's 1 s timeout and keep nothing.
         if (msg_id == -2 && strcmp(type_hint, "event") == 0) {
-            ESP_LOGW(TELEM_TAG, "Outbox full - keeping %s for replay", type_hint);
-            if (offline_buffer_store(json_str, strlen(json_str)))
+            bool kept = (xTaskGetCurrentTaskHandle() == iothub_task_handle)
+                            ? offline_buffer_store(json_str, strlen(json_str))
+                            : offline_buffer_try_store(json_str, strlen(json_str));
+            if (kept) {
                 s_replay_owed = true;
+                ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay", type_hint);
+            } else {
+                ESP_LOGW(TELEM_TAG, "Outbox full - %s not kept", type_hint);
+            }
         }
     } else if (strcmp(type_hint, "event") == 0) {
         if (presync) {
