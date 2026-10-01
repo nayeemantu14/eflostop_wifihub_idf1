@@ -201,17 +201,10 @@ void wifi_manager_start(){
 	wifi_manager_queue = xQueueCreate( 8, sizeof( queue_message) );
 	wifi_manager_json_mutex = xSemaphoreCreateMutex();
 	ip_info_json = (char*)malloc(sizeof(char) * JSON_IP_INFO_SIZE);
-	wifi_manager_clear_ip_info_json();
 	wifi_manager_config_sta = (wifi_config_t*)malloc(sizeof(wifi_config_t));
-	memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
-	memset(&wifi_settings.sta_static_ip_config, 0x00, sizeof(esp_netif_ip_info_t));
 	cb_ptr_arr = malloc(sizeof(void (*)(void*)) * WM_MESSAGE_CODE_COUNT);
-	for(int i=0; i<WM_MESSAGE_CODE_COUNT; i++){
-		cb_ptr_arr[i] = NULL;
-	}
 	wifi_manager_sta_ip_mutex = xSemaphoreCreateMutex();
 	wifi_manager_sta_ip = (char*)malloc(sizeof(char) * IP4ADDR_STRLEN_MAX);
-	wifi_manager_safe_update_sta_ip_string((uint32_t)0);
 	wifi_manager_event_group = xEventGroupCreate();
 
 	/* create timer for to keep track of retries */
@@ -220,8 +213,25 @@ void wifi_manager_start(){
 	/* create timer for to keep track of AP shutdown */
 	wifi_manager_shutdown_ap_timer = xTimerCreate( NULL, pdMS_TO_TICKS(WIFI_MANAGER_SHUTDOWN_AP_TIMER), pdFALSE, ( void * ) 0, wifi_manager_timer_shutdown_ap_cb);
 
+	/* LOCAL PATCH (2.1.4 C2d): every allocation above is checked before its first use. The task, its
+	 * event handler, the HTTP handlers and the app's calls use them unchecked from here on, so a
+	 * failure stops the boot, as the ESP_ERROR_CHECKs above do (at boot, with the heap whole). */
+	bool allocated = wifi_manager_queue && wifi_manager_json_mutex && ip_info_json && wifi_manager_config_sta &&
+			cb_ptr_arr && wifi_manager_sta_ip_mutex && wifi_manager_sta_ip && wifi_manager_event_group &&
+			wifi_manager_retry_timer && wifi_manager_shutdown_ap_timer;
+	ESP_ERROR_CHECK(allocated ? ESP_OK : ESP_ERR_NO_MEM);
+
+	wifi_manager_clear_ip_info_json();
+	memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
+	memset(&wifi_settings.sta_static_ip_config, 0x00, sizeof(esp_netif_ip_info_t));
+	for(int i=0; i<WM_MESSAGE_CODE_COUNT; i++){
+		cb_ptr_arr[i] = NULL;
+	}
+	wifi_manager_safe_update_sta_ip_string((uint32_t)0);
+
 	/* start wifi manager task */
-	xTaskCreate(&wifi_manager, "wifi_manager", 4096, NULL, WIFI_MANAGER_TASK_PRIORITY, &task_wifi_manager);
+	BaseType_t task_created = xTaskCreate(&wifi_manager, "wifi_manager", 4096, NULL, WIFI_MANAGER_TASK_PRIORITY, &task_wifi_manager);
+	ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
 }
 
 esp_err_t wifi_manager_save_sta_config(){
@@ -458,11 +468,16 @@ void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code)
 		char netmask[IP4ADDR_STRLEN_MAX] = "0";
 		if(update_reason_code == UPDATE_CONNECTION_OK){
 			esp_netif_ip_info_t ip_info;
-			ESP_ERROR_CHECK(esp_netif_get_ip_info(esp_netif_sta, &ip_info));
-
-			esp_ip4addr_ntoa(&ip_info.ip, ip, IP4ADDR_STRLEN_MAX);
-			esp_ip4addr_ntoa(&ip_info.gw, gw, IP4ADDR_STRLEN_MAX);
-			esp_ip4addr_ntoa(&ip_info.netmask, netmask, IP4ADDR_STRLEN_MAX);
+			/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK: the addresses stay "0" then */
+			esp_err_t err = esp_netif_get_ip_info(esp_netif_sta, &ip_info);
+			if(err == ESP_OK){
+				esp_ip4addr_ntoa(&ip_info.ip, ip, IP4ADDR_STRLEN_MAX);
+				esp_ip4addr_ntoa(&ip_info.gw, gw, IP4ADDR_STRLEN_MAX);
+				esp_ip4addr_ntoa(&ip_info.netmask, netmask, IP4ADDR_STRLEN_MAX);
+			}
+			else{
+				ESP_LOGW(TAG, "esp_netif_get_ip_info failed (%s) - status without addresses", esp_err_to_name(err));
+			}
 		}
 
 		/* to avoid declaring a new buffer we copy the data directly into the buffer at its correct address */
@@ -1393,7 +1408,16 @@ void wifi_manager( void * pvParameters ){
 					xTimerStop(wifi_manager_retry_timer, (TickType_t)0);
 				}
 
-				ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+				/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK (a mode switch can fail for heap).
+				 * With no AP nothing else of the portal starts and the callback is not called. The retry
+				 * timer stopped above is armed instead: its attempt, failed or not started, counts towards
+				 * WIFI_MANAGER_MAX_RETRY_START_AP, which brings the hub back here. */
+				esp_err_t ap_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+				if(ap_err != ESP_OK){
+					ESP_LOGE(TAG, "ORDER_START_AP: esp_wifi_set_mode failed (%s) - no AP, tried again through the retry timer", esp_err_to_name(ap_err));
+					xTimerStart( wifi_manager_retry_timer, (TickType_t)0 );
+					break;
+				}
 
 				/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up */
 				ap_list_wanted = true;
@@ -1475,7 +1499,10 @@ void wifi_manager( void * pvParameters ){
 					wifi_manager_generate_ip_info_json( UPDATE_CONNECTION_OK );
 					wifi_manager_unlock_json_buffer();
 				}
-				else { abort(); }
+				else{
+					/* LOCAL PATCH (2.1.4 C2d): logged, not abort() (an unbounded wait: only a missing mutex fails it) */
+					ESP_LOGE(TAG, "could not get access to json mutex in WM_EVENT_STA_GOT_IP");
+				}
 
 				/* bring down DNS hijack */
 				dns_server_stop();
@@ -1509,7 +1536,12 @@ void wifi_manager( void * pvParameters ){
 				xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
 
 				/* order wifi discconect */
-				ESP_ERROR_CHECK(esp_wifi_disconnect());
+				/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK. The request bit stays set, as it
+				 * did: the next disconnect (the app's own forget event for an idle STA) still erases. */
+				esp_err_t disconnect_err = esp_wifi_disconnect();
+				if(disconnect_err != ESP_OK){
+					ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s)", esp_err_to_name(disconnect_err));
+				}
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
