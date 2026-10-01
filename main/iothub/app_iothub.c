@@ -1503,9 +1503,14 @@ static void handle_c2d_command(const char *data, size_t data_len)
 
 static void publish_twin_reported(void)
 {
-    // mqtt_client is NULL until cloud_bringup() succeeds; every caller today runs
-    // only after MQTT_EVENT_CONNECTED, but guard rather than rely on that.
-    if (mqtt_client == NULL) return;
+    // mqtt_client is NULL until cloud_bringup() succeeds. Only while connected, like every
+    // other publish of iothub_task's: its device-set change (apply_device_set_change()) can
+    // come while the client is stopping on wifi_task or reconnecting, and
+    // esp_mqtt_client_publish() then waits for esp-mqtt's API lock, which a connect in flight
+    // holds for up to 10-30 s: iothub_task evaluates the leaks. Nothing is lost: a stopping
+    // client's outbox is deleted anyway, and every CONNECTED reports the twin again (the
+    // lifecycle block in iothub_task). The esp-mqtt task's callers run in a session.
+    if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
 
     cJSON *root = cJSON_CreateObject();
     if (!root) return;
