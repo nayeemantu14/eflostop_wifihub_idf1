@@ -1520,7 +1520,9 @@ void wifi_manager( void * pvParameters ){
 				http_app_stop();
 				http_app_start(true);
 
-				/* start DNS */
+				/* start DNS
+				 * LOCAL PATCH (2.1.4 C4): nothing to do while it runs (START_AP with the AP up). It
+				 * now runs until STOP_AP: no longer stopped at GOT_IP */
 				dns_server_start();
 
 				/* callback */
@@ -1542,7 +1544,8 @@ void wifi_manager( void * pvParameters ){
 					/* set to STA only */
 					esp_wifi_set_mode(WIFI_MODE_STA);
 
-					/* stop DNS */
+					/* stop DNS
+					 * LOCAL PATCH (2.1.4 C4): waits up to 1 s for its task to close its socket */
 					dns_server_stop();
 
 					/* restart HTTP daemon */
@@ -1597,8 +1600,10 @@ void wifi_manager( void * pvParameters ){
 					ESP_LOGE(TAG, "could not get access to json mutex in WM_EVENT_STA_GOT_IP");
 				}
 
-				/* bring down DNS hijack */
-				dns_server_stop();
+				/* LOCAL PATCH (2.1.4 C4): the DNS hijack is no longer brought down here. It stays up with
+				 * the AP until STOP_AP, so a phone that joins or re-joins the AP in its tail (the setup
+				 * AP's last 60 s, or the AP left up after the STA lost the link again) is still sent to
+				 * the portal (plan I11) */
 
 				/* start the timer that will eventually shutdown the access point
 				 * We check first that it's actually running because in case of a boot and restore connection
