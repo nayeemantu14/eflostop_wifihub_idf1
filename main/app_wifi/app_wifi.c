@@ -336,16 +336,14 @@ static const char *radio_hold_reason(TickType_t now)
 
 /* ---- Router retry --------------------------------------------------------------------------
  * wifi_manager retries a lost router 3 times, then opens the SoftAP as a router-fallback portal,
- * and its START_AP stops the retry timer (the LOCAL PATCH in wifi_manager.c, against a scan
- * race): nothing tried the router again, and on the 2026-09-29 bench the hub never rejoined
- * once the router was back. wifi_manager can also leave the STA idle for good with the SoftAP
- * down: a portal submit while the STA is connected sets its user-request bit, which stays set
- * since no attempt starts, so after the setup AP has stopped the next link loss takes its
- * "user connect failed" branch, with no retry timer and no AP. So whenever the STA is down with
- * credentials in its config, outside the portal window (router_fallback()), SoftAP up or not,
- * wifi_task asks wifi_manager for a connect once no attempt has started or ended for
- * ROUTER_RETRY_MS and none is in flight; never before wifi_manager's own first attempt (its
- * restore at boot, or a portal submit: s_attempt_tick still 0). BLE is paused
+ * and its START_AP stops the retry timer (the LOCAL PATCH in wifi_manager.c, against a scan race):
+ * nothing tried the router again, and on the 2026-09-29 bench the hub never rejoined once the
+ * router was back. wifi_manager can also leave the STA idle with the SoftAP down: after a user
+ * connect that fails (a portal submit, or this retry's own, below) it starts no retry timer and no
+ * AP. So whenever the STA is down with credentials in its config, outside the portal window
+ * (router_fallback()), SoftAP up or not, wifi_task asks wifi_manager for a connect once no attempt
+ * has started or ended for ROUTER_RETRY_MS and none is in flight; never before wifi_manager's own
+ * first attempt (its restore at boot, or a portal submit: s_attempt_tick still 0). BLE is paused
  * RADIO_HOLD_RETRY_LEAD_MS ahead (s_retry_until), so the leak scanner (500 ms loop) is off the
  * radio when the connect's scan for the router starts; the valve hunt (1 s poll) may still be on.
  * That hold lasts RADIO_HOLD_RETRY_MS in all, the attempt's included (the radio hold above). No
@@ -356,10 +354,10 @@ static const char *radio_hold_reason(TickType_t now)
  * no AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves the
  * config only if it changed. The config tried is the one in RAM: the saved one, unless a portal
  * submit replaced it, one that failed or one wifi_manager ignored because the STA was connected
- * (the one that leads to the idle state above): then what was typed, until a reboot reloads the
- * saved one. So after a submit that does not match the router (a mistyped password, another
- * SSID) the retries fail, router back or not, until a reboot or a new submit; in the idle state,
- * with no SoftAP to submit from, until a reboot (or the 10 s reset).
+ * (one the driver refused is dropped: wifi_manager's C2c): then what was typed, until a reboot
+ * reloads the saved one. So after a submit that does not match the router (a mistyped password,
+ * another SSID) the retries fail, router back or not, until a reboot or a new submit; with the
+ * SoftAP down, with no SoftAP to submit from, until a reboot (or the 10 s reset).
  * wifi_manager's own retries, its first three after a link loss with the SoftAP down, come about
  * every 10 s, so the 30 s rule adds none beside them. With the SoftAP up (the fallback portal, or
  * the setup AP left up by "Wi-Fi lost after setup") it starts none (its C5), and this retry is
@@ -369,35 +367,38 @@ static const char *radio_hold_reason(TickType_t now)
  * SoftAP down arms wifi_manager's one-shot retry timer (WIFI_MANAGER_RETRY_TIMER, 5 s) before our
  * STA_DISCONNECTED callback runs, and only START_AP stops it. A link loss can come long after
  * the last attempt started (a link up for minutes), and a retry sent then would still be
- * connecting when that timer's CONNECT_STA arrives, which reboots the hub (below).
+ * connecting when that timer's CONNECT_STA arrives, which then fails to start (below).
  * ROUTER_RETRY_MS after the last disconnect the timer has fired (its attempt then counts) or
  * START_AP has stopped it. A retry therefore comes ROUTER_RETRY_MS after the previous one
  * failed, on the fallback AP or with the SoftAP down: about every 33-36 s.
  *
  * Never a second connect while one is in flight: wifi_manager's CONNECT_STA would then call
- * esp_wifi_set_config() on a connecting STA, which fails ("sta is connecting, cannot set
- * config") under ESP_ERROR_CHECK, and the hub reboots. A portal submit (POST /connect.json)
- * sends its own, which the app cannot see coming, so no retry is sent while the portal page is
- * open (page_open(): it asked for a scan less than PAGE_OPEN_MS ago, as it does about every
- * 3.8 s while it is used, and at once when it is used again; not the scan hold, which a BLE
- * window ends while the page is still open), for at most ROUTER_RETRY_PAGE_MAX_MS since the last
- * attempt, so a page that keeps asking cannot keep the hub off its router. The retry looks at the
- * page again after its lead, and the page holds a Connect until it has been asking for 8 s,
- * longer than an attempt the retry may have started just before (code.js). A submit can still
- * land in a retry's attempt, and reboot the hub as one in wifi_manager's own retries always
- * could: after a retry that waited out ROUTER_RETRY_PAGE_MAX_MS on a page in use (one every
- * 5 min then), or when the page's requests do not reach the hub.
+ * esp_wifi_set_config() on a connecting STA, which fails ("sta is connecting, cannot set config").
+ * That was an ESP_ERROR_CHECK and a reboot; since its C2c wifi_manager counts the request as a
+ * failed attempt that did not start (a submit's status reads failed, and the STA_DISCONNECTED
+ * callback runs with WIFI_REASON_CONNECTION_FAIL). A portal submit (POST /connect.json) sends its
+ * own, which the app cannot see coming, so no retry is sent while the portal page is open
+ * (page_open(): it asked for a scan less than PAGE_OPEN_MS ago, as it does about every 3.8 s while
+ * it is used, and at once when it is used again; not the scan hold, which a BLE window ends while
+ * the page is still open), for at most ROUTER_RETRY_PAGE_MAX_MS since the last attempt, so a page
+ * that keeps asking cannot keep the hub off its router. The retry looks at the page again after
+ * its lead, and the page holds a Connect until it has been asking for 8 s, longer than an attempt
+ * the retry may have started just before (code.js). A submit can still land in a retry's attempt,
+ * as in one of wifi_manager's own retries, and then reads failed: after a retry that waited out
+ * ROUTER_RETRY_PAGE_MAX_MS on a page in use (one every 5 min then), or when the page's requests do
+ * not reach the hub.
  *
  * Attempts are tracked on the wifi_manager task: its CONNECT_STA callback starts one
- * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), its STA_DISCONNECTED
- * callback ends it and stamps s_attempt_tick again (a lost link too), and its GOT_IP callback
+ * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), its STA_DISCONNECTED callback
+ * ends it and stamps s_attempt_tick again (a lost link too, and an attempt that did not start:
+ * wifi_manager calls that callback right after the CONNECT_STA one then), and its GOT_IP callback
  * ends it. An attempt that neither fails nor gets its IP (associated, with no DHCP answer) keeps
- * the retry off until the STA's next disconnect, since a second connect could reboot the hub;
- * its radio hold still ends at the cap. A retry sent stays pending until wifi_manager takes it
- * (its CONNECT_STA callback restamps s_attempt_tick, or finds the STA connected), however long
- * that takes: a second order queued behind it would reach a connecting STA. s_retry_sent, counted
- * up just before the order and matched in that callback (s_retry_seen), tells the retry's
- * CONNECT_STA from a portal submit's, which comes from the same wifi_manager_connect_async(). */
+ * the retry off until the STA's next disconnect, since a second connect would not start; its radio
+ * hold still ends at the cap. A retry sent stays pending until wifi_manager takes it (its
+ * CONNECT_STA callback restamps s_attempt_tick, or finds the STA connected), however long that
+ * takes: a second order queued behind it would reach a connecting STA. s_retry_sent, counted up
+ * just before the order and matched in that callback (s_retry_seen), tells the retry's CONNECT_STA
+ * from a portal submit's, which comes from the same wifi_manager_connect_async(). */
 #define ROUTER_RETRY_MS           30000    // a retry once no attempt has started or ended this long
 #define ROUTER_RETRY_PAGE_MAX_MS  300000   // an open portal page defers one at most this long
 
@@ -564,7 +565,7 @@ static void cb_scan_done(void *pvParameter)
  * it already is, and cb_connection_lost() prints "WiFi Disconnected. Reason: 8", as for a
  * connected STA's forget. With an attempt in flight, or the STA connected, the driver's own
  * disconnect event follows, and wifi_manager erases unless that attempt was a user connect (a
- * portal submit, the router retry, or one sent while the STA was connected), whose failure branch
+ * portal submit or the router retry, one that started: wifi_manager's C2c), whose failure branch
  * it takes first, leaving the bit set: cb_connection_lost() then posts the event, the STA being
  * idle by then (s_forget_pending). The window, the router retry (no credentials: none) and the
  * page (its scan view) then behave as after the reset. wifi_manager task only. */

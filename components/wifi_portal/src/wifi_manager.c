@@ -181,6 +181,38 @@ static void wifi_manager_start_retry_timer(){
 	}
 }
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C2c): what follows a failed attempt that was not a user's: a lost link,
+ * or an automatic retry or the restore at boot that failed or did not start. retries is the task's
+ * count of them. Moved here unchanged from STA_DISCONNECTED's lost-connection branch.
+ */
+static void wifi_manager_retry_or_start_ap(EventBits_t uxBits, uint8_t *retries){
+
+	/* Start the timer that will try to restore the saved config
+	 * LOCAL PATCH (2.1.4 C5): only while the AP is down. With the AP up (the router-fallback
+	 * portal, or the setup AP's tail after an IP, where it stays up once the STA is lost)
+	 * the app's router retry owns the retries; here they went on every few seconds, and
+	 * a portal Submit or the app's retry could land in one of their attempts. */
+	wifi_manager_start_retry_timer();
+
+	/* if the AP is not started, we check if we have reached the threshold of failed attempt to start it */
+	if(! (uxBits & WIFI_MANAGER_AP_STARTED_BIT) ){
+
+		/* if the nunber of retries is below the threshold to start the AP, a reconnection attempt is made
+		 * This way we avoid restarting the AP directly in case the connection is mementarily lost */
+		if(*retries < WIFI_MANAGER_MAX_RETRY_START_AP){
+			(*retries)++;
+		}
+		else{
+			/* In this scenario the connection was lost beyond repair: kick start the AP! */
+			*retries = 0;
+
+			/* start SoftAP */
+			wifi_manager_send_message(WM_ORDER_START_AP, NULL);
+		}
+	}
+}
+
 void wifi_manager_timer_shutdown_ap_cb( TimerHandle_t xTimer){
 
 	/* stop the timer */
@@ -1248,36 +1280,93 @@ void wifi_manager( void * pvParameters ){
 
 				break;
 
-			case WM_ORDER_CONNECT_STA:
+			case WM_ORDER_CONNECT_STA:{
 				ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA");
 
-				/* very important: precise that this connection attempt is specifically requested.
-				 * Param in that case is a boolean indicating if the request was made automatically
-				 * by the wifi_manager.
-				 * */
-				if((BaseType_t)msg.param == CONNECTION_REQUEST_USER) {
-					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
-				}
-				else if((BaseType_t)msg.param == CONNECTION_REQUEST_RESTORE_CONNECTION) {
-					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
-				}
+				/* LOCAL PATCH (2.1.4 C2c): esp_wifi_set_config() and esp_wifi_connect() were each under
+				 * ESP_ERROR_CHECK, and both fail at runtime: ESP_ERR_WIFI_STATE when an attempt is still
+				 * connecting (a portal Submit, the app's router retry and the retry timer each send their
+				 * own) or a scan cannot stop in time, ESP_ERR_WIFI_SSID for an empty SSID (the retry timer
+				 * after a forget), others at low heap. A connect that does not start is now a failed
+				 * attempt of its kind (below), and nothing reboots. */
+				connection_request_made_by_code_t request = (connection_request_made_by_code_t)(uintptr_t)msg.param;
+				esp_err_t connect_err = ESP_OK;
+				bool config_failed = false;
 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 				if( ! (uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT) ){
 					/* update config to latest and attempt connection */
-					ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, wifi_manager_get_wifi_sta_config()));
+					connect_err = esp_wifi_set_config(ESP_IF_WIFI_STA, wifi_manager_get_wifi_sta_config());
+					config_failed = (connect_err != ESP_OK);
 
-					/* if there is a wifi scan in progress abort it first
-					   Calling esp_wifi_scan_stop will trigger a SCAN_DONE event which will reset this bit */
-					if(uxBits & WIFI_MANAGER_SCAN_BIT){
-						esp_wifi_scan_stop();
+					if(!config_failed){
+						/* if there is a wifi scan in progress abort it first
+						   Calling esp_wifi_scan_stop will trigger a SCAN_DONE event which will reset this bit */
+						if(uxBits & WIFI_MANAGER_SCAN_BIT){
+							esp_wifi_scan_stop();
+						}
+						connect_err = esp_wifi_connect();
 					}
-					ESP_ERROR_CHECK(esp_wifi_connect());
+
+					if(connect_err == ESP_OK){
+						/* very important: precise that this connection attempt is specifically requested.
+						 * Param in that case is a boolean indicating if the request was made automatically
+						 * by the wifi_manager.
+						 * LOCAL PATCH (2.1.4 C2c): set once the attempt has started, never for one that did
+						 * not, nor with the STA connected (no attempt starts then): a bit left set was read
+						 * by a later, unrelated disconnect as this request's failure, with no retry and no
+						 * AP after it.
+						 * */
+						if(request == CONNECTION_REQUEST_USER) {
+							xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
+						}
+						else if(request == CONNECTION_REQUEST_RESTORE_CONNECTION) {
+							xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
+						}
+					}
+					else{
+						ESP_LOGW(TAG, "ORDER_CONNECT_STA: %s failed (%s) - attempt not started",
+								config_failed ? "esp_wifi_set_config" : "esp_wifi_connect", esp_err_to_name(connect_err));
+
+						if(request == CONNECTION_REQUEST_USER){
+							/* a user's request (the portal page's Connect, or the app's router retry): its
+							 * status reads failed, for the SSID it asked for, as for an attempt that fails */
+							if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
+								wifi_manager_generate_ip_info_json( UPDATE_FAILED_ATTEMPT );
+								wifi_manager_unlock_json_buffer();
+							}
+							/* what the page wrote into the RAM copy is dropped if the driver refused it:
+							 * the copy goes back to the network the driver has. An attempt still
+							 * connecting to that one then saves and reports that one at its IP, not what
+							 * was typed, and the app's router retry tries it. */
+							if(config_failed && wifi_manager_config_sta){
+								esp_wifi_get_config(ESP_IF_WIFI_STA, wifi_manager_config_sta);
+							}
+						}
+						else{
+							/* an automatic retry or the restore at boot: as a lost connection, its status
+							 * and the next retry or the AP (C5: no retry timer with the AP up) */
+							if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
+								wifi_manager_generate_ip_info_json( UPDATE_LOST_CONNECTION );
+								wifi_manager_unlock_json_buffer();
+							}
+							wifi_manager_retry_or_start_ap(uxBits, &retries);
+						}
+					}
 				}
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
 
+				/* LOCAL PATCH (2.1.4 C2c): an attempt that did not start ends here for the app too, which
+				 * counts one from the callback above: its STA_DISCONNECTED callback, with the reason
+				 * WIFI_REASON_CONNECTION_FAIL, as after an attempt that failed. Not with the STA
+				 * connected: nothing started or ended then. */
+				if(connect_err != ESP_OK && cb_ptr_arr[WM_EVENT_STA_DISCONNECTED]){
+					(*cb_ptr_arr[WM_EVENT_STA_DISCONNECTED])( (void*)(uintptr_t)WIFI_REASON_CONNECTION_FAIL );
+				}
+
+				}
 				break;
 
 			case WM_EVENT_STA_DISCONNECTED:
@@ -1385,32 +1474,12 @@ void wifi_manager( void * pvParameters ){
 						wifi_manager_unlock_json_buffer();
 					}
 
-					/* Start the timer that will try to restore the saved config
-					 * LOCAL PATCH (2.1.4 C5): only while the AP is down. With the AP up (the router-fallback
-					 * portal, or the setup AP's tail after an IP, where it stays up once the STA is lost)
-					 * the app's router retry owns the retries; here they went on every few seconds, and
-					 * a portal Submit or the app's retry could land in one of their attempts. */
-					wifi_manager_start_retry_timer();
-
 					/* if it was a restore attempt connection, we clear the bit */
 					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
 
-					/* if the AP is not started, we check if we have reached the threshold of failed attempt to start it */
-					if(! (uxBits & WIFI_MANAGER_AP_STARTED_BIT) ){
-
-						/* if the nunber of retries is below the threshold to start the AP, a reconnection attempt is made
-						 * This way we avoid restarting the AP directly in case the connection is mementarily lost */
-						if(retries < WIFI_MANAGER_MAX_RETRY_START_AP){
-							retries++;
-						}
-						else{
-							/* In this scenario the connection was lost beyond repair: kick start the AP! */
-							retries = 0;
-
-							/* start SoftAP */
-							wifi_manager_send_message(WM_ORDER_START_AP, NULL);
-						}
-					}
+					/* the retry timer and the count towards the AP (LOCAL PATCH 2.1.4 C2c: shared with a
+					 * connect that does not start) */
+					wifi_manager_retry_or_start_ap(uxBits, &retries);
 				}
 
 				/* callback */
