@@ -28,6 +28,7 @@ Contains the freeRTOS task for the DNS server that processes the requests.
 LOCAL PATCH (2.1.4 C4): the responder is rewritten (dns_server.c, plan section 6.2a). It
 answers on the SoftAP's address only (DEFAULT_AP_IP, port 53), from START_AP to STOP_AP. The
 old header's DNS structures and codes, used by nothing else, are gone with the old responder.
+LOCAL PATCH (2.1.4 C3): and only senders in the SoftAP's subnet (DEFAULT_AP_NETMASK).
 
 @see https://idyl.io
 @see https://github.com/tonyp7/esp32-wifi-manager

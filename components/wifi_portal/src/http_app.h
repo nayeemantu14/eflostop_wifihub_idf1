@@ -91,6 +91,8 @@ typedef enum http_app_activity_t {
  * @brief The activity hook. Called on the httpd task for every request the portal answers itself
  * (PROBE_302, PAGE, API_USER, API_BG, STATUS: not a user hook's URI nor a 404), at its start,
  * and on the dns_server task for every DNS query it answers (DNS): so on two tasks at once.
+ * LOCAL PATCH (2.1.4 C3): never for a request or query that did not come from the SoftAP's
+ * subnet (to the SoftAP's address, for HTTP): those get 403, or no DNS reply, and no call.
  * client_ip is the client's IPv4 address in network byte order (as esp_ip4_addr_t.addr),
  * 0 if unknown. The request waits for the hook: it must be short and must not block.
  */
@@ -104,7 +106,8 @@ void http_app_set_activity_hook(http_app_activity_hook_t hook);
 
 /**
  * @brief reports one activity to the hook, if one is set. For the component's own tasks
- * (the dns_server task).
+ * (the dns_server task, and since 2.1.4 C3 the HTTP handlers, which have the client's address
+ * from their own check).
  */
 void http_app_note_activity(http_app_activity_t kind, uint32_t client_ip);
 

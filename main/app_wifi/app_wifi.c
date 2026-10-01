@@ -733,9 +733,10 @@ static void cb_disconnect_sta(void *pvParameter)
  * again; its lease adds its address; its leave keeps both, so its late requests still find it.
  * The portal's activity hook (portal_activity(): the httpd task per request, the dns_server task
  * per DNS query) finds the entry by address and prints the first request of each kind. A client
- * not seen joining (one that joined before this log was registered, or a home-LAN client of the
- * STA address: the portal's HTTP server answers there too) gets an entry of its own while one is
- * free. Each SoftAP start begins a new session with an empty table.
+ * not seen joining (one that joined before this log was registered) gets an entry of its own
+ * while one is free. The portal reports only clients in the SoftAP's subnet (its C3: a home-LAN
+ * client gets 403 or no DNS reply, and no call). Each SoftAP start begins a new session with an
+ * empty table.
  * Written by the default event loop task (the SoftAP start, join, leave and lease events) and by
  * the httpd and dns_server tasks, under s_ap_clients_lock: a spinlock held for one table scan,
  * never while logging. */

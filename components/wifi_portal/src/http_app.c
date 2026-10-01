@@ -100,6 +100,7 @@ extern const uint8_t watts_logo_png_end[] asm("_binary_Watts_Logo_png_end");
 const static char http_200_hdr[] = "200 OK";
 const static char http_302_hdr[] = "302 Found";
 const static char http_400_hdr[] = "400 Bad Request";
+const static char http_403_hdr[] = "403 Forbidden";
 const static char http_404_hdr[] = "404 Not Found";
 const static char http_503_hdr[] = "503 Service Unavailable";
 const static char http_location_hdr[] = "Location";
@@ -145,35 +146,32 @@ void http_app_note_activity(http_app_activity_t kind, uint32_t client_ip){
 	}
 }
 
-/**
- * @brief the request's client IPv4 address in network byte order, 0 if unknown. With lwIP IPv6
- * on (CONFIG_LWIP_IPV6) the server's socket is IPv6, so an IPv4 client comes as a v4-mapped
- * address (::ffff:a.b.c.d).
- */
-static uint32_t http_app_client_ip(httpd_req_t *req){
-
-	union {
-		struct sockaddr sa;
-		struct sockaddr_in in4;
+/* a socket address of the server's: with lwIP IPv6 on (CONFIG_LWIP_IPV6) its socket is IPv6, so
+ * an IPv4 peer comes as an IPv4-mapped address (::ffff:a.b.c.d) */
+typedef union {
+	struct sockaddr sa;
+	struct sockaddr_in in4;
 #if LWIP_IPV6
-		struct sockaddr_in6 in6;
+	struct sockaddr_in6 in6;
 #endif
-	} addr;
-	socklen_t len = sizeof(addr);
+} http_app_sockaddr_t;
+
+/**
+ * @brief the IPv4 address in network byte order of an AF_INET address, or of an IPv4-mapped
+ * IPv6 one; 0 for anything else (a native IPv6 address included).
+ */
+static uint32_t http_app_ipv4_of(const http_app_sockaddr_t *addr){
+
 	uint32_t ip = 0;
 
-	int fd = httpd_req_to_sockfd(req);
-	if(fd < 0 || getpeername(fd, &addr.sa, &len) != 0){
-		return 0;
-	}
-	if(addr.sa.sa_family == AF_INET){
-		ip = addr.in4.sin_addr.s_addr;
+	if(addr->sa.sa_family == AF_INET){
+		ip = addr->in4.sin_addr.s_addr;
 	}
 #if LWIP_IPV6
-	else if(addr.sa.sa_family == AF_INET6){
+	else if(addr->sa.sa_family == AF_INET6){
 		static const uint8_t v4_mapped[12] = { 0,0,0,0, 0,0,0,0, 0,0,0xff,0xff };
-		if(memcmp(addr.in6.sin6_addr.s6_addr, v4_mapped, sizeof(v4_mapped)) == 0){
-			memcpy(&ip, &addr.in6.sin6_addr.s6_addr[12], sizeof(ip));
+		if(memcmp(addr->in6.sin6_addr.s6_addr, v4_mapped, sizeof(v4_mapped)) == 0){
+			memcpy(&ip, &addr->in6.sin6_addr.s6_addr[12], sizeof(ip));
 		}
 	}
 #endif
@@ -181,14 +179,48 @@ static uint32_t http_app_client_ip(httpd_req_t *req){
 }
 
 /**
- * @brief reports a request to the activity hook. The client's address is looked up only when a
- * hook is set.
+ * @brief LOCAL PATCH (2.1.4 C3, plan D3): the request came to the SoftAP's own address
+ * (DEFAULT_AP_IP) from a client in the SoftAP's subnet (DEFAULT_AP_NETMASK), both IPv4 or
+ * IPv4-mapped; a native IPv6 address on either side fails. *client_ip is the client's IPv4
+ * address in network byte order, 0 if unknown (the activity hook's). The local address alone
+ * would not do: lwIP takes a packet for any of the hub's addresses on any interface, so a
+ * home-LAN host with a route to the SoftAP's subnet through the hub's STA address reaches
+ * 10.10.0.1:80 while the SoftAP is up (HANDOFF 15h, WP1 risk 8).
  */
-static void http_app_activity(httpd_req_t *req, http_app_activity_t kind){
-	http_app_activity_hook_t hook = activity_hook;
-	if(hook){
-		hook(kind, http_app_client_ip(req));
+static bool http_app_on_ap(httpd_req_t *req, uint32_t *client_ip){
+
+	http_app_sockaddr_t local, peer;
+	socklen_t len;
+	struct in_addr ap_ip, ap_mask;
+
+	*client_ip = 0;
+	int fd = httpd_req_to_sockfd(req);
+	if(fd < 0){
+		return false;
 	}
+	len = sizeof(peer);
+	if(getpeername(fd, &peer.sa, &len) == 0){
+		*client_ip = http_app_ipv4_of(&peer);
+	}
+	len = sizeof(local);
+	if(getsockname(fd, &local.sa, &len) != 0 ||
+			inet_pton(AF_INET, DEFAULT_AP_IP, &ap_ip) != 1 || inet_pton(AF_INET, DEFAULT_AP_NETMASK, &ap_mask) != 1){
+		return false;
+	}
+	return http_app_ipv4_of(&local) == ap_ip.s_addr && *client_ip != 0 &&
+			(*client_ip & ap_mask.s_addr) == (ap_ip.s_addr & ap_mask.s_addr);
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C3): the answer to a request that did not come to the SoftAP from
+ * its subnet (http_app_on_ap()): 403 with no body; nothing is done, read or reported to the
+ * activity hook. Logged at DEBUG only, so a LAN scan cannot fill the log.
+ */
+static esp_err_t http_app_refuse(httpd_req_t *req){
+	ESP_LOGD(TAG, "method %d %s refused (403): not to the SoftAP from its subnet", (int)req->method, req->uri);
+	httpd_resp_set_status(req, http_403_hdr);
+	httpd_resp_send(req, NULL, 0);
+	return ESP_OK;
 }
 
 
@@ -196,9 +228,15 @@ static esp_err_t http_server_delete_handler(httpd_req_t *req){
 
 	ESP_LOGI(TAG, "DELETE %s", req->uri);
 
+	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP (the portal's forget, D9, is kept) */
+	uint32_t client_ip;
+	if(!http_app_on_ap(req, &client_ip)){
+		return http_app_refuse(req);
+	}
+
 	/* DELETE /connect.json */
 	if(strcmp(req->uri, http_connect_url) == 0){
-		http_app_activity(req, HTTP_APP_ACT_API_USER); /* LOCAL PATCH (2.1.4 C10a) */
+		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip); /* LOCAL PATCH (2.1.4 C10a) */
 		wifi_manager_disconnect_async();
 
 		httpd_resp_set_status(req, http_200_hdr);
@@ -223,10 +261,16 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 
 	ESP_LOGI(TAG, "POST %s", req->uri);
 
+	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP; a user hook's URIs too */
+	uint32_t client_ip;
+	if(!http_app_on_ap(req, &client_ip)){
+		return http_app_refuse(req);
+	}
+
 	/* POST /connect.json */
 	if(strcmp(req->uri, http_connect_url) == 0){
 
-		http_app_activity(req, HTTP_APP_ACT_API_USER); /* LOCAL PATCH (2.1.4 C10a) */
+		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip); /* LOCAL PATCH (2.1.4 C10a) */
 
 		/* buffers for the headers
 		 * LOCAL PATCH (2.1.4 C2g): on the stack, where two malloc()s per request were used unchecked.
@@ -305,6 +349,13 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
     ESP_LOGD(TAG, "GET %s", req->uri);
 
+    /* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP (HEAD too, which shares this
+     * handler; a user hook's URIs too) */
+    uint32_t client_ip;
+    if(!http_app_on_ap(req, &client_ip)){
+    	return http_app_refuse(req);
+    }
+
     host[0] = '\0';
     buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
     if (buf_len > 1) {
@@ -315,7 +366,9 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
     	}
     }
 
-	/* determine if Host is from the STA IP address */
+	/* determine if Host is from the STA IP address
+	 * LOCAL PATCH (2.1.4 C3): a request to the STA's address is refused above, so this now only
+	 * spares a request to the SoftAP whose Host names the STA's address the redirect */
 	bool access_from_sta_ip = false;
 	if(has_host && wifi_manager_lock_sta_ip_string(portMAX_DELAY)){
 		const char *sta_ip = wifi_manager_get_sta_ip_string();
@@ -328,7 +381,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 		/* Captive Portal functionality */
 		/* 302 Redirect to IP of the access point */
-		http_app_activity(req, HTTP_APP_ACT_PROBE_302); /* LOCAL PATCH (2.1.4 C10a): this and the calls below */
+		http_app_note_activity(HTTP_APP_ACT_PROBE_302, client_ip); /* LOCAL PATCH (2.1.4 C10a): this and the calls below */
 		httpd_resp_set_status(req, http_302_hdr);
 		httpd_resp_set_hdr(req, http_location_hdr, http_redirect_url);
 		httpd_resp_send(req, NULL, 0);
@@ -338,21 +391,21 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 		/* GET /  */
 		if(strcmp(req->uri, http_root_url) == 0){
-			http_app_activity(req, HTTP_APP_ACT_PAGE);
+			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
 			httpd_resp_set_status(req, http_200_hdr);
 			httpd_resp_set_type(req, http_content_type_html);
 			httpd_resp_send(req, (char*)index_html_start, index_html_end - index_html_start);
 		}
 		/* GET /code.js */
 		else if(strcmp(req->uri, http_js_url) == 0){
-			http_app_activity(req, HTTP_APP_ACT_PAGE);
+			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
 			httpd_resp_set_status(req, http_200_hdr);
 			httpd_resp_set_type(req, http_content_type_js);
 			httpd_resp_send(req, (char*)code_js_start, code_js_end - code_js_start);
 		}
 		/* GET /style.css */
 		else if(strcmp(req->uri, http_css_url) == 0){
-			http_app_activity(req, HTTP_APP_ACT_PAGE);
+			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
 			httpd_resp_set_status(req, http_200_hdr);
 			httpd_resp_set_type(req, http_content_type_css);
 			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
@@ -360,7 +413,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 		}
 		/* GET /Watts_Logo.png */
 		else if(strcmp(req->uri, http_watts_logo_url) == 0){
-			http_app_activity(req, HTTP_APP_ACT_PAGE);
+			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
 			httpd_resp_set_status(req, http_200_hdr);
 			httpd_resp_set_type(req, http_content_type_png);
 			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
@@ -369,7 +422,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 		/* GET /ap.json */
 		else if(strcmp(req->uri, http_ap_url) == 0){
 
-			http_app_activity(req, HTTP_APP_ACT_API_BG);
+			http_app_note_activity(HTTP_APP_ACT_API_BG, client_ip);
 
 			/* if we can get the mutex, write the last version of the AP list */
 			if(wifi_manager_lock_json_buffer(( TickType_t ) 10)){
@@ -398,7 +451,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 		/* GET /status.json */
 		else if(strcmp(req->uri, http_status_url) == 0){
 
-			http_app_activity(req, HTTP_APP_ACT_STATUS);
+			http_app_note_activity(HTTP_APP_ACT_STATUS, client_ip);
 
 			if(wifi_manager_lock_json_buffer(( TickType_t ) 10)){
 				char *buff = wifi_manager_get_ip_info_json();

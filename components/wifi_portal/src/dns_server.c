@@ -36,6 +36,9 @@ no count covers), bound to the STA's address (0.0.0.0 while the STA had none, so
 on the home LAN too), and was killed from the wifi_manager task with vTaskDelete() before its
 socket was closed.
 
+LOCAL PATCH (2.1.4 C3): it also drops, with no reply, datagrams from outside the SoftAP's subnet
+(a LAN host routing that subnet through the hub's STA address reached the bound socket).
+
 @see https://idyl.io
 @see https://github.com/tonyp7/esp32-wifi-manager
 */
@@ -273,9 +276,10 @@ static int dns_open(uint32_t ap_ip, bool *logged){
 }
 
 /**
- * @brief Serves queries on fd while the run flag is set.
+ * @brief Serves queries on fd while the run flag is set. ap_ip and ap_mask: the SoftAP's address
+ * and netmask, network byte order.
  */
-static void dns_serve(int fd, uint32_t ap_ip){
+static void dns_serve(int fd, uint32_t ap_ip, uint32_t ap_mask){
 
 	uint8_t q[DNS_RX_BUF_SIZE];		/* written by recvfrom() only, never past what it received */
 	struct sockaddr_in client;
@@ -292,6 +296,16 @@ static void dns_serve(int fd, uint32_t ap_ip){
 			if(errno != EAGAIN && errno != EWOULDBLOCK){
 				vTaskDelay(pdMS_TO_TICKS(DNS_RETRY_STEP_MS));
 			}
+			continue;
+		}
+
+		/* LOCAL PATCH (2.1.4 C3, HANDOFF 15h WP1 risk 8): dropped without a reply: a sender
+		 * outside the SoftAP's subnet. The socket is bound to the SoftAP's address, but lwIP takes
+		 * a datagram for any of the hub's addresses on any interface, so a home-LAN host that
+		 * routes the SoftAP's subnet through the hub's STA address was answered while the
+		 * SoftAP was up. First, so that such datagrams use none of the reply budget */
+		if((client.sin_addr.s_addr & ap_mask) != (ap_ip & ap_mask)){
+			ESP_LOGD(TAG, "%d B datagram from outside the SoftAP's subnet dropped", n);
 			continue;
 		}
 
@@ -335,12 +349,17 @@ static void dns_server(void *pvParameters){
 
 	(void)pvParameters;
 	struct in_addr ap_addr = { 0 };
+	struct in_addr ap_mask = { 0 };
 	bool open_failure_logged = false;
 	int fd = -1;
 
-	/* the SoftAP's address: where the hijack sends every name, and the only one it answers on */
+	/* the SoftAP's address: where the hijack sends every name, and the only one it answers on.
+	 * LOCAL PATCH (2.1.4 C3): and its netmask: it answers only senders in the SoftAP's subnet */
 	if(inet_pton(AF_INET, DEFAULT_AP_IP, &ap_addr) != 1){
 		ESP_LOGE(TAG, "captive DNS: DEFAULT_AP_IP is not an IPv4 address - not started");
+	}
+	else if(inet_pton(AF_INET, DEFAULT_AP_NETMASK, &ap_mask) != 1){
+		ESP_LOGE(TAG, "captive DNS: DEFAULT_AP_NETMASK is not an IPv4 netmask - not started");
 	}
 	else{
 		while(dns_run && fd < 0){
@@ -353,7 +372,7 @@ static void dns_server(void *pvParameters){
 
 	if(fd >= 0){
 		ESP_LOGI(TAG, "DNS Server listening on 53/udp");
-		dns_serve(fd, ap_addr.s_addr);
+		dns_serve(fd, ap_addr.s_addr, ap_mask.s_addr);
 		close(fd);
 	}
 
