@@ -72,23 +72,28 @@ static void idma_sample(idma_stats_t *st)
 
 // The internal-DMA line; the next interval's lows then start from the last sample. The last
 // failed allocation is shown when the count changed since the previous line.
+// min_ever, last on the line (2.1.4 WP1): the all-time low of the internal-DMA free size, which
+// the allocator records at every allocation. The 1 s samples miss short dips (by about 20 KB on
+// the CP5 bench); this does not. It is the sum of each internal-DMA heap's own lowest free size,
+// reached at different times, so a lower bound of the true low, like the heap line's min_ever.
 static void idma_report(idma_stats_t *st, uint32_t *fails_reported)
 {
     uint32_t fails = s_alloc_fails;
+    unsigned long min_ever = (unsigned long)heap_caps_get_minimum_free_size(IDMA_CAPS);
     if (fails == *fails_reported) {
-        ESP_LOGI(TAG, "idma: free=%lu min=%lu largest=%lu min_largest=%lu allocfail=%lu",
+        ESP_LOGI(TAG, "idma: free=%lu min=%lu largest=%lu min_largest=%lu allocfail=%lu min_ever=%lu",
                  (unsigned long)st->free_now, (unsigned long)st->min_free,
                  (unsigned long)st->largest_now, (unsigned long)st->min_largest,
-                 (unsigned long)fails);
+                 (unsigned long)fails, min_ever);
     } else {
         const char *func = s_alloc_fail_func;
         ESP_LOGI(TAG, "idma: free=%lu min=%lu largest=%lu min_largest=%lu allocfail=%lu "
-                 "(last: %lu B, caps 0x%lx, %lu B free, %s)",
+                 "(last: %lu B, caps 0x%lx, %lu B free, %s) min_ever=%lu",
                  (unsigned long)st->free_now, (unsigned long)st->min_free,
                  (unsigned long)st->largest_now, (unsigned long)st->min_largest,
                  (unsigned long)fails, (unsigned long)s_alloc_fail_size,
                  (unsigned long)s_alloc_fail_caps, (unsigned long)s_alloc_fail_free,
-                 func ? func : "?");
+                 func ? func : "?", min_ever);
         *fails_reported = fails;
     }
     st->min_free    = st->free_now;
