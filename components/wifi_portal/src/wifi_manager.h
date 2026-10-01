@@ -311,6 +311,14 @@ void wifi_manager( void * pvParameters );
 char* wifi_manager_get_ap_list_json();
 char* wifi_manager_get_ip_info_json();
 
+/**
+ * @brief LOCAL PATCH (2.1.4 WP1, a bench diagnostic): true while a scan the wifi_manager task
+ * started (WM_ORDER_START_WIFI_SCAN) has not had its WM_EVENT_SCAN_DONE taken by that task. The
+ * radio is then on the scan's channels part of the time, not the AP's or the router's. For the
+ * wifi_manager task and its callbacks only (no lock).
+ */
+bool wifi_manager_scan_in_flight();
+
 
 void wifi_manager_scan_async();
 

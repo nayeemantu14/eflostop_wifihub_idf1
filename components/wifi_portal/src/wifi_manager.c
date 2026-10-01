@@ -86,6 +86,13 @@ char *accessp_json = NULL;
 /* START_AP sets it, STOP_AP clears it: the list should exist (a failed allocation is retried at the
  * next SCAN_DONE). wifi_manager task only. */
 static bool ap_list_wanted = false;
+/* LOCAL PATCH (2.1.4 WP1, a bench diagnostic): a scan this task started is in flight, from the
+ * esp_wifi_scan_start() that succeeded to this task's WM_EVENT_SCAN_DONE (done, failed or
+ * stopped); the radio then visits every channel (wifi_manager_scan_in_flight()). Not cleared at a
+ * STA disconnect, where the event handler clears WIFI_MANAGER_SCAN_BIT in case no SCAN_DONE
+ * follows: were a SCAN_DONE ever lost, this would stay set until the next scan's, so it errs
+ * towards "in flight", never away from it. wifi_manager task only. */
+static bool scan_in_flight = false;
 char *ip_info_json = NULL;
 wifi_config_t* wifi_manager_config_sta = NULL;
 
@@ -832,6 +839,10 @@ char* wifi_manager_get_ap_list_json(){
 	return accessp_json;
 }
 
+bool wifi_manager_scan_in_flight(){
+	return scan_in_flight;
+}
+
 
 /**
  * @brief Standard wifi event handler
@@ -1222,6 +1233,8 @@ void wifi_manager( void * pvParameters ){
 			case WM_EVENT_SCAN_DONE:{
 				/* LOCAL PATCH (2.1.4 C2a): the parameter is the scan's status (0 = success), not a pointer */
 				uint32_t scan_status = (uint32_t)(uintptr_t)msg.param;
+				/* LOCAL PATCH (2.1.4 WP1): the scan is over, done, failed or stopped */
+				scan_in_flight = false;
 				/* LOCAL PATCH (2.1.4 C2b, C2 (b)): a list that failed to allocate at START_AP is tried
 				 * again while the AP is up */
 				if(ap_list_wanted){
@@ -1255,6 +1268,9 @@ void wifi_manager( void * pvParameters ){
 					if(scan_err != ESP_OK){
 						ESP_LOGW(TAG, "esp_wifi_scan_start failed (%s) — skipping scan", esp_err_to_name(scan_err));
 						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
+					}
+					else{
+						scan_in_flight = true;	/* LOCAL PATCH (2.1.4 WP1) */
 					}
 				}
 

@@ -432,6 +432,15 @@ static __attribute__((noinline)) uint8_t router_channel(void)
     return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.primary : 0;
 }
 
+// Appended to the three channel lines (2.1.4 WP1): while a scan wifi_manager started is in flight
+// (the portal page's network list), the radio's channel is maybe the scan's, not the AP's or the
+// router's (the CP5 bench read "radio 10, router 2" at an IP). Nothing otherwise: the lines are
+// then as before.
+static const char *scan_note(void)
+{
+    return wifi_manager_scan_in_flight() ? ", Wi-Fi scan in flight" : "";
+}
+
 // WM_ORDER_START_AP (wifi_manager task), once the SoftAP, HTTP and DNS servers are up. The STA
 // config is what LOAD_AND_RESTORE read from NVS (all zero when nothing is saved), or what a
 // requested disconnect zeroed and saved just before sending this START_AP. This task writes
@@ -452,11 +461,11 @@ static void cb_ap_started(void *pvParameter)
 
     // The channels (see above).
     if (s_router_channel != 0)
-        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router last seen on %u",
-                 radio_channel(), (unsigned)wifi_settings.ap_channel, (unsigned)s_router_channel);
+        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router last seen on %u%s",
+                 radio_channel(), (unsigned)wifi_settings.ap_channel, (unsigned)s_router_channel, scan_note());
     else
-        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router not joined since boot",
-                 radio_channel(), (unsigned)wifi_settings.ap_channel);
+        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router not joined since boot%s",
+                 radio_channel(), (unsigned)wifi_settings.ap_channel, scan_note());
 }
 
 // WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected. This
@@ -909,7 +918,8 @@ void cb_connection_ok(void *pvParameter)
     uint8_t router = router_channel();
     if (router != 0)
         s_router_channel = router;
-    ESP_LOGI(WIFI_TAG, "Wi-Fi channel at IP: radio %u, router %u", radio_channel(), (unsigned)router);
+    ESP_LOGI(WIFI_TAG, "Wi-Fi channel at IP: radio %u, router %u%s", radio_channel(), (unsigned)router,
+             scan_note());
 
     // The STA has its air time now: no Wi-Fi radio hold, and BLE resumes at once. The attempt
     // that got here is over, and so is a page's chain.
@@ -958,8 +968,8 @@ void cb_connection_lost(void *pvParameter)
         ESP_LOGW(WIFI_TAG, "WiFi Disconnected. Reason: %d", reason);
     // The channels (see above), for a link that was up: not for each failed connect attempt.
     if (s_sta_connected)
-        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at link loss: radio %u, router was on %u",
-                 radio_channel(), (unsigned)s_router_channel);
+        ESP_LOGI(WIFI_TAG, "Wi-Fi channel at link loss: radio %u, router was on %u%s",
+                 radio_channel(), (unsigned)s_router_channel, scan_note());
 
     // The link was lost, or a connect attempt ended, and its radio hold with it (the deadline stays
     // for RADIO_HOLD_GAP_MS). The router retry counts from here too: this disconnect may have armed
