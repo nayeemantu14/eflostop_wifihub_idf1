@@ -101,7 +101,7 @@ static int     s_dps_attempts     = 0;       // registrations tried so far (dps_
 // iothub_on_wifi_lost() (both on the wifi_manager task, flags only); read by iothub_task.
 static volatile bool s_wifi_up = false;
 // Link losses since boot, counted by iothub_on_wifi_lost() (its only writer): iothub_task
-// stops MQTT for a loss even when the link is back by its next pass.
+// asks for MQTT's stop for a loss even when the link is back by its next pass.
 static volatile uint32_t s_wifi_losses = 0;
 
 // SNTP bring-up, iothub_task only (net_maintain()).
@@ -2446,8 +2446,8 @@ static void cloud_admission(void)
     uint32_t losses = s_wifi_losses;
     bool up = s_wifi_up;
     if (losses != s_wifi_losses_seen || (!up && s_admit_state != ADMIT_NO_IP)) {
-        // A link loss since the last pass, even one the link is already back from: MQTT
-        // stops at once, and the next IP is admitted afresh.
+        // A link loss since the last pass, even one the link is already back from: MQTT's
+        // stop is asked at once (wifi_task runs it), and the next IP is admitted afresh.
         s_wifi_losses_seen = losses;
         admit_withdraw("WiFi down");   // its stop line as it always read
         s_admit_state   = ADMIT_NO_IP;
@@ -2531,10 +2531,10 @@ static bool cloud_admission_holds(void)
 }
 
 // Network bring-up, one non-blocking step per loop pass. iothub_task only.
-// The admission first (a link loss stops MQTT on the pass that sees it). SNTP starts at the
-// first Wi-Fi IP, SoftAP up or not: a few small UDP packets, and the clock is then ready for
-// the TLS the admission lets in. The clock is checked on every pass until it is valid -
-// possibly before Wi-Fi, since a software reset keeps the RTC time.
+// The admission first (a link loss asks for MQTT's stop on the pass that sees it; wifi_task
+// runs it). SNTP starts at the first Wi-Fi IP, SoftAP up or not: a few small UDP packets, and
+// the clock is then ready for the TLS the admission lets in. The clock is checked on every
+// pass until it is valid - possibly before Wi-Fi, since a software reset keeps the RTC time.
 static void net_maintain(void)
 {
     cloud_admission();
@@ -2612,8 +2612,11 @@ static void build_mqtt_cfg(esp_mqtt_client_config_t *cfg, const char *password)
 // esp_mqtt_client_stop() does NOT dispatch MQTT_EVENT_DISCONNECTED — the client task
 // simply exits. Without this, s_connected stays true across a deliberate stop, so
 // publish_json() takes the online branch, hands a leak event to an outbox that is
-// about to be discarded, and skips the NVS offline buffer entirely. Call after every
-// explicit stop.
+// about to be discarded, and skips the NVS offline buffer entirely. Call when a stop is
+// asked (mqtt_stop_request()), before it runs: wifi_task's stop can take seconds, and
+// iothub_task, which keeps publishing meanwhile, must hand nothing more to the outbox the
+// stop deletes, nor wait on esp-mqtt's API lock behind it. wifi_task calls it again after
+// the stop if a CONNECTED raced in (iothub_mqtt_stop_service()).
 static void mark_mqtt_disconnected(void)
 {
     g_iot_hub_connected = false;
@@ -3458,8 +3461,9 @@ void iothub_task(void *param)
         // and the 269 s connect's reached IoT Hub). One that esp-mqtt did not take at all
         // (refused for room, MQTT_OUTBOX_LIMIT_BYTES) is owed until it does, while connected:
         // never a second copy on a connect whose first was taken.
-        // Only while still connected: this pass's cloud_admission() may have stopped the client
-        // since that CONNECTED (a link loss, or the SoftAP up). A stopped client still takes a
+        // Only while still connected: this pass's cloud_admission() may have asked for the
+        // client's stop since that CONNECTED (a link loss, or the SoftAP up; it marks MQTT
+        // disconnected as it asks, and wifi_task stops it). A stopping client still takes a
         // QoS 1 publish into its outbox and returns its msg_id, so the replay would count every
         // buffered event as sent and erase it, and the outbox expires them after 30 s. The flag
         // is cleared before the connection is read, so a CONNECTED after that raises it again.
