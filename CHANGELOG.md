@@ -28,8 +28,9 @@ The user approved the 2.1.4 radio and setup-portal plan on 2026-10-01
 packages land one at a time, each behind a bench gate, and the last one (WP10) folds this part into the
 sections below. The first two, WP-V and WP0, change no behaviour. The third, WP1, removes every way the setup
 portal could reboot the hub. The fourth, WP2, starts the cloud's TLS only once the setup SoftAP is down, stops
-the SoftAP soon after Wi-Fi connects, and keeps the setup web server off the home network. WP1 and WP2 are
-built and benched together as Build checkpoint 6 (HANDOFF §15h-§15l).
+the SoftAP soon after Wi-Fi connects, and keeps the setup web server off the home network. WP2b moves the
+MQTT stop off the task that handles leaks. WP1, WP2 and WP2b are built and benched together as Build
+checkpoint 6 (HANDOFF §15h-§15m).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -167,7 +168,8 @@ built and benched together as Build checkpoint 6 (HANDOFF §15h-§15l).
     Wi-Fi manager's task, and a SoftAP that comes up while the cloud is connected stops it too; the Wi-Fi
     callbacks only set flags. The stop can hold the cloud task, which also evaluates leaks, for about 1-5 s
     (about 10-20 s if a connect was in flight): a leak is acted on that much later, never missed (HANDOFF §15i,
-    for the user's decision).
+    for the user's decision). WP2b (next entry) moves the stop itself to the Wi-Fi task: leak handling no
+    longer waits for it.
   - **DPS (first commissioning).** A registration in progress gives up within about 1 s when Wi-Fi is lost or
     the SoftAP comes up, and runs again as soon as the cloud is admitted again, with no back-off and no attempt
     counted.
@@ -233,6 +235,31 @@ built and benched together as Build checkpoint 6 (HANDOFF §15h-§15l).
     come with WP4, so after a Connect the SoftAP stays up to 60 s while the phone stays joined; the Forget is
     still reachable from a phone on the SoftAP (D9 kept); a twin reported-property update refused by a full
     queue is not sent again until the next report (HANDOFF §15i).
+- **The MQTT stop no longer holds leak handling (WP2b; the user's decision of 2026-10-01 on WP2's stall).**
+  Commits `fd682be` … `d0d5284` (`main/iothub`, `main/app_wifi`, `main/telemetry`, `main/offline_buffer`);
+  details in HANDOFF §15m, the bench check in §15k item 7.
+  - **The stop at a link loss, a SoftAP start or a SAS renewal runs on the Wi-Fi helper task** (`wifi_task`),
+    no longer on the cloud task (`iothub_task`), which evaluates leaks and commands the valve close: those never
+    wait for it. The cloud task asks for the stop and goes on; the Wi-Fi task may be held about 1-5 s (10-30 s
+    with a connect in flight) once per outage, SoftAP start or renewal, and the cloud is admitted again only
+    once that stop has ended. The SAS renewal stops, re-keys and restarts the client the same way. The twin
+    report is sent only while connected.
+  - **Buffered events are no longer erased when the connection drops during their replay:** the replay stops
+    at the first event it can no longer hand to a live connection, and keeps it and the rest for the next
+    connect (an event the cloud did get may then arrive twice).
+  - **Log lines.** New: `IOTHUB`: `cloud admission deferred: the last MQTT stop is still under way` (once per
+    hold), `MQTT client stopped on wifi_task in %lu.%lu s`; `OFFLINE_BUF` (warning): `MQTT session ended -
+    drain stopped at [%s], kept for the next connect`. Same text, new time: `TELEMETRY_V2: MQTT connected =
+    false` now prints as the stop is asked, right after the `… — stopping MQTT client (…)` line, and `IOTHUB:
+    SAS: token renewed (…)` now follows `MQTT client stopped on wifi_task …`. No line was removed; the
+    production tool matches none of these, and none prints a credential.
+  - Memory (estimated from the objects; Build checkpoint 6 measures it): `.bss` −75 B, `.data` 0, flash about
+    +0.65 KB; no IRAM; no new task, timer or allocation, except about 0.1-0.15 KB once per boot at the first
+    stop of a connected session (the Wi-Fi task's first network call).
+  - **Known, for the user's decision (HANDOFF §15m):** a live DPS registration (first commissioning, or every
+    hub after a provisioning-epoch change) still runs on the cloud task, for up to about 60 s; a publish on the
+    cloud task can wait about 10-20 s on a full network send buffer when the internet link dies silently under
+    a connected session.
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and

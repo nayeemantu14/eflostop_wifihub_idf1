@@ -6683,6 +6683,7 @@ static void log_stack_hwm(void)
    - At about M + 18 h, expect in this order:
      - `IOTHUB: SAS: within 6 h of expiry — renewing`
      - `TELEMETRY_V2: MQTT connected = false`
+     - `IOTHUB: MQTT client stopped on wifi_task in %lu.%lu s` (format; about 1 s. Since WP2b the stop runs on the Wi-Fi task, HANDOFF §15m; images before it have no such line)
      - `IOTHUB: SAS: token renewed (valid 24 h, expires ts=%ld)` (format; `ts` ≈ renewal time + 86400)
      - `IOTHUB: Connected to Azure IoT Hub!` within about 15 s
      - then a lifecycle (`reset_reason:"power_on"`, `uptime_s` ≈ 64,800 or more), a twin, and a `boot` snapshot
