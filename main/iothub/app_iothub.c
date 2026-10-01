@@ -301,6 +301,8 @@ typedef struct {
     uint8_t       seen;        // health_get_sync_counts() right after the build ...
     uint8_t       total;
     bool          counts_ok;   // ... if it could be read
+    uint8_t       seen_cap;    // the lowest seen-count a removal read during the flight
+                               // (apply_device_set_change()); 0xFF = none
     snap_reason_t reason;
     uint32_t      epoch;       // s_snap_epoch at the build
     uint32_t      rs_pub;      // health_get_rating_seq() sampled before the build
@@ -312,9 +314,10 @@ static uint8_t       s_snap_ticket = 0;     // the last ticket handed out (never
 #define SNAP_RESULT_LATE_MS  60000          // "SNAP result outstanding" after this long
 
 // The commission epoch (R1-2): bumped by everything that re-arms the boot/commission state
-// behind a snapshot in flight - arm_commission_snapshot(), on_hub_emptied(), the removal clamp,
-// a new session's reset. A result read after a bump does only the generic bookkeeping, never
-// the flags it would set from a state that has since been re-armed. iothub_task only.
+// behind a snapshot in flight - arm_commission_snapshot(), on_hub_emptied(), a new session's
+// reset. A result read after a bump does only the generic bookkeeping, never the flags it would
+// set from a state that has since been re-armed. A removal re-arms nothing: its clamp of the
+// seen-count is carried to the result instead (s_fl.seen_cap). iothub_task only.
 static uint32_t      s_snap_epoch = 0;
 
 // EVENT requests made while a snapshot is in flight: one, the strongest tier and the latest
@@ -1080,11 +1083,19 @@ static void apply_device_set_change(void)
     // g_commission_pub_seen — so a late device's first contact would merely restore the old
     // count and publish nothing. Clamp only: an open window keeps running unchanged, and a
     // closed one stays closed. (snap_now_ms() is defined below this function.)
-    if (r.removed > 0 && (esp_timer_get_time() / 1000) < g_commission_until_ms) {
-        s_snap_epoch++;   // a snapshot in flight must not restore the count clamped here (R1-2)
+    // A snapshot in flight was built before this removal: its result would set the count it
+    // read, undoing this clamp (R1-2). The clamp is carried to that result (s_fl.seen_cap), which
+    // applies it after its own bookkeeping, as when the snapshot published on this task and
+    // this clamp followed it. Not by bumping the commission epoch: that also kept the result
+    // from marking its boot or fast snapshot sent, and a second one followed (TC-1).
+    if (r.removed > 0) {
+        bool window = (esp_timer_get_time() / 1000) < g_commission_until_ms;
         uint8_t seen = 0, total = 0;
-        if (health_get_sync_counts(&seen, &total) && seen < g_commission_pub_seen) {
-            g_commission_pub_seen = seen;
+        if ((window || s_fl.out) && health_get_sync_counts(&seen, &total)) {
+            if (window && seen < g_commission_pub_seen)
+                g_commission_pub_seen = seen;
+            if (s_fl.out && seen < s_fl.seen_cap)
+                s_fl.seen_cap = seen;
         }
     }
 
@@ -1275,7 +1286,7 @@ static void snap_result_take(void)
         if (s_rating_seq_seen == s_fl.rs_seen)
             s_rating_seq_seen = s_fl.rs_pub;
         // The flags only if nothing re-armed them during the flight (the epoch, R1-2): a
-        // provision, an emptied hub, a removal's clamp or a new session has its own snapshot.
+        // provision, an emptied hub or a new session has its own snapshot.
         if (s_fl.epoch == s_snap_epoch) {
             if (s_fl.reason == SNAP_BOOT || s_fl.reason == SNAP_COMMISSION) {
                 g_boot_snapshot_sent = true;
@@ -1302,6 +1313,10 @@ static void snap_result_take(void)
                     g_commission_until_ms = s_fl.flush_now + COMMISSION_REFRESH_GRACE_MS;
                 }
             }
+            // A removal during the flight: its clamp, after this snapshot's count, while the
+            // refresh window is open (apply_device_set_change(); TC-1).
+            if (s_fl.seen_cap < g_commission_pub_seen && snap_now_ms() < g_commission_until_ms)
+                g_commission_pub_seen = s_fl.seen_cap;
         }
         snap_rearm_heartbeat();   // also clears the retry backoff
         ESP_LOGI(IOTHUB_TAG, "SNAP heartbeat=reset interval_ms=%lld",
@@ -4628,6 +4643,7 @@ void iothub_task(void *param)
                         .seen      = seen,
                         .total     = total,
                         .counts_ok = counts_ok,
+                        .seen_cap  = 0xFF,
                         .reason    = reason,
                         .epoch     = s_snap_epoch,
                         .rs_pub    = rs_pub,
