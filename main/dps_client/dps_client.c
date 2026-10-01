@@ -33,6 +33,7 @@
 #define DPS_API_VERSION      "2019-03-31"
 #define DPS_POLL_INTERVAL_MS 3000
 #define DPS_TIMEOUT_MS       60000
+#define DPS_WAIT_SLICE_MS    1000   // the caller's abort hook is asked this often
 #define DPS_SAS_EXPIRY_SEC   3600   // 1 hour
 
 // ---------------------------------------------------------------------------
@@ -340,7 +341,8 @@ static void dps_mqtt_event_handler(void *handler_args, esp_event_base_t base,
 // ---------------------------------------------------------------------------
 
 esp_err_t dps_register(const char *id_scope, const char *group_key,
-                       const char *registration_id, dps_assignment_t *out)
+                       const char *registration_id, dps_assignment_t *out,
+                       bool (*keep_going)(void))
 {
     // 1. Try NVS cache first
     if (nvs_load_cache(out) == ESP_OK) {
@@ -384,6 +386,11 @@ esp_err_t dps_register(const char *id_scope, const char *group_key,
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.state = DPS_STATE_CONNECTING;
     s_ctx.done_sem = xSemaphoreCreateBinary();
+    if (s_ctx.done_sem == NULL) {   // the wait below would assert on it
+        ESP_LOGE(DPS_TAG, "DPS registration not started (no memory)");
+        free(sas_token);
+        return ESP_ERR_NO_MEM;
+    }
     s_ctx.id_scope = id_scope;
     s_ctx.registration_id = registration_id;
     s_ctx.poll_rid = 2;  // rid=1 used for initial register
@@ -410,14 +417,36 @@ esp_err_t dps_register(const char *id_scope, const char *group_key,
 
     ESP_LOGI(DPS_TAG, "Connecting to %s...", DPS_GLOBAL_ENDPOINT);
     s_ctx.client = esp_mqtt_client_init(&mqtt_cfg);
+    if (s_ctx.client == NULL) {   // was a silent 60 s wait for nothing
+        ESP_LOGE(DPS_TAG, "DPS registration failed (MQTT client not created)");
+        vSemaphoreDelete(s_ctx.done_sem);
+        s_ctx.done_sem = NULL;
+        free(sas_token);
+        return ESP_FAIL;
+    }
     esp_mqtt_client_register_event(s_ctx.client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID,
                                    dps_mqtt_event_handler, NULL);
     esp_mqtt_client_start(s_ctx.client);
 
-    // 6. Block until done or timeout
-    bool got_sem = xSemaphoreTake(s_ctx.done_sem, pdMS_TO_TICKS(DPS_TIMEOUT_MS));
+    // 6. Block until done or timeout, in DPS_WAIT_SLICE_MS slices (2.1.4 WP2): between two,
+    //    the caller's hook says whether the registration may go on. Its TLS session must not
+    //    run beside the SoftAP (plan I4), so it gives up within a slice when the STA loses
+    //    its link or the SoftAP comes up, instead of holding a doomed session for up to
+    //    DPS_TIMEOUT_MS.
+    bool got_sem = false;
+    bool aborted = false;
+    TickType_t wait_start = xTaskGetTickCount();
+    for (;;) {
+        got_sem = (xSemaphoreTake(s_ctx.done_sem, pdMS_TO_TICKS(DPS_WAIT_SLICE_MS)) == pdTRUE);
+        if (got_sem) break;
+        if (keep_going != NULL && !keep_going()) {
+            aborted = true;
+            break;
+        }
+        if (xTaskGetTickCount() - wait_start >= pdMS_TO_TICKS(DPS_TIMEOUT_MS)) break;
+    }
 
-    // 7. Cleanup MQTT client
+    // 7. Cleanup MQTT client (an abort stops it here too: esp_mqtt_client_stop())
     esp_mqtt_client_stop(s_ctx.client);
     esp_mqtt_client_destroy(s_ctx.client);
     s_ctx.client = NULL;
@@ -425,7 +454,15 @@ esp_err_t dps_register(const char *id_scope, const char *group_key,
     s_ctx.done_sem = NULL;
     free(sas_token);
 
-    if (!got_sem || s_ctx.state != DPS_STATE_DONE) {
+    // Read once the client is stopped: its task no longer writes the state. An assignment
+    // that arrived as the wait ended is kept.
+    if (s_ctx.state != DPS_STATE_DONE) {
+        if (aborted) {
+            ESP_LOGW(DPS_TAG, "DPS registration aborted after %lu s: Wi-Fi lost or SoftAP up - "
+                     "tried again once the cloud is admitted again",
+                     (unsigned long)((xTaskGetTickCount() - wait_start) / configTICK_RATE_HZ));
+            return ESP_ERR_INVALID_STATE;
+        }
         ESP_LOGE(DPS_TAG, "DPS registration failed (state=%d, timeout=%s)",
                  s_ctx.state, got_sem ? "no" : "yes");
         return ESP_FAIL;

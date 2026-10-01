@@ -1,6 +1,7 @@
 #ifndef DPS_CLIENT_H
 #define DPS_CLIENT_H
 
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -17,16 +18,24 @@ typedef struct {
 
 /**
  * Try NVS cache first; if not cached, perform DPS registration over MQTT.
- * Blocks until complete or fails.
+ * Blocks until complete or fails, for up to 60 s.
  *
  * @param id_scope        DPS ID scope (e.g. "0neXXXXXXXX")
  * @param group_key       Base64-encoded group enrollment primary key
  * @param registration_id Device registration ID (e.g. "GW-34B7DA6AAD54")
  * @param out             Filled on success with assigned hub, device ID, and derived key
- * @return ESP_OK on success, ESP_FAIL on registration failure
+ * @param keep_going      Abort hook, or NULL: asked about every second while a live
+ *                        registration waits (on the caller's task). false stops and
+ *                        destroys the registration's MQTT client and returns
+ *                        ESP_ERR_INVALID_STATE. iothub_task passes its cloud admission
+ *                        (2.1.4 WP2: no DPS TLS session while the SoftAP is up).
+ * @return ESP_OK on success; ESP_ERR_INVALID_STATE when the registration did not run or
+ *         was aborted (no valid clock, or keep_going said stop): not a failed attempt;
+ *         ESP_ERR_NO_MEM or ESP_FAIL on registration failure
  */
 esp_err_t dps_register(const char *id_scope, const char *group_key,
-                       const char *registration_id, dps_assignment_t *out);
+                       const char *registration_id, dps_assignment_t *out,
+                       bool (*keep_going)(void));
 
 /**
  * Clear the NVS DPS cache (forces re-registration on next boot).

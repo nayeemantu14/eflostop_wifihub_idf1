@@ -2336,6 +2336,17 @@ static void cloud_admission(void)
     }
 }
 
+// The admission still holds: no link loss since the pass that admitted, the IP, the SoftAP
+// down. Read-only, so a pass can ask it from inside a blocking step: dps_register()'s abort
+// hook asks it every second (plan I4: DPS's private MQTT client runs TLS too). The next
+// pass's cloud_admission() then withdraws the admission itself.
+static bool cloud_admission_holds(void)
+{
+    bool up = s_wifi_up;
+    return s_admit_state == ADMIT_DONE && up && s_wifi_losses == s_wifi_losses_seen &&
+           softap_down();
+}
+
 // Network bring-up, one non-blocking step per loop pass. iothub_task only.
 // The admission first (a link loss stops MQTT on the pass that sees it). SNTP starts at the
 // first Wi-Fi IP, SoftAP up or not: a few small UDP packets, and the clock is then ready for
@@ -2514,13 +2525,16 @@ static void sas_maintain(void)
 // One attempt at the whole chain: DPS assignment -> client config -> client.
 // Safe to call repeatedly; it does nothing lasting until every step has succeeded,
 // and mqtt_client is only published once the client is fully built and its event
-// handler registered. Returns true when the cloud path is ready.
-static bool cloud_bringup(void)
+// handler registered. Returns ESP_OK when the cloud path is ready, ESP_ERR_INVALID_STATE
+// when DPS did not run its attempt (its registration gave up because the cloud admission
+// dropped, or it had no valid clock), another error for a failed attempt.
+static esp_err_t cloud_bringup(void)
 {
     dps_assignment_t dps = {0};
-    if (dps_register(AZURE_DPS_ID_SCOPE, AZURE_DPS_GROUP_KEY,
-                     hub_identity_get_gateway_id(), &dps) != ESP_OK) {
-        return false;
+    esp_err_t err = dps_register(AZURE_DPS_ID_SCOPE, AZURE_DPS_GROUP_KEY,
+                                 hub_identity_get_gateway_id(), &dps, cloud_admission_holds);
+    if (err != ESP_OK) {
+        return err;
     }
 
     strncpy(g_hub_hostname, dps.hub_hostname, sizeof(g_hub_hostname) - 1);
@@ -2560,7 +2574,7 @@ static bool cloud_bringup(void)
     if (client == NULL) {
         ESP_LOGE(IOTHUB_TAG, "esp_mqtt_client_init failed — will retry");
         s_sas_expiry = 0;
-        return false;
+        return ESP_FAIL;
     }
     esp_mqtt_client_register_event(client, (esp_mqtt_event_id_t)ESP_EVENT_ANY_ID,
                                    mqtt_event_handler, NULL);
@@ -2569,14 +2583,16 @@ static bool cloud_bringup(void)
     telemetry_v2_attach_client(client, g_device_id);
     g_cloud_ready = true;
 
-    if (s_sas_expiry != 0 && !s_mqtt_suspended) {
-        esp_mqtt_client_start(client);
-        g_mqtt_running = true;
-    } else {
+    if (s_sas_expiry == 0) {
         ESP_LOGW(IOTHUB_TAG, "Clock not synced (ts=%ld) — holding MQTT until SNTP lands",
                  (long)now);
+    } else if (!s_mqtt_suspended && cloud_admission_holds()) {
+        esp_mqtt_client_start(client);
+        g_mqtt_running = true;
     }
-    return true;
+    // Otherwise the admission dropped while DPS ran (an assignment that arrived as the link
+    // went): the next admission starts the client (mqtt_resume()).
+    return ESP_OK;
 }
 
 // Cloud bring-up from inside the event loop, so neither Wi-Fi nor a DPS outage ever stops
@@ -2586,7 +2602,9 @@ static bool cloud_bringup(void)
 // run its own TLS session beside the SoftAP) and on a valid clock (DPS registration stamps
 // its own SAS token). The first attempt runs as soon as both hold; failures back off like
 // the boot loop this replaces, then settle to DPS_RETRY_INTERVAL_MS. NOTE a live (uncached)
-// registration still blocks this pass for up to the DPS client's own timeout.
+// registration still blocks this pass for up to the DPS client's own timeout, or until the
+// admission drops (its abort hook, cloud_admission_holds(), asked every second): then it is
+// not counted as an attempt and runs again on the first pass after the next admission.
 static void dps_maintain(void)
 {
     if (g_cloud_ready) return;
@@ -2600,10 +2618,15 @@ static void dps_maintain(void)
     if (!boot_phase) {
         ESP_LOGI(IOTHUB_TAG, "DPS: retrying registration...");
     }
-    if (cloud_bringup()) {
+    esp_err_t err = cloud_bringup();
+    if (err == ESP_OK) {
         if (!boot_phase) {
             ESP_LOGI(IOTHUB_TAG, "DPS: registration recovered — cloud path up");
         }
+        return;
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        s_dps_attempts--;   // no attempt ran to its end (dps_register() logged why): no back-off
         return;
     }
 
