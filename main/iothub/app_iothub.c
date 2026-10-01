@@ -15,6 +15,8 @@
 #include "mqtt_client.h"
 #include "esp_crt_bundle.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "esp_wifi.h"
 #include "cJSON.h"
 #include "esp_mac.h"
 #include "mbedtls/base64.h"
@@ -41,7 +43,7 @@ extern QueueHandle_t lora_rx_queue;
 TaskHandle_t iothub_task_handle = NULL;
 static esp_mqtt_client_handle_t mqtt_client = NULL;
 static bool g_iot_hub_connected = false;
-// True while the esp-mqtt client task is started; gates suspend/resume on WiFi loss.
+// True while the esp-mqtt client task is started; gates the stop/resume of the cloud admission.
 static bool g_mqtt_running = false;
 
 // DPS-assigned credentials (populated at boot)
@@ -72,12 +74,14 @@ static char   s_mqtt_username[256] = {0};
 // Absolute expiry of the token currently held by the client. 0 = we have never
 // minted one against a valid clock, so the client must not be started yet.
 static volatile time_t s_sas_expiry     = 0;
-// True only while a WiFi-loss suspend is in effect, so token maintenance doesn't
-// restart the client behind iothub_suspend_mqtt()'s back.
-static volatile bool   s_mqtt_suspended = false;
-// Serialises client start/stop/reconfigure. iothub_suspend_mqtt/resume_mqtt run on
-// the WiFi event task while sas_refresh() runs on iothub_task; without this they can
-// interleave a stop/set_config/start sequence and leave g_mqtt_running lying.
+// True while the cloud is not admitted (cloud_admission(), below): from boot until the
+// first admission, and from every link loss or SoftAP start until the next. Nothing
+// starts the client while it is set - not the admission's own resume, not cloud_bringup(),
+// not sas_refresh() - and sas_maintain() does not even mint (2.1.4 WP2, plan I4).
+static volatile bool   s_mqtt_suspended = true;
+// Serialises client start/stop/reconfigure: mqtt_stop_for()/mqtt_resume() and
+// sas_refresh() run on iothub_task, esp-mqtt's own events on its task; the mutex keeps a
+// stop/set_config/start sequence whole so g_mqtt_running never lies.
 // Statically allocated so creation cannot fail — the alternative (bailing out of
 // iothub_task) would silently take leak evaluation and rules_engine_tick with it.
 // Initialised before mqtt_client, so a non-NULL mqtt_client implies a live mutex.
@@ -98,8 +102,11 @@ static int64_t s_dps_next_try_ms  = 0;
 static int     s_dps_attempts     = 0;       // registrations tried so far (dps_maintain)
 
 // Wi-Fi STA has an IP. Set by iothub_on_wifi_connected() and cleared by
-// iothub_suspend_mqtt() (both on the Wi-Fi event task); read by iothub_task.
+// iothub_on_wifi_lost() (both on the wifi_manager task, flags only); read by iothub_task.
 static volatile bool s_wifi_up = false;
+// Link losses since boot, counted by iothub_on_wifi_lost() (its only writer): iothub_task
+// stops MQTT for a loss even when the link is back by its next pass.
+static volatile uint32_t s_wifi_losses = 0;
 
 // SNTP bring-up, iothub_task only (net_maintain()).
 static bool    s_sntp_started   = false;   // esp_sntp_init() done (first Wi-Fi IP)
@@ -656,7 +663,7 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 // ---------------------------------------------------------------------------
 
 static void publish_twin_reported(void);   // forward declaration
-static void mark_mqtt_disconnected(void);  // forward declaration (used by iothub_suspend_mqtt)
+static void mark_mqtt_disconnected(void);  // forward declaration (used by mqtt_stop_for)
 
 // Reject an "open the valve" request while the valve's RMLEAK latch is asserted
 // (valve locked after an auto-close). Forwarding the open anyway lets the valve
@@ -1657,7 +1664,7 @@ static void handle_twin_get_response(const char *data, int data_len)
 }
 
 // ---------------------------------------------------------------------------
-// MQTT suspend / resume on WiFi loss / restore
+// MQTT stop / resume, on iothub_task only (cloud_admission())
 //
 // The esp-mqtt client auto-reconnects with TLS. If WiFi STA drops (e.g. a button
 // WiFi reset that brings up the SoftAP captive portal without rebooting), leaving
@@ -1665,19 +1672,23 @@ static void handle_twin_get_response(const char *data, int data_len)
 // handshake wants a large (~16 KB SSL_IN) buffer; with dynamic buffers disabled
 // these fail (MBEDTLS_ERR_SSL_ALLOC_FAILED / -0x7F00) and fragment the heap the
 // captive portal's http/dns servers need, making AP join slow and flaky. Stopping
-// the client while STA is down frees that heap; we restart it when STA returns.
-// (On first boot the client isn't created until after STA connects, so there is no
-//  thrash — this only matters for the post-reset / reconnect case.)
+// the client while STA is down frees that heap; the next admission restarts it.
+// Until 2.1.4 WP2 the Wi-Fi manager's callbacks did both, on the wifi_manager task: the
+// stop could hold that task on the MQTT control mutex and in esp_mqtt_client_stop() for
+// as long as a TLS connect runs, and the resume at the IP started TLS beside the SoftAP
+// of the AP tail (E4: internal heap down to 152 B, 4 failed allocations). Now the
+// callbacks only set flags (iothub_on_wifi_connected() / _lost()), and iothub_task
+// stops, admits and resumes.
 // ---------------------------------------------------------------------------
-void iothub_suspend_mqtt(void)
+static void mqtt_stop_for(const char *why)
 {
-    s_wifi_up        = false;  // only ever called on Wi-Fi loss; also holds DPS attempts
     s_mqtt_suspended = true;   // also blocks sas_maintain() from restarting behind us
     if (mqtt_client == NULL) return;
 
     xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
     if (g_mqtt_running) {
-        ESP_LOGW(IOTHUB_TAG, "WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)");
+        // "WiFi down" prints the line it always printed, byte for byte.
+        ESP_LOGW(IOTHUB_TAG, "%s — stopping MQTT client (free TLS heap for AP/captive portal)", why);
         esp_mqtt_client_stop(mqtt_client);
         g_mqtt_running = false;
         mark_mqtt_disconnected();   // stop() dispatches no event; clear the flags ourselves
@@ -1685,7 +1696,7 @@ void iothub_suspend_mqtt(void)
     xSemaphoreGive(s_mqtt_ctl_mutex);
 }
 
-void iothub_resume_mqtt(void)
+static void mqtt_resume(void)
 {
     s_mqtt_suspended = false;
     if (mqtt_client == NULL) return;
@@ -1706,12 +1717,20 @@ void iothub_resume_mqtt(void)
     xSemaphoreGive(s_mqtt_ctl_mutex);
 }
 
-// Runs on the Wi-Fi event task. A flag and a wake only: SNTP and DPS are started by
-// iothub_task (net_maintain / dps_maintain), never here. The wake is a no-op until
-// telemetry_v2_init() has created the queue; the loop reads the flag on its first pass.
+// Run on the wifi_manager task (its GOT_IP and STA_DISCONNECTED callbacks). A flag and a
+// wake only: SNTP, the admission, MQTT and DPS are iothub_task's (net_maintain /
+// dps_maintain), never here, so nothing here blocks. The wake is a no-op until
+// telemetry_v2_init() has created the queue; the loop reads the flags on its first pass.
 void iothub_on_wifi_connected(void)
 {
     s_wifi_up = true;
+    telemetry_v2_wake_snapshot();
+}
+
+void iothub_on_wifi_lost(void)
+{
+    s_wifi_up = false;
+    s_wifi_losses++;   // this task is its only writer
     telemetry_v2_wake_snapshot();
 }
 
@@ -2176,11 +2195,155 @@ static void initialize_sntp(void)
 // blocking wait's 60 x 2 s).
 #define SNTP_INITIAL_SYNC_MS  (120 * 1000)
 
+// ---------------------------------------------------------------------------
+// Cloud admission (2.1.4 WP2; plan section 4.6, invariant I4: no TLS or DPS while the
+// SoftAP is up)
+//
+// The cloud - MQTT's start, DPS, the SAS restart - is admitted only when all three hold:
+//   - the STA has its IP (s_wifi_up);
+//   - the SoftAP is down: esp_wifi_get_mode() reads WIFI_MODE_STA. A fact read on every
+//     pass, never a flag a missed callback could leave stale;
+//   - internal DMA-capable heap: ADMIT_IDMA_FREE_MIN free, with a block of
+//     ADMIT_IDMA_LARGEST_MIN. Bringing the cloud up takes about 20 KB of it (G0 run B:
+//     36,904 -> 16,800 B), and the long-lived blocks of a session started in a fragmented
+//     heap stay where they land (G0: the largest block 18,432 -> 6,400 B for good after a
+//     TLS start in the AP tail).
+// The heap gate never keeps the cloud off for good: ADMIT_ESCAPE_MS after it first held this
+// IP's admission back (the SoftAP down) the cloud is admitted with a block of
+// ADMIT_ESCAPE_LARGEST_MIN (W), and after ADMIT_FORCE_MS whatever the heap (E); both count in
+// s_admit_escapes (G3b expects none). The SoftAP rule has no escape: the AP tail ends by the
+// IP + 75 s (wifi_task's backstop).
+// Once admitted, the gate is not checked again (the session's own heap would fail it):
+// esp-mqtt's reconnects and the SAS renewal run as before, with the SoftAP down. A link loss,
+// or a SoftAP start with the STA still connected, withdraws the admission: MQTT stops at once
+// (mqtt_stop_for()), and s_mqtt_suspended keeps every start off until the next admission.
+// A normal boot with Wi-Fi saved has no SoftAP and about 44 KB of internal DMA-capable heap
+// free before TLS (G0 run B), so it is admitted on the pass that sees the IP: its cloud comes
+// up as fast as before.
+// iothub_task only: net_maintain() runs it every pass, every second while an IP waits.
+// ---------------------------------------------------------------------------
+#define ADMIT_IDMA_CAPS           (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)
+#define ADMIT_IDMA_FREE_MIN       (36 * 1024)    // plan 4.6; G0 re-derives it
+#define ADMIT_IDMA_LARGEST_MIN    (12 * 1024)    // plan 4.6; G0 re-derives it
+#define ADMIT_ESCAPE_MS           (60 * 1000)    // then a block of ADMIT_ESCAPE_LARGEST_MIN will do
+#define ADMIT_ESCAPE_LARGEST_MIN  (8 * 1024)
+#define ADMIT_FORCE_MS            (180 * 1000)   // then admitted whatever the heap
+
+typedef enum {
+    ADMIT_NO_IP = 0,   // no STA IP, nothing to admit
+    ADMIT_IP,          // an IP this task has not decided on yet
+    ADMIT_WAIT_AP,     // deferred: the SoftAP is up
+    ADMIT_WAIT_HEAP,   // deferred: the heap gate
+    ADMIT_DONE,        // admitted
+} admit_state_t;
+
+static admit_state_t s_admit_state      = ADMIT_NO_IP;
+static uint32_t      s_wifi_losses_seen = 0;   // s_wifi_losses as last acted on
+static int64_t       s_admit_ip_ms      = 0;   // when this task first saw the IP
+static int64_t       s_admit_heap_ms    = 0;   // when the heap gate first held it back; 0 = not
+static uint32_t      s_admit_escapes    = 0;   // admissions past the heap gate since boot
+
+// The SoftAP is down: the Wi-Fi mode is STA only. False when the driver cannot say.
+static bool softap_down(void)
+{
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    return esp_wifi_get_mode(&mode) == ESP_OK && mode == WIFI_MODE_STA;
+}
+
+static void admit_withdraw(const char *why)
+{
+    if (s_admit_state == ADMIT_DONE)
+        ESP_LOGI(IOTHUB_TAG, "cloud admission withdrawn (%s)", why);
+    mqtt_stop_for(why);
+}
+
+// how: 0 = through the gate, 1 = the 60 s escape (W), 2 = the 180 s one (E).
+static void admit_now(int64_t now, size_t free_b, size_t largest, int how)
+{
+    unsigned long ms = (unsigned long)(now - s_admit_ip_ms);
+    if (how == 0) {
+        ESP_LOGI(IOTHUB_TAG, "cloud admitted %lu.%lu s after the IP (internal DMA free %u B, largest %u B)",
+                 ms / 1000, (ms % 1000) / 100, (unsigned)free_b, (unsigned)largest);
+    } else {
+        s_admit_escapes++;
+        if (how == 1)
+            ESP_LOGW(IOTHUB_TAG, "cloud admitted %lu.%lu s after the IP below the heap gate (internal DMA free %u B, largest %u B) - escape %lu since boot",
+                     ms / 1000, (ms % 1000) / 100, (unsigned)free_b, (unsigned)largest,
+                     (unsigned long)s_admit_escapes);
+        else
+            ESP_LOGE(IOTHUB_TAG, "cloud admitted %lu.%lu s after the IP whatever the heap (internal DMA free %u B, largest %u B) - escape %lu since boot",
+                     ms / 1000, (ms % 1000) / 100, (unsigned)free_b, (unsigned)largest,
+                     (unsigned long)s_admit_escapes);
+    }
+    s_admit_state   = ADMIT_DONE;
+    s_admit_heap_ms = 0;
+    mqtt_resume();   // DPS (dps_maintain()) and the SAS mint follow from the same flag
+}
+
+static void cloud_admission(void)
+{
+    // A loss writes the count before it clears the flag, so a flag read first and seen
+    // clear always comes with its count.
+    bool up = s_wifi_up;
+    uint32_t losses = s_wifi_losses;
+    if (losses != s_wifi_losses_seen || (!up && s_admit_state != ADMIT_NO_IP)) {
+        // A link loss since the last pass, even one the link is already back from: MQTT
+        // stops at once, and the next IP is admitted afresh.
+        s_wifi_losses_seen = losses;
+        admit_withdraw("WiFi down");   // its stop line as it always read
+        s_admit_state   = ADMIT_NO_IP;
+        s_admit_heap_ms = 0;
+    }
+    if (!up)
+        return;
+
+    int64_t now = snap_now_ms();
+    if (s_admit_state == ADMIT_NO_IP) {
+        s_admit_state = ADMIT_IP;
+        s_admit_ip_ms = now;
+    }
+    if (!softap_down()) {
+        // The AP tail after a setup or a rejoin, or a SoftAP started with the STA connected.
+        if (s_admit_state == ADMIT_DONE)
+            admit_withdraw("SoftAP up");
+        s_admit_heap_ms = 0;
+        if (s_admit_state != ADMIT_WAIT_AP)
+            ESP_LOGI(IOTHUB_TAG, "cloud admission deferred: SoftAP up - no TLS or DPS until it stops");
+        s_admit_state = ADMIT_WAIT_AP;
+        return;
+    }
+    if (s_admit_state == ADMIT_DONE)
+        return;
+
+    size_t free_b  = heap_caps_get_free_size(ADMIT_IDMA_CAPS);
+    size_t largest = heap_caps_get_largest_free_block(ADMIT_IDMA_CAPS);
+    if (free_b >= ADMIT_IDMA_FREE_MIN && largest >= ADMIT_IDMA_LARGEST_MIN) {
+        admit_now(now, free_b, largest, 0);
+        return;
+    }
+    if (s_admit_heap_ms == 0)
+        s_admit_heap_ms = now;
+    int64_t held = now - s_admit_heap_ms;
+    if (held >= ADMIT_FORCE_MS) {
+        admit_now(now, free_b, largest, 2);
+    } else if (held >= ADMIT_ESCAPE_MS && largest >= ADMIT_ESCAPE_LARGEST_MIN) {
+        admit_now(now, free_b, largest, 1);
+    } else if (s_admit_state != ADMIT_WAIT_HEAP) {
+        ESP_LOGI(IOTHUB_TAG, "cloud admission deferred: internal DMA free %u B, largest %u B (needs %u / %u)",
+                 (unsigned)free_b, (unsigned)largest,
+                 (unsigned)ADMIT_IDMA_FREE_MIN, (unsigned)ADMIT_IDMA_LARGEST_MIN);
+        s_admit_state = ADMIT_WAIT_HEAP;
+    }
+}
+
 // Network bring-up, one non-blocking step per loop pass. iothub_task only.
-// SNTP starts at the first Wi-Fi IP. The clock is checked on every pass until it is valid
-// - possibly before Wi-Fi, since a software reset keeps the RTC time.
+// The admission first (a link loss stops MQTT on the pass that sees it). SNTP starts at the
+// first Wi-Fi IP, SoftAP up or not: a few small UDP packets, and the clock is then ready for
+// the TLS the admission lets in. The clock is checked on every pass until it is valid -
+// possibly before Wi-Fi, since a software reset keeps the RTC time.
 static void net_maintain(void)
 {
+    cloud_admission();
     if (!s_sntp_started && s_wifi_up) {
         initialize_sntp();
         s_sntp_started  = true;
@@ -2277,7 +2440,7 @@ static bool sas_refresh(void)
     xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
 
     // set_config reallocates the client's RX/TX buffers, so it must not run under a
-    // live connection: stop, swap, start — the sequence suspend/resume already uses.
+    // live connection: stop, swap, start — the sequence stop/resume already uses.
     if (g_mqtt_running) {
         esp_mqtt_client_stop(mqtt_client);
         g_mqtt_running = false;
@@ -2321,10 +2484,10 @@ static bool sas_refresh(void)
 static void sas_maintain(void)
 {
     if (mqtt_client == NULL) return;
-    // Nothing to maintain while the client is deliberately stopped for a WiFi-down
-    // captive-portal window; re-minting every 30 s would churn heap it needs.
-    // iothub_resume_mqtt() defers to us, so a stale token is refreshed on the next
-    // pass after WiFi returns.
+    // Nothing to maintain while the cloud is not admitted (Wi-Fi down, the SoftAP up, the
+    // heap gate): re-minting every 30 s would churn heap the portal needs, and the restart
+    // would be TLS beside the SoftAP. mqtt_resume() defers to us, so a stale token is
+    // refreshed on the pass after the admission.
     if (s_mqtt_suspended) return;
 
     time_t now = time(NULL);
@@ -2386,7 +2549,7 @@ static bool cloud_bringup(void)
     esp_mqtt_client_config_t mqtt_cfg;
     build_mqtt_cfg(&mqtt_cfg, sas_token);
 
-    // Must be live before mqtt_client is published: suspend/resume gate on a non-NULL
+    // Must be live before mqtt_client is published: stop/resume gate on a non-NULL
     // mqtt_client and then take this mutex unconditionally.
     if (s_mqtt_ctl_mutex == NULL) {
         s_mqtt_ctl_mutex = xSemaphoreCreateMutexStatic(&s_mqtt_ctl_mutex_buf);
@@ -2417,16 +2580,17 @@ static bool cloud_bringup(void)
 }
 
 // Cloud bring-up from inside the event loop, so neither Wi-Fi nor a DPS outage ever stops
-// leak evaluation (N1). Gated on Wi-Fi (a CACHED assignment would otherwise build and start
-// MQTT into a dead network, the TLS thrash iothub_suspend_mqtt() exists to prevent) and on
-// a valid clock (DPS registration stamps its own SAS token). The first attempt runs as soon
-// as both are up; failures back off like the boot loop this replaces, then settle to
-// DPS_RETRY_INTERVAL_MS. NOTE a live (uncached) registration still blocks this pass for up
-// to the DPS client's own timeout.
+// leak evaluation (N1). Gated on the cloud admission (Wi-Fi with its IP and the SoftAP down,
+// cloud_admission(): a CACHED assignment would otherwise build and start MQTT into a dead
+// network, the TLS thrash mqtt_stop_for() exists to prevent, and a live registration would
+// run its own TLS session beside the SoftAP) and on a valid clock (DPS registration stamps
+// its own SAS token). The first attempt runs as soon as both hold; failures back off like
+// the boot loop this replaces, then settle to DPS_RETRY_INTERVAL_MS. NOTE a live (uncached)
+// registration still blocks this pass for up to the DPS client's own timeout.
 static void dps_maintain(void)
 {
     if (g_cloud_ready) return;
-    if (!s_wifi_up) return;
+    if (s_admit_state != ADMIT_DONE) return;
     if (time(NULL) < SNTP_EPOCH_VALID) return;
 
     if (s_dps_next_try_ms != 0 && snap_now_ms() < s_dps_next_try_ms) return;
@@ -2841,6 +3005,11 @@ void iothub_task(void *param)
              (!g_cloud_ready && s_dps_attempts < DPS_BOOT_ATTEMPTS &&
               time(NULL) >= SNTP_EPOCH_VALID) ||
              (g_cloud_ready && s_sas_expiry == 0));
+        // An IP the cloud admission has not let in yet (the AP tail, the heap gate): every
+        // second, so the admission follows the SoftAP's stop within a second and the
+        // facts are read at least once a second (plan I6). Nothing here wakes the loop at
+        // the AP stop itself.
+        bool admit_pending = s_wifi_up && s_admit_state != ADMIT_DONE;
 
         // Flush trigger = derive the select timeout from the snapshot deadline so
         // the loop wakes in time to flush a pending snapshot (defeats the 30 s idle
@@ -2857,7 +3026,8 @@ void iothub_task(void *param)
         // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
-        int64_t base = (commission_pending || cloud_pending || s_ble_apply_owed ||
+        int64_t base = admit_pending ? 1000 :
+                       (commission_pending || cloud_pending || s_ble_apply_owed ||
                         g_devset_changed || rules_engine_auto_clear_pending()) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake

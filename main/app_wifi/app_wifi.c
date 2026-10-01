@@ -123,13 +123,12 @@ static void portal_priority_close(const char *reason)
     health_set_ble_scan_paused(false);
     s_portal_priority = false;
     s_setup_ok_tick = 0;
-    // The raise lasts as long as the window, so cb_connection_ok()'s work (the LED, the MQTT
-    // resume, the iothub wake) runs at PORTAL_TASK_PRIORITY when Wi-Fi is set up in it. That is
-    // harmless: none of it spins. Where it can block, on the net_status or the MQTT control
-    // mutex, the holder inherits the raised priority until it gives the mutex, so the wait is
-    // no longer than at the task's own priority. The rest are flags and non-blocking queue
-    // posts, and at most one esp_mqtt_client_start(), which creates the MQTT task at its own
-    // priority.
+    // The raise lasts as long as the window, so cb_connection_ok()'s work (the LED, the iothub
+    // flag and wake) runs at PORTAL_TASK_PRIORITY when Wi-Fi is set up in it. That is
+    // harmless: none of it spins. Where it can block, on the net_status mutex, the holder
+    // inherits the raised priority until it gives the mutex, so the wait is no longer than at
+    // the task's own priority. The rest are flags and a non-blocking queue post (MQTT is
+    // iothub_task's since 2.1.4 WP2).
     if (s_wm_task != NULL)
     {
         vTaskPrioritySet(s_wm_task, WIFI_MANAGER_TASK_PRIORITY);
@@ -959,12 +958,10 @@ void cb_connection_ok(void *pvParameter)
     //    to "connected" (ramp blue) once the IoT Hub session is up.
     net_status_set_wifi(true);
 
-    // 2. Restart MQTT if it was stopped while STA was down. No-op until iothub_task has
-    //    built the client (DPS done, with Wi-Fi up and a valid clock).
-    iothub_resume_mqtt();
-
-    // 3. Tell iothub_task the network is up: its loop starts SNTP and the cloud bring-up.
-    //    Last, so the wake finds a reconnect's MQTT suspend already lifted.
+    // 2. Tell iothub_task the network is up: a flag and a wake (2.1.4 WP2). Its loop starts
+    //    SNTP, and MQTT, DPS and the SAS mint once its cloud admission lets them in: with
+    //    the SoftAP down (after the AP tail) and internal heap to spare. This task no longer
+    //    starts MQTT itself (TLS beside the SoftAP, E4).
     iothub_on_wifi_connected();
 }
 
@@ -994,9 +991,9 @@ void cb_connection_lost(void *pvParameter)
     // The STA lost the Wi-Fi it was set up with in this window, before the setup AP stopped.
     // wifi_manager has just stopped its AP-shutdown timer, so the SoftAP stays up as a
     // router-fallback portal with the credentials saved, which keeps BLE scanning: close the
-    // window, before the MQTT stop below (it can wait). Not after a requested disconnect (the
-    // 10 s reset, the portal's forget): wifi_manager zeroes the STA config before this callback
-    // and sends START_AP next, so the window stays open for the next setup.
+    // window. Not after a requested disconnect (the 10 s reset, the portal's forget):
+    // wifi_manager zeroes the STA config before this callback and sends START_AP next, so the
+    // window stays open for the next setup.
     if (s_portal_priority && s_setup_ok_tick != 0)
     {
         const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
@@ -1021,9 +1018,11 @@ void cb_connection_lost(void *pvParameter)
     // inside net_status so a later reconnect shows "connecting" first.
     net_status_set_wifi(false);
 
-    // Stop the MQTT client so it doesn't thrash TLS handshakes (fragmenting the
-    // heap the SoftAP captive portal needs) while STA is down / in AP mode.
-    iothub_suspend_mqtt();
+    // Tell iothub_task: a flag, a count and a wake (2.1.4 WP2). It stops the MQTT client on
+    // its next pass, so it doesn't thrash TLS handshakes (fragmenting the heap the SoftAP
+    // captive portal needs) while STA is down / in AP mode. This task no longer waits on
+    // the MQTT control mutex and esp_mqtt_client_stop() here.
+    iothub_on_wifi_lost();
 }
 
 // wifi_task's own state for the Wi-Fi radio hold's log lines and the router retry.

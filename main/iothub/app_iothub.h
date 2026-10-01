@@ -55,8 +55,14 @@ void initialize_iothub(void);
 // Wi-Fi STA got an IP (the Wi-Fi manager's callback; called on every (re)connect, safe at
 // any time, even before initialize_iothub()). iothub_task no longer waits for Wi-Fi - leak
 // protection and BLE run from boot - so this only marks the network usable and wakes the
-// loop, which then starts SNTP and the cloud bring-up (DPS, MQTT) without blocking.
+// loop, which then starts SNTP and, once its cloud admission lets it in (the SoftAP down,
+// internal heap to spare), the cloud bring-up (DPS, MQTT), without blocking.
 void iothub_on_wifi_connected(void);
+
+// Wi-Fi STA lost its link, or a connect attempt ended without one (the Wi-Fi manager's
+// callback; safe at any time). A flag, a count and a wake only: iothub_task stops MQTT on
+// its next pass and holds the cloud off until the next admission.
+void iothub_on_wifi_lost(void);
 
 // Apply the provisioned device set to BLE: the valve target becomes the provisioned valve
 // (or none), and BLE starts when there is a valve or a BLE leak sensor to serve. The target
@@ -65,12 +71,6 @@ void iothub_on_wifi_connected(void);
 // Returns false when provisioning could not be read (busy): NOTHING was applied, and the
 // caller must hand the retry to iothub_task (it retries every pass until one succeeds).
 bool iothub_apply_provisioned_mac(void);
-
-// Suspend/resume the MQTT client on WiFi loss/restore. Stopping the client while
-// STA is down frees the large TLS buffers so the SoftAP captive portal stays
-// responsive after a button WiFi reset (no MQTT TLS-reconnect heap thrash).
-void iothub_suspend_mqtt(void);
-void iothub_resume_mqtt(void);
 
 #ifdef __cplusplus
 }
