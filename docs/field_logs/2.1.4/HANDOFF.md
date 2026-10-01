@@ -4,7 +4,9 @@ Written for the user and for the next Claude Code session. It records where the 
 
 > **Resume here.** Read §15 first, then §14, §13, then §12-§12c, then §1, §7, §10 and §11.
 >
-> **Update, Thursday 2026-10-01 (latest): the 2.1.4 rework has started (WP-V, WP0); Build checkpoint 5 is next, now of `31b4c9f`.** The user approved the council's 2.1.4 proposal ("start with WP-V/WP0"; every recommended option except D9: the portal's Forget/Disconnect stays). WP-V carries the Wi-Fi manager in the tree as `components/wifi_portal` (`4f14a23`, `b74a891`); WP0 adds instrumentation with no behaviour change (`607df82`, `fbd8537`, `818ce43`, `afe77c1`, `41eb044`); their review fixes are `9f2d061`, `bd64e83`, `9c27644` and `31b4c9f`. With the page round of 2026-09-30 (`695283a` … `520b17a`), none of it is built yet. **The last firmware commit is now `31b4c9f`**, and §15b gives the build and its expectations, which differ from §14g's: the `git diff` pathspec now includes `components` and `dependencies.lock`; `idf.py fullclean` needs registry access (or delete `build\` instead); `sdkconfig` gains one line, `CONFIG_APP_BENCH_DIAG=y`, so its hash changes once; the link order changes (`wifi_portal` after `main`); `.bss` about +121 B. Then the bench: the WP-V gate's 10 s reset ×3 and G0. The plan is now in the repo, `docs/field_logs/2.1.4/RADIO_PORTAL_PLAN.md`; §15 records the approval and the user's answers, the state of each package, the G0 procedure (§15d), this image's known issues (§15e) and the run order (§15f).
+> **Update, Thursday 2026-10-01 (latest): WP1 is committed, reviewed and voted 5/5 SHIP; 🔨 Build checkpoint 6 comes only after G0.** WP1 (plan §11: the setup portal can no longer reboot the hub; C2 a-h, C2b, C4, C5, and the plan updates (i)-(iii) of 2026-10-01) is `97ce041` … `703fa22`, its review fixes `b67e5bf`, `bf45701`, `5bd0762` and `9d31927` (comments only), its docs `1ef04bb` and this commit (§15g, §15h). **The last firmware code commit is `5bd0762`; the last commit that touches firmware sources is `9d31927` (comments), and CP6 is of it.** Nothing of WP1 is built: Build checkpoint 5 of `31b4c9f` was built at 11:07 and G0 is running on it. Finish G0 on CP5 first (§15d, §15f), then build CP6 (§15i) and run WP1's gates on it: G-FAULT (WP1 subset), G8, P-13, the 10 s reset ×10, and a portal smoke on an iPhone and an Android (§15j; order in §15k). For the user (§15h): the WP1 implementers and fixer compiled single objects into the scratchpad, against §8's no-compiler rule (nothing reached `build\`); `9583236`'s subject has 74 characters (§15g); G-FAULT's heap hold has no injection hook in this image.
+>
+> **Update, Thursday 2026-10-01 (morning): the 2.1.4 rework has started (WP-V, WP0); Build checkpoint 5 is next, now of `31b4c9f`.** The user approved the council's 2.1.4 proposal ("start with WP-V/WP0"; every recommended option except D9: the portal's Forget/Disconnect stays). WP-V carries the Wi-Fi manager in the tree as `components/wifi_portal` (`4f14a23`, `b74a891`); WP0 adds instrumentation with no behaviour change (`607df82`, `fbd8537`, `818ce43`, `afe77c1`, `41eb044`); their review fixes are `9f2d061`, `bd64e83`, `9c27644` and `31b4c9f`. With the page round of 2026-09-30 (`695283a` … `520b17a`), none of it is built yet. **The last firmware commit is now `31b4c9f`**, and §15b gives the build and its expectations, which differ from §14g's: the `git diff` pathspec now includes `components` and `dependencies.lock`; `idf.py fullclean` needs registry access (or delete `build\` instead); `sdkconfig` gains one line, `CONFIG_APP_BENCH_DIAG=y`, so its hash changes once; the link order changes (`wifi_portal` after `main`); `.bss` about +121 B. Then the bench: the WP-V gate's 10 s reset ×3 and G0. The plan is now in the repo, `docs/field_logs/2.1.4/RADIO_PORTAL_PLAN.md`; §15 records the approval and the user's answers, the state of each package, the G0 procedure (§15d), this image's known issues (§15e) and the run order (§15f).
 >
 > **Update, Wednesday 2026-09-30 (later): the user's four decisions on the router-rejoin fix; Build checkpoint 5 is next, now of `0f08d32`.** Round 1's open items went to the user, who decided (§14c): (1) an open portal page's chained scan pauses stop after 30 s, and BLE then gets 15 s with no pause of any kind; (2) each connect attempt's pause is capped at about 3 s of BLE off (2.5 s holds, the router retry's 0.5 s lead included, never back to back outside a page's chain); (3) the router retry runs whenever Wi-Fi is down with credentials saved, not only from the fallback SoftAP, which also recovers the Wi-Fi manager's idle state with no SoftAP; (4) a mistyped password on the fallback page is accepted and documented. Firmware `288db73`, `d0d07b9`, `06c0739`, then the fixer's `3d120b4`, `80be3e0` and `0f08d32` (comments only), after a review and a second 5/5 SHIP council on the whole fix (§14e). The last firmware commit is now **`0f08d32`**; CP5 covers it and the D1 fix, and §14g gives the new expectations (`.bss` 36,336 or 36,344 B). Next: VAL-01 for 🔨 Build checkpoint 5 of `0f08d32`, then T4-10 Part F, the valve-hub A-steps and Part D, now D1-D13 (§14i). Open for the user before a field release (§14f): a dry BLE sensor can be reported offline while a portal page stays open about 10 min or more; the page counts as closed 10 s after its last request, so a submit made as a phone comes back from the background can meet a retry and reboot the hub (the Wi-Fi specialist suggests 60 s); a submit in the 15 s listening time runs with BLE on; and §13e's heap floor, now analysed: pre-existing (the open fallback SoftAP), not caused by this fix.
 >
@@ -63,7 +65,7 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | E: adversarial review | **done**; fixes committed `095b5d6` … `b245d94` plus docs (§10) |
 | 🔨 Build checkpoint 3 | **passed** (build of `d9fa9c8`, §4b) |
 | F: 5-specialist council | **done**: round 1 BLOCK (F-01, B1), both fixed; final vote 5/5 SHIP on `d9fa9c8` (§11) |
-| Captive-portal regression (2026-09-29) | fixed in `5b5d70e` … `ca4835f` (docs `b7783d0`, `ac73cc6`); follow-up `93b8629` … `cc66d72` and its docs commit (§12a); "go red" `9951bf4` … `46a1f0a` and its docs commit (§12b); Build checkpoint 4 of `46a1f0a` **passed** (§13); the D1 fix `4e6fe71`, `f424d65`; the router-rejoin fix `727e6c1` … `8fb8340` and, for the user's decisions of 2026-09-30, `288db73` … `0f08d32` (§14); the page round `695283a` … `520b17a`; the 2.1.4 rework's WP-V and WP0 with their review fixes, `4f14a23` … `31b4c9f` (§15); 🔨 **Build checkpoint 5, now of `31b4c9f`, next** (§15b), then the WP-V gate and G0 (§15d, §15f) |
+| Captive-portal regression (2026-09-29) | fixed in `5b5d70e` … `ca4835f` (docs `b7783d0`, `ac73cc6`); follow-up `93b8629` … `cc66d72` and its docs commit (§12a); "go red" `9951bf4` … `46a1f0a` and its docs commit (§12b); Build checkpoint 4 of `46a1f0a` **passed** (§13); the D1 fix `4e6fe71`, `f424d65`; the router-rejoin fix `727e6c1` … `8fb8340` and, for the user's decisions of 2026-09-30, `288db73` … `0f08d32` (§14); the page round `695283a` … `520b17a`; the 2.1.4 rework's WP-V and WP0 with their review fixes, `4f14a23` … `31b4c9f` (§15); 🔨 Build checkpoint 5 of `31b4c9f` built (2026-10-01 11:07), the WP-V gate and G0 on it running (§15b, §15d, §15f); WP1 `97ce041` … `9d31927`, council 5/5 SHIP (§15h); 🔨 **Build checkpoint 6 of `9d31927` after G0** (§15i), then WP1's gates (§15j, §15k) |
 | G: MANUAL_TEST_PLAN.md + summary | **done**: version grep clean; CP3 build summary in §4b; `docs/field_logs/2.1.4/MANUAL_TEST_PLAN.md` (`d595633`, 114 tests, traceability matrix, ~30 min smoke subset) |
 
 ---
@@ -900,7 +902,7 @@ Round 1's four open items (an open page kept BLE off, the leak latency and the f
 1. **Dry BLE sensors reported offline while a page stays open (RTOS, BLE; follows from decision 1's parameters).** `code.js` asks every 3.8 s (`setInterval(refreshAP, 3800)`), and a new chain starts at the first request at least 45 s after the last one began, so the cycle is about 45.6 s: 30 s held, about 15.6 s listening. A dry sensor's 2.5 s burst every 100 s moves only 100 mod 45.6 = 8.8 s per beat, so 4-6 beats in a row can fall in the held part; at a 4.0 s cadence (a slow HTTP server, a browser that rounds its timers) 7-8. The RTOS specialist's simulation (1 h runs, each advertisement heard with p = 0.5): at 3.8 s the median longest silence is about 500 s and the worst 600-1,000 s with 100 ms of jitter; at 3.9 s, 3 of 40 runs pass 600 s; at 4.0 s, 40 of 40. Past `HEALTH_BLE_LEAK_TIMEOUT_MS` (600 s) the sensor is rated CRITICAL/LINK: red roll-up, and `device_offline` once the cloud is back. A false alarm only: a wet sensor is heard within about 46 s. Now in the CHANGELOG known limitations and observed in T4-10 D8. Options: (a) accept and document (the current state); (b) a listening time of at least 102.5 s every few minutes while chains repeat; (c) a BLE-sensor health hold while chains are active.
 2. **The 10 s page-open window can reboot the hub (Wi-Fi; recommended before a field release).** `page_open()` counts the page closed 10 s after its last scan order (`ROUTER_RETRY_PAGE_OPEN_MS`). A phone that puts the page in the background or locks its screen stops `code.js`'s timer, so a due retry fires about 10.5-11.5 s after the last request: about when a user who stepped away for the new router password comes back and taps Connect. That submit reaches a connecting STA, `ESP_ERROR_CHECK(esp_wifi_set_config())` (`wifi_manager.c:1074`) aborts, the hub reboots and what was typed is lost. This is the fallback page's main use (the router's password changed); round 1 had no retries on the fallback AP. The Wi-Fi specialist suggests about 60 s (one constant, no RAM; within the 5 min cap; it delays only the first retry after the page really closes, and cuts SoftAP channel moves under a phone still on the page). Not changed in this docs round; T4-10 D13 (optional) measures it.
 3. **A submit in the 15 s listening time runs with BLE on (Wi-Fi).** By the 2026-09-29 mechanism it may end 201 with the right password, and the page shows "failed": about 1 in 3 submits made 30-45 s into a chain. The router retry later joins with what was typed once the page closes. It follows from reading decision 1 strictly (the listening time masks every hold, which keeps the wet-sensor guarantee). Option: let a submit take one gap-spaced 2.5 s hold inside the listening time. Documented; T4-10 D12 observes it.
-4. **The heap floor on the open fallback SoftAP (memory; pre-existing, not caused by this fix).** The 17:20 capture of 2026-09-29 (§13e; its image had no radio holds and no retry): a Windows laptop joined the fallback SoftAP at 203.8 s and re-associated at 311, 368, 383, 384.7 and 385.4 s; `dns_server` answered its Teams, SharePoint and other lookups with 10.10.0.1 (TTL 0); `dns_server: UDP sendto failed: -1` once at 320.1 s and 13 times at 384.6-388.4 s (TX allocation failures); `MONITOR` `min_ever` went 20,992 → 18,204 B (320 s) → 10,380 B (380 s) → **1,184 B (390 s)**, with `largest_blk` 8,192 B at 390 s, and `free` was back to 30,716 B by 420 s. The 2.1.3 field minimum is 2,972 B. Causes: `CONFIG_DEFAULT_AP_PASSWORD` is 7 characters, so the component starts the SoftAP open and any device that once joined it can rejoin by itself; the DNS hijack answers every name; the 32 dynamic RX and 32 dynamic TX Wi-Fi buffers and lwIP's out-of-sequence queue use heap; BLE takes much of the air time. The fix shortens the exposure: the DNS hijack stops at `GOT_IP` (`dns_server_stop()`, `wifi_manager.c:1265`) and the SoftAP 60 s later, so the flood ends within about 33-40 s of the router's return (up to 5 min + 17.5 s with a page open), where on CP4 it lasted until a reboot. From the WP1 image on, C4 (`d300079`) keeps the hijack up until STOP_AP (plan I11), so the flood lasts until the SoftAP stops, about 60 s after the IP, with TLS starting beside it until WP2 (15g). While the router stays down it may add small dips (a connect scan every 33-36 s, fuller scan lists with BLE held, and MQTT/TLS starting while the SoftAP is still up after a rejoin). At zero, the component's unchecked event-handler mallocs (`wifi_manager.c:585, 661, 731`) would panic and reboot the hub. Options, all outside 2.1.4's current rules: (1) a WPA2 SoftAP password of 8 characters or more (it changes the setup instructions and labels); (2) `CONFIG_DEFAULT_AP_MAX_CONNECTIONS` 4 → 1-2; (3) fewer dynamic RX buffers, or TCP out-of-sequence queuing off; (4) limit the DNS hijack in router-fallback mode; (5) accept it for 2.1.4, document it (done: CHANGELOG known limitations) and measure it on the bench (T4-10 heap rows D1, D3, D4, D7, D8, with a laptop on the SoftAP). An app-side, rule-compliant log trim, `esp_log_level_set("dns_server", ESP_LOG_WARN)` beside `main.c:69-70`, cuts UART volume, not heap.
+4. **The heap floor on the open fallback SoftAP (memory; pre-existing, not caused by this fix).** The 17:20 capture of 2026-09-29 (§13e; its image had no radio holds and no retry): a Windows laptop joined the fallback SoftAP at 203.8 s and re-associated at 311, 368, 383, 384.7 and 385.4 s; `dns_server` answered its Teams, SharePoint and other lookups with 10.10.0.1 (TTL 0); `dns_server: UDP sendto failed: -1` once at 320.1 s and 13 times at 384.6-388.4 s (TX allocation failures); `MONITOR` `min_ever` went 20,992 → 18,204 B (320 s) → 10,380 B (380 s) → **1,184 B (390 s)**, with `largest_blk` 8,192 B at 390 s, and `free` was back to 30,716 B by 420 s. The 2.1.3 field minimum is 2,972 B. Causes: `CONFIG_DEFAULT_AP_PASSWORD` is 7 characters, so the component starts the SoftAP open and any device that once joined it can rejoin by itself; the DNS hijack answers every name; the 32 dynamic RX and 32 dynamic TX Wi-Fi buffers and lwIP's out-of-sequence queue use heap; BLE takes much of the air time. The fix shortens the exposure: the DNS hijack stops at `GOT_IP` (`dns_server_stop()`, `wifi_manager.c:1265`) and the SoftAP 60 s later, so the flood ends within about 33-40 s of the router's return (up to 5 min + 17.5 s with a page open), where on CP4 it lasted until a reboot. From the WP1 image on, C4 (`d300079`) keeps the hijack up until STOP_AP (plan I11), so the flood lasts until the SoftAP stops, about 60 s after the IP, with TLS starting beside it until WP2 (15g). While the router stays down it may add small dips (a connect scan every 33-36 s, fuller scan lists with BLE held, and MQTT/TLS starting while the SoftAP is still up after a rejoin). At zero, the component's unchecked event-handler mallocs (`wifi_manager.c:585, 661, 731`) would panic and reboot the hub (up to the CP5 image; WP1's C2a, `97ce041`, removed them, and C2/C4 leave no reboot on NO_MEM in the portal stack, §15h). Options, all outside 2.1.4's current rules: (1) a WPA2 SoftAP password of 8 characters or more (it changes the setup instructions and labels); (2) `CONFIG_DEFAULT_AP_MAX_CONNECTIONS` 4 → 1-2; (3) fewer dynamic RX buffers, or TCP out-of-sequence queuing off; (4) limit the DNS hijack in router-fallback mode; (5) accept it for 2.1.4, document it (done: CHANGELOG known limitations) and measure it on the bench (T4-10 heap rows D1, D3, D4, D7, D8, with a laptop on the SoftAP). An app-side, rule-compliant log trim, `esp_log_level_set("dns_server", ESP_LOG_WARN)` beside `main.c:69-70`, cuts UART volume, not heap.
 5. **Decided and documented, no code:** a mistyped password on the fallback page (decision 4); the idle state rejoins only if the ignored submit matches the router, otherwise a restart or the 10 s reset (WSM-1); the "forget" path (§14e, safety).
 6. **Residual risks, disclosed:** a submit during a retry's attempt reboots the hub (item 2; also a page left open more than 5 min); the component's timer race at `START_AP` (T4-10 D1 records it); the fixer's rare case (one attempt partly with BLE on); a flapping router keeps the component retrying every 7-10 s with a 2.5 s hold each, BLE about 25-33 % paused, for the whole outage.
 7. **Optional hardening:** read `s_attempt_tick` once in `router_retry()` (council 2, RTOS); stamp `s_attempt_tick` before clearing `s_sta_connected` in `cb_connection_lost()` (council 1). Council 1's third item (no new retry until the stamp has moved off `retry_mark`) is in the code since `288db73` (`retry_pending`).
@@ -952,7 +954,7 @@ Then VAL-01 steps 5-6 (the `.bin` time and size, the ELF hash, flash, the boot l
 5. T5-03 on CP5 (D1), then the `SS-V4` smoke steps 2-11 in one capture, sections 1-6 and VAL-02…VAL-14, as §13f item 5.
 6. Take §14f items 1-4 to the user with the D3, D8, D12 and D13 results and the heap rows.
 
-## 15. Approved radio/portal plan (2026-10-01) and CP5
+## 15. Approved radio/portal plan (2026-10-01), CP5, WP1 and CP6
 
 **The approval.** On 2026-10-01 the user approved the council's 2.1.4 radio and portal proposal: "Approve, start with WP-V/WP0", with the recommended option on every decision of its §13 **except D9: Forget/Disconnect stays** (`DELETE /connect.json` and the page's Disconnect button are kept: WP4's C9 keeps the button, where the plan drops it, and C8's forget, which erases an idle STA directly, serves both). The user's answers:
 - **D1: some leak sensors in the field are in 1M mode,** so mixed fleets are real. Per-sensor PHY learning (WP6) and the known-1M profiles (AP_K1M, N_MIXED) are needed, and plan §5.5 item 5 (an unknown-PHY 1M sensor in an AP mode, covered only by discovery slots and not modelled) is a real case. Benches include a 1M sensor where one is at hand.
@@ -968,7 +970,7 @@ With D9 kept, plan §9's "DELETE → erase → uncapped pause" row is closed by 
 |---|---|---|---|
 | **WP-V** | The Wi-Fi manager moved to `components/wifi_portal`; manifest and lock (D11) | identical `.text` / `.bss`; 10 s reset ×3 | **Done:** `4f14a23`, `b74a891`; its review fixes are docs and comments (`31b4c9f`, `8f8f399`). Gate: CP5 (15b), then the 10 s reset ×3 (15f) |
 | **WP0** | Instrumentation, no behaviour change: failed-allocation count, internal-DMA sampler, `AP_STAIPASSIGNED`, advert-burst statistics, the C10a hook, C1, the channel lines, `APP_BENCH_DIAG` | **G0** | **Done:** `607df82`, `fbd8537`, `818ce43`, `afe77c1`, `41eb044`; review fixes `9f2d061`, `bd64e83`, `9c27644`. Gate: G0 (15d) |
-| WP1 | The portal cannot reboot the hub: C2 (a-h), C2b, C4, C5 | G-FAULT (WP1 subset), G8, P-13, 10 s reset ×10 | pending |
+| **WP1** | The portal cannot reboot the hub: C2 (a-h), C2b, C4, C5; plan updates (i)-(iii) of 2026-10-01 | G-FAULT (WP1 subset), G8, P-13, 10 s reset ×10 | **Done:** `97ce041`, `488c13d`, `541eaa4`, `87c3178`, `6c69ac3`, `9583236`, `c8b8c7d`, `4d67b79`, `d300079`; updates `300e2bc`, `56c2c4d`, `703fa22`; review fixes `b67e5bf`, `bf45701`, `5bd0762`, `9d31927` (comments). Council 5/5 SHIP (15h). Gate: CP6 (15i), then 15j |
 | WP2 | Cloud admission and AP lifecycle (flag-only callbacks, admission, DPS abort hook, outbox limit, lifecycle republish, the AP-tail policy); C3; C12 (API only) | G3-lite (E4 replay), DPS router-pull test, first commissioning, P-14 LAN part | pending |
 | WP3 | The seven `sdkconfig.defaults` lines and their compile guards (plan §4.9, D12); the valve stale-handle check and `REATTEMPT_COUNT` handling | TLS / DPS / C2D / snapshot regression; heap table; G6b | pending |
 | WP4 | Portal intake and phone UX: C6, C7, C8, C9, C10b, C12 (Finish), C13, channel 11; plan §6.4's WP4 deletions; the `reset_button.c` forget comment. **D9: Forget/Disconnect kept** | G8x, G-CNA in S1 (fixes the httpd socket cap), P-7, G3 (E2) | pending |
@@ -1104,6 +1106,8 @@ The CP5 image is a development build, never for the field. These are known; G0 r
 
 ### 15f. Run next (in order; supersedes §14i)
 
+*(Still the order on the CP5 image. Once G0 is done, §15k continues it with CP6 and WP1's gates.)*
+
 0. **🔨 Build checkpoint 5 of `31b4c9f`** (15b), VAL-01 steps 5-6, then flash.
 1. **The WP-V gate:** the 10 s reset ×3. G0 run B's three resets are it: each ends in `Connected! IP` and `portal priority OFF (AP stopped)`, with no reboot but the reset's own.
 2. **G0** (15d): runs A, B and D, then C if a spare hub is free; each with the valve unpowered, then linked.
@@ -1124,8 +1128,240 @@ WP1 (plan §11: C2 a-h, C2b, C4, C5, and the 2026-10-01 plan updates (i)-(iii)) 
 
 **WP10 follow-up register** (documents that still show pre-WP1 lines):
 - `MANUAL_TEST_PLAN.md` T4-10 A4, D3 and F2 (the DNS line above) and E2 (the paused heartbeat form).
-- `CHANGELOG.md`'s WP0 entry: the idma line now ends ` min_ever=%lu` (after the `(last: …)` part when there is one); the three channel lines can end `, Wi-Fi scan in flight`; the heartbeat's paused form is new.
+- `CHANGELOG.md`'s WP0 entry: the idma line now ends ` min_ever=%lu` (after the `(last: …)` part when there is one); the three channel lines can end `, Wi-Fi scan in flight`; the heartbeat's paused form is new. *Recorded since in the CHANGELOG's WP1 entry (with §15h's docs commit); WP10 folds both entries into the release sections.*
 - Removed by C4: E `dns_server: Failed to create socket` and E `dns_server: Failed to bind to 53/udp` (each followed by `exit()`), and I `dns_server: Replying to DNS request for %s from %s` (now DEBUG). They are replaced by W `captive DNS: %s failed (errno %d) - trying again every %d ms` and the activity hook's first-DNS line.
 - `reset_button.c`: the `execute_wifi_reset()` comment block in WP4 (forget) and WP8 (window), as plan §6.4 says. `erase_wifi_credentials()`'s comment is updated (`9d31927`).
 
 **For the user's decision: one commit subject over 72 characters.** `9583236`'s subject, "fix(portal): log the remaining runtime ESP_ERROR_CHECKs, check boot allocs", has 74 characters. Every other WP1 subject has 72 or fewer. Rewording it means rewriting history, which the agents do not do. Before any push, either reword it (for example "fix(portal): log runtime ESP_ERROR_CHECKs, check boot allocations", 65 characters) or accept it as it is.
+
+### 15h. WP1: what changed, the council, the residual risks (2026-10-01)
+
+WP1 (plan §11: "the portal cannot reboot the hub", C2 a-h, C2b, C4, C5) and the three plan updates of 2026-10-01 are committed on `fix/2.1.4` after `e6c625e`, with the review fixes of 15g. None of it is built yet (CP6, 15i). Nothing was pushed, amended or rebased; `sdkconfig` and `build\` are untouched.
+
+| SHA | Plan item | What |
+|---|---|---|
+| `97ce041` | C2a, C2h | The Wi-Fi event handler allocates nothing: a message carries its value (SCAN_DONE its status, STA_DISCONNECTED its reason, GOT_IP the IPv4 address), documented at `wifi_manager_set_callback()`; `app_wifi.c`'s callbacks read it. The queue holds 8 messages (was 3) |
+| `488c13d` | C2e | Bounded JSON. `json_print_ssid()` reads at most the 32-byte field, escapes `"` and `\`, writes a control character as `?`, and writes an SSID that is not UTF-8 with `\u00XX` for every byte from 0x80 and `"raw":1` on its entry. The list keeps room for `]\n` and leaves out (W line) an entry that does not fit; an empty list is `[]`. `status.json` is bounded (a 32-character SSID no longer runs into the password); `JSON_IP_INFO_SIZE` 159 → 295 |
+| `541eaa4` | C2b, C2 (b) | Scan records read one at a time (64 at most) into a 15 × 35 B stack array: the 15 strongest named networks, one per SSID and auth mode, at the strongest access point's channel and RSSI. `esp_wifi_clear_ap_list()` after every scan, failed ones included. The 1,489 B list exists only from START_AP to STOP_AP; `/ap.json` answers `[]` without it |
+| `87c3178` | C2f | The NVS save and load close their handle and give the lock back on every path; the load reads through a 128 B stack buffer; `strncmp`/`strnlen` on the fixed-size fields. NVS layout unchanged (`reset_button.c`'s erase holds) |
+| `6c69ac3` | C2g | Host (64 B), SSID (33 B) and password (65 B) headers in stack buffers (a Host over 63 characters gets the 302); the URLs are literals; `status.json` gives the json lock back when it has no buffer; a failed `httpd_start()` is logged |
+| `9583236` | C2d | `esp_netif_get_ip_info()`, START_AP's `esp_wifi_set_mode()` (a failure starts no AP service or callback, and the retry timer brings START_AP back), `esp_wifi_disconnect()` and GOT_IP's `abort()` are logged instead of rebooting; `wifi_manager_start()` checks every allocation (boot only) |
+| `c8b8c7d` | C5 | The component's retry timer starts only while `AP_STARTED_BIT` is clear, and its callback checks again (I9) |
+| `4d67b79` | C2c | `esp_wifi_set_config()` and `esp_wifi_connect()` checked; the request bits are set only once an attempt has started. A connect that cannot start is a failed attempt of its kind (a user's: status FAILED, and a refused config is put back to the driver's; an automatic one or the boot restore: LOST and the retry path), then a synthetic STA_DISCONNECTED (reason 205) ends the app's tracking |
+| `d300079` | C4 | The captive DNS rewritten to plan §6.2a: bound to 10.10.0.1:53, run flag and its own socket close, up from START_AP to STOP_AP (the stop at GOT_IP is gone) |
+| `300e2bc` | update (i) | `MONITOR: idma:` ends ` min_ever=%lu`, the allocator's own internal-DMA low (the 1 s sampler missed lows by about 20 KB on CP5) |
+| `56c2c4d` | update (ii) | The three WP0 channel lines end `, Wi-Fi scan in flight` while a scan runs (`wifi_manager_scan_in_flight()`) |
+| `703fa22` | update (iii) | The scanner heartbeat says when and why scanning is paused; the normal form is byte-identical |
+| `b67e5bf` | review BLM-2 | The list is allocated only with its 1,489 B plus 4 KB in the largest free block, after httpd and DNS; its W line once per AP start |
+| `bf45701` | review WP1-R1 | httpd and the DNS task are started again every 5 s while the AP is up and either is down (needs one 8 KB internal block); no new task or timer |
+| `5bd0762` | review WP1-R2 | A failed `esp_wifi_disconnect()` on a connected STA drops the forget: nothing erased |
+| `9d31927` | review WP1-R3 | Comments only (`app_wifi.c`, `reset_button.c`) |
+| `1ef04bb` | docs | §14f item 4 and §15g |
+
+**What the image does differently** (the user-facing list is the CHANGELOG's WP1 entry):
+- **No reboot path in the portal stack (I12).** No `ESP_ERROR_CHECK`, `abort()` or `exit()` on a runtime path of `wifi_manager.c`, `http_app.c`, `json.c` or `dns_server.c`. The ones left run once at boot (`nvs_flash_init`, `nvs_sync_create`, `wifi_manager_start()`'s allocations, the task's set-up before its loop). Closes B3 and B4's reboot (plan §7.2) and the 14 paths of C2.
+- **A Connect that meets a running attempt** fails at once instead of rebooting: W `ORDER_CONNECT_STA: esp_wifi_set_config failed (ESP_ERR_WIFI_STATE) - attempt not started`, then `APP_WIFI: WiFi Disconnected. Reason: 205`; the page shows "Connection failed", and its Retry works once the other attempt has ended. That attempt goes on and, at its IP, saves and reports its own network, not what was typed. C8 (WP4) makes the Submit lossless; until then the page keeps its 8 s guard.
+- **Captive DNS (C4):** A or ANY → 10.10.0.1 with TTL 60 s; AAAA, HTTPS, SVCB, PTR and the rest → NOERROR with no answer; EDNS0 queries get a minimal OPT (B2); malformed questions get a header-only FORMERR or NOTIMP; dropped with no reply: under 17 B, 300 B or more, QR set, internal DMA-capable heap under 10 KB, more than 20 replies in the current second. Up through the 60 s AP tail, so a phone that joins after a rejoin is still sent to the portal (B1). Per-query logging is DEBUG (compiled out): the evidence is WP0's `portal client <IP>: first DNS query`.
+- **One retry owner while the SoftAP is up (C5, I9):** `router_retry()` alone, every 33-36 s, deferred while the page polls (5 min at most). The component's loop in the setup AP's tail after a link loss is gone. With the SoftAP down nothing changes (3 retries about 10 s apart, then the fallback AP).
+- **`/ap.json` and `status.json`:** always valid JSON; control characters read `?`; a Latin-1 or GBK SSID has `"raw":1`; `status.json` never holds password bytes. The page needs no change.
+- **The AP's servers:** a START_AP whose mode switch fails opens no portal and comes back through the retry timer; an httpd or DNS start that fails at START_AP is tried again every 5 s while the AP is up.
+- **Forget (D9 kept) and the 10 s reset:** unchanged for an idle or connecting STA; on a connected STA a failed `esp_wifi_disconnect()` now drops the forget (tap Disconnect again). The reset erases NVS itself as before, and `RESET_BTN: Wi-Fi NVS lock busy for 3 s - erasing without it` should no longer print (C2f).
+
+**Log lines.** `functional_test.py`'s version, Wi-Fi MAC, Gateway, BLE-address and "address" rules match none of these (checked against renderings of every new or changed line by the implementers and the council); no production-tool or bench anchor line changed; no line prints a credential.
+- New, tag `wifi_manager` (W or E, so they print under `main.c`'s WARN cap): W `network list: %u access points left out (list buffer full)`; W `esp_wifi_scan_get_ap_record failed (%s) - network list kept`; W `network list: no memory for its %u B - the page lists no network yet` (at most once per AP start); W `Wi-Fi config not saved to flash (%s)`; W `esp_netif_get_ip_info failed (%s) - status without addresses`; E `ORDER_START_AP: esp_wifi_set_mode failed (%s) - no AP, tried again through the retry timer`; W `ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s)` (STA idle or connecting) and W `ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s) - still connected, nothing erased`; E `could not get access to json mutex in WM_EVENT_STA_GOT_IP` (was an `abort()`); W `ORDER_CONNECT_STA: %s failed (%s) - attempt not started` (`esp_wifi_set_config` or `esp_wifi_connect`); W `AP up without its %s - tried again every %d s` (`HTTP server`, `DNS server` or `HTTP and DNS servers`); W `AP servers running again (HTTP and DNS)`.
+- New, tag `http_server`: E `httpd_start failed (%s)`.
+- New, tag `dns_server`: W `captive DNS: %s failed (errno %d) - trying again every %d ms` (`socket()`, `setsockopt()` or `bind()`); E `captive DNS: DEFAULT_AP_IP is not an IPv4 address - not started`; W `captive DNS: the stopped task has not ended - not started`; E `captive DNS: task not created (no memory)`; W `captive DNS: task still ending after %d ms - it ends by itself`.
+- Kept byte for byte: I `dns_server: DNS Server listening on 53/udp` (once per DNS task, when its socket is bound: at each AP start, not again for a START_AP while the task runs), E `dns_server: UDP sendto failed: %d`, `APP_WIFI: Connected! IP: %s`, `APP_WIFI: WiFi Disconnected. Reason: %d` (now also `205` after a connect that did not start), `wifi_manager: could not get access to json mutex in wifi_scan`, and the normal heartbeat.
+- Removed (C4): E `dns_server: Failed to create socket`, E `dns_server: Failed to bind to 53/udp` (each was followed by `exit()`), I `dns_server: Replying to DNS request for %s from %s` (now a DEBUG line per query, compiled out).
+- Changed (I): `MONITOR: idma: free=%lu min=%lu largest=%lu min_largest=%lu allocfail=%lu min_ever=%lu`, and with a new failed allocation `… allocfail=%lu (last: %lu B, caps 0x%lx, %lu B free, %s) min_ever=%lu`, so the CP5 text is an exact prefix; `APP_WIFI: Wi-Fi channel at AP start: …`, `… at IP: …` and `… at link loss: …` end `, Wi-Fi scan in flight` while a scan runs (byte-identical otherwise); new paused form `BLE_LEAK: [HEARTBEAT] Scanner alive, whitelist=%d sensors, scanning paused for %lu s (%s)`, with `Wi-Fi setup portal` or `Wi-Fi radio hold`.
+
+**Memory ledger** (WP1 against CP5; from object sizes and the code, so unofficial until CP6 measures it, see "Process" below; plan §10 budgets the whole release, not each package):
+- **Static RAM:** `.bss` about **−38 B**: `http_app.c` −32 (the eight URL pointers), `dns_server.c` −6 (socket and task handle out, two 1-byte flags in), libc's `__atexit` −4 (it leaves the link with `exit`), `wifi_manager.c` +4 (`accessp_records` −4; `ap_list_wanted`, `scan_in_flight`, `ap_list_logged`, `ap_servers_down` +1 each; `ap_servers_tick` +4). `.data` about **−6 B** (`ap_num` −2, libc's `__atexit_recursive_mutex` −4). Both round by alignment.
+- **Heap at rest:** with Wi-Fi connected and the SoftAP down, about **+2.8 KB free**: the records array (1,380 B) gone, the list (1,489 B) only while the AP is up, the URL copies (about 150 B) gone; against that `JSON_IP_INFO_SIZE` 159 → 295 (+136 B, allocated at boot) and the 8-deep queue (+40 B). With the SoftAP up, about **+1.3 KB**. With no Wi-Fi saved, about 50 B per boot no longer leaked (C2f). (The +136 B and +40 B were disclosed in `488c13d` and `97ce041` but in no ledger until this one; the council asked for them here.)
+- **Tasks and timers:** none new. The DNS task (3,072 B stack plus TCB, about 3.4 KB of internal heap) now also lives through the AP tail: up to 60 s after the IP, or as long as the AP stays up after the STA loses the link there. Plan §10 accepts it with WP2's admission in place (15g).
+- **Flash:** about +2.5 KB of code and +1.3 KB of read-only data (15i).
+- **IRAM: 0.** No `IRAM_ATTR`; the new links (`esp_wifi_scan_get_ap_record`, `esp_wifi_clear_ap_list` and their libnet80211 handlers) are plain `.text.*` sections that the `esp_wifi` linker fragment places in flash, and `heap_caps_get_largest_free_block`, `heap_caps_get_minimum_free_size`, `lwip_setsockopt`, `esp_wifi_get_config` and `strnlen` were already linked in flash. Unlinked: `esp_wifi_scan_get_ap_records`, `exit`, `__call_exitprocs`.
+- **Stack** (frames from the objects; no high-water mark is logged, only the canary): `wifi_manager` (4,096 B) about 2.6-2.7 KB at its deepest (the 480 B loop frame, the 688 B scan-record frame, `vprintf` for a W line); `dns_server` (3,072 B) about 2 KB with the activity hook's first-query log line on it, so about 0.7-1 KB of headroom; `httpd` (4,096 B) GET frame 32 → 96 B, POST 64 → 160 B.
+
+**The council** (rtos, memory, wifi-portal, security, safety): **5/5 SHIP, no blocking issue.** Checked and passed: I12 (only boot-time checks remain); every DNS read stays below the received length and the longest reply is 299 B (a `_Static_assert`); the DNS start/stop handshake never puts two tasks on :53, and the stopper waits at most 1 s; C5 checks the bit both where the timer starts and in its callback; the server retry is a bounded queue wait on the existing loop, safe across tick wrap-around; every value the event handler sends is used correctly by every app callback; the new links are flash functions; static RAM down about 40 B; heap at rest up about 2.8 KB; the production tool parses no new line; line endings kept. Their bench risks are in 15j.
+
+**Process, for the user's decision.**
+1. **§8's no-compiler rule was broken.** The two WP1 implementers and the fixer compiled single objects with the project's flags (each file's command from `build\compile_commands.json`) into the session scratchpad, to check that every commit compiles with no warning and to measure the sizes in the commit messages and the ledger above. The fixer reported it and stopped when it noticed; the documentation commits were not compiled. Nothing was written to `build\`, `idf.py` was not run, and no repo file came of it. The figures above are therefore unofficial: CP6 is the authority. Your call whether later packages may do the same (scratchpad only) or not; until you say otherwise, §8 stands.
+2. **`9583236`'s subject has 74 characters** (15g): reword it before any push, or accept it.
+3. **G-FAULT's heap hold** ("internal heap held below 1 KB for 5 s", plan §12) cannot be run on this image: nothing in `main/` or `components/` can hold the heap down. 15j runs a proxy (the router-outage fallback with a phone, and the E2 laptop) and records it. Either accept the proxy for WP1, or ask for a bench-only hook (for example under `APP_BENCH_DIAG`) in a later package, so that `bf45701`'s server restart is exercised.
+
+**Residual risks** (none blocks WP1; the owner is in brackets):
+1. **A forget and a Submit inside one attempt.** The synthetic 205 (`4d67b79`) ends the app's tracking while the real attempt is still connecting, so a forget pending from that attempt is posted at once; it takes wifi_manager's user-connect-failed branch and the disconnect bit stays armed. If the attempt then gets its IP, the next link loss erases the credentials and opens the uncapped no-credential pause (15e item 1). It needs Disconnect and then Connect within one router-retry attempt; before WP1 the same sequence rebooted the hub (which cleared the RAM-only bit). [C8, WP4; joins 15e item 2's forget-bit hazard]
+2. **Two unlocked writers of the STA config:** C2c's restore (`esp_wifi_get_config()`, wifi_manager task) and the POST handler (httpd task). A second Submit landing within microseconds of a first one's "attempt not started" can lose its typed credentials. Pre-existing race class, behind the page's 8 s guard. [C8, WP4]
+3. **The POST handler's `memset` of its password copy** is a dead store that `-O2`/`-Os` may remove (it is in the current `-Og` object). Low impact: the same password is in the live config. [WP4: `mbedtls_platform_zeroize()` in C8's intake]
+4. **`portMAX_DELAY` queue posts** (pre-existing): the wifi_manager task posts to its own queue (START_AP, LOAD_AND_RESTORE), and an httpd handler can post while the wifi_manager task waits in `httpd_stop()` at START_AP or STOP_AP. The 8-deep queue makes both rarer. [C6, WP4: posts bounded at 200 ms]
+5. **STOP_AP ignores `esp_wifi_set_mode(WIFI_MODE_STA)`'s result** (pre-existing): if it fails, the AP stays up with DNS stopped, the server retry cleared and the list freed (I11 broken, nothing repairs it). [WP2: the IP + 75 s backstop should check the mode]
+6. **GOT_IP handled before `AP_STARTED_BIT` is set** (a rare ordering): no AP shutdown timer starts, so the AP and now its DNS stay up with the STA connected. The app's safety net (`73b4483`) stops it only in the no-credential window. [WP2's backstop]
+7. **`scan_in_flight` can read false** while a scan that overrode an earlier one is still running (the earlier one's SCAN_DONE clears it). Only the channel lines' suffix is affected; the comment ("errs towards in flight") overstates. [WP10 register]
+8. **DNS answers a LAN host that routes 10.10.0.1 through the hub** during the tail (lwIP's weak host model), at most 20 replies a second, nothing secret. The plan's "no LAN answer" holds for the hub's LAN IP. One compare in `dns_serve()` (drop sources outside the AP subnet) would close it. [WP2 with C3, which must also check the peer's subnet and refuse non-v4-mapped IPv6, not only the socket's local address]
+9. **The DNS reply budget is global** (20 a second for all clients): a laptop's lookups can use it up and drop a phone's probe (Android retries after about 5 s). Drops are DEBUG, invisible on the bench. [measure in G-CNA and G3's E2; per-source accounting only if needed]
+10. **The AP tail until WP2:** the DNS task and its httpd sessions run beside MQTT/DPS TLS (15g), and the sockets are tight there (`CONFIG_LWIP_MAX_SOCKETS=16`: httpd up to 12, DNS 1, MQTT 1, DPS 1 at first commissioning). [WP2 admission; WP4's C6 socket cap]
+11. **The server retry needs one 8 KB internal block:** a heap that recovers its total but stays fragmented keeps the portal without a server, with only the first `AP up without its …` line. [G-FAULT records it, 15j]
+12. **Cosmetic, for the component change register:** `dns_server.h` declares `bool dns_server_start();` without `<stdbool.h>` or `(void)`; NOTIMP and FORMERR replies carry OPCODE 0 (RFC 1035 copies the query's); a name of 255 octets plus the root's zero is accepted. [WP10]
+
+### 15i. 🔨 Build checkpoint 6, of `9d31927` (WP1's image): only after G0
+
+**Build it only when G0's runs on CP5 are done and their material is saved** (15d): `fullclean` deletes the CP5 build. As 15b: `idf.py fullclean` (it needs registry access; without it, `Remove-Item -Recurse -Force build`), the build into `build_cp6.log`, `idf.py size`. In PowerShell, with the ESP-IDF 5.5.1 environment, in the project folder. CP5's map, ELF, `.bin` and `sdkconfig` are saved first as the reference. If G0 may need the CP5 image again, also copy the whole `build\` folder aside before `fullclean` (it flashes with esptool from its own `flash_args`), or rebuild `31b4c9f` later in a worktree.
+
+```powershell
+git log --oneline -1
+git diff --stat 9d31927 HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock managed_components
+Get-FileHash sdkconfig
+New-Item -ItemType Directory -Force "$env:TEMP\ref_31b4c9f" | Out-Null
+Copy-Item build\eFloStop_WiFiHub_idf1.map, build\eFloStop_WiFiHub_idf1.elf, build\eFloStop_WiFiHub_idf1.bin, sdkconfig "$env:TEMP\ref_31b4c9f\"
+idf.py fullclean
+idf.py build *> "$env:TEMP\build_cp6.log" ; "exit=$LASTEXITCODE"
+Select-String -Path "$env:TEMP\build_cp6.log" -Pattern 'warning:|error:' | ForEach-Object Line
+idf.py size
+Compare-Object (Get-Content "$env:TEMP\ref_31b4c9f\sdkconfig") (Get-Content sdkconfig)
+Get-FileHash sdkconfig
+Select-String -Path build\eFloStop_WiFiHub_idf1.map -Pattern '^\s+0x\w+\s+(esp_wifi_scan_get_ap_records?|esp_wifi_clear_ap_list|exit|__call_exitprocs)\s*$' | ForEach-Object Line
+git status --short
+```
+
+**CP5's figures, the reference.** Read by Claude from `build\eFloStop_WiFiHub_idf1.map` (2026-10-01 11:07, built after `e6c625e` and before WP1's first commit at 12:35; it still links the old DNS's `exit`). The user's CP5 `idf.py size` is the authority where it differs. DIRAM `.text` **113,387 B** (`.iram0.vectors` 1,028 + `.iram0.text` 128,743 − the 16,384 B of IRAM); `.bss` **36,480 B**; `.data` **21,572 B**; flash `.text` **1,026,154 B**; `.rodata` **368,236 B**; `.bin` **1,546,144 B**. All within 15b's expectations except flash `.text` and `.bin`, about 150 B under their estimates (not a Fail). The `sdkconfig` in the project folder, written by CP5's configure at 11:04, has SHA256 **`98F3B2CC…AE759767`**: CP5's reference hash.
+
+Expected:
+- **The `git diff` prints nothing:** `1ef04bb` and this commit touch only `docs/` and `CHANGELOG.md`. The `sdkconfig` hash before the build is CP5's, `98F3B2CC…AE759767`.
+- The configure as at CP5: `Processing 4 dependencies:`, no re-solve, `dependencies.lock` unchanged; `-- Components:` lists `wifi_portal`. `git status --short` afterwards lists only the four usual entries (`.vscode/settings.json`, the two 2.1.3 docs, `.adsum/`).
+- `exit=0`; **the same four warnings** (`app_ble_valve.c:106:9` `BLE_HS_ATT_ERR` redefined; `app_lora.cpp:185:5` ×2; `app_lora.cpp:160:13` `switch_sync_word` unused), no `error:`. A warning in `components/wifi_portal`, `app_wifi.c`, `app_ble_leak.c`, `monitoring.c` or `reset_button.c` is a finding (the scratchpad compiles of every WP1 commit, 15h "Process", saw none).
+- **`Compare-Object` prints nothing, and the hash after the build is still `98F3B2CC…AE759767`:** WP1 changes no `sdkconfig` or `sdkconfig.defaults` line (WP3 does).
+- **DIRAM `.text` exactly 113,387 B; IRAM 16,384 B (100 %).** The map search prints exactly two lines, `esp_wifi_scan_get_ap_record` and `esp_wifi_clear_ap_list`, both at `0x420…` addresses (flash); `esp_wifi_scan_get_ap_records`, `exit` and `__call_exitprocs` are gone (on CP5's map the same search prints those three, at `0x420abd9c`, `0x420d8c60` and `0x420dc184`). If DIRAM `.text` moves, stop: compare the IRAM input sections of the saved and the new map (the `.iram1` and `.iram0.text` input sections, not their `*fill*`) before calling it a newly linked IRAM function, and send both maps.
+- `.bss` about **36,440 B** (CP5's 36,480 − 38 B, 15h), rounded by the section's `ALIGN(8)` and the input-section fill: 36,432-36,448 B. Below 36,424 or above 36,464 B needs a look (`exit` still linked would read about 4 B higher).
+- `.data` about **21,566 B** (−2 B `ap_num`, −4 B libc's `__atexit_recursive_mutex`): 21,564-21,568 B. Below 21,560 or above 21,576 B needs a look.
+- **Flash, against CP5:** `.text` about +2.5 KB, 1,028,200-1,029,100 B (the portal component's code about +2.1 KB, of it the DNS rewrite about 0.9 KB and the review fixes about 0.5 KB; the app's diagnostics about +0.3 KB; newly linked libnet80211 code about +0.3 KB; `exit` and `__call_exitprocs` about −0.2 KB); `.rodata` about +1.3 KB, 369,200-369,900 B (strings and the URL literals); `.bin` about +3.8 KB, 1,549,300-1,550,800 B, about 26.1 % of the 2 MB partition free. They move with the code: record them, they are not a Fail.
+- VAL-01 steps 5-6 as at CP5: the `.bin` newer than `9d31927`'s commit (2026-10-01 14:09:57 +1000); record the ELF SHA256.
+- **The boot** as at CP5 (`HUB_IDENT: Firmware version: v2.1.4`, the `bench build (APP_BENCH_DIAG)` warning after `AP SSID:`), and every `MONITOR: idma:` line now ends ` min_ever=N`. At rest with Wi-Fi connected and the SoftAP down, the `MONITOR: heap:` line's `free` reads about 2.8 KB above CP5's in the same state. Each AP start prints `dns_server: DNS Server listening on 53/udp`, and no `captive DNS: … failed` line.
+- CP6 is still a bench image (`APP_BENCH_DIAG=y`): never through the production tool with Wi-Fi credentials saved (15c). The first DIAG-off boot through the tool (WP10) also confirms its parse of the longer `idma:` and channel lines.
+
+**Send back:** `build_cp6.log`, the `idf.py size` output, the map search's output, both `sdkconfig` hashes, and both maps if DIRAM `.text` moved.
+
+### 15j. WP1's gates on the CP6 image
+
+WP1's gate (plan §11): **G-FAULT (WP1 subset), G8, P-13 and the 10 s reset ×10**, here with a portal smoke on an iPhone and an Android and a leak check. **Pass for all of them: 0 reboots other than the 10 s reset's own, 0 panics, no invalid list or status JSON, 400s where due** (plan §12). Run each first with the valve **unpowered** (provisioned, batteries out), then **linked**, where the item uses the valve hub.
+
+**Set-up** as 15d (hub `GW-7C4FADAE69C8` on COM30 with the CP6 build, `idf.py -p COM30 flash`, never `erase-flash`; one UART file per run with `--timestamps`; the IoT Hub monitor per run; a note per phone join). Also:
+- a Windows laptop with `curl.exe` (built into Windows; in PowerShell type `curl.exe`, since `curl` is an alias for `Invoke-WebRequest`), Python 3, and `dig` (in WSL: `sudo apt install bind9-dnsutils`; or a Linux or macOS machine). The laptop that remembers `WiFi-Hub-69C8` is E2's: keep it off except where a step asks for it;
+- a second ESP32 that can beacon chosen SSIDs (item 4b);
+- the probe script below, saved outside the repo, for example as `$env:TEMP\dns_probe.py`.
+
+**Where to run the laptop items.** On the router-outage fallback SoftAP BLE keeps scanning, and a laptop may get no lease for minutes (15e item 3). Run P-13 and G-FAULT's DNS and HTTP items in the 10 s-reset portal (BLE paused, no credentials) or on a spare hub with no devices provisioned, and note which. The DNS answers only on 10.10.0.1. httpd still also answers on the home LAN until WP2 (C3): keep the bench LAN trusted, and do not run P-14's LAN part on this image.
+
+**Report at once:** any `rst:` other than the 10 s reset's, `Guru Meditation`, `***ERROR*** A stack overflow in task` (the canary check is on; above all `dns_server`, `wifi_manager`, `httpd`), `ESP_ERROR_CHECK failed`, `abort() was called`, with the 30 s before it.
+
+**1. Portal smoke, iPhone then Android (state S2).** After a 10 s reset (item 2's first run can be it), each phone joins `WiFi-Hub-69C8` from Settings; the sign-in window should open by itself; the page lists networks; choose the router, type its password, Connect. Expect `APP_WIFI: portal client <IP>: first DNS query`, `… captive probe (302 sent)`, `… page request`, `… Connect/Disconnect request` (each `…, N ms after joining`), `Connected! IP`, the success page, and `portal priority OFF (AP stopped) - BLE scanning resumed` about 60 s after the IP. Note the tap time, whether and when the sign-in window opened by itself, what the page showed, and the phone's model and OS (as in G0, to compare with CP5). A sign-in window that does not open by itself is recorded, not a WP1 failure (G-CNA after WP4 has the targets); a reboot is a failure.
+
+**2. The 10 s reset ×10.** With the STA **connected** 4 times; **idle** 3 times (on the router-outage fallback SoftAP, between two router retries); **connecting** 3 times (on that SoftAP, start the 10 s hold about 25 s after the last `WiFi Disconnected. Reason: …`, so that it fires inside the next `router fallback: retrying the configured network (attempt N)` attempt; a run whose `LONG PRESS CONFIRMED` is not within 3 s after that line counts as idle, and is repeated). Each run: `RESET_BTN: === LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===`, `Wi-Fi credentials erased from NVS`, `Rebooting into AP mode...`; after the reboot `portal priority ON (no Wi-Fi credentials) - BLE scanning paused`, `Wi-Fi channel at AP start: …, router not joined since boot` and `dns_server: DNS Server listening on 53/udp`, and a phone or the laptop can open the page. Set Wi-Fi up again between runs (item 1's steps). **Pass:** every run ends in the no-credential portal; no `Wi-Fi NVS lock busy for 3 s - erasing without it` and no `Wi-Fi credential erase failed`; no reboot but the reset's own.
+
+**3. P-13 (plan §7.5).** The laptop on `WiFi-Hub-69C8` with its lease:
+
+```bash
+dig @10.10.0.1 captive.apple.com A
+dig @10.10.0.1 captive.apple.com A +noedns +norecurse
+dig @10.10.0.1 captive.apple.com AAAA
+dig @10.10.0.1 captive.apple.com HTTPS
+dig @10.10.0.1 _dns.resolver.arpa SVCB
+dig @10.10.0.1 $(python3 -c "print('.'.join(['a'*63, 'b'*63, 'c'*63, 'd'*58]))") A
+```
+
+(an older `dig` that knows neither HTTPS nor SVCB takes `TYPE65` and `TYPE64`). Then, in PowerShell, `python $env:TEMP\dns_probe.py odd` (UDP datagrams of 1, 11 and 600 B). Last, once Wi-Fi is set up again, within the 60 s the SoftAP stays up after `Connected! IP: <LAN IP>`, from a machine on the home LAN: `dig @<LAN IP> captive.apple.com +time=2 +tries=1`.
+
+Pass:
+- A: `status: NOERROR`, `flags: qr aa rd ra`, `ANSWER: 1`, `captive.apple.com. 60 IN A 10.10.0.1`; with EDNS (dig's default, with a cookie) `ADDITIONAL: 1` and an `OPT PSEUDOSECTION` with `udp: 512`. No `WARNING: Message has … extra bytes at end` and no `malformed` (CP5's EDNS0 defect, B2).
+- `+noedns +norecurse`: `flags: qr aa ra`, `ADDITIONAL: 0`, the same answer.
+- AAAA, HTTPS and SVCB: `status: NOERROR`, `ANSWER: 0` (CP5 answered each with an A record).
+- The 250-character name (a 291 B query with dig's cookie, under the 300 B drop): NOERROR and the A answer.
+- `dns_probe.py odd`: `no reply (pass)` three times. (On Windows an ICMP "port unreachable" also reads as no reply, so run it right after the dig queries have shown the DNS up.)
+- The LAN IP: no answer (`timed out` or `connection refused`). A LAN host with a static route that sends to 10.10.0.1 through the hub's STA IP is answered in the tail (15h risk 8): record it if tried; it is not a C4 failure.
+- **No reboot.** The hub logs nothing per query (DEBUG), only `portal client <laptop IP>: first DNS query` once.
+
+The probe script (Python 3, standard library only):
+
+```python
+import os, random, socket, sys, time
+HUB = ('10.10.0.1', 53)
+Q = bytes.fromhex('123401000001000000000000') + b'\x07captive\x05apple\x03com\x00\x00\x01\x00\x01'
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+if sys.argv[1:] == ['odd']:            # P-13: datagrams of 1, 11 and 600 B
+    s.settimeout(2)
+    for n in (1, 11, 600):
+        s.sendto(bytes(n), HUB)
+        try:
+            print(n, 'B: reply of', len(s.recv(2048)), 'B (FAIL)')
+        except OSError:
+            print(n, 'B: no reply (pass)')
+    sys.exit()
+s.setblocking(False)                   # G-FAULT: 1,000 datagrams, about 30-50 a second
+per_s, t0 = {}, time.time()
+def drain():
+    while True:
+        try:
+            s.recv(2048)
+        except OSError:
+            return
+        k = int(time.time() - t0)
+        per_s[k] = per_s.get(k, 0) + 1
+for i in range(1000):
+    if i % 2:                          # a real query with 1-4 bytes changed, a quarter cut short
+        d = bytearray(Q)
+        for _ in range(random.randint(1, 4)):
+            d[random.randrange(len(d))] = random.randrange(256)
+        if random.random() < 0.25:
+            d = d[:random.randint(1, len(d))]
+    else:                              # random bytes, 1-600 B
+        d = os.urandom(random.randint(1, 600))
+    s.sendto(bytes(d), HUB)
+    time.sleep(0.02)
+    drain()
+time.sleep(1)
+drain()
+print('replies:', sum(per_s.values()), ' most in one second:', max(per_s.values(), default=0))
+```
+
+**4. G-FAULT, WP1 subset (plan §12).** Pass: 0 panics, 0 corruption, 400s where due.
+- **(a) The heap hold, by proxy** (15h "Process" item 3). The router-outage fallback with a phone polling the page while the router is power-cycled twice, then once with the E2 laptop on the SoftAP. Record every `idma:` line (`min`, `min_largest`, `min_ever`, `allocfail` and its `(last: …)`). Pass: no reboot; any `wifi_manager: AP up without its …` is followed by `AP servers running again (HTTP and DNS)` before the run ends (15g); `network list: no memory for its 1489 B …` at most once per AP start; the page lists networks again once the heap recovers.
+- **(b) Beacons.** The second ESP32 beacons close to the hub (the list keeps the 15 strongest): first 10 SSIDs of 31 × 0x01 plus a distinct last byte (`A` … `J`), then 10 SSIDs of 31 × 0xFF plus a distinct last byte. Ten identical SSIDs with one auth mode are one entry since C2b, so the plan's "10 SSIDs of 32 × 0x01" alone no longer tests the bound. With the laptop on the portal, each time: `curl.exe -s http://10.10.0.1/ap.json -o $env:TEMP\ap.json`, `python -m json.tool $env:TEMP\ap.json`, and `curl.exe -s http://10.10.0.1/status.json`; also look at the page on a phone. Pass: valid JSON every time; the 0x01 networks listed as `???…?A` and so on; about 6 of the 0xFF networks listed (about 240 B each), with `ÿ` escapes and `"raw":1`, and `wifi_manager: network list: N access points left out (list buffer full)`; no reboot. Tapping a `?` network submits `?` bytes and fails to connect: expected.
+- **(c) DNS fuzz.** `python $env:TEMP\dns_probe.py` (1,000 datagrams). Pass: no reboot and no stack-overflow line; the script's `most in one second` at most 20 (the reply cap); `dig @10.10.0.1 captive.apple.com A` still answered right after; `allocfail` not rising during the run. Then once more while two phones join the SoftAP (their first-DNS log lines run on the DNS task's stack).
+- **(d) HTTP header fuzz** (PowerShell):
+
+```powershell
+curl.exe -s -o NUL -w "%{http_code}\n" -H "Host: $('a'*100)" http://10.10.0.1/
+curl.exe -s -o NUL -w "%{http_code}\n" -H "Host: $('a'*2000)" http://10.10.0.1/
+curl.exe -s -o NUL -w "%{http_code}\n" -H "Host:" http://10.10.0.1/
+curl.exe -s -o NUL -w "%{http_code}\n" -X POST http://10.10.0.1/connect.json
+curl.exe -s -o NUL -w "%{http_code}\n" -X POST -H "X-Custom-ssid: $('s'*33)" -H "X-Custom-pwd: 12345678" http://10.10.0.1/connect.json
+curl.exe -s -o NUL -w "%{http_code}\n" -X POST -H "X-Custom-ssid: test" -H "X-Custom-pwd: $('p'*65)" http://10.10.0.1/connect.json
+curl.exe -s -o NUL -w "%{http_code}\n" -X POST -H "X-Custom-ssid: test" http://10.10.0.1/connect.json
+```
+
+  Expected, in order: `302` (a Host over 63 characters is read as empty and redirected), `431` (httpd's 1,536 B header limit), `200` (no Host gets the page), then `400` four times (no headers; a 33-character SSID; a 65-character password; no password, as an open network still gets until C8). Never send a valid SSID and password here: that starts a connect. Pass: these codes and no reboot.
+
+**5. G8 (plan §12), with the WP1 additions** (valve unpowered, then linked):
+1. Hub connected, router on. Router off: `WiFi Disconnected. Reason: …`, the component's 3 retries, then `SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on`.
+2. A phone joins `WiFi-Hub-69C8` and opens the page.
+3. Router on: `router fallback: retrying the configured network (attempt N)`, `Connected! IP`: the AP tail starts. Record the `idma:` lines over the next 60 s (15g).
+4. **Within 20 s of `Connected! IP`, pull the router again.** The SoftAP stays up with the STA lost. Expect `WiFi Disconnected. Reason: …`, then only `router fallback: retrying …` every 33-36 s (`retry deferred - the Wi-Fi setup page is open` while it polls, 5 min at most). No component retry (C5): no `Reason:` lines about 10 s apart (its `Retry Timer Tick!` is under the WARN cap, so check by timing).
+5. Keep the page open 5 min and Submit ×10 (the router's correct password, at least 10 s apart; with the router off each ends "Connection failed"). At least 5 of them deliberately 0-3 s after a `router fallback: retrying …` line: expect `wifi_manager: ORDER_CONNECT_STA: esp_wifi_set_config failed (ESP_ERR_WIFI_STATE) - attempt not started` (or `esp_wifi_connect failed`), `APP_WIFI: WiFi Disconnected. Reason: 205`, and the page showing the failure at once. `Wi-Fi setup page: Connect sent - …` beside it means that no hold took effect for that Submit (15g). Do not tap Disconnect in that window (15h risk 1).
+6. Router on: `Connected! IP`, the cloud back (the first IoT Hub message), the SoftAP stopping about 60 s later (the phone's `SoftAP: station … left`). Record the `idma:` lines over those 60 s.
+7. Once more steps 1-3 and 6, with the E2 laptop (it remembers the SSID) on the SoftAP when the router comes back.
+
+Pass: **0 reboots**; no automatic attempt (`router fallback: retrying …`) less than 30 s after the previous attempt's start or end, Submits included; each Submit's page result matches the log. Expected on this image, recorded and not failed: `allocfail` rising and a low `min_ever` in the tail, and MQTT/DPS socket or connect errors there (TLS beside the SoftAP until WP2, 15g). A reboot in the tail is a WP1 finding, whatever its backtrace.
+
+**6. A leak on this image** (P11 and P14 never ran on 2.1.3; WP1 does not touch the leak path). With the valve linked and Wi-Fi connected, wet one BLE sensor: `eleak … leak=1`, RMLEAK then CLOSE, `leak_detected` and `auto_close` in the IoT Hub capture; dry it: `rmleak_auto_cleared` about 10 s later. If practical, once more with the wetting inside a G8 tail (item 5 step 6). Any difference from CP5 is a finding.
+
+**Send back:** each run's UART file and IoT Hub capture, the phone notes, the `dig` and probe-script outputs, the `curl.exe` codes, the `/ap.json` and `status.json` files of item 4b, and the tails' `idma:` lines.
+
+### 15k. Run next (in order; continues §15f once G0 is done)
+
+0. Finish G0 on CP5 (15f items 1-4) and save its material: CP6's `fullclean` deletes the CP5 build.
+1. 🔨 **Build checkpoint 6 of `9d31927`** (15i), VAL-01 steps 5-6, then flash.
+2. 15j items 1 and 2: the portal smoke on an iPhone and an Android, and the 10 s reset ×10 (its first run can open the smoke).
+3. 15j items 3 and 4: P-13 and G-FAULT's WP1 subset, in the 10 s-reset portal or on the spare hub.
+4. 15j item 5: G8, valve unpowered, then linked; once with the E2 laptop.
+5. 15j item 6: a leak with the valve linked.
+6. Send the material (15i, 15j). Then the user's three calls of 15h "Process", and WP2 (plan §11).

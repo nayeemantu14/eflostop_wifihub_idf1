@@ -26,7 +26,8 @@ and shapes are new, and parsers must accept them (see *Wire changes*).
 The user approved the 2.1.4 radio and setup-portal plan on 2026-10-01
 (`docs/field_logs/2.1.4/RADIO_PORTAL_PLAN.md`; progress in `docs/field_logs/2.1.4/HANDOFF.md` §15). Its
 packages land one at a time, each behind a bench gate, and the last one (WP10) folds this part into the
-sections below. The first two, WP-V and WP0, change no behaviour.
+sections below. The first two, WP-V and WP0, change no behaviour. The third, WP1, removes every way the setup
+portal could reboot the hub; it is built and benched as Build checkpoint 6 (HANDOFF §15h-§15j).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -74,6 +75,80 @@ sections below. The first two, WP-V and WP0, change no behaviour.
     Wi-Fi MAC.
   - Memory: `.bss` +121 B, `.data` +8 B and about 40-60 B of permanent heap (one more event handler); no IRAM;
     flash about +5 KB. No new task or timer; the monitor task wakes every second instead of every 10 s.
+  - WP1 extends three of these lines (the `idma` line, the channel lines, the scanner heartbeat): see the next
+    entry.
+- **The setup portal can no longer reboot the hub (WP1: C2 a-h, C2b, C4, C5).** Commits `97ce041` … `5bd0762`
+  (`components/wifi_portal`, `main/app_wifi`; the diagnostics below also in `main/systemservices` and
+  `main/ble_leak_scanner`); details and the bench gates in HANDOFF §15h-§15j.
+  - **No reboot path is left in the portal.** These used to reboot the hub, and no longer do: a Connect from the
+    setup page while another connect attempt is still running (the router retry's, or an earlier Connect's); a
+    Wi-Fi scan result read at low memory; the SoftAP start's mode switch or an IP read failing; a forget's
+    disconnect failing; an allocation failing in the Wi-Fi event handler or in an HTTP request; a UDP datagram
+    shorter than 12 B sent to port 53. A DNS query of 80 B or more no longer writes past its buffer. The checks
+    that are left run once at boot.
+  - **A Connect that meets a running attempt fails at once.** The page shows "Connection failed" and its Retry
+    works once the other attempt has ended; what was typed is no longer lost to a reboot. The running attempt goes
+    on, and at its IP it keeps its own network. (WP4's C8 queues such a Connect instead; the page keeps its 8 s
+    guard until then.)
+  - **Captive DNS rewritten.** It answers only on the SoftAP's address, 10.10.0.1 (it used to answer on the home
+    LAN too), and from the SoftAP's start to its stop (it used to stop at the IP, so a phone that joined in the
+    SoftAP's last 60 s was never sent to the setup page). A and ANY get 10.10.0.1 with a 60 s TTL; AAAA, HTTPS,
+    SVCB and every other type get "no data" (they used to get an A record); a query with EDNS0 (Windows, Linux,
+    strict-DNS Android) gets a well-formed reply with a minimal OPT record (it used to get a malformed one);
+    malformed queries get FORMERR or NOTIMP. No reply to datagrams under 17 B or of 300 B or more, to DNS
+    responses, below 10 KB of free internal DMA-capable heap, or past 20 replies a second.
+  - **The network list and `status.json` are always valid JSON.** A neighbour's SSID with control characters no
+    longer overflows the list buffer (they show as `?`); a 32-character SSID no longer puts the Wi-Fi password
+    into `status.json`; an SSID that is not UTF-8 (Latin-1, GBK) is sent as `\u00XX` escapes with `"raw":1` on its
+    entry; an empty list is `[]`. The list shows the 15 strongest named networks, one per SSID and security type,
+    at the strongest access point's channel. Its buffer exists only while the SoftAP is up.
+  - **One retry owner while the SoftAP is up.** The Wi-Fi manager's own retries never run while the SoftAP is
+    up; the router fallback's retry (every 33-36 s) is then the only one. The Wi-Fi manager's loop of retries in
+    the setup SoftAP's last 60 s, after the new Wi-Fi was lost again, is gone. With the SoftAP down nothing
+    changes: 3 retries about 10 s apart, then the fallback SoftAP.
+  - **The SoftAP's servers come back.** If the web server or the DNS cannot start when the SoftAP comes up (low
+    memory), both are tried again every 5 s while it stays up.
+  - **Forget and the 10 s reset.** Unchanged, except that a forget whose disconnect fails while Wi-Fi is
+    connected is dropped (nothing is erased; tap Disconnect again). Saving and loading the Wi-Fi settings now
+    release their NVS handle and lock on every path: a failed save no longer blocks every later one, and no heap
+    leaks at a boot with nothing saved. The NVS layout is unchanged.
+  - **Log lines.** New, all warnings or errors (the `wifi_manager` and `http_server` tags stay capped at WARN):
+    - `wifi_manager`: `network list: %u access points left out (list buffer full)`, `esp_wifi_scan_get_ap_record
+      failed (%s) - network list kept`, `network list: no memory for its %u B - the page lists no network yet` (at
+      most once per SoftAP start), `Wi-Fi config not saved to flash (%s)`, `esp_netif_get_ip_info failed (%s) -
+      status without addresses`, `ORDER_START_AP: esp_wifi_set_mode failed (%s) - no AP, tried again through the
+      retry timer`, `ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s)` (and the same with `- still
+      connected, nothing erased`), `could not get access to json mutex in WM_EVENT_STA_GOT_IP` (it used to
+      abort), `ORDER_CONNECT_STA: %s failed (%s) - attempt not started`, `AP up without its %s - tried again
+      every %d s`, `AP servers running again (HTTP and DNS)`.
+    - `http_server`: `httpd_start failed (%s)`.
+    - `dns_server`: `captive DNS: %s failed (errno %d) - trying again every %d ms`, `captive DNS: DEFAULT_AP_IP
+      is not an IPv4 address - not started`, `captive DNS: the stopped task has not ended - not started`, `captive
+      DNS: task not created (no memory)`, `captive DNS: task still ending after %d ms - it ends by itself`.
+    - Also `APP_WIFI: WiFi Disconnected. Reason: 205` after a connect that could not start (the line itself is
+      unchanged).
+  - **Removed:** `dns_server: Failed to create socket` and `dns_server: Failed to bind to 53/udp` (each was
+    followed by `exit()`, a reboot), and `dns_server: Replying to DNS request for %s from %s`, now a per-query
+    DEBUG line that this build compiles out (WP0's `portal client <IP>: first DNS query` shows the first query of
+    each phone). `dns_server: DNS Server listening on 53/udp` and `UDP sendto failed: %d` are unchanged.
+  - **Changed, bench diagnostics** (the plan's updates of 2026-10-01):
+    - `MONITOR`: the `idma:` line ends ` min_ever=%lu`, the allocator's own low of the internal DMA-capable heap
+      since boot (the 1 s sampler can miss a short dip); with a failed allocation it follows the `(last: ...)`
+      part. What WP0 printed is an exact prefix of the new line.
+    - `APP_WIFI`: the three `Wi-Fi channel at ...` lines end `, Wi-Fi scan in flight` while a Wi-Fi scan runs (the
+      radio's channel is then the scan's); they are unchanged otherwise.
+    - `BLE_LEAK`: while scanning is paused the heartbeat reads `[HEARTBEAT] Scanner alive, whitelist=%d sensors,
+      scanning paused for %lu s (%s)`, with `Wi-Fi setup portal` or `Wi-Fi radio hold`; not paused, it is
+      unchanged.
+  - Every other existing line is unchanged. The production tool matches none of the new or changed lines, and no
+    line prints a Wi-Fi password.
+  - Memory (estimated from the objects; Build checkpoint 6 measures it): `.bss` about −38 B, `.data` about −6 B;
+    free heap at rest about +2.8 KB with Wi-Fi connected and the SoftAP down (about +1.3 KB with it up); flash
+    about +3.8 KB; no IRAM; no new task or timer. The DNS task (about 3.4 KB) now also runs through the SoftAP's
+    last 60 s after a rejoin.
+  - **Known until later packages:** the DNS and the web server run beside the cloud's TLS start in the SoftAP's
+    last 60 s after a rejoin, so failed allocations there are expected (WP2 admits the cloud only after the SoftAP
+    stops); the web server still answers on the home LAN (WP2, C3); an open network still gets HTTP 400 (WP4).
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and
