@@ -181,7 +181,9 @@ static void switch_sync_word(uint8_t newSync) {
 // unchanged. The same keys, lines and 500 ms lora_mutex take; one byte is read per
 // lora_task pass (about every 10 ms; the task read one every 150 ms), never waited for. The
 // production tool sends none of them.
-static void lora_uart_keys_init(void) {
+// false = UART0's driver is not installed (no memory; the driver has logged why): the keys
+// stay off, as uart_read_bytes() would log an error on every lora_task pass.
+static bool lora_uart_keys_init(void) {
     uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -190,8 +192,9 @@ static void lora_uart_keys_init(void) {
         .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
         .source_clk = UART_SCLK_DEFAULT,
     };
-    uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0);
+    bool installed = (uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0) == ESP_OK);
     uart_param_config(UART_NUM_0, &uart_config);
+    return installed;
 }
 
 // lora_task only, between two radio passes.
@@ -260,7 +263,7 @@ extern "C" void lora_task(void* param)
     lora_crypto_init();
 
     // 4. Bench keys on the console UART (polled in the loop below)
-    lora_uart_keys_init();
+    bool keys_ok = lora_uart_keys_init();
 
     ESP_LOGI(TAG, "LoRa Task Started. Listening (encrypted mode)...");
 
@@ -330,7 +333,8 @@ extern "C" void lora_task(void* param)
         }
 
         // Bench keys (s, r, d, a): one byte, never waited for.
-        lora_uart_keys_poll();
+        if (keys_ok)
+            lora_uart_keys_poll();
 
         // Yield to other tasks
         vTaskDelay(pdMS_TO_TICKS(10));
