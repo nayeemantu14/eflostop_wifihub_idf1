@@ -459,7 +459,12 @@ static volatile bool s_attempt_submit = false;   // the tracked attempt is the p
 static volatile TickType_t s_ip_tick = 0;        // the STA's last IP (forced non-zero), 0 = none since a loss; wifi_manager task only
 static volatile bool s_tail_submit = false;      // that IP's tail follows the page's Connect; wifi_manager task only
 static volatile uint32_t s_tail_cap_ms = 0;      // its first stop, ms after the IP; 0 = the SoftAP was down then; wifi_manager task only
+static volatile bool s_tail_armed = false;       // that first stop was taken (wifi_manager_ap_stop_in()); wifi_manager task only
 static TickType_t s_ap_stop_seen = 0;            // the IP whose SoftAP stop was printed; wifi_manager task only
+
+// wifi_task's tail_stop for a first stop ap_tail_start() could not set: no real stop has this
+// value, so the next pass sets it.
+#define AP_TAIL_STOP_UNSET       ((TickType_t)-1)
 
 // The SoftAP is up: the Wi-Fi mode has the AP in it (a fact, read from the driver; false when it
 // cannot say).
@@ -492,12 +497,15 @@ static void ap_tail_start(void)
         cap_ms = submit ? AP_TAIL_SUBMIT_MS : (stations != 0) ? AP_TAIL_AUTO_MS : AP_TAIL_AUTO_EMPTY_MS;
     }
     TickType_t now = xTaskGetTickCount();
+    // Set before s_ip_tick, which publishes the tail to wifi_task. A failure prints its own
+    // line, and wifi_task sets the stop on its next pass (ap_tail_maintain()).
+    bool armed = (cap_ms != 0) && wifi_manager_ap_stop_in(cap_ms);
     s_tail_submit = submit;
     s_tail_cap_ms = cap_ms;
+    s_tail_armed = armed;
     s_ip_tick = (now != 0) ? now : 1;   // last: wifi_task reads it first
     if (cap_ms == 0)
         return;
-    (void)wifi_manager_ap_stop_in(cap_ms);   // a failure prints its own line; the backstop stays
     if (submit)
         ESP_LOGI(WIFI_TAG, "SoftAP tail after a setup-page Connect (stations on it: %d) - it stops %d s after the IP, or %d s after the last station leaves (not before %d s)",
                  stations, AP_TAIL_SUBMIT_MS / 1000, AP_TAIL_SUBMIT_LEFT_MS / 1000, AP_TAIL_SUBMIT_MIN_MS / 1000);
@@ -1279,7 +1287,8 @@ static void router_retry(wifi_task_state_t *st)
 }
 
 // The SoftAP's tail (see there), on every wifi_task pass: one a second while a tail is followed.
-// Moves the stop by the stations on the SoftAP, and sends the backstop's STOP_AP. Writes only its
+// Moves the stop by the stations on the SoftAP, sets a first stop ap_tail_start() could not set
+// (the timer task's queue full), and sends the backstop's STOP_AP. Writes only its
 // own state: the stop goes through wifi_manager_ap_stop_in() (never waits), the backstop's order
 // through wifi_manager's queue, as the router retry's does.
 static void ap_tail_maintain(wifi_task_state_t *st)
@@ -1316,7 +1325,7 @@ static void ap_tail_maintain(wifi_task_state_t *st)
     if (st->tail_ip != ip)
     {
         st->tail_ip = ip;
-        st->tail_stop = cap;   // as ap_tail_start() set it
+        st->tail_stop = s_tail_armed ? cap : AP_TAIL_STOP_UNSET;   // as ap_tail_start() set it, or not
         st->tail_empty = 0;
     }
     int stations = ap_station_count();
@@ -1340,14 +1349,15 @@ static void ap_tail_maintain(wifi_task_state_t *st)
     }
     if (stop == st->tail_stop)
         return;
+    const char *why = (st->tail_stop == AP_TAIL_STOP_UNSET) ? "its stop not set at the IP, set now" :
+                      (stations > 0) ? "a station on it again" : "no station left on it";
     TickType_t in = (stop > since) ? stop - since : 0;
     if (!wifi_manager_ap_stop_in((uint32_t)in * portTICK_PERIOD_MS))
         return;   // tried again on the next pass
     st->tail_stop = stop;
     uint32_t stop_ms = (uint32_t)stop * portTICK_PERIOD_MS;
     ESP_LOGI(WIFI_TAG, "SoftAP tail: %s - it stops %lu.%lu s after the IP",
-             (stations > 0) ? "a station on it again" : "no station left on it",
-             (unsigned long)(stop_ms / 1000), (unsigned long)((stop_ms % 1000) / 100));
+             why, (unsigned long)(stop_ms / 1000), (unsigned long)((stop_ms % 1000) / 100));
 }
 
 void wifi_task(void *pvParameter)
