@@ -236,6 +236,7 @@ esp_err_t wifi_manager_save_sta_config(){
 	memset(&tmp_conf, 0x00, sizeof(tmp_conf));
 	memset(&tmp_settings, 0x00, sizeof(tmp_settings));
 	bool change = false;
+	bool write_failed = false;
 
 	ESP_LOGI(TAG, "About to save config to flash!!");
 
@@ -247,14 +248,24 @@ esp_err_t wifi_manager_save_sta_config(){
 			return esp_err;
 		}
 
+		/* LOCAL PATCH (2.1.4 C2f): every path from here ends at "done", which closes the handle and
+		 * gives the lock back. A failed write returned with the handle open (leaked), and a failed
+		 * commit, or a key that could not be read with nothing to write, with the lock held too:
+		 * every later save, and the 10 s reset's erase for 3 s, then waited on it. The fields
+		 * are compared within their sizes: a 32-byte SSID or a 64-byte password has no terminator,
+		 * and strcmp() ran on into the next field. The keys, sizes and meaning are unchanged (the
+		 * 10 s reset's erase_wifi_credentials() relies on them): "ssid" 32 B, "password" 64 B,
+		 * "settings", namespace "espwifimgr", an empty SSID = nothing saved. */
+
 		sz = sizeof(tmp_conf.sta.ssid);
 		esp_err = nvs_get_blob(handle, "ssid", tmp_conf.sta.ssid, &sz);
-		if( (esp_err == ESP_OK  || esp_err == ESP_ERR_NVS_NOT_FOUND) && strcmp( (char*)tmp_conf.sta.ssid, (char*)wifi_manager_config_sta->sta.ssid) != 0){
+		if( (esp_err == ESP_OK  || esp_err == ESP_ERR_NVS_NOT_FOUND) &&
+				strncmp( (char*)tmp_conf.sta.ssid, (char*)wifi_manager_config_sta->sta.ssid, sizeof(tmp_conf.sta.ssid)) != 0){
 			/* different ssid or ssid does not exist in flash: save new ssid */
 			esp_err = nvs_set_blob(handle, "ssid", wifi_manager_config_sta->sta.ssid, 32);
 			if (esp_err != ESP_OK){
-				nvs_sync_unlock();
-				return esp_err;
+				write_failed = true;
+				goto done;
 			}
 			change = true;
 			/* LOCAL PATCH (2.1.4 C1): no credential in the log. The SSID is bounded: a 32-byte one has
@@ -267,12 +278,13 @@ esp_err_t wifi_manager_save_sta_config(){
 
 		sz = sizeof(tmp_conf.sta.password);
 		esp_err = nvs_get_blob(handle, "password", tmp_conf.sta.password, &sz);
-		if( (esp_err == ESP_OK  || esp_err == ESP_ERR_NVS_NOT_FOUND) && strcmp( (char*)tmp_conf.sta.password, (char*)wifi_manager_config_sta->sta.password) != 0){
+		if( (esp_err == ESP_OK  || esp_err == ESP_ERR_NVS_NOT_FOUND) &&
+				strncmp( (char*)tmp_conf.sta.password, (char*)wifi_manager_config_sta->sta.password, sizeof(tmp_conf.sta.password)) != 0){
 			/* different password or password does not exist in flash: save new password */
 			esp_err = nvs_set_blob(handle, "password", wifi_manager_config_sta->sta.password, 64);
 			if (esp_err != ESP_OK){
-				nvs_sync_unlock();
-				return esp_err;
+				write_failed = true;
+				goto done;
 			}
 			change = true;
 			ESP_LOGI(TAG, "wifi_manager_wrote wifi_sta_config: pwd_len:%u",
@@ -283,8 +295,8 @@ esp_err_t wifi_manager_save_sta_config(){
 		esp_err = nvs_get_blob(handle, "settings", &tmp_settings, &sz);
 		if( (esp_err == ESP_OK  || esp_err == ESP_ERR_NVS_NOT_FOUND) &&
 				(
-				strcmp( (char*)tmp_settings.ap_ssid, (char*)wifi_settings.ap_ssid) != 0 ||
-				strcmp( (char*)tmp_settings.ap_pwd, (char*)wifi_settings.ap_pwd) != 0 ||
+				strncmp( (char*)tmp_settings.ap_ssid, (char*)wifi_settings.ap_ssid, sizeof(tmp_settings.ap_ssid)) != 0 ||
+				strncmp( (char*)tmp_settings.ap_pwd, (char*)wifi_settings.ap_pwd, sizeof(tmp_settings.ap_pwd)) != 0 ||
 				tmp_settings.ap_ssid_hidden != wifi_settings.ap_ssid_hidden ||
 				tmp_settings.ap_bandwidth != wifi_settings.ap_bandwidth ||
 				tmp_settings.sta_only != wifi_settings.sta_only ||
@@ -294,8 +306,8 @@ esp_err_t wifi_manager_save_sta_config(){
 		){
 			esp_err = nvs_set_blob(handle, "settings", &wifi_settings, sizeof(wifi_settings));
 			if (esp_err != ESP_OK){
-				nvs_sync_unlock();
-				return esp_err;
+				write_failed = true;
+				goto done;
 			}
 			change = true;
 
@@ -313,15 +325,20 @@ esp_err_t wifi_manager_save_sta_config(){
 
 		if(change){
 			esp_err = nvs_commit(handle);
+			write_failed = (esp_err != ESP_OK);
 		}
 		else{
 			ESP_LOGI(TAG, "Wifi config was not saved to flash because no change has been detected.");
 		}
 
-		if (esp_err != ESP_OK) return esp_err;
-
+done:
 		nvs_close(handle);
 		nvs_sync_unlock();
+
+		if(write_failed){
+			ESP_LOGW(TAG, "Wi-Fi config not saved to flash (%s)", esp_err_to_name(esp_err));
+		}
+		return esp_err;
 
 	}
 	else{
@@ -344,49 +361,53 @@ bool wifi_manager_fetch_wifi_sta_config(){
 			return false;
 		}
 
+		/* LOCAL PATCH (2.1.4 C2f): every path closes the handle and gives the lock back: a missing
+		 * key returned with the handle open, about 50 B of heap leaked at each boot with nothing
+		 * saved (reset_button.c). The blobs are read through a buffer on the stack, not a malloc()
+		 * used unchecked (of which only 4 bytes were cleared). The reads, their order and what a
+		 * missing key leaves in the RAM copy are as before. */
+		bool found = false;
 		if(wifi_manager_config_sta == NULL){
 			wifi_manager_config_sta = (wifi_config_t*)malloc(sizeof(wifi_config_t));
 		}
-		memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
+		if(wifi_manager_config_sta != NULL){
 
-		/* allocate buffer */
-		size_t sz = sizeof(wifi_settings);
-		uint8_t *buff = (uint8_t*)malloc(sizeof(uint8_t) * sz);
-		memset(buff, 0x00, sizeof(sz));
+			memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
 
-		/* ssid */
-		sz = sizeof(wifi_manager_config_sta->sta.ssid);
-		esp_err = nvs_get_blob(handle, "ssid", buff, &sz);
-		if(esp_err != ESP_OK){
-			free(buff);
-			nvs_sync_unlock();
-			return false;
+			/* buffer */
+			uint8_t buff[sizeof(wifi_settings)];
+			memset(buff, 0x00, sizeof(buff));
+			size_t sz;
+
+			/* ssid */
+			sz = sizeof(wifi_manager_config_sta->sta.ssid);
+			esp_err = nvs_get_blob(handle, "ssid", buff, &sz);
+			if(esp_err == ESP_OK){
+				memcpy(wifi_manager_config_sta->sta.ssid, buff, sz);
+
+				/* password */
+				sz = sizeof(wifi_manager_config_sta->sta.password);
+				esp_err = nvs_get_blob(handle, "password", buff, &sz);
+			}
+			if(esp_err == ESP_OK){
+				memcpy(wifi_manager_config_sta->sta.password, buff, sz);
+
+				/* settings */
+				sz = sizeof(wifi_settings);
+				esp_err = nvs_get_blob(handle, "settings", buff, &sz);
+			}
+			if(esp_err == ESP_OK){
+				memcpy(&wifi_settings, buff, sz);
+				found = true;
+			}
 		}
-		memcpy(wifi_manager_config_sta->sta.ssid, buff, sz);
 
-		/* password */
-		sz = sizeof(wifi_manager_config_sta->sta.password);
-		esp_err = nvs_get_blob(handle, "password", buff, &sz);
-		if(esp_err != ESP_OK){
-			free(buff);
-			nvs_sync_unlock();
-			return false;
-		}
-		memcpy(wifi_manager_config_sta->sta.password, buff, sz);
-
-		/* settings */
-		sz = sizeof(wifi_settings);
-		esp_err = nvs_get_blob(handle, "settings", buff, &sz);
-		if(esp_err != ESP_OK){
-			free(buff);
-			nvs_sync_unlock();
-			return false;
-		}
-		memcpy(&wifi_settings, buff, sz);
-
-		free(buff);
 		nvs_close(handle);
 		nvs_sync_unlock();
+
+		if(!found){
+			return false;
+		}
 
 
 		/* LOCAL PATCH (2.1.4 C1): no credential in the log, and the SSIDs bounded (see the save above) */
@@ -1079,7 +1100,8 @@ void wifi_manager( void * pvParameters ){
 	memcpy(ap_config.ap.ssid, wifi_settings.ap_ssid , sizeof(wifi_settings.ap_ssid));
 
 	/* if the password lenght is under 8 char which is the minium for WPA2, the access point starts as open */
-	if(strlen( (char*)wifi_settings.ap_pwd) < WPA2_MINIMUM_PASSWORD_LENGTH){
+	/* LOCAL PATCH (2.1.4 C2f): bounded, the field comes from NVS and a 64-byte password has no terminator */
+	if(strnlen( (char*)wifi_settings.ap_pwd, sizeof(wifi_settings.ap_pwd)) < WPA2_MINIMUM_PASSWORD_LENGTH){
 		ap_config.ap.authmode = WIFI_AUTH_OPEN;
 		memset( ap_config.ap.password, 0x00, sizeof(ap_config.ap.password) );
 	}
