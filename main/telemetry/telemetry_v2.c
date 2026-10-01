@@ -82,6 +82,8 @@ static QueueHandle_t     s_sessq   = NULL;
 static StaticSemaphore_t s_busy_buf;
 static SemaphoreHandle_t s_busy    = NULL;
 static TaskHandle_t      s_tx_task = NULL;
+// Set once, by iothub_task, at a decommission whose clear did not finish (telemetry_v2_tx_freeze()).
+static volatile bool     s_tx_frozen = false;
 
 _Static_assert(sizeof(telem_tx_item_t) == 12, "the FIFO's item is 12 B (WP2c section 2.2)");
 
@@ -210,9 +212,17 @@ static int publish_logged(const char *json_str, const char *type_hint, bool gate
     return msg_id;
 }
 
+// cloud_tx's store into the offline buffer (it may wait for the buffer's lock): none once a
+// decommission's fallback has erased the buffer for the restart, even when the freeze landed
+// during this event's publish (telemetry_v2_tx_freeze()).
+static bool tx_store(const char *json, size_t len)
+{
+    return !s_tx_frozen && offline_buffer_store(json, len);
+}
+
 // A message's send: publishes a message from build_str(), or buffers or drops it. Does not
-// free m->json. Runs on cloud_tx for what iothub_task built (2.1.4 WP2c), on the esp-mqtt task
-// for its own cmd_ack, and on iothub_task for the snapshot, until that goes to cloud_tx too.
+// free m->json. Runs on cloud_tx for what iothub_task built (2.1.4 WP2c), and on the esp-mqtt
+// task for its own cmd_ack.
 // `gen`: on cloud_tx, the session whose replay and lifecycle it has done, the only one an
 // event may go into; NULL elsewhere.
 // Returns true ONLY when the message actually reached esp-mqtt (online branch
@@ -228,13 +238,17 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
 
     bool sent = false;
     bool is_event  = (strcmp(type_hint, "event") == 0);
-    TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    bool on_tx     = (s_tx_task != NULL && self == s_tx_task);
-    // cloud_tx's publishes, and iothub_task's snapshot, take the publish gate: never beside
-    // wifi_task's MQTT stop (app_iothub.c, "MQTT stop / resume"). Not the esp-mqtt task's
-    // cmd_ack: it runs on its own client's task, which that stop ends.
-    bool gated     = on_tx || self == iothub_task_handle;
+    bool on_tx     = (s_tx_task != NULL && xTaskGetCurrentTaskHandle() == s_tx_task);
+    // cloud_tx's publishes take the publish gate: never beside wifi_task's MQTT stop
+    // (app_iothub.c, "MQTT stop / resume"). Not the esp-mqtt task's cmd_ack: it runs on its
+    // own client's task, which that stop ends.
+    bool gated     = on_tx;
     bool online    = s_mqtt && s_connected && !presync;
+
+    // A decommission's fallback has erased the offline buffer for the restart: nothing more
+    // goes out or into it (telemetry_v2_tx_freeze()).
+    if (on_tx && s_tx_frozen)
+        return false;
 
     // Events wait in the offline buffer although the client is connected (refused for room,
     // or the rest of a drain cut short): an event from cloud_tx must not overtake them,
@@ -283,7 +297,7 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
         // it while it waits for that lock (offline_buffer_drain()), so a wait would stall both
         // tasks for the buffer's 1 s timeout and keep nothing.
         if (msg_id == -2 && is_event) {
-            bool kept = on_tx ? offline_buffer_store(json_str, m->len)
+            bool kept = on_tx ? tx_store(json_str, m->len)
                               : offline_buffer_try_store(json_str, m->len);
             if (kept) {
                 s_replay_owed = true;
@@ -304,7 +318,7 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
             // outbox can still deliver its copy too, possibly after newer events: the cloud
             // dedupes on gateway.id + ts + event + device id and keeps the first copy. Not the
             // esp-mqtt task's cmd_ack (it cannot wait for the buffer, above).
-            if (offline_buffer_store(json_str, m->len)) {
+            if (tx_store(json_str, m->len)) {
                 s_replay_owed = true;
                 ESP_LOGW(TELEM_TAG, "Pub %s not confirmed (msg_id=%d) - kept for replay, a duplicate is possible",
                          type_hint, msg_id);
@@ -325,7 +339,7 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
                 offline_buffer_stamp_presync();
         } else if (behind) {
             // Behind the events the replay could not send yet (see above), in order.
-            if (offline_buffer_store(json_str, m->len))
+            if (tx_store(json_str, m->len))
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay, behind the buffered ones", type_hint);
             else
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s not kept", type_hint);
@@ -334,7 +348,7 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
             // not wait for the buffer (its cmd_ack, after a stop was asked: see the -2 refusal).
             ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
             if (on_tx)
-                offline_buffer_store(json_str, m->len);
+                tx_store(json_str, m->len);
             else
                 offline_buffer_try_store(json_str, m->len);
         }
@@ -916,7 +930,7 @@ static bool snapshot_envelope_complete(const cJSON *root)
 #define SNAP_ADD(x) do { if (!(x)) goto fail; } while (0)
 
 // The snapshot's build: prints it into *out (2.1.4 WP2c: built apart from its send, like
-// every message). false = not built (see telemetry_v2_publish_snapshot() in the header), and
+// every message). false = not built (see telemetry_v2_post_snapshot() in the header), and
 // *out is not set.
 static bool build_snapshot(const char *trigger, telem_msg_t *out)
 {
@@ -1252,13 +1266,12 @@ fail:
 
 #undef SNAP_ADD
 
-bool telemetry_v2_publish_snapshot(const char *trigger)
+bool telemetry_v2_post_snapshot(const char *trigger, uint32_t tag, uint8_t flags)
 {
     telem_msg_t m;
     if (!build_snapshot(trigger, &m)) return false;
-    bool sent = send_str(&m, "snapshot", NULL);
-    free(m.json);
-    return sent;
+    telem_tx_item_t it = { .json = m.json, .tag = tag, .kind = TELEM_TX_SNAPSHOT, .flags = flags };
+    return telemetry_v2_tx_post(&it, "snapshot");
 }
 
 // ---- Events ---------------------------------------------------------------
@@ -1464,7 +1477,7 @@ uint32_t telemetry_v2_session_gen(void)
 // taken, or a stop asked, reads as the session's end: kept for the next connect.
 static offline_buffer_pub_t replay_publish(const char *json, size_t len)
 {
-    if (!s_mqtt || !iothub_pub_begin()) return OFFLINE_BUF_PUB_DOWN;
+    if (s_tx_frozen || !s_mqtt || !iothub_pub_begin()) return OFFLINE_BUF_PUB_DOWN;
     uint32_t gen = telemetry_v2_session_gen();
     int64_t t0 = esp_timer_get_time();
     int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json, (int)len, 1, 0);
@@ -1477,8 +1490,9 @@ static offline_buffer_pub_t replay_publish(const char *json, size_t len)
 void telemetry_v2_drain_offline(void)
 {
     // Not into a client that is not connected: a stopped one still takes a QoS 1 publish into
-    // its outbox (a msg_id, so the slot is erased), and expires it there after 30 s.
-    if (!s_connected) return;
+    // its outbox (a msg_id, so the slot is erased), and expires it there after 30 s. Nor once
+    // a decommission's fallback has erased the buffer (telemetry_v2_tx_freeze()).
+    if (!s_connected || s_tx_frozen) return;
     s_replay_owed = false;
     int pending = offline_buffer_count();
     if (pending == 0) return;
@@ -1602,4 +1616,14 @@ void telemetry_v2_tx_send_event(const telem_tx_item_t *it, uint32_t gen)
 int telemetry_v2_tx_publish(const char *json, const char *type_hint)
 {
     return publish_logged(json, type_hint, true);
+}
+
+void telemetry_v2_tx_freeze(void)
+{
+    s_tx_frozen = true;
+}
+
+bool telemetry_v2_tx_frozen(void)
+{
+    return s_tx_frozen;
 }

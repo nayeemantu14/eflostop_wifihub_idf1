@@ -147,6 +147,19 @@ static volatile bool g_decommission_reboot = false;
 // written from two tasks. 2.1.3 did all of that on the esp-mqtt task.
 static volatile bool g_devset_changed = false;
 
+// The C2D device-set changes, counted (2.1.4 WP2c, R1-3): incremented on the esp-mqtt task
+// just before each C2D raise of g_devset_changed (devset_changed_c2d()), its only writer. A
+// snapshot carries the count its pass saw at the loop top; cloud_tx drops it as stale when a
+// change has landed since, so the next build shows the reconciled table (E-10) rather than a
+// removed device after its ack.
+static volatile uint32_t s_devset_seq = 0;
+
+// Decommission-all: cloud_tx has published the last snapshot and cleared the offline buffer
+// (TELEM_TX_DECOM_CLEAR). Written by cloud_tx, read by iothub_task, which waits for it up to
+// DECOM_TX_WAIT_MS before it erases the buffer itself.
+#define DECOM_TX_WAIT_MS 25000
+static volatile bool s_decom_done = false;
+
 // iothub_apply_provisioned_mac() found provisioning busy (at boot, or for a `provision` on
 // the esp-mqtt task), so the BLE target and the BLE start are still owed. iothub_task
 // retries at the top of every pass until one succeeds: a busy mutex must never leave BLE
@@ -269,10 +282,63 @@ static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from 
 static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only on lifecycle)
 static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms when the fast snapshot was (re)armed; ceiling is relative to THIS
 static uint32_t      s_rating_seq_seen    = 0;                  // health_get_rating_seq() already requested/published (see Phase 3)
-// A due snapshot held last pass for cloud_tx (2.1.4 WP2c): TX not idle. The loop then polls at
-// SNAP_TX_HOLD_POLL_MS, not 1 tick (R0-3); cloud_tx's idle wake usually comes first.
+// A due snapshot held last pass for cloud_tx (2.1.4 WP2c): TX not idle, one in flight, or a
+// session whose resets this task has not applied. The loop then polls at SNAP_TX_HOLD_POLL_MS,
+// not 1 tick (R0-3); cloud_tx's wake (idle, or the result) usually comes first.
 #define SNAP_TX_HOLD_POLL_MS   2000
 static bool          s_snap_tx_held       = false;
+
+// ---- The asynchronous snapshot (2.1.4 WP2c, section 2.6) ----
+// The flush builds the snapshot into an idle TX and hands it to cloud_tx; its bookkeeping (the
+// heartbeat re-arm, the boot/fast/commission flags) runs when cloud_tx's result comes back
+// (snap_result_take()), with the values saved here at the build. At most one is in flight: the
+// flush is held meanwhile, so the single build site, the settle barrier and E-10 are as before.
+typedef struct {
+    bool          out;         // built and handed over; its result not read yet
+    bool          late_logged; // the "outstanding" line has printed
+    uint8_t       ticket;      // matches cloud_tx's result to this build
+    uint8_t       seen;        // health_get_sync_counts() right after the build ...
+    uint8_t       total;
+    bool          counts_ok;   // ... if it could be read
+    snap_reason_t reason;
+    uint32_t      epoch;       // s_snap_epoch at the build
+    uint32_t      rs_pub;      // health_get_rating_seq() sampled before the build
+    uint32_t      rs_seen;     // s_rating_seq_seen at the build
+    int64_t       flush_now;   // the build's time: last_pub on success, as before
+} snap_flight_t;
+static snap_flight_t s_fl;                  // iothub_task only
+static uint8_t       s_snap_ticket = 0;     // the last ticket handed out (never 0)
+
+// The commission epoch (R1-2): bumped by everything that re-arms the boot/commission state
+// behind a snapshot in flight - arm_commission_snapshot(), on_hub_emptied(), the removal clamp,
+// a new session's reset. A result read after a bump does only the generic bookkeeping, never
+// the flags it would set from a state that has since been re-armed. iothub_task only.
+static uint32_t      s_snap_epoch = 0;
+
+// EVENT requests made while a snapshot is in flight: one, the strongest tier and the latest
+// name, re-requested when its result is read. BOOT, FAST and COMMISSION are not kept: they are
+// re-armed from state on every pass. iothub_task only.
+static struct {
+    bool        set;
+    snap_tier_t tier;
+    char        evt[32];
+} s_snap_next;
+
+// cloud_tx's result for the snapshot in flight: its ticket in bits 0-7, SNAP_RES_* in bits
+// 8-15, stored with release in one 32-bit word, then iothub_task woken. cloud_tx only writes it.
+#define SNAP_RES_OK      1u   // esp-mqtt took it (msg_id >= 0)
+#define SNAP_RES_FAILED  2u   // refused, or the session not up: the 5 s retry floor
+#define SNAP_RES_STALE   3u   // its session or the device set changed first: built again
+static volatile uint32_t s_snap_result = 0;
+
+// A snapshot item's tag: the session it was built for (16 bits), the C2D device-set sequence
+// its build saw (8 bits) and its ticket (8 bits). Both counts move far slower than a wrap.
+#define SNAP_TAG(gen, devset, ticket) (((uint32_t)(gen) & 0xFFFFu) |                 \
+                                       (((uint32_t)(devset) & 0xFFu) << 16) |       \
+                                       ((uint32_t)(ticket) << 24))
+#define SNAP_TAG_GEN(tag)     ((tag) & 0xFFFFu)
+#define SNAP_TAG_DEVSET(tag)  (((tag) >> 16) & 0xFFu)
+#define SNAP_TAG_TICKET(tag)  ((uint8_t)((tag) >> 24))
 
 // A health alert taken from the health engine but not yet admitted to cloud_tx
 // (telemetry_v2_tx_health_admit()): it waits here, the rest in the engine's queue, until TX is
@@ -768,6 +834,7 @@ static void arm_commission_snapshot(bool pulse)
     g_commission_pub_seen = 0;
     g_commission_until_ms = (esp_timer_get_time() / 1000) + COMMISSION_REFRESH_GRACE_MS;
     if (pulse) g_prov_pulse_arm = true;
+    s_snap_epoch++;   // a snapshot in flight must not mark this commission's boot snapshot sent (R1-2)
 }
 
 // Invalidate every telemetry-cache entry whose device is no longer provisioned (L9).
@@ -862,6 +929,7 @@ static void on_hub_emptied(void)
     g_fast_snapshot_sent  = true;
     g_commission_pub_seen = 0;
     g_commission_until_ms = 0;
+    s_snap_epoch++;                 // a snapshot in flight must not reopen the window (R1-2)
     // An open post-provision pulse has nothing left to refresh.
     g_prov_pulse_arm      = false;
     g_prov_pulse_until_ms = 0;
@@ -1008,6 +1076,7 @@ static void apply_device_set_change(void)
     // count and publish nothing. Clamp only: an open window keeps running unchanged, and a
     // closed one stays closed. (snap_now_ms() is defined below this function.)
     if (r.removed > 0 && (esp_timer_get_time() / 1000) < g_commission_until_ms) {
+        s_snap_epoch++;   // a snapshot in flight must not restore the count clamped here (R1-2)
         uint8_t seen = 0, total = 0;
         if (health_get_sync_counts(&seen, &total) && seen < g_commission_pub_seen) {
             g_commission_pub_seen = seen;
@@ -1075,6 +1144,20 @@ static void snap_rearm_heartbeat(void)
 // message volume. Runs in iothub_task only -> lock-free.
 static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt)
 {
+    // A snapshot in flight (2.1.4 WP2c): its deadline and reason stay as they are until its
+    // result is read. An EVENT is kept (s_snap_next) and requested then, from the new last_pub.
+    // BOOT, FAST and COMMISSION are not: every pass re-arms them from the flags, which that
+    // result updates first.
+    if (s_fl.out) {
+        if (reason == SNAP_EVENT) {
+            if (!s_snap_next.set || tier > s_snap_next.tier)
+                s_snap_next.tier = tier;
+            s_snap_next.set = true;
+            snprintf(s_snap_next.evt, sizeof(s_snap_next.evt), "%s", evt ? evt : "");
+        }
+        return;
+    }
+
     int64_t now = snap_now_ms();
 
     if (reason == SNAP_COMMISSION || reason == SNAP_BOOT || reason == SNAP_FAST) {
@@ -1147,6 +1230,80 @@ static void snap_request(snap_reason_t reason, snap_tier_t tier, const char *evt
     }
 }
 
+// A snapshot not built, refused by esp-mqtt (e.g. QoS-1 outbox full), or not sent because the
+// session ended before cloud_tx got to it: back off RETRY_FLOOR for ALL reasons (the retry floor
+// is honored by snap_request so BOOT/COMMISSION re-arms can't hammer the outbox).
+static void snap_backoff(int64_t now)
+{
+    s_snap_retry_until_ms = now + SNAP_RETRY_FLOOR_MS;
+    s_snap_due_ms = s_snap_retry_until_ms;
+    ESP_LOGW(IOTHUB_TAG, "SNAP heartbeat=suppressed (publish-failed)");
+}
+
+// The result of the snapshot in flight (cloud_tx_snapshot()): the bookkeeping the flush did
+// when it published on this task, with the values saved at the build (s_fl). Every pass, in
+// Phase 3 before the BOOT/FAST/COMMISSION arming, which then re-arms from the updated flags.
+// iothub_task only.
+static void snap_result_take(void)
+{
+    if (!s_fl.out)
+        return;
+    uint32_t r = __atomic_load_n(&s_snap_result, __ATOMIC_ACQUIRE);
+    if ((uint8_t)r != s_fl.ticket)
+        return;   // still in flight
+    uint32_t res = (r >> 8) & 0xFFu;
+    s_fl.out = false;
+
+    if (res == SNAP_RES_OK) {
+        s_snap_last_pub_ms = s_fl.flush_now;
+        // This snapshot already carries the rating changes sampled before its build. One seen
+        // during the flight was requested again (s_snap_next): not marked as published.
+        if (s_rating_seq_seen == s_fl.rs_seen)
+            s_rating_seq_seen = s_fl.rs_pub;
+        // The flags only if nothing re-armed them during the flight (the epoch, R1-2): a
+        // provision, an emptied hub, a removal's clamp or a new session has its own snapshot.
+        if (s_fl.epoch == s_snap_epoch) {
+            if (s_fl.reason == SNAP_BOOT || s_fl.reason == SNAP_COMMISSION) {
+                g_boot_snapshot_sent = true;
+                g_fast_snapshot_sent = true;   // flag hygiene: a boot/commission snapshot also satisfies the fast one-shot
+                if (s_fl.counts_ok) {
+                    g_commission_pub_seen = s_fl.seen;
+                    if (s_fl.seen >= s_fl.total) g_commission_until_ms = 0;
+                }
+            } else if (s_fl.reason == SNAP_FAST) {
+                // The fast snapshot IS the boot snapshot, fired early at
+                // valve-ready. Mark boot sent so the slow all-heard boot path
+                // does not double-publish, and OPEN the refresh grace window so
+                // the still-unheard sensors fill in via incremental refresh as
+                // each first beacons (capped by COMMISSION_REFRESH_GRACE_MS).
+                g_fast_snapshot_sent = true;
+                g_boot_snapshot_sent = true;
+                if (s_fl.counts_ok) {
+                    g_commission_pub_seen = s_fl.seen;
+                    // Only open the grace window if devices are still unheard;
+                    // if everything was already heard there is nothing to fill.
+                    g_commission_until_ms = (s_fl.seen >= s_fl.total) ? 0
+                        : (s_fl.flush_now + COMMISSION_REFRESH_GRACE_MS);
+                } else {
+                    g_commission_until_ms = s_fl.flush_now + COMMISSION_REFRESH_GRACE_MS;
+                }
+            }
+        }
+        snap_rearm_heartbeat();   // also clears the retry backoff
+        ESP_LOGI(IOTHUB_TAG, "SNAP heartbeat=reset interval_ms=%lld",
+                 (long long)s_hb_interval_ms);
+    } else if (res == SNAP_RES_FAILED) {
+        snap_backoff(snap_now_ms());
+    }
+    // SNAP_RES_STALE: no floor; the deadline stays due, and the next idle pass builds it again
+    // from the reconciled table or for the new session.
+
+    if (s_snap_next.set) {
+        s_snap_next.set = false;
+        snap_request(SNAP_EVENT, s_snap_next.tier, s_snap_next.evt);
+    }
+}
+
 // Publish (or, offline, buffer) one rules-engine event taken from
 // rules_engine_take_pending_telemetry() and couple its snapshot, then free it. NULL is a
 // no-op. iothub_task only, like snap_request().
@@ -1161,6 +1318,15 @@ static void publish_rules_telemetry(char *rules_json)
     bool low = (strstr(rules_json, "auto_close_blocked_override") != NULL);
     snap_request(SNAP_EVENT, low ? SNAP_TIER_LOW : SNAP_TIER_HIGH, "rules");
     free(rules_json);
+}
+
+// esp-mqtt task: a C2D handler changed the device set (D0). The count first (s_devset_seq):
+// a snapshot whose pass read it before this change is stale at cloud_tx, so none built before
+// the reconcile goes out after this command's ack (E-10, R1-3).
+static void devset_changed_c2d(void)
+{
+    s_devset_seq++;
+    g_devset_changed = true;
 }
 
 static void handle_c2d_command(const char *data, size_t data_len)
@@ -1260,7 +1426,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 if (emptied) reset_rules_state_hub_emptied();
                 // Health reconcile, purges and twin run on iothub_task (D0). No snapshot
                 // arming: the on-success command snapshot below is the removal's only one.
-                g_devset_changed = true;
+                devset_changed_c2d();
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -1280,7 +1446,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
                          (unsigned long)sid);
                 sensor_meta_remove(SENSOR_TYPE_LORA, lora_id_str);
                 if (emptied) reset_rules_state_hub_emptied();   // the last device (E-05)
-                g_devset_changed = true;   // reconcile on iothub_task (D0); survivors keep their state
+                devset_changed_c2d();   // reconcile on iothub_task (D0); survivors keep their state
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -1298,7 +1464,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             if (mac && provisioning_remove_ble_sensor(mac, &emptied)) {
                 sensor_meta_remove(SENSOR_TYPE_BLE_LEAK, mac);
                 if (emptied) reset_rules_state_hub_emptied();   // the last device (E-05)
-                g_devset_changed = true;   // reconcile on iothub_task (D0); survivors keep their state
+                devset_changed_c2d();   // reconcile on iothub_task (D0); survivors keep their state
                 if (!provisioning_is_provisioned())
                     ESP_LOGI(IOTHUB_TAG, "Device is now UNPROVISIONED");
             } else {
@@ -1451,7 +1617,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
             // new commissioning state (auto_close_enabled / trigger_mask, device lists,
             // valve_id) into twin reported, so an app confirming setup via the twin does
             // not have to wait for a reconnect.
-            g_devset_changed = true;
+            devset_changed_c2d();
         } else {
             success = false;
             error_msg = "provisioning failed";
@@ -3147,7 +3313,7 @@ static void cloud_tx_twin(const telem_tx_item_t *it)
 // into. false = live messages wait (the lifecycle hold): no FIFO item now.
 static bool cloud_tx_session_work(uint32_t *gen_out)
 {
-    if (s_stamp_owed && !s_tx_stamped) {
+    if (s_stamp_owed && !s_tx_stamped && !telemetry_v2_tx_frozen()) {
         s_tx_stamped = true;
         offline_buffer_stamp_presync();
     }
@@ -3161,10 +3327,13 @@ static bool cloud_tx_session_work(uint32_t *gen_out)
             // Built for a CONNECTED that landed after the check above: that session's replay
             // goes first.
             cloud_tx_session_check();
-            if (it.kind == TELEM_TX_LIFECYCLE)
-                cloud_tx_lifecycle(&it);
-            else
-                cloud_tx_twin(&it);
+            // Not once a decommission's fallback has frozen TX: its restart follows.
+            if (!telemetry_v2_tx_frozen()) {
+                if (it.kind == TELEM_TX_LIFECYCLE)
+                    cloud_tx_lifecycle(&it);
+                else
+                    cloud_tx_twin(&it);
+            }
             free(it.json);
         }
         up  = telemetry_v2_is_connected();
@@ -3206,6 +3375,31 @@ static bool cloud_tx_session_work(uint32_t *gen_out)
     return true;
 }
 
+// A snapshot (the FIFO). Published only into the session it was built for, and only if no C2D
+// device-set change has landed since its pass read the count: otherwise stale, and iothub_task
+// builds it again from the reconciled table (E-10, R1-3). Not up: failed, as a snapshot dropped
+// offline was (the 5 s floor). The result goes back to iothub_task (snap_result_take()), except
+// for the decommission's, which nothing waits for.
+static void cloud_tx_snapshot(const telem_tx_item_t *it)
+{
+    bool final = (it->flags & TELEM_TX_FINAL) != 0;
+    uint32_t res = SNAP_RES_FAILED;
+    if (iothub_pub_begin()) {
+        if (!final && (SNAP_TAG_GEN(it->tag) != (telemetry_v2_session_gen() & 0xFFFFu) ||
+                       SNAP_TAG_DEVSET(it->tag) != (s_devset_seq & 0xFFu))) {
+            iothub_pub_end(NULL, 0, 0);
+            res = SNAP_RES_STALE;
+        } else if (telemetry_v2_tx_publish(it->json, "snapshot") >= 0) {
+            res = SNAP_RES_OK;
+        }
+    }
+    if (final)
+        return;
+    __atomic_store_n(&s_snap_result, (uint32_t)SNAP_TAG_TICKET(it->tag) | (res << 8),
+                     __ATOMIC_RELEASE);
+    telemetry_v2_wake_snapshot();
+}
+
 // One FIFO item. false = the FIFO is empty.
 static bool cloud_tx_service_one(uint32_t gen)
 {
@@ -3214,12 +3408,29 @@ static bool cloud_tx_service_one(uint32_t gen)
     telem_tx_item_t it;
     if (!telemetry_v2_tx_take(&it))
         return false;
+    if (telemetry_v2_tx_frozen()) {
+        // A decommission's fallback erased the offline buffer for the restart: nothing more
+        // goes out or into it.
+        free(it.json);
+        return true;
+    }
     switch (it.kind) {
     case TELEM_TX_EVENT:
         telemetry_v2_tx_send_event(&it, gen);
         break;
     case TELEM_TX_TWIN:
         cloud_tx_twin(&it);
+        break;
+    case TELEM_TX_SNAPSHOT:
+        cloud_tx_snapshot(&it);
+        break;
+    case TELEM_TX_DECOM_CLEAR:
+        // Events buffered while offline belong to the deployment that just ended;
+        // replaying them after the reboot would report its leaks under the next one
+        // (L17). After everything iothub_task posted before it: the twin, the last
+        // snapshot, and any event (sent or stored first, then cleared).
+        offline_buffer_clear();
+        s_decom_done = true;
         break;
     default:
         break;
@@ -3457,7 +3668,7 @@ void iothub_task(void *param)
     while (1)
     {
         // A C2D 'decommission all' cleared the device set and asked us to reboot.
-        // Publish one final snapshot of the now-empty state — here, in iothub_task,
+        // Build one final snapshot of the now-empty state — here, in iothub_task,
         // so it doesn't race the snapshot caches — then restart to re-register with
         // DPS. (The 3 s delay lets esp-mqtt flush the snapshot + cmd_ack, as the
         // original inline-restart path did.)
@@ -3471,21 +3682,35 @@ void iothub_task(void *param)
             // Reconcile against the now-empty set FIRST, so the final snapshot is built
             // from an empty table (and the caches, the rules sources and the twin agree).
             apply_device_set_change();
-            // What cloud_tx still has (the twin just built, events) goes first, and nothing
-            // is stored behind the clear: up to 25 s for TX to go idle, then on anyway.
-            bool tx_idle = false;
-            for (int i = 0; i < 250 && !(tx_idle = telemetry_v2_tx_idle_take()); i++) {
-                vTaskDelay(pdMS_TO_TICKS(100));
+            // cloud_tx publishes the snapshot, then clears the offline buffer (L17), after the
+            // twin just built and every event before them, in that order (2.1.4 WP2c). Not
+            // held for an idle TX: the hub is empty, its snapshot small, and nothing is in
+            // flight that its result could matter to. An empty hub has no safety function, so
+            // this task may wait for them, up to DECOM_TX_WAIT_MS.
+            telemetry_v2_post_snapshot("decommission", 0, TELEM_TX_FINAL);
+            telem_tx_item_t clr = { .json = NULL, .tag = 0, .kind = TELEM_TX_DECOM_CLEAR, .flags = 0 };
+            bool clr_posted = false;
+            for (int i = 0; i < DECOM_TX_WAIT_MS / 100 && !s_decom_done; i++) {
+                if (!clr_posted)
+                    clr_posted = telemetry_v2_tx_post(&clr, NULL);   // the FIFO full: again
+                if (!s_decom_done)
+                    vTaskDelay(pdMS_TO_TICKS(100));
             }
-            telemetry_v2_publish_snapshot("decommission");
-            // Events buffered while offline belong to the deployment that just ended;
-            // replaying them after the reboot would report its leaks under the next one
-            // (L17).
-            offline_buffer_clear();
-            if (tx_idle)
-                telemetry_v2_tx_idle_give();
+            bool decom_done = s_decom_done;
+            if (!decom_done) {
+                // cloud_tx is stuck (a write into a dead WAN, say): it stores and drains nothing
+                // from here on, and the buffer is erased here, without its lock - the restart
+                // follows (R1-7). A drain still running can only rewrite the ring's metadata,
+                // which then points at erased slots: the next boot replays nothing.
+                telemetry_v2_tx_freeze();
+                offline_buffer_erase_for_restart();
+                ESP_LOGW(IOTHUB_TAG, "decommission: cloud_tx did not finish in %d s - offline buffer erased here",
+                         DECOM_TX_WAIT_MS / 1000);
+            }
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
+            if (!decom_done)
+                offline_buffer_erase_for_restart();   // again: a store under way at the freeze
             esp_restart();
         }
 
@@ -3505,6 +3730,9 @@ void iothub_task(void *param)
         // command-ack snapshot below, so that snapshot is built from the reconciled table
         // and never shows a removed device. Clear-then-apply: a change landing while this
         // runs sets the flag again and is re-applied next pass (the reconcile is idempotent).
+        // The C2D count is read first: a snapshot built this pass carries it, and cloud_tx
+        // drops it as stale if a change lands before its publish (R1-3).
+        uint32_t devset_seq = s_devset_seq;
         if (g_devset_changed) {
             g_devset_changed = false;
             apply_device_set_change();
@@ -3560,9 +3788,10 @@ void iothub_task(void *param)
             int64_t new_hb_ms = (int64_t)telemetry_v2_get_snapshot_interval_s() * 1000;
             // s_snap_retry_until_ms != 0 means a publish failed and we are backing
             // off; snap_rearm_heartbeat() would clear that backoff, so leave it be
-            // and let the next confirmed publish pick the new interval up.
+            // and let the next confirmed publish pick the new interval up. Likewise while a
+            // snapshot is in flight (2.1.4 WP2c): its result re-arms with the new interval.
             if (new_hb_ms != s_hb_interval_ms && s_snap_reason == SNAP_HEARTBEAT &&
-                s_snap_retry_until_ms == 0) {
+                s_snap_retry_until_ms == 0 && !s_fl.out) {
                 s_hb_interval_ms = new_hb_ms;
                 snap_rearm_heartbeat();          // re-aims from the last CONFIRMED publish
                 ESP_LOGI(IOTHUB_TAG,
@@ -3853,6 +4082,7 @@ void iothub_task(void *param)
                 s_iot_gen_seen = gen;
                 s_iot_sess_owed = IOT_SESS_LIFECYCLE | IOT_SESS_TWIN;
                 s_lifecycle_retry_ms = 0;       // now
+                s_snap_epoch++;                 // the last session's snapshot result marks nothing sent here (L-1)
                 g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
                 g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
                 g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
@@ -4098,6 +4328,11 @@ void iothub_task(void *param)
         // wire, never the safety action.
         publish_rules_telemetry(auto_close_json);
 
+        // ---- The result of the snapshot in flight (2.1.4 WP2c) ----
+        // Its bookkeeping first, so the arming below re-arms BOOT/FAST/COMMISSION from the
+        // flags it sets, in this same pass (snap_result_take()).
+        snap_result_take();
+
         // ---- Fast boot/reconnect snapshot ARMING (valve-READY, no publish here) ----
         // Publish a snapshot as soon as the valve GATT setup completes (~20-30 s)
         // instead of waiting the full boot-sync timeout (~120 s) for an offline/slow
@@ -4203,26 +4438,34 @@ void iothub_task(void *param)
         }
 
         // =================================================================
-        // SINGLE FLUSH BLOCK — the ONLY telemetry_v2_publish_snapshot() site.
+        // SINGLE FLUSH BLOCK — the ONLY snapshot build site (telemetry_v2_post_snapshot()).
         // Runs after all event/cache updates and the boot/commission arming, so
         // the snapshot always reflects post-burst state (ordering invariant).
-        // Re-arms the heartbeat ONLY on a snapshot that actually reached esp-mqtt.
+        // Re-arms the heartbeat ONLY on a snapshot that actually reached esp-mqtt: cloud_tx
+        // publishes it, and its result is read on a later pass (snap_result_take()).
         //
         // Skipped for ONE pass while a C2D provision/decommission that landed on the esp-mqtt
         // task during this pass is still unreconciled (E-10): its ok ack precedes this
         // snapshot, and the health table would still show the pre-change set (e.g. a removed
         // valve). The next loop top reconciles it; the deadline stays due, so that pass's
         // select waits one tick and this block then publishes the reconciled table. Not for
-        // a failed apply's retry (devset_retry above).
+        // a failed apply's retry (devset_retry above). One that lands after the build makes
+        // cloud_tx drop the snapshot as stale, and it is built again (R1-3).
         //
-        // Held, too, while TX is not idle (2.1.4 WP2c): items still queued for cloud_tx, or
-        // cloud_tx at work. The events and the twin built before it go first, and this task
-        // never publishes beside cloud_tx. The deadline stays due; cloud_tx wakes this task as
-        // it goes idle (tx_wake_request()), and the loop polls at SNAP_TX_HOLD_POLL_MS meanwhile.
+        // Held, too (2.1.4 WP2c, section 2.6): while a snapshot is in flight (at most one); while
+        // this task has not applied the current session's resets (a CONNECTED after them this
+        // pass); and while TX is not idle - items still queued for cloud_tx, or cloud_tx at
+        // work - so the events and the twin built before it go first, and a large build never
+        // overlaps a cloud_tx TLS write. The deadline stays due; cloud_tx wakes this task (its
+        // result, or idle after tx_wake_request()), and the loop polls at SNAP_TX_HOLD_POLL_MS
+        // meanwhile. The build holds the busy mutex, so cloud_tx starts nothing meanwhile.
         // =================================================================
         bool devset_unseen = g_devset_changed && !devset_retry;
         s_snap_tx_held = false;
-        if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
+        if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms &&
+            (s_fl.out || s_iot_gen_seen != telemetry_v2_session_gen())) {
+            s_snap_tx_held = true;
+        } else if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
             int64_t flush_now = snap_now_ms();
             snap_reason_t reason = s_snap_reason;
             // Gate: while a boot/commission (re)sync window is OPEN (g_boot_snapshot_sent
@@ -4282,49 +4525,34 @@ void iothub_task(void *param)
                 // Sampled BEFORE the build, so the snapshot reflects at least this much;
                 // a change after the sample is re-requested on the next pass.
                 uint32_t rs_pub = health_get_rating_seq();
-                bool ok = telemetry_v2_publish_snapshot(rstr);
+                uint8_t ticket = ++s_snap_ticket;
+                if (ticket == 0)
+                    ticket = ++s_snap_ticket;   // 0 never matches a result
+                bool posted = telemetry_v2_post_snapshot(
+                    rstr, SNAP_TAG(s_iot_gen_seen, devset_seq, ticket), 0);
+                // Read right after the build, as the publish used to be followed by it: a
+                // sensor first heard during the flight still counts as unseen.
+                uint8_t seen = 0, total = 0;
+                bool counts_ok = posted && health_get_sync_counts(&seen, &total);
                 telemetry_v2_tx_idle_give();
-                if (ok) {
-                    s_snap_last_pub_ms = flush_now;
-                    // This snapshot already carries those rating changes: no duplicate.
-                    s_rating_seq_seen  = rs_pub;
-                    if (reason == SNAP_BOOT || reason == SNAP_COMMISSION) {
-                        g_boot_snapshot_sent = true;
-                        g_fast_snapshot_sent = true;   // flag hygiene: a boot/commission snapshot also satisfies the fast one-shot
-                        uint8_t seen = 0, total = 0;
-                        if (health_get_sync_counts(&seen, &total)) {
-                            g_commission_pub_seen = seen;
-                            if (seen >= total) g_commission_until_ms = 0;
-                        }
-                    } else if (reason == SNAP_FAST) {
-                        // The fast snapshot IS the boot snapshot, fired early at
-                        // valve-ready. Mark boot sent so the slow all-heard boot path
-                        // does not double-publish, and OPEN the refresh grace window so
-                        // the still-unheard sensors fill in via incremental refresh as
-                        // each first beacons (capped by COMMISSION_REFRESH_GRACE_MS).
-                        g_fast_snapshot_sent = true;
-                        g_boot_snapshot_sent = true;
-                        uint8_t seen = 0, total = 0;
-                        if (health_get_sync_counts(&seen, &total)) {
-                            g_commission_pub_seen = seen;
-                            // Only open the grace window if devices are still unheard;
-                            // if everything was already heard there is nothing to fill.
-                            g_commission_until_ms = (seen >= total) ? 0
-                                : (flush_now + COMMISSION_REFRESH_GRACE_MS);
-                        } else {
-                            g_commission_until_ms = flush_now + COMMISSION_REFRESH_GRACE_MS;
-                        }
-                    }
-                    snap_rearm_heartbeat();   // also clears the retry backoff
-                    ESP_LOGI(IOTHUB_TAG, "SNAP heartbeat=reset interval_ms=%lld",
-                             (long long)s_hb_interval_ms);
+                if (posted) {
+                    s_fl = (snap_flight_t){
+                        .out       = true,
+                        .ticket    = ticket,
+                        .seen      = seen,
+                        .total     = total,
+                        .counts_ok = counts_ok,
+                        .reason    = reason,
+                        .epoch     = s_snap_epoch,
+                        .rs_pub    = rs_pub,
+                        .rs_seen   = s_rating_seq_seen,
+                        .flush_now = flush_now,
+                    };
+                    s_snap_tx_held = true;   // its result next, at the 2 s poll at the latest
                 } else {
-                    // Connected but publish failed (e.g. QoS-1 outbox full): back off
-                    // RETRY_FLOOR for ALL reasons (the retry floor is honored by
-                    // snap_request so BOOT/COMMISSION re-arms can't hammer the outbox).
-                    s_snap_retry_until_ms = flush_now + SNAP_RETRY_FLOOR_MS;
-                    s_snap_due_ms = s_snap_retry_until_ms;
-                    ESP_LOGW(IOTHUB_TAG, "SNAP heartbeat=suppressed (publish-failed)");
+                    // Not built (pre-SNTP, the health table busy, no memory): as a failed
+                    // publish always was.
+                    snap_backoff(flush_now);
                 }
             }
         }

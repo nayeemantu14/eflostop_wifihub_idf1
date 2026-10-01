@@ -547,3 +547,13 @@ void offline_buffer_clear(void)
     clear_locked();
     ob_unlock();
 }
+
+void offline_buffer_erase_for_restart(void)
+{
+    // No s_lock (see the header): its holder may be stuck in a publish, and the restart follows.
+    nvs_handle_t h;
+    if (nvs_open(OB_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_all(h);
+    nvs_commit(h);
+    nvs_close(h);
+}

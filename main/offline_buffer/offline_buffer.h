@@ -123,6 +123,15 @@ int offline_buffer_count(void);
  */
 void offline_buffer_clear(void);
 
+/**
+ * @brief Erase the buffer's NVS namespace WITHOUT its mutex, and leave its RAM state alone:
+ *        only for a path that restarts right after (2.1.4 WP2c: a decommission whose clear
+ *        the sender, cloud_tx, did not finish in time, R1-7). A drain still running can only
+ *        rewrite the ring's metadata, which then points at erased slots: the next boot reads
+ *        them as missing ("Read ... failed, skipping") and replays nothing. Never waits.
+ */
+void offline_buffer_erase_for_restart(void);
+
 #ifdef __cplusplus
 }
 #endif

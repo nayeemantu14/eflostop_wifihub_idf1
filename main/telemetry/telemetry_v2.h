@@ -142,16 +142,19 @@ typedef struct {
 bool telemetry_v2_build_lifecycle(telem_msg_t *out);
 
 /**
- * @brief Publish type="snapshot" with all current device + sensor state.
+ * @brief Build type="snapshot" with all current device + sensor state, and hand it to
+ *        cloud_tx (2.1.4 WP2c: iothub_task never publishes). The result comes back
+ *        asynchronously (cloud_tx_snapshot(), app_iothub.c): the heartbeat is re-armed only
+ *        on a snapshot esp-mqtt took (msg_id >= 0).
  * @param trigger Trigger reason string emitted as data.reason
  *                ("heartbeat" | "event" | "commission" | "boot"); may be NULL.
- * @return true ONLY if the snapshot actually reached esp-mqtt (online, msg_id>=0);
- *         false if dropped offline, suppressed pre-SNTP, deferred because the health
- *         table was busy (its copy timed out: nothing is published rather than empty
- *         device arrays), or not built for lack of memory. The caller re-arms the
- *         heartbeat only on true.
+ * @param tag     The item's tag (the snapshot's session, device-set sequence and ticket).
+ * @param flags   TELEM_TX_FINAL for the decommission's last snapshot, else 0.
+ * @return true = built and handed over; false = not built: suppressed pre-SNTP, deferred
+ *         because the health table was busy (its copy timed out: nothing is published
+ *         rather than empty device arrays), not built for lack of memory, or the FIFO full.
  */
-bool telemetry_v2_publish_snapshot(const char *trigger);
+bool telemetry_v2_post_snapshot(const char *trigger, uint32_t tag, uint8_t flags);
 
 /**
  * @brief Publish type="event" for valve position transitions (valve_state_changed).
@@ -306,16 +309,21 @@ typedef enum {
     TELEM_TX_EVENT = 0,     // FIFO: an event (leak, valve, rules, health)
     TELEM_TX_TWIN,          // FIFO (a device-set change) or session queue (a CONNECTED)
     TELEM_TX_LIFECYCLE,     // session queue only
+    TELEM_TX_SNAPSHOT,      // FIFO: built only into an idle TX, at most one in flight
+    TELEM_TX_DECOM_CLEAR,   // FIFO, no json: the decommission's clear of the offline buffer
 } telem_tx_kind_t;
 
 #define TELEM_TX_PRESYNC  0x01u   // an event built before the first clock sync (telem_msg_t)
+#define TELEM_TX_FINAL    0x02u   // the decommission's snapshot: no result, never stale
 
 /** One message handed to cloud_tx (12 B). */
 typedef struct {
-    char    *json;    // malloc'd, NUL-terminated; whoever holds the item frees it
-    uint32_t tag;     // the session generation it was built for (twin, lifecycle)
+    char    *json;    // malloc'd, NUL-terminated (NULL for TELEM_TX_DECOM_CLEAR); whoever
+                      // holds the item frees it
+    uint32_t tag;     // the session generation it was built for (twin, lifecycle); for a
+                      // snapshot its session, device-set sequence and ticket (app_iothub.c)
     uint8_t  kind;    // telem_tx_kind_t
-    uint8_t  flags;   // TELEM_TX_PRESYNC
+    uint8_t  flags;   // TELEM_TX_PRESYNC, TELEM_TX_FINAL
 } telem_tx_item_t;
 
 /** iothub_task, once, right after it created cloud_tx: the task the hand-over wakes. */
@@ -377,11 +385,20 @@ bool telemetry_v2_tx_health_admit(size_t *free_b, size_t *largest);
 void telemetry_v2_tx_send_event(const telem_tx_item_t *it, uint32_t gen);
 
 /**
- * @brief cloud_tx: publishes json (the lifecycle) with the "Pub" line and its
+ * @brief cloud_tx: publishes json (a snapshot, the lifecycle) with the "Pub" line and its
  *        "failed" line. The caller holds the publish gate (iothub_pub_begin()); this gives it
  *        back right after the publish. The msg_id: >= 0 = esp-mqtt took it.
  */
 int telemetry_v2_tx_publish(const char *json, const char *type_hint);
+
+/**
+ * @brief iothub_task, at a decommission whose clear cloud_tx did not finish in time: from now
+ *        on cloud_tx publishes, stores, drains and stamps nothing (the items it still takes
+ *        are dropped), so the offline buffer erased right after stays empty until the
+ *        restart (WP2c section 2.8, R1-7).
+ */
+void telemetry_v2_tx_freeze(void);
+bool telemetry_v2_tx_frozen(void);
 
 #ifdef __cplusplus
 }
