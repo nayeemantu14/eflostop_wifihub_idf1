@@ -2,9 +2,11 @@
 
 Written for the user and for the next Claude Code session. It records where the 2.1.4 fix job stands and how to pick it up again.
 
-> **Resume here.** Read §14 first, then §13, then §12-§12c, then §1, §7, §10 and §11.
+> **Resume here.** Read §15 first, then §14, §13, then §12-§12c, then §1, §7, §10 and §11.
 >
-> **Update, Wednesday 2026-09-30 (latest): the user's four decisions on the router-rejoin fix; Build checkpoint 5 is next, now of `0f08d32`.** Round 1's open items went to the user, who decided (§14c): (1) an open portal page's chained scan pauses stop after 30 s, and BLE then gets 15 s with no pause of any kind; (2) each connect attempt's pause is capped at about 3 s of BLE off (2.5 s holds, the router retry's 0.5 s lead included, never back to back outside a page's chain); (3) the router retry runs whenever Wi-Fi is down with credentials saved, not only from the fallback SoftAP, which also recovers the Wi-Fi manager's idle state with no SoftAP; (4) a mistyped password on the fallback page is accepted and documented. Firmware `288db73`, `d0d07b9`, `06c0739`, then the fixer's `3d120b4`, `80be3e0` and `0f08d32` (comments only), after a review and a second 5/5 SHIP council on the whole fix (§14e). The last firmware commit is now **`0f08d32`**; CP5 covers it and the D1 fix, and §14g gives the new expectations (`.bss` 36,336 or 36,344 B). Next: VAL-01 for 🔨 Build checkpoint 5 of `0f08d32`, then T4-10 Part F, the valve-hub A-steps and Part D, now D1-D13 (§14i). Open for the user before a field release (§14f): a dry BLE sensor can be reported offline while a portal page stays open about 10 min or more; the page counts as closed 10 s after its last request, so a submit made as a phone comes back from the background can meet a retry and reboot the hub (the Wi-Fi specialist suggests 60 s); a submit in the 15 s listening time runs with BLE on; and §13e's heap floor, now analysed: pre-existing (the open fallback SoftAP), not caused by this fix.
+> **Update, Thursday 2026-10-01 (latest): the 2.1.4 rework has started (WP-V, WP0); Build checkpoint 5 is next, now of `31b4c9f`.** The user approved the council's 2.1.4 proposal ("start with WP-V/WP0"; every recommended option except D9: the portal's Forget/Disconnect stays). WP-V carries the Wi-Fi manager in the tree as `components/wifi_portal` (`4f14a23`, `b74a891`); WP0 adds instrumentation with no behaviour change (`607df82`, `fbd8537`, `818ce43`, `afe77c1`, `41eb044`); their review fixes are `9f2d061`, `bd64e83`, `9c27644` and `31b4c9f`. With the page round of 2026-09-30 (`695283a` … `520b17a`), none of it is built yet. **The last firmware commit is now `31b4c9f`**, and §15b gives the build and its expectations, which differ from §14g's: the `git diff` pathspec now includes `components` and `dependencies.lock`; `idf.py fullclean` needs registry access (or delete `build\` instead); `sdkconfig` gains one line, `CONFIG_APP_BENCH_DIAG=y`, so its hash changes once; the link order changes (`wifi_portal` after `main`); `.bss` about +121 B. Then the bench: the WP-V gate's 10 s reset ×3 and G0.
+>
+> **Update, Wednesday 2026-09-30 (later): the user's four decisions on the router-rejoin fix; Build checkpoint 5 is next, now of `0f08d32`.** Round 1's open items went to the user, who decided (§14c): (1) an open portal page's chained scan pauses stop after 30 s, and BLE then gets 15 s with no pause of any kind; (2) each connect attempt's pause is capped at about 3 s of BLE off (2.5 s holds, the router retry's 0.5 s lead included, never back to back outside a page's chain); (3) the router retry runs whenever Wi-Fi is down with credentials saved, not only from the fallback SoftAP, which also recovers the Wi-Fi manager's idle state with no SoftAP; (4) a mistyped password on the fallback page is accepted and documented. Firmware `288db73`, `d0d07b9`, `06c0739`, then the fixer's `3d120b4`, `80be3e0` and `0f08d32` (comments only), after a review and a second 5/5 SHIP council on the whole fix (§14e). The last firmware commit is now **`0f08d32`**; CP5 covers it and the D1 fix, and §14g gives the new expectations (`.bss` 36,336 or 36,344 B). Next: VAL-01 for 🔨 Build checkpoint 5 of `0f08d32`, then T4-10 Part F, the valve-hub A-steps and Part D, now D1-D13 (§14i). Open for the user before a field release (§14f): a dry BLE sensor can be reported offline while a portal page stays open about 10 min or more; the page counts as closed 10 s after its last request, so a submit made as a phone comes back from the background can meet a retry and reboot the hub (the Wi-Fi specialist suggests 60 s); a submit in the 15 s listening time runs with BLE on; and §13e's heap floor, now analysed: pre-existing (the open fallback SoftAP), not caused by this fix.
 >
 > **Update, Wednesday 2026-09-30 (morning): the router-rejoin fix; Build checkpoint 5 was then of `8fb8340` (now `0f08d32`, see the latest update above).** The 17:20 session of 2026-09-29 (§13e) showed two defects that are also in 2.1.3: after a router outage the hub never rejoined its router (the Wi-Fi manager's START_AP patch `6ad1d7b` stops its retry timer, and nothing else retried), and the fallback portal's network list stayed empty (the BLE scans starved the Wi-Fi scans). The user chose an app-side fix: a router retry every 30 s from the fallback SoftAP, and short BLE pauses around each Wi-Fi scan and connect attempt while Wi-Fi is down, with no health hold. Firmware `727e6c1`, `58b0606`, `cd6ab28`, `8fb8340`, after three reviews, one fixer round and a 5/5 SHIP council (§14). The last firmware commit was then **`8fb8340`**, and CP5 was to cover it and the D1 fix together. Next: VAL-01 for 🔨 Build checkpoint 5 of `8fb8340`, then T4-10 Part F, the valve-hub A-steps and Part D (§14i). Four design decisions are open for the user before a field release (§14f), and §13e's heap floor is still not analysed.
 >
@@ -61,7 +63,7 @@ We're working on branch `fix/2.1.4`, from `master` @ `ae4d59a` = 2.1.3. The job 
 | E: adversarial review | **done**; fixes committed `095b5d6` … `b245d94` plus docs (§10) |
 | 🔨 Build checkpoint 3 | **passed** (build of `d9fa9c8`, §4b) |
 | F: 5-specialist council | **done**: round 1 BLOCK (F-01, B1), both fixed; final vote 5/5 SHIP on `d9fa9c8` (§11) |
-| Captive-portal regression (2026-09-29) | fixed in `5b5d70e` … `ca4835f` (docs `b7783d0`, `ac73cc6`); follow-up `93b8629` … `cc66d72` and its docs commit (§12a); "go red" `9951bf4` … `46a1f0a` and its docs commit (§12b); Build checkpoint 4 of `46a1f0a` **passed** (§13); the D1 fix `4e6fe71`, `f424d65`; the router-rejoin fix `727e6c1` … `8fb8340` and, for the user's decisions of 2026-09-30, `288db73` … `0f08d32` (§14); 🔨 **Build checkpoint 5 of `0f08d32` next** (§14g) |
+| Captive-portal regression (2026-09-29) | fixed in `5b5d70e` … `ca4835f` (docs `b7783d0`, `ac73cc6`); follow-up `93b8629` … `cc66d72` and its docs commit (§12a); "go red" `9951bf4` … `46a1f0a` and its docs commit (§12b); Build checkpoint 4 of `46a1f0a` **passed** (§13); the D1 fix `4e6fe71`, `f424d65`; the router-rejoin fix `727e6c1` … `8fb8340` and, for the user's decisions of 2026-09-30, `288db73` … `0f08d32` (§14); the page round `695283a` … `520b17a`; the 2.1.4 rework's WP-V and WP0 with their review fixes, `4f14a23` … `31b4c9f` (§15); 🔨 **Build checkpoint 5, now of `31b4c9f`, next** (§15b) |
 | G: MANUAL_TEST_PLAN.md + summary | **done**: version grep clean; CP3 build summary in §4b; `docs/field_logs/2.1.4/MANUAL_TEST_PLAN.md` (`d595633`, 114 tests, traceability matrix, ~30 min smoke subset) |
 
 ---
@@ -382,7 +384,7 @@ The logs are on the user's Desktop: `UART logs.txt` (the last boot, ELF `d079814
 ## 8. Rules that stay in force (from CLAUDE_CODE_PROMPT.md)
 
 - **Builds.** Claude never runs `idf.py` or any compiler; the user builds at each 🔨 checkpoint.
-- **Off-limits.** Do not touch `managed_components/`, `sdkconfig*`, the partition table, DPS/SAS/crypto, or NVS namespaces, keys or layout. Field units OTA from 2.1.3 and must keep their provisioning; rolling back to 2.1.3 must keep it too.
+- **Off-limits.** Do not touch `managed_components/`, `sdkconfig*`, the partition table, DPS/SAS/crypto, or NVS namespaces, keys or layout. (Since 2026-10-01 the Wi-Fi manager is the local component `components/wifi_portal`, which the 2.1.4 rework edits by the user's decision D11, §15; the rest stands.) Field units OTA from 2.1.3 and must keep their provisioning; rolling back to 2.1.3 must keep it too.
 - **RAM and code rules.**
   - No heap regressions and no large stack buffers.
   - Every cJSON/malloc result is NULL-checked.
@@ -904,11 +906,11 @@ Round 1's four open items (an open page kept BLE off, the leak latency and the f
 
 ### 14g. CP5 (both fixes) and its expectations
 
-CP5 is now of **`0f08d32`**, the last commit that changes `main/`, and covers the D1 fix too; it supersedes §13c's CP5 figures and round 1's (no build of `8fb8340` was made). In PowerShell, with the ESP-IDF 5.5.1 environment, in the project folder (the test plan's VAL-01 pins `0f08d32`):
+*(Superseded by §15b: CP5 is now of `31b4c9f`, with new expectations. The `git diff` below now has the pathspec of §15b; against `0f08d32` it lists every firmware change since.)* CP5 was then of **`0f08d32`**, the last commit that changes `main/`, and covers the D1 fix too; it supersedes §13c's CP5 figures and round 1's (no build of `8fb8340` was made). In PowerShell, with the ESP-IDF 5.5.1 environment, in the project folder (the test plan's VAL-01 pins `0f08d32`):
 
 ```powershell
 git log --oneline -1
-git diff --stat 0f08d32 HEAD -- main CMakeLists.txt partitions.csv sdkconfig.defaults managed_components
+git diff --stat 0f08d32 HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock managed_components
 Get-FileHash sdkconfig
 idf.py fullclean
 idf.py build *> "$env:TEMP\build_cp5.log" ; "exit=$LASTEXITCODE"
@@ -939,10 +941,73 @@ Then VAL-01 steps 5-6 (the `.bin` time and size, the ELF hash, flash, the boot l
 
 ### 14i. Run next (in order; supersedes §13f)
 
-0. **VAL-01 for Build checkpoint 5 of `0f08d32`** (§14g), then flash that build.
+0. **VAL-01 for Build checkpoint 5, now of `31b4c9f`** (§15b, which replaces §14g), then flash that build.
 1. **T4-10 Part F, F1-F4** (sensors-only hub, about 15 min), as §13f item 1, and also **no** `Wi-Fi radio hold` line in the window.
 2. **Smoke step 10 / T4-10 A1-A5 and A8-A11 on a valve hub** (about 15 min), as §13f item 2.
 3. **T4-10 Part D, D1-D8 and D11** (router outage, about 110 min with D7's 30 min and D8's 12 min), then the observe steps D9, D10 and D12, and D13 last if wanted. They also cover T4-02 row 1 and T5-12 step 1.
 4. T4-10 B1, Part E, H3-H4, T6-14 (Part C), and T4-14 rows 1 and 4, as §13f item 4.
 5. T5-03 on CP5 (D1), then the `SS-V4` smoke steps 2-11 in one capture, sections 1-6 and VAL-02…VAL-14, as §13f item 5.
 6. Take §14f items 1-4 to the user with the D3, D8, D12 and D13 results and the heap rows.
+
+## 15. The 2.1.4 rework: WP-V and WP0 (2026-10-01), and the next build
+
+### 15a. What changed
+
+On 2026-10-01 the user approved the council's 2.1.4 proposal ("Approve, start with WP-V/WP0"): the recommended option on every decision except D9, so the portal's Forget/Disconnect (`DELETE /connect.json` and the page's Disconnect) stays. The user's answers: some leak sensors in the field advertise on 1M, so mixed fleets are real (D1); nothing but the setup page calls the portal's HTTP API (D10); leak protection must keep running in the reset portal (a later package). The proposal is not in the repo: it is `C:\Users\antun\AppData\Local\Temp\claude\c--Work-Projects-EfloStop-2-Firmware-Production-eFloStop-WiFiHub-idf1\ee520eed-0dc0-45ef-bdfe-91bf0b44762d\scratchpad\council\PROPOSAL_2_1_4.md` (a temp folder: copy it somewhere lasting); its packages run WP-V, WP0, WP1 … WP10, each behind a bench gate.
+
+Firmware after `0f08d32`, none of it built yet (the build in `build\`, 2026-09-30 13:39, is of `520b17a`, and is the reference below):
+- **The page round** (2026-09-30): `695283a` (the page polls its network list only while it is used), `0c9b942` (a page's chain gives BLE a 4 s window every 12 s, the user's Connect first), `9a680cf` (the portal's forget erases Wi-Fi with the STA idle), `520b17a` (its chain-end line). Not yet recorded in §14 or the test plan: the commit messages describe them. Its review's open minor issues are superseded by WP4 (C8, C9) and WP8.
+- **WP-V** (D11: the Wi-Fi manager is carried in the tree): `4f14a23` moves `managed_components/ankayca__esp32-wifi-manager` to `components/wifi_portal` (byte-identical files); `b74a891` drops the registry entry from `main/idf_component.yml` and `dependencies.lock`. Nothing can silently restore the pristine 0.0.4 any more, and the component's local patches are plain tracked code.
+- **WP0** (instrumentation, no behaviour change): `607df82` (C1: no Wi-Fi password in any log line, SSID and `pwd_len` only), `fbd8537` (C10a: the portal's activity hook), `818ce43` (internal-DMA heap sampled every second, failed allocations counted), `afe77c1` (each phone's portal timeline, the Wi-Fi channels, `APP_BENCH_DIAG`), `41eb044` (each leak sensor's advert burst).
+- **WP-V/WP0 review fixes:** `9f2d061` (`APP_BENCH_DIAG` has no prompt, so its Kconfig default decides in every build, and a DIAG build says so at boot), `bd64e83` (burst times kept for the first 4 sensor slots: `.bss`), `9c27644` (comment: the failed-allocation hook needs the flash cache on), `31b4c9f` (comments: "portal component"). **The last firmware commit is `31b4c9f`.**
+
+New log lines (WP0 and its fixes; formats as in the code). No existing line changed its text: C1's changed lines are in the `wifi_manager` and `http_server` tags, which `main.c` still caps at WARN.
+- `MONITOR: idma: free=%lu min=%lu largest=%lu min_largest=%lu allocfail=%lu`, right after each `MONITOR: heap:` line; ` (last: %lu B, caps 0x%lx, %lu B free, %s)` is appended when the count changed.
+- `APP_WIFI: Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router last seen on %u` (or `…, router not joined since boot`); `APP_WIFI: Wi-Fi channel at IP: radio %u, router %u`; `APP_WIFI: Wi-Fi channel at link loss: radio %u, router was on %u` (only for a link that was up).
+- `APP_WIFI: SoftAP: station %02X:…:%02X got <IP>, %lu ms after joining` (or `… got <IP> (join not seen)`).
+- `APP_WIFI: portal client <IP>: first %s, %lu ms after joining` (or `… first %s (no SoftAP join seen)`), once per client and kind: `DNS query`, `captive probe (302 sent)`, `page request`, `Connect/Disconnect request`, `network list request`, `status request`.
+- `BLE_LEAK: eleak <MAC> burst: n=%u in %u.%02u s, dT %u-%u ms, phy=%s` (or `… burst: n=1, phy=%s`), `phy` one of `1M`, `Coded`, `1M+Coded`, `other` and their combinations; for the sensors in the first 4 tracking slots only (the first heard).
+- `W … APP_WIFI: bench build (APP_BENCH_DIAG): Wi-Fi driver log at INFO - not for release`, once at boot, and the Wi-Fi driver's own `wifi:` lines (channel switches and CSA with `csa_count`, station join and leave, the STA's connect states).
+
+### 15b. The next build: 🔨 Build checkpoint 5, now of `31b4c9f` (the WP-V gate and G0's image)
+
+In PowerShell, with the ESP-IDF 5.5.1 environment, in the project folder. Save the `520b17a` reference first: `fullclean` deletes `build\`.
+
+```powershell
+git log --oneline -1
+git diff --stat 31b4c9f HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock managed_components
+Get-FileHash sdkconfig
+New-Item -ItemType Directory -Force "$env:TEMP\ref_520b17a" | Out-Null
+Copy-Item build\eFloStop_WiFiHub_idf1.map, build\eFloStop_WiFiHub_idf1.elf, sdkconfig "$env:TEMP\ref_520b17a\"
+idf.py fullclean
+idf.py build *> "$env:TEMP\build_cp5.log" ; "exit=$LASTEXITCODE"
+Select-String -Path "$env:TEMP\build_cp5.log" -Pattern 'warning:|error:' | ForEach-Object Line
+idf.py size
+Compare-Object (Get-Content "$env:TEMP\ref_520b17a\sdkconfig") (Get-Content sdkconfig)
+Get-FileHash sdkconfig
+git status --short
+```
+
+Expected:
+- **The `git diff` prints nothing.** Its pathspec now includes `components` and `dependencies.lock` (WPV-2): the old one (`main … managed_components`, in §14g and the test plan's 0.2 and VAL-01 until this round) could not see the portal component at all. The `sdkconfig` hash before the build is still `ef97579…c3`.
+- **`idf.py fullclean` needs the network** (WPV-3). It deletes the three registry components left in `managed_components\` (`espressif__led_strip`, `espressif__mdns`, `jgromes__radiolib`: 451 tracked files; their hashes match, so the component manager removes them), and the build downloads them again. That was already so before WP-V: `fullclean` deleted those three, then stopped with `ComponentModifiedError` on the patched Wi-Fi manager copy (plan §6.1). With no registry access, replace `idf.py fullclean` with `Remove-Item -Recurse -Force build`: the same full rebuild, and `managed_components\` is left alone. Either way, `git status --short` afterwards lists only what it listed before (`.vscode/settings.json`, the two 2.1.3 docs, `.adsum/`), no deleted file.
+- The configure prints `Processing 4 dependencies` (5 before), with no `Solving dependencies` and no change to `dependencies.lock`. A rewritten lock means the manager re-solved (then it needed the network): keep the new lock aside and report it.
+- `exit=0`; the same four warnings (`app_ble_valve.c:106:9`, `app_lora.cpp:185:5` ×2, `app_lora.cpp:160:13`), no `error:`.
+- **`Compare-Object` lists exactly one line, `CONFIG_APP_BENCH_DIAG=y` (`=>`)** (WPV-4): the new option, written at the first configure (no menu, no comment lines, since `9f2d061`). **Record the new `sdkconfig` SHA256: it is the reference from now on**, in place of CP4's `ef97579…c3`. It returns to `ef97579…c3` only when WP10 sets the default to n. For the 2.1.3 worktree of the test plan's 0.4, copy either file: 2.1.3's configure drops the unknown symbol, so the 2.1.3 image is the same; its hash check compares with the file copied.
+- **DIRAM `.text` exactly 113,387 B**; IRAM 16,384 B (100 %). No WP0 object has an IRAM section (each compiled with the project's flags), and the new links are flash functions (`esp_wifi_get_channel`, `esp_wifi_sta_get_ap_info`, `lwip_getpeername`, `httpd_req_to_sockfd`, `heap_caps_register_failed_alloc_callback`). If it moves, stop: the link order changed (next item), so compare the IRAM input lists of the saved and the new map (the `.iram1` and `.iram0.text` input sections, not their `*fill*`) before calling it a newly linked IRAM function. Send both maps to the next session.
+- **The link order changed** (WPV-1; `b74a891`'s message says "unchanged", which is wrong). The map's first-pass `LOAD` lines end `… wifi_provisioning, espressif__led_strip, espressif__mdns, jgromes__radiolib, main, wifi_portal`; at `520b17a` they ended `… wifi_provisioning, espressif__mdns, ankayca__esp32-wifi-manager, espressif__led_strip, jgromes__radiolib, main`. With the registry entry gone, the component manager no longer puts the Wi-Fi manager into `main`'s requirements (it lists them sorted, `led_strip` first), and `wifi_portal`, found in `components/`, is expanded after `main`. `main` still links it and sees its headers (no `REQUIRES` in `main/CMakeLists.txt`, so `main` depends on every component). No other library defines any of the portal's global symbols, so behaviour cannot change, and none of the reordered libraries has IRAM input; only the alignment fill between input sections moves, a few bytes in flash `.text`, `.rodata`, `.data` and `.bss`.
+- `.bss` about **36,472-36,480 B**: the `520b17a` build's 36,352 B plus WP0's 121 B (15c), rounded by the section's `ALIGN(8)`; the new link order can move the fill by ±8 B. Below 36,456 or above 36,496 B needs a look.
+- `.data` about **21,580 B** (21,572 + the 8 B spinlock), ±8 B.
+- Flash `.text` about 1,026,300-1,027,100 B (+3.4 KB of WP0 code in the objects, about +0.9-1.2 KB of newly linked library functions, `esp_wifi_sta_get_ap_info` and `lwip_getpeername` with their helpers the largest) and `.rodata` about 368,100-368,350 B (+1.4 KB of strings, −48 B of shorter `__FILE__` paths); `.bin` about 1,546,300-1,547,800 B, about 26.2 % of the 2 MB partition free. They move with the code and the link order: record them, they are not a Fail.
+- `520b17a`'s figures, for the comparison: DIRAM `.text` 113,387, `.bss` 36,352, `.data` 21,572, flash `.text` 1,022,302, `.rodata` 366,828 B; `.bin` 1,540,880 B.
+- The boot shows `HUB_IDENT: Firmware version: v2.1.4`, the `bench build (APP_BENCH_DIAG)` warning after `AP SSID:`, and from then on the driver's `wifi:` lines.
+
+A separate build of `b74a891` alone (plan §11's WP-V gate, "identical `.text` / `.bss`") is optional: it would show the same link-order change and the same few bytes of fill, DIRAM `.text` 113,387 B and an unchanged `sdkconfig`. This build covers it. The bench then runs the WP-V gate's 10 s reset ×3, and G0 (plan §12: the E4 replay, the E1 re-run, first setup and the 10 s reset) records the plan §2.4 baselines from the lines of 15a.
+
+### 15c. WP0's memory ledger and its limits
+
+- **Static RAM** (against `520b17a`, objects compiled with the project's flags): `.bss` **+121 B**: `http_app.c` +4 (the activity hook), `monitoring.c` +20 (the failed-allocation record), `app_wifi.c` +65 (the portal client table, 4 × 16 B, and the router's channel), `app_ble_leak.c` +32 (burst times, 4 slots × 8 B). `.data` **+8 B** (the client table's spinlock). WP0's budget was about +60-150 B; as first written it was +217 B (the burst times in all 16 slots, +128 B), and `bd64e83` cut it (WP0 review). Plan §10's per-file figures for the later packages stand; WP6's per-sensor counters (+80 B) should replace the burst times, not add to them.
+- **Permanent heap** (WP0 review): registering `ap_lease_event_handler` for `IP_EVENT_AP_STAIPASSIGNED` allocates three small blocks in the default event loop (the handler node, its context and a node for that event id), about 40-60 B with the allocator's overhead, once. `free` at rest reads that much below `520b17a`'s, before any other change.
+- **No task, timer or queue; no IRAM.** The monitor task now wakes every second (one heap walk for the largest internal-DMA block, core 1, priority 1).
+- **`APP_BENCH_DIAG` is bench-only** (WP0 review). Its connect line, `wifi:connected with <SSID>, aid = …, channel …, bssid = <MAC>`, meets the production tool's Wi-Fi MAC rule (`functional_test.py`: "wifi" or "sta", "mac" and a colon-MAC on one line) when the router's SSID contains "mac" in any case, and the tool would then record the router's BSSID as the hub's Wi-Fi MAC. Never run a DIAG image through the production tool with Wi-Fi credentials saved (its flash erases them, so its normal flow does not reach the connect). WP10 sets the default to n; since `9f2d061` that reaches every machine, because a stored `sdkconfig` value no longer overrides an option with no prompt. Check a release candidate's boot log for the absence of the `bench build (APP_BENCH_DIAG)` warning. None of the firmware's own new lines has the word "mac" (the station and sensor lines carry a colon-MAC, but hex digits cannot spell it).
+- **The failed-allocation hook** (`818ce43`, comment fixed in `9c27644`) is flash-resident while heap_caps calls it from its IRAM failure path: it relies on no allocation failing with the flash cache disabled. None does in this image; code that ever allocates in an IRAM-safe ISR must unregister it first. It stays in every build, since G3, G-M and G4b pass on the failed-allocation count.

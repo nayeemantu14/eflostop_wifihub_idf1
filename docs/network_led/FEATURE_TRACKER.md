@@ -94,7 +94,7 @@ interruptible animations, `'F'` in **both** led_task switches, explicit `semphr.
 3. **Version single-sourced** in `PROJECT_VER` only — never hardcode a version string.
 4. **Don't reorder `app_main` init.** `net_status_init()` must stay after `setupLEDTask()` (ledQueue exists)
    and before `app_wifi_start()` (callbacks that call the setters).
-5. **`wifi_manager` is a managed component with LOCAL PATCHES** — not touched here; re-apply if it re-resolves.
+5. **`wifi_manager` carries LOCAL PATCHES** — not touched here. Since 2.1.4's WP-V it is the tracked local component `components/wifi_portal`, so nothing re-resolves it.
 
 ## Known/intended behaviour notes (for the test plan)
 - Connecting (beat blue) and connected (ramp blue) are **both blue** by spec — distinguished by **cadence**

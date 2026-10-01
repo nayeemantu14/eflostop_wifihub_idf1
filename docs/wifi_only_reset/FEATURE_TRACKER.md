@@ -127,9 +127,9 @@ erase are independent events. The split is enforced by the API: commissioning mo
 ## NOT touched (intentional)
 - **`main/offline_buffer/offline_buffer.c`** — ns stays in the **default** `nvs`. The offline event buffer is
   transient and fully reconstructible; it must NOT consume `nvs_prov` budget. Left on plain `nvs_open`.
-- **`managed_components/.../wifi_manager.c`** — managed component carrying **LOCAL PATCHES**; its WiFi creds
+- **`components/wifi_portal/src/wifi_manager.c`** — carries **LOCAL PATCHES** (a managed component until 2.1.4's WP-V); its WiFi creds
   intentionally stay in the default partition (that is exactly what the button is allowed to clear). Do **not**
-  edit it here; re-apply the local patches if the component is re-resolved.
+  edit it here. Since WP-V the patches are tracked code in the repo: nothing to re-apply.
 
 ## ⚠️ UPGRADE NOTE (one-time, when flashing 1.4.3 onto an already-deployed hub)
 This build **changes the partition table** (adds `nvs_prov`) **and moves commissioning into it**. A normal app
@@ -148,7 +148,7 @@ default-partition recovery can no longer touch it.
 1. **No cloud/app contract change** — `decommission` remains the only full-reset path; the button is strictly
    WiFi-creds-only. No new C2D commands, no telemetry-field changes.
 2. **`offline_buffer` stays on the default partition** — never move it into `nvs_prov`.
-3. **`wifi_manager` is a managed component with LOCAL PATCHES** — not touched; re-apply if it re-resolves.
+3. **`wifi_manager` carries LOCAL PATCHES** — not touched. Since 2.1.4's WP-V it is the tracked local component `components/wifi_portal`, so nothing re-resolves it.
 4. **Version single-sourced** in `PROJECT_VER` only — never hardcode a version string.
 5. **Reboot on WiFi reset is intentional** — the button clears creds, then `esp_restart()` so the captive
    portal comes up on a clean heap. Safe because commissioning is in `nvs_prov` (survives reboot); the
