@@ -109,19 +109,28 @@ static bool    s_sntp_started   = false;   // esp_sntp_init() done (first Wi-Fi 
 static bool    s_sntp_fallback  = false;   // initial sync timed out; 60 s re-poll timer armed
 static bool    s_time_ok        = false;   // wall clock valid (>= SNTP_EPOCH_VALID)
 static int64_t s_sntp_start_ms  = 0;       // monotonic ms of esp_sntp_init()
+// The clock has synced: cloud_tx stamps the pre-sync events in the offline buffer
+// (offline_buffer_stamp_presync()). Set once by iothub_task (net_maintain()), read by cloud_tx.
+static volatile bool s_stamp_owed = false;
 
-// Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
-static bool g_needs_lifecycle = false;
+// The MQTT session whose resets iothub_task has applied (2.1.4 WP2c; telemetry_v2_session_gen()).
+// It replaces the lifecycle flag the CONNECTED handler raised: a generation this task has not
+// seen, read connected, resets the boot and fast snapshots and builds that session's lifecycle
+// and twin for cloud_tx, once per CONNECTED. iothub_task only.
+static uint32_t s_iot_gen_seen = 0;
 
-// The next replay of events kept in the offline buffer while connected (monotonic ms;
-// iothub_task only; see REPLAY_RETRY_MS).
-static int64_t s_replay_retry_ms = 0;
+// That session's lifecycle and twin, not handed to cloud_tx yet: their build or their post
+// failed. Retried every LIFECYCLE_RETRY_MS while connected. iothub_task only.
+#define IOT_SESS_LIFECYCLE 0x01u
+#define IOT_SESS_TWIN      0x02u
+static uint8_t s_iot_sess_owed = 0;
 
-// The lifecycle of this connection has not reached esp-mqtt yet (refused for room): sent
-// again while connected, every LIFECYCLE_RETRY_MS, until it does. iothub_task only.
+// The lifecycle of this connection has not reached esp-mqtt yet (refused for room): built
+// again while connected, every LIFECYCLE_RETRY_MS, until it does. Written by cloud_tx, which
+// publishes it (cloud_tx_lifecycle()); read by iothub_task, which builds it.
 #define LIFECYCLE_RETRY_MS 5000
-static bool    s_lifecycle_owed     = false;
-static int64_t s_lifecycle_retry_ms = 0;
+static volatile bool s_lifecycle_owed     = false;
+static int64_t       s_lifecycle_retry_ms = 0;   // iothub_task only
 
 // Full-decommission reboot: set by handle_c2d_command ('decommission all', which
 // runs in the esp-mqtt event task) and consumed by iothub_task, which publishes a
@@ -260,6 +269,16 @@ static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from 
 static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only on lifecycle)
 static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms when the fast snapshot was (re)armed; ceiling is relative to THIS
 static uint32_t      s_rating_seq_seen    = 0;                  // health_get_rating_seq() already requested/published (see Phase 3)
+// A due snapshot held last pass for cloud_tx (2.1.4 WP2c): TX not idle. The loop then polls at
+// SNAP_TX_HOLD_POLL_MS, not 1 tick (R0-3); cloud_tx's idle wake usually comes first.
+#define SNAP_TX_HOLD_POLL_MS   2000
+static bool          s_snap_tx_held       = false;
+
+// A health alert taken from the health engine but not yet admitted to cloud_tx
+// (telemetry_v2_tx_health_admit()): it waits here, the rest in the engine's queue, until TX is
+// idle or the heap has room. Lossless, and in order. iothub_task only.
+static health_alert_t s_alert_parked;
+static bool           s_alert_held        = false;
 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
@@ -314,12 +333,11 @@ static int next_twin_rid(void)
 static int g_twin_res_sub_id = -1;
 
 // That GET was not taken by esp-mqtt (refused for room, MQTT_OUTBOX_LIMIT_BYTES, or no
-// memory): iothub_task sends it again while connected, every TWIN_GET_RETRY_MS, until it is
+// memory): cloud_tx sends it again while connected, every TWIN_GET_RETRY_MS, until it is
 // (2.1.4 WP2). Set at the SUBACK and cleared at each CONNECTED (esp-mqtt task), cleared by
-// iothub_task once its GET is taken. s_twin_get_retry_ms: iothub_task only.
+// cloud_tx once its GET is taken (2.1.4 WP2c; iothub_task until then).
 #define TWIN_GET_RETRY_MS 5000
 static volatile bool s_twin_get_owed     = false;
-static int64_t       s_twin_get_retry_ms = 0;
 
 // ---------------------------------------------------------------------------
 // Telemetry v2 caches (shared with telemetry module for snapshot reads)
@@ -1570,8 +1588,9 @@ static char *build_twin_reported(void)
 }
 
 // The twin report's send: takes the report's $rid, prints it and publishes it. Does not free
-// json.
-static void send_twin_reported(const char *json)
+// json. gated: cloud_tx, which holds the publish gate (iothub_pub_begin()) and gets it back
+// here right after the publish. The msg_id.
+static int send_twin_reported(const char *json, bool gated)
 {
     char topic[128];
     int rid = next_twin_rid();
@@ -1579,23 +1598,32 @@ static void send_twin_reported(const char *json)
              "$iothub/twin/PATCH/properties/reported/?$rid=%d", rid);
 
     ESP_LOGI(IOTHUB_TAG, "Twin reported (%d): %s", rid, json);
-    esp_mqtt_client_publish(mqtt_client, topic, json, 0, 1, 0);
+    int64_t t0 = esp_timer_get_time();
+    int msg_id = esp_mqtt_client_publish(mqtt_client, topic, json, 0, 1, 0);
+    if (gated)
+        iothub_pub_end("twin", msg_id, t0);
+    return msg_id;
 }
 
 static void publish_twin_reported(void)
 {
-    // mqtt_client is NULL until cloud_bringup() succeeds. Only while connected, like every
-    // other publish of iothub_task's: its device-set change (apply_device_set_change()) can
-    // come while the client is stopping on wifi_task or reconnecting, and
-    // esp_mqtt_client_publish() then waits for esp-mqtt's API lock, which a connect in flight
-    // holds for up to 10-30 s: iothub_task evaluates the leaks. Nothing is lost: a stopping
-    // client's outbox is deleted anyway, and every CONNECTED reports the twin again (the
-    // lifecycle block in iothub_task). The esp-mqtt task's callers run in a session.
+    // mqtt_client is NULL until cloud_bringup() succeeds. Only while connected: nothing is
+    // lost, as a stopping client's outbox is deleted anyway, and every CONNECTED reports the
+    // twin again (iothub_task's session reset). The esp-mqtt task's callers run in a session.
     if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
 
+    uint32_t gen = telemetry_v2_session_gen();
     char *json = build_twin_reported();
     if (!json) return;
-    send_twin_reported(json);
+    if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
+        // A device-set change (apply_device_set_change()): built here, sent by cloud_tx in order
+        // with the events (2.1.4 WP2c). iothub_task evaluates the leaks and never publishes. A
+        // session that ends before cloud_tx gets to it drops it: the next one reports the twin.
+        telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0 };
+        telemetry_v2_tx_post(&it, "twin");
+        return;
+    }
+    send_twin_reported(json, false);
     free(json);
 }
 
@@ -1737,15 +1765,49 @@ static void handle_twin_get_response(const char *data, int data_len)
 //     counted.
 //   - wifi_task holds no lock of the app's while it waits, and esp-mqtt's API lock only inside
 //     esp_mqtt_client_stop(), for that DISCONNECT.
+// The publish gate (2.1.4 WP2c, R0-1). esp-mqtt's task frees its outbox as the stop ends it
+// WITHOUT its API lock, and esp_mqtt_client_publish() queues into that outbox even with the
+// client not connected: a publish from another task beside a stop's end corrupts the list.
+// Before WP2c the only such publisher, iothub_task, was also the only task that asks for a
+// stop, and it marks MQTT disconnected as it asks. cloud_tx publishes on its own, so each of
+// its publishes and wifi_task's stop take s_pub_gate, both with a try only: cloud_tx publishes
+// only with the gate taken and the session up and no stop asked (iothub_pub_begin()), and
+// otherwise handles the message as offline; wifi_task stops only with the gate taken, and
+// otherwise returns at once and is woken by cloud_tx as it gives the gate back
+// (iothub_pub_end()). Once a stop is asked cloud_tx starts no publish, so the stop runs at most
+// one publish later, no later than it used to wait for esp-mqtt's API lock. The esp-mqtt task's
+// own publishes (cmd_ack, the C2D twin reports) run on the task the stop ends.
 // ---------------------------------------------------------------------------
 static volatile uint32_t     s_mqtt_stop_req  = 0;      // stops asked; iothub_task only
 static volatile uint32_t     s_mqtt_stop_done = 0;      // the last one served; wifi_task only
 static volatile TaskHandle_t s_mqtt_stopper   = NULL;   // wifi_task's handle; wifi_task only
+static uint32_t              s_mqtt_stop_wait_logged = 0;   // wifi_task only
+// Created by initialize_iothub(), before any task can ask for or run a stop.
+static StaticSemaphore_t     s_pub_gate_buf;
+static SemaphoreHandle_t     s_pub_gate = NULL;
 
 // wifi_task has a stop to run, or is running it.
 static bool mqtt_stop_pending(void)
 {
     return s_mqtt_stop_req != s_mqtt_stop_done;
+}
+
+bool iothub_pub_begin(void)
+{
+    if (s_pub_gate == NULL || xSemaphoreTake(s_pub_gate, 0) != pdTRUE)
+        return false;   // wifi_task is stopping the client
+    if (mqtt_client != NULL && telemetry_v2_is_connected() && !mqtt_stop_pending())
+        return true;
+    iothub_pub_end(NULL, 0, 0);
+    return false;
+}
+
+void iothub_pub_end(const char *what, int msg_id, int64_t t0_us)
+{
+    xSemaphoreGive(s_pub_gate);
+    TaskHandle_t stopper = s_mqtt_stopper;
+    if (mqtt_stop_pending() && stopper != NULL)
+        xTaskNotifyGive(stopper);   // its stop may have found the gate taken
 }
 
 // iothub_task only, with the client started (g_mqtt_running). Never waits.
@@ -1777,12 +1839,22 @@ void iothub_mqtt_stop_service(void)
     uint32_t req = s_mqtt_stop_req;
     if (req == s_mqtt_stop_done)
         return;
+    // Never beside a publish of cloud_tx's (the publish gate, above), and never waiting for it:
+    // cloud_tx wakes this task as it gives the gate back.
+    if (xSemaphoreTake(s_pub_gate, 0) != pdTRUE) {
+        if (s_mqtt_stop_wait_logged != req) {
+            s_mqtt_stop_wait_logged = req;
+            ESP_LOGI(IOTHUB_TAG, "MQTT stop waits for cloud_tx's publish");
+        }
+        return;
+    }
     int64_t t0 = esp_timer_get_time();
     esp_mqtt_client_stop(mqtt_client);   // a request implies a client, and it is never cleared
     // A connect that ended as the stop was asked may have marked MQTT connected again
     // (MQTT_EVENT_CONNECTED); the client's task has ended now, so this mark stays.
     if (telemetry_v2_is_connected())
         mark_mqtt_disconnected();
+    xSemaphoreGive(s_pub_gate);      // a publish now finds the stop still pending: offline
     unsigned long ms = (unsigned long)((esp_timer_get_time() - t0) / 1000);
     ESP_LOGI(IOTHUB_TAG, "MQTT client stopped on wifi_task in %lu.%lu s", ms / 1000, (ms % 1000) / 100);
     s_mqtt_stop_done = req;          // last: iothub_task may start the client from here on
@@ -2124,17 +2196,22 @@ static void rx_continue(esp_mqtt_event_handle_t e)
     rx_reset();
 }
 
-// The full-twin GET of this connection (MQTT_EVENT_SUBSCRIBED, and iothub_task's retry while
-// s_twin_get_owed). false = esp-mqtt did not take it: refused for room (-2) or no memory.
-static bool twin_get_send(void)
+// The full-twin GET of this connection (MQTT_EVENT_SUBSCRIBED, and cloud_tx's retry while
+// s_twin_get_owed). The msg_id: < 0 = esp-mqtt did not take it, refused for room (-2) or no
+// memory. gated: cloud_tx, which holds the publish gate and gets it back here.
+static int twin_get_send(bool gated)
 {
     char topic[64];
     int rid = next_twin_rid();
     snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", rid);
-    if (esp_mqtt_client_publish(mqtt_client, topic, "", 0, 1, 0) < 0)
-        return false;
+    int64_t t0 = esp_timer_get_time();
+    int msg_id = esp_mqtt_client_publish(mqtt_client, topic, "", 0, 1, 0);
+    if (gated)
+        iothub_pub_end("twin GET", msg_id, t0);
+    if (msg_id < 0)
+        return msg_id;
     ESP_LOGI(IOTHUB_TAG, "Twin GET requested (rid=%d)", rid);
-    return true;
+    return msg_id;
 }
 
 // ---------------------------------------------------------------------------
@@ -2154,11 +2231,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         if (mqtt_stop_pending())
             break;
         g_iot_hub_connected = true;
+        // A new session generation: cloud_tx replays the buffer and sends the lifecycle and
+        // twin that iothub_task builds for it, then the live messages (2.1.4 WP2c).
         telemetry_v2_set_connected(true);
         net_status_set_mqtt(true);   // status LED -> fully connected (ramp blue)
-        g_needs_lifecycle = true;  // Event loop will publish lifecycle + snapshot
         s_twin_get_owed = false;   // this connection's GET follows its SUBACK
-        telemetry_v2_wake_snapshot();  // wake iothub_task now so the first post-reconnect snapshot is prompt
+        telemetry_v2_wake_snapshot();  // wake iothub_task now: this session's resets, lifecycle and twin, then its first snapshot
         {
             char sub_topic[128];
             // C2D messages
@@ -2201,12 +2279,13 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             g_twin_res_sub_id = -1;             // one GET per connection
             // Refused for room (the last session's unacknowledged messages, which survive a
             // quick reconnect, plus the SUBSCRIBEs, over MQTT_OUTBOX_LIMIT_BYTES), it is owed:
-            // iothub_task sends it again while connected, so this session still reads the
+            // cloud_tx sends it again while connected, so this session still reads the
             // twin (a change made during an outage would otherwise wait for the next connect).
-            if (!twin_get_send()) {
+            if (twin_get_send(false) < 0) {
                 s_twin_get_owed = true;
                 ESP_LOGW(IOTHUB_TAG, "Twin GET not taken by MQTT - sent again every %d s while connected",
                          TWIN_GET_RETRY_MS / 1000);
+                telemetry_v2_tx_kick();
             }
         }
         break;
@@ -2567,8 +2646,10 @@ static void net_maintain(void)
         localtime_r(&now, &timeinfo);
         ESP_LOGI(IOTHUB_TAG, "Time synced: %s", asctime(&timeinfo));
         // Give events held from before the sync their real time now, in NVS, so a
-        // restart before the next connect's drain cannot lose them.
-        offline_buffer_stamp_presync();
+        // restart before the next connect's drain cannot lose them. cloud_tx does it, the
+        // offline buffer's only user (2.1.4 WP2c): this task never waits for its lock.
+        s_stamp_owed = true;
+        telemetry_v2_tx_kick();
         return;
     }
 
@@ -2929,6 +3010,266 @@ static __attribute__((noinline)) void qset_add_member(QueueSetHandle_t set, Queu
 }
 
 // ---------------------------------------------------------------------------
+// cloud_tx: the sender (2.1.4 WP2c, LS-1; the user's decision D1 (i) of 2026-10-02)
+//
+// iothub_task evaluates the leaks, runs the rules and commands the valve, and used to make
+// every publish of its own messages as well: on a WAN that dies with Wi-Fi up, one write could
+// hold it 10 s, or 20 s behind esp-mqtt's own write, and every leak item waited (CP5: 10-20 s
+// from a leak to its CLOSE). Now iothub_task only builds them and hands them over
+// (telemetry_v2.h, "The sender"), and this task makes every esp_mqtt_client_publish() for them,
+// the offline buffer's replay, every store into it and the pre-sync stamp. It takes no lock of
+// the app's (provisioning, rules, health, sensor_meta), and iothub_task never waits for it.
+// uart_cmd_task's removal pays for its stack (app_lora.cpp): the task count is unchanged.
+//
+// Each round, with the busy mutex held: the session's work first (cloud_tx_session_work()),
+// then one FIFO item, again and again until the FIFO is empty; session work comes before
+// EVERY item, so a CONNECTED that lands mid-round has its replay and lifecycle sent before
+// any live message goes into that session. Woken by every post (a task notification), and at
+// least every CLOUD_TX_POLL_MS.
+// ---------------------------------------------------------------------------
+#define CLOUD_TX_STACK_BYTES        5120
+#define CLOUD_TX_PRIORITY           3
+#define CLOUD_TX_POLL_MS            5000
+// How long live messages wait, after a session's replay, for the lifecycle iothub_task builds
+// on the pass that CONNECTED wakes (its build reads provisioning: milliseconds).
+#define CLOUD_TX_LIFECYCLE_HOLD_MS  1000
+
+static StackType_t  s_cloud_tx_stack[CLOUD_TX_STACK_BYTES];
+static StaticTask_t s_cloud_tx_tcb;
+
+// cloud_tx only.
+static uint32_t s_tx_gen_seen     = 0;       // the session whose replay ran (its work started)
+static bool     s_tx_lc_hold      = false;   // live messages wait for that session's lifecycle
+static int64_t  s_tx_lc_until_ms  = 0;       // ... until then at the latest
+static uint32_t s_tx_lc_tried_gen = 0;       // the session whose lifecycle was published or refused
+static uint32_t s_tx_lc_taken_gen = 0;       // the session whose lifecycle esp-mqtt took
+static int64_t  s_tx_replay_ms    = 0;       // next replay of events kept while connected
+static int64_t  s_tx_twin_get_ms  = 0;       // next twin GET while it is owed
+static bool     s_tx_stamped      = false;   // the clock sync's pre-sync stamp has run
+
+// iothub_task asks to be woken when TX goes idle (a held snapshot or health alert): it
+// increments the request, cloud_tx sets the answer equal and wakes it. One writer each.
+static volatile uint32_t s_flush_req = 0;   // iothub_task only
+static volatile uint32_t s_flush_ack = 0;   // cloud_tx only
+
+// iothub_task: wake me when TX goes idle (never waits).
+static void tx_wake_request(void)
+{
+    if (s_flush_req == s_flush_ack) {
+        s_flush_req++;
+        telemetry_v2_tx_kick();
+    }
+}
+
+// iothub_task: the lifecycle and the twin of session `gen`, built here and handed to cloud_tx
+// through the session queue. false = not built, or the queue full (freed): owed again.
+static bool post_session_lifecycle(uint32_t gen)
+{
+    telem_msg_t m;
+    if (!telemetry_v2_build_lifecycle(&m))
+        return false;
+    telem_tx_item_t it = { .json = m.json, .tag = gen, .kind = TELEM_TX_LIFECYCLE, .flags = 0 };
+    return telemetry_v2_tx_post_session(&it);
+}
+
+static bool post_session_twin(uint32_t gen)
+{
+    char *json = build_twin_reported();
+    if (!json)
+        return false;
+    telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0 };
+    return telemetry_v2_tx_post_session(&it);
+}
+
+// The publish gate, then the session read again: still `gen`, the one this message was built
+// for. false = not up (see iothub_pub_begin()), or another session.
+static bool pub_begin_for(uint32_t gen)
+{
+    if (!iothub_pub_begin())
+        return false;
+    if (telemetry_v2_session_gen() == gen)
+        return true;
+    iothub_pub_end(NULL, 0, 0);
+    return false;
+}
+
+// A session cloud_tx has not served yet, now connected: its replay first. Then live messages
+// wait (s_tx_lc_hold) for its lifecycle, which iothub_task builds on the pass that CONNECTED
+// wakes, at most CLOUD_TX_LIFECYCLE_HOLD_MS: replay, then lifecycle, then live (R1-5).
+static void cloud_tx_session_check(void)
+{
+    if (!telemetry_v2_is_connected())   // read first (acquire): then its generation, or later
+        return;
+    uint32_t gen = telemetry_v2_session_gen();
+    if (gen == s_tx_gen_seen)
+        return;
+    s_tx_gen_seen    = gen;
+    s_lifecycle_owed = false;           // an earlier session's is owed no more
+    telemetry_v2_drain_offline();       // replay buffered events before lifecycle
+    s_tx_replay_ms   = snap_now_ms() + REPLAY_RETRY_MS;
+    s_tx_lc_hold     = true;
+    s_tx_lc_until_ms = snap_now_ms() + CLOUD_TX_LIFECYCLE_HOLD_MS;
+}
+
+// A session's lifecycle (the session queue). Once per CONNECTED: one esp-mqtt took is never
+// sent again, and one it refused for room (MQTT_OUTBOX_LIMIT_BYTES) is owed until it does, while
+// connected (iothub_task builds it again every LIFECYCLE_RETRY_MS). One for a session that has
+// ended is dropped: the next CONNECTED has its own.
+static void cloud_tx_lifecycle(const telem_tx_item_t *it)
+{
+    uint32_t gen = it->tag;
+    if (gen == s_tx_lc_taken_gen)
+        return;
+    if (gen == s_tx_gen_seen)
+        s_tx_lc_tried_gen = gen;        // ends the hold
+    if (pub_begin_for(gen) && telemetry_v2_tx_publish(it->json, "lifecycle") >= 0) {
+        s_tx_lc_taken_gen = gen;
+        s_lifecycle_owed  = false;
+        return;
+    }
+    if (telemetry_v2_is_connected() && telemetry_v2_session_gen() == gen) {
+        if (!s_lifecycle_owed)
+            ESP_LOGW(IOTHUB_TAG, "Lifecycle not taken by MQTT - sent again every %d s while connected",
+                     LIFECYCLE_RETRY_MS / 1000);
+        s_lifecycle_owed = true;
+    }
+}
+
+// A twin report: a session's (the session queue, at its CONNECTED) or a device-set change's
+// (the FIFO). Not owed when it cannot go: every CONNECTED reports the twin again.
+static void cloud_tx_twin(const telem_tx_item_t *it)
+{
+    if (pub_begin_for(it->tag))
+        send_twin_reported(it->json, true);
+}
+
+// The session's work, before every FIFO item. *gen_out: the session the next item may go
+// into. false = live messages wait (the lifecycle hold): no FIFO item now.
+static bool cloud_tx_session_work(uint32_t *gen_out)
+{
+    if (s_stamp_owed && !s_tx_stamped) {
+        s_tx_stamped = true;
+        offline_buffer_stamp_presync();
+    }
+
+    bool up;
+    uint32_t gen;
+    for (;;) {
+        cloud_tx_session_check();
+        telem_tx_item_t it;
+        while (telemetry_v2_tx_take_session(&it)) {
+            // Built for a CONNECTED that landed after the check above: that session's replay
+            // goes first.
+            cloud_tx_session_check();
+            if (it.kind == TELEM_TX_LIFECYCLE)
+                cloud_tx_lifecycle(&it);
+            else
+                cloud_tx_twin(&it);
+            free(it.json);
+        }
+        up  = telemetry_v2_is_connected();
+        gen = telemetry_v2_session_gen();
+        if (!up || gen == s_tx_gen_seen)
+            break;
+        // A CONNECTED landed meanwhile: its replay and lifecycle first.
+    }
+    *gen_out = gen;
+
+    int64_t now = snap_now_ms();
+    if (s_tx_lc_hold) {
+        if (!up || s_tx_lc_tried_gen == gen) {
+            s_tx_lc_hold = false;
+        } else if (now >= s_tx_lc_until_ms) {
+            ESP_LOGW(IOTHUB_TAG, "lifecycle not built in 1 s - live messages go first");
+            s_tx_lc_hold = false;
+        } else {
+            return false;
+        }
+    }
+
+    if (up) {
+        // Events kept in the offline buffer while connected (the outbox refused them for room,
+        // a drain cut short, or a count read that timed out): replayed at most every
+        // REPLAY_RETRY_MS, not only at the next connect.
+        if ((telemetry_v2_replay_owed() || offline_buffer_pending() > 0) &&
+            now >= s_tx_replay_ms) {
+            s_tx_replay_ms = now + REPLAY_RETRY_MS;
+            telemetry_v2_drain_offline();
+        }
+        // This connection's full-twin GET, refused at its SUBACK (MQTT_EVENT_SUBSCRIBED).
+        if (s_twin_get_owed && now >= s_tx_twin_get_ms) {
+            s_tx_twin_get_ms = now + TWIN_GET_RETRY_MS;
+            if (pub_begin_for(gen) && twin_get_send(true) >= 0)
+                s_twin_get_owed = false;
+        }
+    }
+    return true;
+}
+
+// One FIFO item. false = the FIFO is empty.
+static bool cloud_tx_service_one(uint32_t gen)
+{
+    if (telemetry_v2_session_gen() != gen)
+        return true;   // a CONNECTED since the session's work: that work first
+    telem_tx_item_t it;
+    if (!telemetry_v2_tx_take(&it))
+        return false;
+    switch (it.kind) {
+    case TELEM_TX_EVENT:
+        telemetry_v2_tx_send_event(&it, gen);
+        break;
+    case TELEM_TX_TWIN:
+        cloud_tx_twin(&it);
+        break;
+    default:
+        break;
+    }
+    free(it.json);
+    return true;
+}
+
+// How long cloud_tx may sleep: CLOUD_TX_POLL_MS, or less for the lifecycle hold's end, a
+// replay or a twin GET owed while connected.
+static TickType_t cloud_tx_wait(void)
+{
+    int64_t now  = snap_now_ms();
+    int64_t wait = CLOUD_TX_POLL_MS;
+    if (s_tx_lc_hold && s_tx_lc_until_ms - now < wait)
+        wait = s_tx_lc_until_ms - now;
+    if (telemetry_v2_is_connected()) {
+        if ((telemetry_v2_replay_owed() || offline_buffer_pending() > 0) &&
+            s_tx_replay_ms - now < wait)
+            wait = s_tx_replay_ms - now;
+        if (s_twin_get_owed && s_tx_twin_get_ms - now < wait)
+            wait = s_tx_twin_get_ms - now;
+    }
+    if (wait < 0)
+        wait = 0;
+    return pdMS_TO_TICKS((uint32_t)wait) + 1;
+}
+
+static void cloud_tx_task(void *param)
+{
+    (void)param;
+    ESP_LOGI(IOTHUB_TAG, "cloud_tx started (stack %u B, priority %u)",
+             (unsigned)CLOUD_TX_STACK_BYTES, (unsigned)CLOUD_TX_PRIORITY);
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, cloud_tx_wait());
+        telemetry_v2_tx_busy_take();   // waits only for an iothub_task snapshot build
+        uint32_t gen = 0;
+        while (cloud_tx_session_work(&gen) && cloud_tx_service_one(gen)) {
+        }
+        telemetry_v2_tx_busy_give();
+        // Idle now (nothing queued, the busy mutex free): wake iothub_task if it asked.
+        uint32_t req = s_flush_req;
+        if (req != s_flush_ack && telemetry_v2_tx_queued() == 0) {
+            s_flush_ack = req;
+            telemetry_v2_wake_snapshot();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main IoT Hub task
 // ---------------------------------------------------------------------------
 
@@ -3033,6 +3374,20 @@ void iothub_task(void *param)
                       hub_identity_get_gateway_id(),
                       g_telem_lora_cache, g_telem_ble_cache);
 
+    // cloud_tx (2.1.4 WP2c): sends every message this task builds, from here on. Static stack
+    // and TCB, so the create cannot fail for memory; after the offline buffer and the
+    // hand-over exist. No core affinity, like this task.
+    TaskHandle_t tx = xTaskCreateStaticPinnedToCore(cloud_tx_task, "cloud_tx", CLOUD_TX_STACK_BYTES,
+                                                    NULL, CLOUD_TX_PRIORITY, s_cloud_tx_stack,
+                                                    &s_cloud_tx_tcb, tskNO_AFFINITY);
+    if (tx == NULL) {
+        // Unreachable with static buffers; without it nothing would ever be published.
+        ESP_LOGE(IOTHUB_TAG, "cloud_tx: creation failed - rebooting");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        esp_restart();
+    }
+    telemetry_v2_tx_set_consumer(tx);
+
     // QueueSet length MUST be >= the SUM of every member queue's depth. FreeRTOS
     // pushes one handle into the set per successful member send and asserts
     // (queue.c: uxMessagesWaiting < uxLength) if the set overflows — with
@@ -3116,11 +3471,19 @@ void iothub_task(void *param)
             // Reconcile against the now-empty set FIRST, so the final snapshot is built
             // from an empty table (and the caches, the rules sources and the twin agree).
             apply_device_set_change();
+            // What cloud_tx still has (the twin just built, events) goes first, and nothing
+            // is stored behind the clear: up to 25 s for TX to go idle, then on anyway.
+            bool tx_idle = false;
+            for (int i = 0; i < 250 && !(tx_idle = telemetry_v2_tx_idle_take()); i++) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+            }
             telemetry_v2_publish_snapshot("decommission");
             // Events buffered while offline belong to the deployment that just ended;
             // replaying them after the reboot would report its leaks under the next one
             // (L17).
             offline_buffer_clear();
+            if (tx_idle)
+                telemetry_v2_tx_idle_give();
             ESP_LOGI(IOTHUB_TAG, "Decommissioned — restarting in 3s...");
             vTaskDelay(pdMS_TO_TICKS(3000));
             esp_restart();
@@ -3257,16 +3620,19 @@ void iothub_task(void *param)
         if (delta < 0) delta = 0;
         bool can_pub = mqtt_up;
         if (delta <= 0 && !can_pub) delta = SNAP_OFFLINE_FLOOR_MS;
+        // Due, but held last pass for cloud_tx (s_snap_tx_held): it wakes this task as it goes
+        // idle; this poll is the backstop, not a 1-tick spin (R0-3). The deadline stays due.
+        else if (delta <= 0 && s_snap_tx_held) delta = SNAP_TX_HOLD_POLL_MS;
         // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
-        // A replay, a lifecycle or a twin GET owed while connected (REPLAY_RETRY_MS,
-        // LIFECYCLE_RETRY_MS, TWIN_GET_RETRY_MS) also polls at 2 s.
-        bool replay_pending = mqtt_up && (telemetry_v2_replay_owed() || s_lifecycle_owed ||
-                                          s_twin_get_owed);
+        // A lifecycle or a twin owed to this session while connected (LIFECYCLE_RETRY_MS), or a
+        // health alert held for cloud_tx, also polls at 2 s. The replay and the twin GET are
+        // cloud_tx's to retry now (2.1.4 WP2c).
+        bool session_owed = mqtt_up && (s_iot_sess_owed != 0 || s_lifecycle_owed);
         int64_t base = admit_pending ? 1000 :
                        (commission_pending || cloud_pending || s_ble_apply_owed ||
-                        g_devset_changed || replay_pending ||
+                        g_devset_changed || session_owed || s_alert_held ||
                         rules_engine_auto_clear_pending()) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
@@ -3278,11 +3644,10 @@ void iothub_task(void *param)
         // Publish what the tick raised NOW, before Phase 2 evaluates this pass's item. The
         // rules engine holds ONE pending event, so a wet report evaluated below replaced a
         // tick's rmleak_auto_cleared with its auto_close, and the release never reached the
-        // cloud (F-08). Not on the (re)connect pass: its offline replay and lifecycle go
-        // first, so there the event is left for the Phase 3 take as before.
-        if (!g_needs_lifecycle) {
-            publish_rules_telemetry(rules_engine_take_pending_telemetry());
-        }
+        // cloud (F-08). Built here, its ts with it, and handed to cloud_tx without a wait
+        // (2.1.4 WP2c), so it costs Phase 2 nothing, on the (re)connect pass too: cloud_tx
+        // sends a new session's replay and lifecycle before it (cloud_tx_session_work()).
+        publish_rules_telemetry(rules_engine_take_pending_telemetry());
 
         // =================================================================
         // Phase 1: RECEIVE (always -- regardless of connection state)
@@ -3469,50 +3834,40 @@ void iothub_task(void *param)
         // DISCONNECTED after a removal). The empty-hub scheduler state is set once, on the
         // transition, by on_hub_emptied().
 
-        // ---- Lifecycle on first connect / reconnect ----
-        // Once per CONNECTED: every (re)connect, esp-mqtt's own reconnects included, raises
-        // g_needs_lifecycle, so a lifecycle lost with its session is sent again by the next
-        // one (E4: the 234 s lifecycle expired from the outbox across two failed handshakes,
-        // and the 269 s connect's reached IoT Hub). One that esp-mqtt did not take at all
-        // (refused for room, MQTT_OUTBOX_LIMIT_BYTES) is owed until it does, while connected:
-        // never a second copy on a connect whose first was taken.
-        // Only while still connected: this pass's cloud_admission() may have asked for the
-        // client's stop since that CONNECTED (a link loss, or the SoftAP up; it marks MQTT
-        // disconnected as it asks, and wifi_task stops it). A stopping client still takes a
-        // QoS 1 publish into its outbox and returns its msg_id, so the replay would count every
-        // buffered event as sent and erase it, and the outbox expires them after 30 s. The flag
-        // is cleared before the connection is read, so a CONNECTED after that raises it again.
-        bool lifecycle_due = g_needs_lifecycle;
-        if (lifecycle_due)
-            g_needs_lifecycle = false;
-        if (lifecycle_due && telemetry_v2_is_connected()) {
-            telemetry_v2_drain_offline();   // Replay buffered events before lifecycle
-            s_lifecycle_owed = !telemetry_v2_publish_lifecycle();
-            s_lifecycle_retry_ms = snap_now_ms() + LIFECYCLE_RETRY_MS;
-            if (s_lifecycle_owed)
-                ESP_LOGW(IOTHUB_TAG, "Lifecycle not taken by MQTT - sent again every %d s while connected",
-                         LIFECYCLE_RETRY_MS / 1000);
-            publish_twin_reported();        // Update Device Twin reported properties
-            g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
-            g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
-            g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
-        } else if (!lifecycle_due && telemetry_v2_is_connected()) {
-            if (telemetry_v2_replay_owed() && snap_now_ms() >= s_replay_retry_ms) {
-                // Events the outbox refused for room while connected, or the rest of a drain
-                // cut short, wait in the offline buffer: replayed now, at most every
-                // REPLAY_RETRY_MS, not only at the next connect (MQTT_OUTBOX_LIMIT_BYTES).
-                s_replay_retry_ms = snap_now_ms() + REPLAY_RETRY_MS;
-                telemetry_v2_drain_offline();
+        // ---- A new MQTT session: its resets, its lifecycle and its twin ----
+        // Once per CONNECTED (2.1.4 WP2c: keyed on the session's generation, which replaces the
+        // flag the CONNECTED handler raised): every (re)connect, esp-mqtt's own reconnects
+        // included, so a lifecycle lost with its session is sent again by the next one (E4: the
+        // 234 s lifecycle expired from the outbox across two failed handshakes, and the 269 s
+        // connect's reached IoT Hub). This task builds the lifecycle and the twin, and cloud_tx
+        // sends them after the session's replay and before any live message; one esp-mqtt did
+        // not take (refused for room, MQTT_OUTBOX_LIMIT_BYTES) is built again every
+        // LIFECYCLE_RETRY_MS while connected, never a second copy on a connect whose first was
+        // taken (cloud_tx_lifecycle()). Read connected first (acquire), then the generation: a
+        // session that is connected now. One whose stop this pass's cloud_admission() asked for
+        // reads disconnected (the stop marks it as it asks).
+        {
+            bool connected = telemetry_v2_is_connected();
+            uint32_t gen = telemetry_v2_session_gen();
+            if (connected && gen != s_iot_gen_seen) {
+                s_iot_gen_seen = gen;
+                s_iot_sess_owed = IOT_SESS_LIFECYCLE | IOT_SESS_TWIN;
+                s_lifecycle_retry_ms = 0;       // now
+                g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
+                g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
+                g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
             }
-            if (s_lifecycle_owed && snap_now_ms() >= s_lifecycle_retry_ms) {
+            if (connected && gen == s_iot_gen_seen && (s_iot_sess_owed != 0 || s_lifecycle_owed) &&
+                snap_now_ms() >= s_lifecycle_retry_ms) {
                 s_lifecycle_retry_ms = snap_now_ms() + LIFECYCLE_RETRY_MS;
-                s_lifecycle_owed = !telemetry_v2_publish_lifecycle();
-            }
-            if (s_twin_get_owed && snap_now_ms() >= s_twin_get_retry_ms) {
-                // This connection's full-twin GET, refused at its SUBACK (MQTT_EVENT_SUBSCRIBED).
-                s_twin_get_retry_ms = snap_now_ms() + TWIN_GET_RETRY_MS;
-                if (twin_get_send())
-                    s_twin_get_owed = false;
+                if ((s_iot_sess_owed & IOT_SESS_LIFECYCLE) || s_lifecycle_owed) {
+                    if (post_session_lifecycle(gen))
+                        s_iot_sess_owed &= (uint8_t)~IOT_SESS_LIFECYCLE;
+                    else
+                        s_iot_sess_owed |= IOT_SESS_LIFECYCLE;
+                }
+                if ((s_iot_sess_owed & IOT_SESS_TWIN) && post_session_twin(gen))
+                    s_iot_sess_owed &= (uint8_t)~IOT_SESS_TWIN;
             }
         }
 
@@ -3524,11 +3879,25 @@ void iothub_task(void *param)
         // cloud consumer reading in order saw an unexplained auto-close.
 
         // ---- Health alerts (offline / recovered) and rating changes ----
+        // Each goes to cloud_tx only when it may (telemetry_v2_tx_health_admit(): TX idle, or
+        // room in the FIFO and the heap): during a stall they wait, the first here and the rest
+        // in the health engine's queue, and are built when TX frees up. Nothing is lost, and
+        // the leak and rules events never queue behind them (2.1.4 WP2c, section 2.3).
         {
-            health_alert_t alert;
             bool any_alert = false;
-            while (health_pop_alert(&alert)) {
-                char *json = health_alert_to_json(&alert);
+            for (;;) {
+                if (!s_alert_held) {
+                    if (!health_pop_alert(&s_alert_parked))
+                        break;
+                    s_alert_held = true;
+                }
+                size_t free_b = 0, largest = 0;
+                if (!telemetry_v2_tx_health_admit(&free_b, &largest)) {
+                    tx_wake_request();   // cloud_tx wakes this task as it goes idle
+                    break;
+                }
+                s_alert_held = false;
+                char *json = health_alert_to_json(&s_alert_parked);
                 if (json) {
                     telemetry_v2_publish_health_event(json);
                     free(json);
@@ -3845,8 +4214,14 @@ void iothub_task(void *param)
         // valve). The next loop top reconciles it; the deadline stays due, so that pass's
         // select waits one tick and this block then publishes the reconciled table. Not for
         // a failed apply's retry (devset_retry above).
+        //
+        // Held, too, while TX is not idle (2.1.4 WP2c): items still queued for cloud_tx, or
+        // cloud_tx at work. The events and the twin built before it go first, and this task
+        // never publishes beside cloud_tx. The deadline stays due; cloud_tx wakes this task as
+        // it goes idle (tx_wake_request()), and the loop polls at SNAP_TX_HOLD_POLL_MS meanwhile.
         // =================================================================
         bool devset_unseen = g_devset_changed && !devset_retry;
+        s_snap_tx_held = false;
         if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
             int64_t flush_now = snap_now_ms();
             snap_reason_t reason = s_snap_reason;
@@ -3894,6 +4269,9 @@ void iothub_task(void *param)
                 // poll instead of busy-spinning at 1 tick (the boot arming above will
                 // pull the deadline in the instant the window closes).
                 s_snap_due_ms = flush_now + 2000;
+            } else if (!telemetry_v2_tx_idle_take()) {
+                s_snap_tx_held = true;
+                tx_wake_request();
             } else {
                 const char *rstr = snap_reason_str(reason);
                 if (reason == SNAP_EVENT)
@@ -3905,6 +4283,7 @@ void iothub_task(void *param)
                 // a change after the sample is re-requested on the next pass.
                 uint32_t rs_pub = health_get_rating_seq();
                 bool ok = telemetry_v2_publish_snapshot(rstr);
+                telemetry_v2_tx_idle_give();
                 if (ok) {
                     s_snap_last_pub_ms = flush_now;
                     // This snapshot already carries those rating changes: no duplicate.
@@ -3954,5 +4333,8 @@ void iothub_task(void *param)
 
 void initialize_iothub(void)
 {
+    // The publish gate first: wifi_task may already run iothub_mqtt_stop_service(), and only a
+    // stop request (iothub_task, much later) makes it take the gate.
+    s_pub_gate = xSemaphoreCreateMutexStatic(&s_pub_gate_buf);
     xTaskCreate(iothub_task, "iothub_task", 10240, NULL, 5, &iothub_task_handle);
 }

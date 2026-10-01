@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/task.h"
 #include "mqtt_client.h"
 #include "rules_engine.h"   // leak_source_t — the water-detection source vocabulary
 
@@ -132,27 +133,13 @@ typedef struct {
 } telem_msg_t;
 
 /**
- * Publish type="lifecycle" birth message (online, reset_reason, config).
- * @return true ONLY if it reached esp-mqtt (online, msg_id >= 0); false if it was
- *         refused (the outbox full: -2), dropped offline, or not built. iothub_task
- *         publishes it again while connected until true (2.1.4 WP2).
- *         The same as telemetry_v2_build_lifecycle(), then telemetry_v2_send_lifecycle().
- */
-bool telemetry_v2_publish_lifecycle(void);
-
-/**
- * @brief The lifecycle's build: reads the provisioning state (its mutex) and prints the
- *        message into *out (2.1.4 WP2c). false = not built (before the first clock sync, or
- *        out of memory), and *out is not set.
+ * @brief The type="lifecycle" birth message (online, reset_reason, config), built: reads the
+ *        provisioning state (its mutex) and prints the message into *out (2.1.4 WP2c).
+ *        false = not built (before the first clock sync, or out of memory), and *out is not
+ *        set. iothub_task builds it once per CONNECTED and hands it to cloud_tx
+ *        (telemetry_v2_tx_post_session()), again every 5 s while esp-mqtt has not taken it.
  */
 bool telemetry_v2_build_lifecycle(telem_msg_t *out);
-
-/**
- * @brief The lifecycle's send: publishes a message from telemetry_v2_build_lifecycle(), with
- *        the same lines and the same result as telemetry_v2_publish_lifecycle(). Does not
- *        free m->json.
- */
-bool telemetry_v2_send_lifecycle(const telem_msg_t *m);
 
 /**
  * @brief Publish type="snapshot" with all current device + sensor state.
@@ -270,8 +257,9 @@ void telemetry_v2_clear_settings(void);
 // ---------------------------------------------------------------------------
 
 /** Set MQTT connectivity state. When false, event telemetry is buffered to NVS. true also
- *  starts the next session generation (telemetry_v2_session_gen()): only the
- *  MQTT_EVENT_CONNECTED handler, on the esp-mqtt task, calls it with true. */
+ *  starts the next session generation (telemetry_v2_session_gen()) and wakes cloud_tx for that
+ *  session's replay and lifecycle: only the MQTT_EVENT_CONNECTED handler, on the esp-mqtt
+ *  task, calls it with true. */
 void telemetry_v2_set_connected(bool connected);
 
 /**
@@ -283,15 +271,117 @@ void telemetry_v2_set_connected(bool connected);
 uint32_t telemetry_v2_session_gen(void);
 
 /** Drain all NVS-buffered events via MQTT. Call on reconnect before lifecycle. Does nothing
- *  while the client is not connected (2.1.4 WP2). */
+ *  while the client is not connected (2.1.4 WP2). cloud_tx only (2.1.4 WP2c). */
 void telemetry_v2_drain_offline(void);
 
 /**
  * True while events wait in the offline buffer with the client connected: an event the
- * outbox refused for room (msg_id -2), or the rest of a drain cut short. iothub_task then
+ * outbox refused for room (msg_id -2), or the rest of a drain cut short. cloud_tx then
  * calls telemetry_v2_drain_offline() again while connected (2.1.4 WP2).
  */
 bool telemetry_v2_replay_owed(void);
+
+// ---------------------------------------------------------------------------
+// The sender, cloud_tx (2.1.4 WP2c, LS-1; the user's decision D1 (i) of 2026-10-02)
+//
+// iothub_task evaluates the leaks and commands the valve; a publish there could wait 10-20 s
+// on a dead WAN (esp-mqtt's write, or its API lock behind esp-mqtt's own write), and every
+// leak item waited with it. So iothub_task now only BUILDS the messages, and hands each to
+// cloud_tx (app_iothub.c), which makes every esp_mqtt_client_publish() for them, the offline
+// buffer's replay and every store into it. The hand-over never waits: a queue send with a 0
+// timeout, a flag, or a try-take. Static storage throughout, no heap at rest.
+//   - The FIFO (TELEM_TX_FIFO_LEN): events, the twin of a device-set change, the snapshot
+//     and the decommission's clear, in build order. It owns each item's json; cloud_tx frees it.
+//   - The session queue (TELEM_TX_SESSION_LEN): a session's lifecycle and twin, built by
+//     iothub_task when it first sees the session connected, tagged with its generation
+//     (telemetry_v2_session_gen()); one for a session that has ended is dropped.
+//   - The busy mutex: cloud_tx holds it whenever it works, and gives it before it blocks.
+//     iothub_task only try-takes it (telemetry_v2_tx_idle_take()).
+// ---------------------------------------------------------------------------
+
+#define TELEM_TX_FIFO_LEN     24
+#define TELEM_TX_SESSION_LEN  2
+
+typedef enum {
+    TELEM_TX_EVENT = 0,     // FIFO: an event (leak, valve, rules, health)
+    TELEM_TX_TWIN,          // FIFO (a device-set change) or session queue (a CONNECTED)
+    TELEM_TX_LIFECYCLE,     // session queue only
+} telem_tx_kind_t;
+
+#define TELEM_TX_PRESYNC  0x01u   // an event built before the first clock sync (telem_msg_t)
+
+/** One message handed to cloud_tx (12 B). */
+typedef struct {
+    char    *json;    // malloc'd, NUL-terminated; whoever holds the item frees it
+    uint32_t tag;     // the session generation it was built for (twin, lifecycle)
+    uint8_t  kind;    // telem_tx_kind_t
+    uint8_t  flags;   // TELEM_TX_PRESYNC
+} telem_tx_item_t;
+
+/** iothub_task, once, right after it created cloud_tx: the task the hand-over wakes. */
+void telemetry_v2_tx_set_consumer(TaskHandle_t task);
+
+/** Any task: wakes cloud_tx (a task notification). Never waits. */
+void telemetry_v2_tx_kick(void);
+
+/**
+ * @brief iothub_task: hands one item to cloud_tx through the FIFO, never waiting, and wakes it.
+ *        false = the FIFO is full: the item's json is freed, and when `what` is set the
+ *        E line "TX queue full (24) - <what> not sent" says what was lost.
+ */
+bool telemetry_v2_tx_post(telem_tx_item_t *it, const char *what);
+
+/**
+ * @brief iothub_task: hands a session's lifecycle or twin to cloud_tx through the session
+ *        queue, never waiting. false = the queue is full: the json is freed, and the caller
+ *        owes the message again.
+ */
+bool telemetry_v2_tx_post_session(telem_tx_item_t *it);
+
+/** cloud_tx: the next item of the FIFO, or of the session queue, without waiting. */
+bool telemetry_v2_tx_take(telem_tx_item_t *out);
+bool telemetry_v2_tx_take_session(telem_tx_item_t *out);
+
+/** Any task: how many items wait in the FIFO. */
+unsigned telemetry_v2_tx_queued(void);
+
+/** cloud_tx: the busy mutex, around each round of its work (it waits only for an iothub_task
+ *  snapshot build, milliseconds). */
+void telemetry_v2_tx_busy_take(void);
+void telemetry_v2_tx_busy_give(void);
+
+/**
+ * @brief iothub_task: "TX idle" - both queues empty and the busy mutex free - and if so, the
+ *        mutex is taken, so cloud_tx starts no work until telemetry_v2_tx_idle_give(). Never
+ *        waits (a try-take).
+ */
+bool telemetry_v2_tx_idle_take(void);
+void telemetry_v2_tx_idle_give(void);
+
+/**
+ * @brief iothub_task, before it takes a health alert (device_offline / device_recovered):
+ *        whether one may go to cloud_tx now. Yes while fewer than 16 items wait in the FIFO,
+ *        and either TX is idle or internal DMA-capable heap has 12 KB free with a 4.5 KB
+ *        block. Otherwise the alerts wait, losslessly, for TX to go idle: a stall must not
+ *        pile health events on top of a stalled session's heap (WP2c section 2.3). Sets the
+ *        heap figures it read (0 when it did not need them).
+ */
+bool telemetry_v2_tx_health_admit(size_t *free_b, size_t *largest);
+
+/**
+ * @brief cloud_tx: sends one event from the FIFO, or stores it in the offline buffer, with
+ *        the same lines and rules as before (replay first, behind the buffered ones, offline,
+ *        pre-sync, the outbox full, kept when unconfirmed). Published only into session
+ *        `gen`, the one whose replay and lifecycle cloud_tx has done. Does not free it->json.
+ */
+void telemetry_v2_tx_send_event(const telem_tx_item_t *it, uint32_t gen);
+
+/**
+ * @brief cloud_tx: publishes json (the lifecycle) with the "Pub" line and its
+ *        "failed" line. The caller holds the publish gate (iothub_pub_begin()); this gives it
+ *        back right after the publish. The msg_id: >= 0 = esp-mqtt took it.
+ */
+int telemetry_v2_tx_publish(const char *json, const char *type_hint);
 
 #ifdef __cplusplus
 }

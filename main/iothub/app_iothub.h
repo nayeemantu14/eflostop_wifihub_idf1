@@ -72,6 +72,18 @@ void iothub_on_wifi_lost(void);
 // initialize_iothub(); its first call records the caller as the task iothub_task wakes.
 void iothub_mqtt_stop_service(void);
 
+// The publish gate (2.1.4 WP2c, R0-1): every publish of cloud_tx's runs under it, and so does
+// wifi_task's MQTT stop, so the two never run at once. esp-mqtt's task frees the outbox when
+// its stop ends without its API lock, and a publish beside that would corrupt it. Neither side
+// ever waits for the gate: a try-take only.
+// iothub_pub_begin(): true = the gate is taken AND the session is up (connected, the client
+// built, no stop asked); then call iothub_pub_end() right after the one publish. false = do
+// not publish (treat it as offline), nothing to give back.
+bool iothub_pub_begin(void);
+// Gives the gate back, and wakes wifi_task if its stop is waiting for it. what / msg_id / t0_us
+// describe the publish just made (esp_timer_get_time() before it); what = NULL: none was made.
+void iothub_pub_end(const char *what, int msg_id, int64_t t0_us);
+
 // Apply the provisioned device set to BLE: the valve target becomes the provisioned valve
 // (or none), and BLE starts when there is a valve or a BLE leak sensor to serve. The target
 // is read and set in one provisioning mutex hold, so it is never a valve that a concurrent
