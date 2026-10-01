@@ -29,10 +29,16 @@ typedef struct {
 } idma_stats_t;
 
 /* heap_caps calls alloc_failed_hook() for every allocation that fails, in the failing call's
- * context: any task, maybe inside a critical section or with interrupts off, in principle an
- * ISR. So the hook only stores: no logging, no allocation, no lock, no RTOS call. The free size
- * it reads is a plain sum of the matching heaps' counters. A report that races a second failure
- * can mix the two in its "last" details; the count is what the gates use. */
+ * context: any task, maybe inside a critical section or with interrupts off. So the hook only
+ * stores: no logging, no allocation, no lock, no RTOS call. The free size it reads is a plain
+ * sum of the matching heaps' counters. A report that races a second failure can mix the two in
+ * its "last" details; the count is what the gates use.
+ * The hook and heap_caps_get_free_size() are in flash (IRAM is full), but heap_caps calls the
+ * hook from its IRAM failure path: an allocation that fails while the flash cache is disabled
+ * (an IRAM-safe ISR during a flash write) would fault here instead of returning NULL. None was
+ * found in this image: the one IRAM ISR (reset_button.c) does not allocate, and the BT
+ * controller's malloc wrapper is in flash itself. Code that ever allocates there needs this
+ * hook unregistered first. */
 static volatile uint32_t s_alloc_fails = 0;             // failed allocations since boot
 static volatile uint32_t s_alloc_fail_size = 0;         // the last one: bytes asked for,
 static volatile uint32_t s_alloc_fail_caps = 0;         // its capabilities,
