@@ -392,13 +392,20 @@ static const char *radio_hold_reason(TickType_t now)
  * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), its STA_DISCONNECTED callback
  * ends it and stamps s_attempt_tick again (a lost link too, and an attempt that did not start:
  * wifi_manager calls that callback right after the CONNECT_STA one then), and its GOT_IP callback
- * ends it. An attempt that neither fails nor gets its IP (associated, with no DHCP answer) keeps
- * the retry off until the STA's next disconnect, since a second connect would not start; its radio
- * hold still ends at the cap. A retry sent stays pending until wifi_manager takes it (its
- * CONNECT_STA callback restamps s_attempt_tick, or finds the STA connected), however long that
- * takes: a second order queued behind it would reach a connecting STA. s_retry_sent, counted up
- * just before the order and matched in that callback (s_retry_seen), tells the retry's CONNECT_STA
- * from a portal submit's, which comes from the same wifi_manager_connect_async(). */
+ * ends it. That synthetic disconnect (reason 205) ends whatever attempt is tracked, also one still
+ * running: a portal submit that lands in the router retry's attempt is counted as a submit (its
+ * hold, wifi_task's "Connect sent" line) and then ends the tracking of both, while the retry's
+ * attempt goes on; a forget then is posted at once (the portal's forget below). The next retry
+ * still waits ROUTER_RETRY_MS from that stamp, by when the real attempt has ended (C8 in WP4
+ * replaces this). On the bench, "Connect sent" beside wifi_manager's "attempt not started" means
+ * no hold took effect and no attempt of that submit ran. An attempt that neither fails nor gets
+ * its IP (associated, with no DHCP answer) keeps the retry off until the STA's next disconnect,
+ * since a second connect would not start; its radio hold still ends at the cap. A retry sent
+ * stays pending until wifi_manager takes it (its CONNECT_STA callback restamps s_attempt_tick,
+ * or finds the STA connected), however long that takes: a second order queued behind it would
+ * reach a connecting STA. s_retry_sent, counted up just before the order and matched in that
+ * callback (s_retry_seen), tells the retry's CONNECT_STA from a portal submit's, which comes from
+ * the same wifi_manager_connect_async(). */
 #define ROUTER_RETRY_MS           30000    // a retry once no attempt has started or ended this long
 #define ROUTER_RETRY_PAGE_MAX_MS  300000   // an open portal page defers one at most this long
 
@@ -562,8 +569,10 @@ static void cb_scan_done(void *pvParameter)
  * DISCONNECT_STA: it sets its user-disconnect bit and calls esp_wifi_disconnect(). Only its
  * STA_DISCONNECTED handler acts on that bit: it zeroes the STA config in RAM, saves it (zero SSID
  * and password blobs over the saved ones, under its NVS lock, which it gives back) and sends
- * START_AP, whose callback opens the portal window (cb_ap_started()). A connected STA gets there.
- * An idle one (on the router outage's fallback portal, between attempts) posts no disconnect
+ * START_AP, whose callback opens the portal window (cb_ap_started()). A connected STA gets there
+ * (if its esp_wifi_disconnect() fails, no event follows: wifi_manager then drops the forget,
+ * erases nothing and calls no cb_disconnect_sta(), so no forget is left waiting). An idle one
+ * (on the router outage's fallback portal, between attempts) posts no disconnect
  * event: nothing was erased, the router retry went on with the old credentials, and the bit
  * stayed set, so the next disconnect that was not a user connect's (a router outage, maybe days
  * after a new setup) would have erased whatever was saved then and reopened the portal, with BLE

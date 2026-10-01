@@ -81,9 +81,10 @@ static void erase_wifi_credentials(void)
     /* The mutex serialises wifi_manager's own read-compare-write of the config. It is taken
      * and never given back: held through esp_restart(), it keeps any later wifi_manager save
      * (a GOT_IP, if the router comes back just then) from writing back the credentials still
-     * in its RAM copy. NVS itself is thread-safe, so if the mutex is not free within 3 s (a
-     * wifi_manager save whose commit failed returns without giving it) the erase goes ahead
-     * without it. */
+     * in its RAM copy. NVS itself is thread-safe, so if the mutex is not free within 3 s the
+     * erase goes ahead without it (before 2.1.4's C2f a wifi_manager save whose commit failed
+     * returned without giving it; every path gives it back now, and the 3 s limit stays as a
+     * guard). */
     if (!nvs_sync_lock(pdMS_TO_TICKS(3000))) {
         ESP_LOGW(TAG, "Wi-Fi NVS lock busy for 3 s - erasing without it");
     }
@@ -93,11 +94,12 @@ static void erase_wifi_credentials(void)
      * wifi_manager_fetch_wifi_sta_config() reads all three keys, closes its handle and returns
      * false for the empty SSID, and LOAD_AND_RESTORE opens the portal about 0.7 s after the
      * reboot. The keys are NOT erased: "settings" (the SoftAP's own) is kept, so the namespace
-     * stays, and the fetch returns at a missing key without closing its NVS handle, leaking
-     * ~50 B of heap on every boot until Wi-Fi is set up. Only a key that exists is written (no
-     * key is created), and zeros over the zeros wifi_manager already saved on a connected STA
-     * cost no flash write: NVS skips an unchanged value. A key that cannot be written (NVS
-     * full) is erased instead, which also reads as "nothing saved".
+     * stays, and 2.1.3's fetch (a rollback target) returns at a missing key without closing its
+     * NVS handle, leaking ~50 B of heap on every boot until Wi-Fi is set up (2.1.4's C2f closes
+     * it on every path). Only a key that exists is written (no key is created), and zeros over
+     * the zeros wifi_manager already saved on a connected STA cost no flash write: NVS skips an
+     * unchanged value. A key that cannot be written (NVS full) is erased instead, which also
+     * reads as "nothing saved".
      * "ssid" first, and the password only once the SSID is cleared: a saved SSID whose password
      * is gone reads as "nothing saved" (no reconnect) yet leaves the SSID in wifi_manager's RAM
      * copy, which keeps the portal window shut (a fallback AP that keeps BLE scanning). An
