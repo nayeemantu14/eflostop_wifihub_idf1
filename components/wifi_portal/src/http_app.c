@@ -226,13 +226,14 @@ static esp_err_t http_app_refuse(httpd_req_t *req){
 
 static esp_err_t http_server_delete_handler(httpd_req_t *req){
 
-	ESP_LOGI(TAG, "DELETE %s", req->uri);
-
-	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP (the portal's forget, D9, is kept) */
+	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP (the portal's forget, D9, is kept).
+	 * The request line after the check: a refused request logs at DEBUG only */
 	uint32_t client_ip;
 	if(!http_app_on_ap(req, &client_ip)){
 		return http_app_refuse(req);
 	}
+
+	ESP_LOGI(TAG, "DELETE %s", req->uri);
 
 	/* DELETE /connect.json */
 	if(strcmp(req->uri, http_connect_url) == 0){
@@ -259,13 +260,14 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 
 	esp_err_t ret = ESP_OK;
 
-	ESP_LOGI(TAG, "POST %s", req->uri);
-
-	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP; a user hook's URIs too */
+	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP; a user hook's URIs too. The
+	 * request line after the check: a refused request logs at DEBUG only */
 	uint32_t client_ip;
 	if(!http_app_on_ap(req, &client_ip)){
 		return http_app_refuse(req);
 	}
+
+	ESP_LOGI(TAG, "POST %s", req->uri);
 
 	/* POST /connect.json */
 	if(strcmp(req->uri, http_connect_url) == 0){
