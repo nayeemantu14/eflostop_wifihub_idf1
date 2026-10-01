@@ -514,8 +514,8 @@ bool http_app_start(bool lru_purge_enable){
 	    }
 	    else {
 	        /* LOCAL PATCH (2.1.4 C2g): a failed start was silent (httpd_handle stays NULL: the next
-	         * START_AP or STOP_AP tries again, and LOCAL PATCH 2.1.4 WP1: with the AP up,
-	         * wifi_manager's own retry, wifi_manager_start_ap_servers()) */
+	         * START_AP tries again, and LOCAL PATCH 2.1.4 WP1: with the AP up, wifi_manager's own
+	         * retry, wifi_manager_start_ap_servers()) */
 	        ESP_LOGE(TAG, "httpd_start failed (%s)", esp_err_to_name(err));
 	    }
 	}

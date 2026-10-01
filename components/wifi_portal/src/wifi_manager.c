@@ -98,7 +98,7 @@ static bool ap_list_logged = false;
 #define WIFI_MANAGER_HEAP_MARGIN	4096
 /* LOCAL PATCH (2.1.4 WP1): the AP is up with its HTTP or DNS server not running: START_AP could
  * not start it (httpd_start() or the DNS task's creation failed, for lack of memory), and nothing
- * else would before the next START_AP or STOP_AP, which the setup portal may never see (plan I11:
+ * else would before the next START_AP, which the setup portal may never see (plan I11:
  * both up from START_AP to STOP_AP). The task's loop then starts them again every
  * WIFI_MANAGER_AP_SERVERS_RETRY_MS, counted from ap_servers_tick (the last try), each try once the
  * largest free block has room for a server task's stack (WIFI_MANAGER_AP_SERVER_STACK, httpd's)
@@ -1310,8 +1310,10 @@ void wifi_manager( void * pvParameters ){
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	ESP_ERROR_CHECK(esp_wifi_start());
 
-	/* start http server */
-	http_app_start(false);
+	/* LOCAL PATCH (2.1.4 C3, plan D3): no HTTP server here. It runs only while the AP is up, from
+	 * START_AP to STOP_AP: with the STA alone it answered the home LAN, where DELETE and POST
+	 * /connect.json need no password, and its task and sockets held about 5 KB of heap for
+	 * nothing (no client of it but the setup page, user decision D10) */
 
 	/* wifi scanner config */
 	wifi_scan_config_t scan_config = {
@@ -1646,10 +1648,11 @@ void wifi_manager( void * pvParameters ){
 					break;
 				}
 
-				/* restart HTTP daemon */
-				http_app_stop();
-
 				/* start HTTP, and DNS
+				 * LOCAL PATCH (2.1.4 C3): HTTP is no longer stopped first. It ran from boot with the
+				 * STA's settings and was restarted here with the AP's; it now runs only while the
+				 * AP is up, so it runs here only at a START_AP with the AP already up (the portal's
+				 * forget), and keeps running, with its sessions, as the DNS does.
 				 * LOCAL PATCH (2.1.4 C4): DNS: nothing to do while it runs (START_AP with the AP up).
 				 * It now runs until STOP_AP: no longer stopped at GOT_IP.
 				 * LOCAL PATCH (2.1.4 WP1): a server that does not start is started again while the
@@ -1701,9 +1704,10 @@ void wifi_manager( void * pvParameters ){
 					dns_server_stop();
 					ap_servers_down = false;	/* LOCAL PATCH (2.1.4 WP1): no retry with the AP down */
 
-					/* restart HTTP daemon */
+					/* stop HTTP daemon
+					 * LOCAL PATCH (2.1.4 C3): not started again (it was, with the STA's settings):
+					 * it runs only while the AP is up, and the next START_AP starts it */
 					http_app_stop();
-					http_app_start(false);
 
 					/* LOCAL PATCH (2.1.4 C2b): the network list goes with the AP (+1,489 B of heap) */
 					ap_list_wanted = false;
