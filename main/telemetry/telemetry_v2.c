@@ -1334,6 +1334,19 @@ void telemetry_v2_set_connected(bool connected)
     ESP_LOGI(TELEM_TAG, "MQTT connected = %s", connected ? "true" : "false");
 }
 
+// The drain's publish (offline_buffer_drain()): one replayed entry, only into a session that
+// is up, and taken only if the session is still up after the publish. A publish whose own
+// write failed has ended the session too (esp-mqtt aborts and dispatches DISCONNECTED on this
+// task), and is reported as failed, its own line. The client exists whenever the session is
+// up: s_connected is set only by its CONNECTED.
+static offline_buffer_pub_t replay_publish(const char *json, size_t len)
+{
+    if (!s_mqtt || !s_connected) return OFFLINE_BUF_PUB_DOWN;
+    int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json, (int)len, 1, 0);
+    if (msg_id < 0) return OFFLINE_BUF_PUB_FAILED;
+    return s_connected ? OFFLINE_BUF_PUB_TAKEN : OFFLINE_BUF_PUB_DOWN;
+}
+
 void telemetry_v2_drain_offline(void)
 {
     // Not into a client that is not connected: a stopped one still takes a QoS 1 publish into
@@ -1344,7 +1357,7 @@ void telemetry_v2_drain_offline(void)
     if (pending == 0) return;
 
     ESP_LOGI(TELEM_TAG, "Draining %d offline event(s) before lifecycle...", pending);
-    int published = offline_buffer_drain(s_mqtt, s_topic, telemetry_v2_is_connected);
+    int published = offline_buffer_drain(replay_publish);
     ESP_LOGI(TELEM_TAG, "Offline drain complete: %d event(s) replayed", published);
     // Cut short with the client still connected (a publish refused: the outbox full): the
     // rest is owed now, not at the next connect. Cut short by the session's end (the drain

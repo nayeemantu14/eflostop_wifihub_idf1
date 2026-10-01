@@ -3,7 +3,6 @@
 
 #include <stdbool.h>
 #include <stddef.h>
-#include "mqtt_client.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,7 +53,25 @@ bool offline_buffer_try_store(const char *json, size_t len);
 bool offline_buffer_store_presync(const char *json, size_t len);
 
 /**
- * @brief Drain all buffered events by publishing via MQTT.
+ * What a drain's publish callback did with one entry (offline_buffer_drain()).
+ */
+typedef enum {
+    OFFLINE_BUF_PUB_TAKEN,    // published (msg_id >= 0), the session still up after it: erased
+    OFFLINE_BUF_PUB_FAILED,   // the session was up, but the publish was not taken (msg_id < 0):
+                              // kept, with the rest; the drain stops
+    OFFLINE_BUF_PUB_DOWN,     // the session was not up, before the publish or after it: kept,
+                              // with the rest; the drain stops
+} offline_buffer_pub_t;
+
+/**
+ * Publishes one replayed entry: `json` is NUL-terminated, `len` its length. The caller of
+ * offline_buffer_drain() owns the MQTT client, its topic and the session's state, so this
+ * module makes no MQTT call itself (2.1.4 WP2c).
+ */
+typedef offline_buffer_pub_t (*offline_buffer_publish_fn)(const char *json, size_t len);
+
+/**
+ * @brief Drain all buffered events through `publish`.
  *        Publishes FIFO (oldest first), clears entries from NVS.
  *
  *        An entry whose top-level "ts" is below the synced-clock threshold is a pre-sync
@@ -64,21 +81,26 @@ bool offline_buffer_store_presync(const char *json, size_t len);
  *        dropped (logged): its real time can never be known. Should the clock still be
  *        unsynced, the drain stops there and keeps it.
  *
- *        An entry is published only while still_up() says the MQTT session is up, and
- *        erased only if it still says so after the publish. A session that ended mid-drain
- *        (the link lost, a failed read on the esp-mqtt task) still takes a QoS 1 publish
- *        into its outbox and returns a msg_id, but the stop at a link loss deletes that
- *        outbox, and it expires after 30 s anyway: the drain stops there instead and keeps
- *        that entry and the rest for the next connect's drain. One kept although it did
- *        reach the broker is sent again then (a QoS 1 duplicate, never a loss).
+ *        An entry is published only while the MQTT session is up, and erased only if it is
+ *        still up after the publish (`publish` decides both: OFFLINE_BUF_PUB_DOWN). A
+ *        session that ended mid-drain (the link lost, a failed read on the esp-mqtt task)
+ *        still takes a QoS 1 publish into its outbox and returns a msg_id, but the stop at a
+ *        link loss deletes that outbox, and it expires after 30 s anyway: the drain stops
+ *        there instead and keeps that entry and the rest for the next connect's drain. One
+ *        kept although it did reach the broker is sent again then (a QoS 1 duplicate, never
+ *        a loss).
  *
- * @param client    MQTT client handle
- * @param topic     MQTT topic string
- * @param still_up  true while the MQTT session is connected (telemetry_v2_is_connected)
+ * @param publish  publishes one entry and reports the session (telemetry_v2's replay)
  * @return Number of events published (0 on lock timeout)
  */
-int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic,
-                         bool (*still_up)(void));
+int offline_buffer_drain(offline_buffer_publish_fn publish);
+
+/**
+ * @brief The number of events buffered, read without the buffer's mutex (2.1.4 WP2c). A hint
+ *        for "is anything waiting?", never waits: it can be one store or one drained entry
+ *        behind another task's. 0 before offline_buffer_init().
+ */
+int offline_buffer_pending(void);
 
 /**
  * @brief Stamp every pre-sync event stored this boot with its real time, in NVS, once the
