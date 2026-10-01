@@ -1501,19 +1501,13 @@ static void handle_c2d_command(const char *data, size_t data_len)
 // Device Twin — reported properties
 // ---------------------------------------------------------------------------
 
-static void publish_twin_reported(void)
+// The twin report's build (2.1.4 WP2c: built apart from its send, like every message): the
+// reported-properties PATCH body, or NULL out of memory. Reads the provisioning state (its
+// mutex). The caller frees it.
+static char *build_twin_reported(void)
 {
-    // mqtt_client is NULL until cloud_bringup() succeeds. Only while connected, like every
-    // other publish of iothub_task's: its device-set change (apply_device_set_change()) can
-    // come while the client is stopping on wifi_task or reconnecting, and
-    // esp_mqtt_client_publish() then waits for esp-mqtt's API lock, which a connect in flight
-    // holds for up to 10-30 s: iothub_task evaluates the leaks. Nothing is lost: a stopping
-    // client's outbox is deleted anyway, and every CONNECTED reports the twin again (the
-    // lifecycle block in iothub_task). The esp-mqtt task's callers run in a session.
-    if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
-
     cJSON *root = cJSON_CreateObject();
-    if (!root) return;
+    if (!root) return NULL;
 
     cJSON_AddStringToObject(root, "fw_version", telemetry_v2_fw_version());
     cJSON_AddStringToObject(root, "gateway_id", hub_identity_get_gateway_id());
@@ -1572,8 +1566,13 @@ static void publish_twin_reported(void)
 
     char *json = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
-    if (!json) return;
+    return json;
+}
 
+// The twin report's send: takes the report's $rid, prints it and publishes it. Does not free
+// json.
+static void send_twin_reported(const char *json)
+{
     char topic[128];
     int rid = next_twin_rid();
     snprintf(topic, sizeof(topic),
@@ -1581,6 +1580,22 @@ static void publish_twin_reported(void)
 
     ESP_LOGI(IOTHUB_TAG, "Twin reported (%d): %s", rid, json);
     esp_mqtt_client_publish(mqtt_client, topic, json, 0, 1, 0);
+}
+
+static void publish_twin_reported(void)
+{
+    // mqtt_client is NULL until cloud_bringup() succeeds. Only while connected, like every
+    // other publish of iothub_task's: its device-set change (apply_device_set_change()) can
+    // come while the client is stopping on wifi_task or reconnecting, and
+    // esp_mqtt_client_publish() then waits for esp-mqtt's API lock, which a connect in flight
+    // holds for up to 10-30 s: iothub_task evaluates the leaks. Nothing is lost: a stopping
+    // client's outbox is deleted anyway, and every CONNECTED reports the twin again (the
+    // lifecycle block in iothub_task). The esp-mqtt task's callers run in a session.
+    if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
+
+    char *json = build_twin_reported();
+    if (!json) return;
+    send_twin_reported(json);
     free(json);
 }
 

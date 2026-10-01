@@ -136,19 +136,17 @@ static cJSON *build_envelope(const char *type)
     return root;
 }
 
-// Returns true ONLY when the message actually reached esp-mqtt (online branch
-// taken AND esp_mqtt_client_publish accepted it, msg_id >= 0). Returns false on
-// a NULL root, offline (buffered or dropped), or a negative msg_id (e.g. outbox
-// saturated). The snapshot scheduler re-arms the heartbeat only on a true return,
-// so an offline/pre-SNTP/outbox-full drop never counts as "sent". A pre-sync event
-// is always buffered, never sent, so it returns false too.
-static bool publish_json(cJSON *root, const char *type_hint)
+// A message's build: prints root into *out and frees root (2.1.4 WP2c: publish_json() is
+// split into this and send_str(), so that a message can be built on one task and sent on
+// another). false on a NULL root or out of memory, with nothing left to free; otherwise
+// out->json is the caller's to free.
+static bool build_str(cJSON *root, telem_msg_t *out)
 {
     if (!root) return false;
 
     // An event built before the first clock sync carries the unsynced time() in "ts"
     // (build_envelope). Decided from the envelope's own number, never a fresh time(): a
-    // sync landing between the build and here must not let that ts onto the wire.
+    // sync landing between the build and the send must not let that ts onto the wire.
     const cJSON *ts = cJSON_GetObjectItemCaseSensitive(root, "ts");
     bool presync = cJSON_IsNumber(ts) &&
                    ts->valuedouble < (double)EPOCH_VALID_THRESHOLD_TELEM;
@@ -156,6 +154,25 @@ static bool publish_json(cJSON *root, const char *type_hint)
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!json_str) return false;
+
+    out->json    = json_str;
+    out->len     = strlen(json_str);
+    out->presync = presync;
+    return true;
+}
+
+// A message's send: publishes a message from build_str(), or buffers or drops it. Does not
+// free m->json.
+// Returns true ONLY when the message actually reached esp-mqtt (online branch
+// taken AND esp_mqtt_client_publish accepted it, msg_id >= 0). Returns false
+// offline (buffered or dropped), or on a negative msg_id (e.g. outbox
+// saturated). The snapshot scheduler re-arms the heartbeat only on a true return,
+// so an offline/pre-SNTP/outbox-full drop never counts as "sent". A pre-sync event
+// is always buffered, never sent, so it returns false too.
+static bool send_str(const telem_msg_t *m, const char *type_hint)
+{
+    const char *json_str = m->json;
+    bool presync = m->presync;
 
     bool sent = false;
     bool is_event  = (strcmp(type_hint, "event") == 0);
@@ -195,8 +212,8 @@ static bool publish_json(cJSON *root, const char *type_hint)
         // it while it waits for that lock (offline_buffer_drain()), so a wait would stall both
         // tasks for the buffer's 1 s timeout and keep nothing.
         if (msg_id == -2 && is_event) {
-            bool kept = on_iothub ? offline_buffer_store(json_str, strlen(json_str))
-                                  : offline_buffer_try_store(json_str, strlen(json_str));
+            bool kept = on_iothub ? offline_buffer_store(json_str, m->len)
+                                  : offline_buffer_try_store(json_str, m->len);
             if (kept) {
                 s_replay_owed = true;
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay", type_hint);
@@ -209,24 +226,34 @@ static bool publish_json(cJSON *root, const char *type_hint)
             // Built before the first clock sync (build_envelope() has logged it). Buffered
             // even when online - MQTT cannot normally connect before the clock syncs - so
             // the drain stamps it with the real time before it reaches the cloud.
-            offline_buffer_store_presync(json_str, strlen(json_str));
+            offline_buffer_store_presync(json_str, m->len);
         } else if (behind) {
             // Behind the events the replay could not send yet (see above), in order.
-            if (offline_buffer_store(json_str, strlen(json_str)))
+            if (offline_buffer_store(json_str, m->len))
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay, behind the buffered ones", type_hint);
             else
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s not kept", type_hint);
         } else {
             // Offline: buffer critical events for replay on reconnect
             ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
-            offline_buffer_store(json_str, strlen(json_str));
+            offline_buffer_store(json_str, m->len);
         }
     } else {
         // Offline: drop lifecycle/snapshot (regenerated on reconnect)
         ESP_LOGD(TELEM_TAG, "Offline — dropping %s (regenerated)", type_hint);
     }
 
-    free(json_str);
+    return sent;
+}
+
+// Builds and sends one message (build_str(), then send_str()) and frees it. send_str()'s
+// result; false on a NULL root or a message not built.
+static bool publish_json(cJSON *root, const char *type_hint)
+{
+    telem_msg_t m;
+    if (!build_str(root, &m)) return false;
+    bool sent = send_str(&m, type_hint);
+    free(m.json);
     return sent;
 }
 
@@ -701,7 +728,7 @@ void telemetry_v2_clear_settings(void)
 
 // ---- Lifecycle ------------------------------------------------------------
 
-bool telemetry_v2_publish_lifecycle(void)
+bool telemetry_v2_build_lifecycle(telem_msg_t *out)
 {
     cJSON *root = build_envelope("lifecycle");
     if (!root) return false;
@@ -740,7 +767,21 @@ bool telemetry_v2_publish_lifecycle(void)
         }
     }
 
-    return publish_json(root, "lifecycle");
+    return build_str(root, out);
+}
+
+bool telemetry_v2_send_lifecycle(const telem_msg_t *m)
+{
+    return send_str(m, "lifecycle");
+}
+
+bool telemetry_v2_publish_lifecycle(void)
+{
+    telem_msg_t m;
+    if (!telemetry_v2_build_lifecycle(&m)) return false;
+    bool sent = telemetry_v2_send_lifecycle(&m);
+    free(m.json);
+    return sent;
 }
 
 // ---- Snapshot -------------------------------------------------------------
@@ -766,7 +807,10 @@ static bool snapshot_envelope_complete(const cJSON *root)
 // the whole build. Events do not use it - an event ships with whatever it has.
 #define SNAP_ADD(x) do { if (!(x)) goto fail; } while (0)
 
-bool telemetry_v2_publish_snapshot(const char *trigger)
+// The snapshot's build: prints it into *out (2.1.4 WP2c: built apart from its send, like
+// every message). false = not built (see telemetry_v2_publish_snapshot() in the header), and
+// *out is not set.
+static bool build_snapshot(const char *trigger, telem_msg_t *out)
 {
     cJSON *root = build_envelope("snapshot");
     if (!root) return false;   // pre-SNTP / alloc fail — treated as "not published"
@@ -1090,7 +1134,7 @@ bool telemetry_v2_publish_snapshot(const char *trigger)
             SNAP_ADD(cJSON_AddNumberToObject(data, "expires_ts", (double)ovr_expires));
     }
 
-    return publish_json(root, "snapshot");
+    return build_str(root, out);
 
 fail:
     ESP_LOGE(TELEM_TAG, "Snapshot not built - out of memory");
@@ -1099,6 +1143,15 @@ fail:
 }
 
 #undef SNAP_ADD
+
+bool telemetry_v2_publish_snapshot(const char *trigger)
+{
+    telem_msg_t m;
+    if (!build_snapshot(trigger, &m)) return false;
+    bool sent = send_str(&m, "snapshot");
+    free(m.json);
+    return sent;
+}
 
 // ---- Events ---------------------------------------------------------------
 

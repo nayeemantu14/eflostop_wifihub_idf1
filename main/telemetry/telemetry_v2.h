@@ -2,6 +2,7 @@
 #define TELEMETRY_V2_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -119,12 +120,39 @@ void telemetry_v2_start_snapshot_timer(void);
 // ---------------------------------------------------------------------------
 
 /**
+ * A message built and printed, not yet sent (2.1.4 WP2c: a message is built apart from its
+ * send, so that the two can run on different tasks). `json` is malloc'd and the caller frees
+ * it; `len` is strlen(json). `presync` is true for an event built before the first clock
+ * sync (its envelope "ts" is the unsynced time()): it is buffered for the replay, never sent.
+ */
+typedef struct {
+    char   *json;
+    size_t  len;
+    bool    presync;
+} telem_msg_t;
+
+/**
  * Publish type="lifecycle" birth message (online, reset_reason, config).
  * @return true ONLY if it reached esp-mqtt (online, msg_id >= 0); false if it was
  *         refused (the outbox full: -2), dropped offline, or not built. iothub_task
  *         publishes it again while connected until true (2.1.4 WP2).
+ *         The same as telemetry_v2_build_lifecycle(), then telemetry_v2_send_lifecycle().
  */
 bool telemetry_v2_publish_lifecycle(void);
+
+/**
+ * @brief The lifecycle's build: reads the provisioning state (its mutex) and prints the
+ *        message into *out (2.1.4 WP2c). false = not built (before the first clock sync, or
+ *        out of memory), and *out is not set.
+ */
+bool telemetry_v2_build_lifecycle(telem_msg_t *out);
+
+/**
+ * @brief The lifecycle's send: publishes a message from telemetry_v2_build_lifecycle(), with
+ *        the same lines and the same result as telemetry_v2_publish_lifecycle(). Does not
+ *        free m->json.
+ */
+bool telemetry_v2_send_lifecycle(const telem_msg_t *m);
 
 /**
  * @brief Publish type="snapshot" with all current device + sensor state.
