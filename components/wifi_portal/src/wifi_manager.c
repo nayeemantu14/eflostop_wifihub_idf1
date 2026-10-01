@@ -46,6 +46,7 @@ Contains the freeRTOS task and all necessary support
 #include "esp_netif.h"
 #include "esp_wifi_types.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "mdns.h"
@@ -86,6 +87,15 @@ char *accessp_json = NULL;
 /* START_AP sets it, STOP_AP clears it: the list should exist (a failed allocation is retried at the
  * next SCAN_DONE). wifi_manager task only. */
 static bool ap_list_wanted = false;
+/* LOCAL PATCH (2.1.4 WP1): the list's "no memory" line is printed for this AP start (START_AP
+ * clears it): once per AP session, not at every SCAN_DONE that finds no room. wifi_manager task
+ * only. */
+static bool ap_list_logged = false;
+/* LOCAL PATCH (2.1.4 WP1): an allocation that can wait (the network list) is tried only while the
+ * largest free block exceeds it by this much. One that fails is counted as a failed allocation
+ * (MONITOR's allocfail, the figure the memory gates pass on) and replaces the record of the last
+ * one, which should name the allocation that could not wait. */
+#define WIFI_MANAGER_HEAP_MARGIN	4096
 /* LOCAL PATCH (2.1.4 WP1, a bench diagnostic): a scan this task started is in flight, from the
  * esp_wifi_scan_start() that succeeded to this task's WM_EVENT_SCAN_DONE (done, failed or
  * stopped); the radio then visits every channel (wifi_manager_scan_in_flight()). Not cleared at a
@@ -758,18 +768,35 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 }
 
 /**
+ * @brief LOCAL PATCH (2.1.4 WP1): the largest free block with the caps has room for size bytes
+ * and WIFI_MANAGER_HEAP_MARGIN more (see there).
+ */
+static bool wifi_manager_heap_has(uint32_t caps, size_t size){
+	return heap_caps_get_largest_free_block(caps) >= size + WIFI_MANAGER_HEAP_MARGIN;
+}
+
+/**
  * @brief LOCAL PATCH (2.1.4 C2b): allocates the network list (START_AP, or a SCAN_DONE after a
  * failed allocation while the AP is up). wifi_manager task only.
+ * LOCAL PATCH (2.1.4 WP1): only while the heap has room to spare (wifi_manager_heap_has()), so
+ * a heap that stays low (the AP-start dip, a laptop flood) is not met with a failed malloc() at
+ * every scan the page orders, and its "no memory" line is printed once per AP start.
  */
 static void wifi_manager_alloc_ap_list(){
 
-	if(accessp_json != NULL || !wifi_manager_lock_json_buffer( portMAX_DELAY )){
+	if(accessp_json != NULL){
 		return;
 	}
-	accessp_json = (char*)malloc(ACCESSP_JSON_SIZE);
-	wifi_manager_clear_access_points_json();
-	wifi_manager_unlock_json_buffer();
-	if(accessp_json == NULL){
+	if(wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ACCESSP_JSON_SIZE)){
+		if(!wifi_manager_lock_json_buffer( portMAX_DELAY )){
+			return;
+		}
+		accessp_json = (char*)malloc(ACCESSP_JSON_SIZE);
+		wifi_manager_clear_access_points_json();
+		wifi_manager_unlock_json_buffer();
+	}
+	if(accessp_json == NULL && !ap_list_logged){
+		ap_list_logged = true;
 		ESP_LOGW(TAG, "network list: no memory for its %u B - the page lists no network yet", (unsigned)ACCESSP_JSON_SIZE);
 	}
 }
@@ -1528,10 +1555,6 @@ void wifi_manager( void * pvParameters ){
 					break;
 				}
 
-				/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up */
-				ap_list_wanted = true;
-				wifi_manager_alloc_ap_list();
-
 				/* restart HTTP daemon */
 				http_app_stop();
 				http_app_start(true);
@@ -1540,6 +1563,14 @@ void wifi_manager( void * pvParameters ){
 				 * LOCAL PATCH (2.1.4 C4): nothing to do while it runs (START_AP with the AP up). It
 				 * now runs until STOP_AP: no longer stopped at GOT_IP */
 				dns_server_start();
+
+				/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up.
+				 * LOCAL PATCH (2.1.4 WP1): after the servers, which captive detection needs (plan
+				 * I11): at the AP-start heap dip they have the memory first, and a list that does
+				 * not fit then is allocated at a later SCAN_DONE */
+				ap_list_wanted = true;
+				ap_list_logged = false;
+				wifi_manager_alloc_ap_list();
 
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
