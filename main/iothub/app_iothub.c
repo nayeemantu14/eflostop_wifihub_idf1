@@ -1739,8 +1739,8 @@ void iothub_on_wifi_connected(void)
 
 void iothub_on_wifi_lost(void)
 {
-    s_wifi_up = false;
-    s_wifi_losses++;   // this task is its only writer
+    s_wifi_up = false;   // before the count: cloud_admission() reads them the other way round
+    s_wifi_losses++;     // this task is its only writer
     telemetry_v2_wake_snapshot();
 }
 
@@ -2324,10 +2324,12 @@ static void admit_now(int64_t now, size_t free_b, size_t largest, int how)
 
 static void cloud_admission(void)
 {
-    // A loss writes the count before it clears the flag, so a flag read first and seen
-    // clear always comes with its count.
-    bool up = s_wifi_up;
+    // A loss clears the flag before it counts (iothub_on_wifi_lost()), so the count is read
+    // first: a new count always comes with the flag clear, or set again by a later IP. Read
+    // the other way round, a stale "up" beside a new count would admit a dead link for a
+    // pass. A loss whose count is not visible yet is caught by the flag (the second test).
     uint32_t losses = s_wifi_losses;
+    bool up = s_wifi_up;
     if (losses != s_wifi_losses_seen || (!up && s_admit_state != ADMIT_NO_IP)) {
         // A link loss since the last pass, even one the link is already back from: MQTT
         // stops at once, and the next IP is admitted afresh.
@@ -2384,8 +2386,8 @@ static void cloud_admission(void)
 // pass's cloud_admission() then withdraws the admission itself.
 static bool cloud_admission_holds(void)
 {
-    bool up = s_wifi_up;
-    return s_admit_state == ADMIT_DONE && up && s_wifi_losses == s_wifi_losses_seen &&
+    uint32_t losses = s_wifi_losses;   // read first, as in cloud_admission()
+    return s_admit_state == ADMIT_DONE && losses == s_wifi_losses_seen && s_wifi_up &&
            softap_down();
 }
 
