@@ -18,7 +18,8 @@ extern "C" {
  * leak response (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and its
  * connect run anyway, until the valve links and takes them (app_ble_valve.c). The window
  * opens at wifi_manager's START_AP, with no time cap before setup, and closes when the setup
- * AP stops: about 60 s after the STA gets its IP, so the phone can still load the portal's
+ * AP stops: 15-60 s after the STA gets its IP (the SoftAP's tail in app_wifi.c: 15 s after the
+ * phone leaves, never sooner than 15 s, at most 60 s), so the phone can still load the portal's
  * success status. It closes earlier if the STA loses that Wi-Fi first, since the SoftAP then
  * stays up as a router-fallback portal. It is NOT opened for the fallback AP after failed
  * retries while credentials are still saved (router outage): BLE leak protection stays on

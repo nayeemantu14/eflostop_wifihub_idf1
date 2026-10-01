@@ -42,16 +42,15 @@ void wifi_task(void *pvParameter);
  * decision).
  *
  * The window closes when the setup AP stops (cb_ap_stopped()), not when the STA gets its IP:
- * the phone that submitted the credentials is still on the SoftAP, which wifi_manager keeps up
- * for WIFI_MANAGER_SHUTDOWN_AP_TIMER (60 s) after the IP so the portal page can load its success
- * status, and resuming the dual-PHY scan at the IP starved the SoftAP again. BLE must never stay
- * paused while the hub is on Wi-Fi, so two nets back that up:
+ * the phone that submitted the credentials is still on the SoftAP, which stays up after the IP
+ * so the portal page can load its success status (the SoftAP's tail, below: 15-60 s after a
+ * setup-page Connect), and resuming the dual-PHY scan at the IP starved the SoftAP again. BLE
+ * must never stay paused while the hub is on Wi-Fi, so two nets back that up:
  *   - the STA loses that Wi-Fi before the AP stops: wifi_manager stops its AP-shutdown timer
  *     and the SoftAP stays up as a router-fallback portal with the credentials saved, which
  *     keeps BLE scanning, so cb_connection_lost() closes the window;
- *   - the window is still open PORTAL_AP_STOP_MARGIN_MS past that timer (wifi_manager starts
- *     the timer only if its AP_STARTED bit is set at the IP): wifi_task sends the STOP_AP
- *     itself (portal_priority_net()).
+ *   - the SoftAP is still up AP_TAIL_BACKSTOP_MS after the IP: wifi_task sends the STOP_AP
+ *     itself (the tail's backstop, ap_tail_maintain()).
  *
  * NOT for the fallback AP that wifi_manager opens after failed retries while credentials are
  * still saved (router outage): that is the field case BLE-from-boot leak protection is for,
@@ -66,12 +65,8 @@ static volatile bool s_portal_priority = false;
 
 /* The tick of the GOT_IP that set Wi-Fi up in the open window (forced non-zero), 0 = none.
  * Set by cb_connection_ok(); cleared when the window opens or closes, and by a requested
- * disconnect in the window. */
+ * disconnect in the window. Read by cb_connection_lost() ("Wi-Fi lost after setup"). */
 static volatile TickType_t s_setup_ok_tick = 0;
-
-/* How long past WIFI_MANAGER_SHUTDOWN_AP_TIMER the safety net waits for the setup AP to stop on
- * its own: wifi_task checks every 5 s, so BLE resumes at most about 80 s after the IP. */
-#define PORTAL_AP_STOP_MARGIN_MS 15000
 
 /* For the window the wifi_manager task runs at PORTAL_TASK_PRIORITY: above the app tasks (5),
  * far below lwIP (18) and the Wi-Fi and BT tasks (20-23). Insurance only: the portal was short
@@ -411,6 +406,109 @@ static const char *radio_hold_reason(TickType_t now)
 static volatile bool s_attempt_in_flight = false;   // wifi_manager task only
 static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end; wifi_manager task only
 
+/* ---- The SoftAP's tail after an IP (2.1.4 WP2; plan section 4.6) ---------------------------
+ * The SoftAP stays up a while after the STA gets its IP, so that a phone on it can read the
+ * result, and the cloud waits for it to stop: no TLS while the SoftAP is up (iothub_task's
+ * cloud admission, plan I4). How long is decided from facts, at the IP and on each wifi_task
+ * pass (one a second while a tail runs):
+ *   - an automatic rejoin with no station on the SoftAP: it stops AP_TAIL_AUTO_EMPTY_MS (0.5 s)
+ *     after the IP;
+ *   - an automatic rejoin with a station on it: AP_TAIL_AUTO_MS (20 s) after the IP, or
+ *     AP_TAIL_AUTO_LEFT_MS (10 s) after the last station left, whichever comes first;
+ *   - a setup-page Connect: AP_TAIL_SUBMIT_MS (60 s) after the IP, or AP_TAIL_SUBMIT_LEFT_MS
+ *     (15 s) after the last station left, never sooner than AP_TAIL_SUBMIT_MIN_MS (15 s) after
+ *     the IP: a phone the SoftAP's channel switch dropped has that long to re-join and read the
+ *     result. (WP4's Finish button adds a stop of its own.)
+ * "Left" is when wifi_task first saw the SoftAP with no station: the driver's station list
+ * (esp_wifi_ap_get_sta_list()), read on each pass, so at most about a second late. A station
+ * that joins again moves the stop back to the 20 s or 60 s cap. cb_connection_ok() sets the
+ * first stop at the IP (ap_tail_start()), and wifi_task moves it (ap_tail_maintain()), both
+ * through wifi_manager_ap_stop_in() (the portal's C12), which re-arms wifi_manager's one
+ * AP-shutdown timer; its STOP_AP stops the AP only with the STA connected. A STA lost in the
+ * tail stops that timer, and the SoftAP stays up as a router-fallback portal (no retry timer of
+ * wifi_manager's own with the SoftAP up, its C5: the router retry below owns the retries); the
+ * next IP starts a tail of its own.
+ * The backstop: the SoftAP still up with the STA connected AP_TAIL_BACKSTOP_MS (75 s) after the
+ * IP, whatever kept it up (a timer command that was not taken, wifi_manager's AP_STARTED bit set
+ * only after its GOT_IP, so that it armed no timer, a SoftAP that came up after the IP):
+ * wifi_task sends one STOP_AP for that IP. It takes over the portal window's old safety net.
+ *
+ * Automatic or a Connect: the attempt that got the IP decides. Each CONNECT_STA callback marks
+ * the attempt it starts (cb_connect_sta(), s_attempt_submit): the router retry's order
+ * (s_retry_sent) is automatic, and any other one is the setup page's Connect, because while
+ * the SoftAP is up wifi_manager's own retry timer never runs (its C5) and its restore runs only
+ * at boot, with the SoftAP down. An attempt that starts with the SoftAP down gets no tail, so
+ * its mark does not matter. A disconnect ends the attempt and clears the mark, except the
+ * synthetic one of wifi_manager's C2c (WIFI_REASON_CONNECTION_FAIL, 205) for a CONNECT_STA that
+ * did not start: it cannot be told from an attempt that really failed with 205, and the attempt
+ * that order met may still be running. So a Connect that lands in the router retry's running
+ * attempt marks that attempt a Connect's: the longer tail, the side that keeps the page's
+ * result up. The reverse, the router retry's order landing in a Connect's attempt, does not
+ * happen with today's page: the retry waits while the page asks for its list, and the page
+ * holds a Connect until it has asked for 8 s (WP4's C8 replaces this bookkeeping). Every
+ * CONNECT_STA writes the mark again, so a stale one never outlives the next attempt. */
+#define AP_TAIL_AUTO_EMPTY_MS    500      // an automatic rejoin with no station on the SoftAP
+#define AP_TAIL_AUTO_MS          20000    // an automatic rejoin with a station: at the latest ...
+#define AP_TAIL_AUTO_LEFT_MS     10000    // ... or this long after the last station left
+#define AP_TAIL_SUBMIT_MS        60000    // a setup-page Connect: at the latest ...
+#define AP_TAIL_SUBMIT_LEFT_MS   15000    // ... or this long after the last station left,
+#define AP_TAIL_SUBMIT_MIN_MS    15000    //     never sooner than this after the IP
+#define AP_TAIL_BACKSTOP_MS      75000    // still up this long after the IP: wifi_task stops it
+
+static volatile bool s_attempt_submit = false;   // the tracked attempt is the page's Connect; wifi_manager task only
+static volatile TickType_t s_ip_tick = 0;        // the STA's last IP (forced non-zero), 0 = none since a loss; wifi_manager task only
+static volatile bool s_tail_submit = false;      // that IP's tail follows the page's Connect; wifi_manager task only
+static volatile uint32_t s_tail_cap_ms = 0;      // its first stop, ms after the IP; 0 = the SoftAP was down then; wifi_manager task only
+static TickType_t s_ap_stop_seen = 0;            // the IP whose SoftAP stop was printed; wifi_manager task only
+
+// The SoftAP is up: the Wi-Fi mode has the AP in it (a fact, read from the driver; false when it
+// cannot say).
+static bool softap_up(void)
+{
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    return esp_wifi_get_mode(&mode) == ESP_OK && (mode == WIFI_MODE_APSTA || mode == WIFI_MODE_AP);
+}
+
+// The stations on the SoftAP now (the driver's list, a fact), -1 when the driver cannot say. In a
+// frame of its own: the list is about 0.2 KB.
+static __attribute__((noinline)) int ap_station_count(void)
+{
+    wifi_sta_list_t list;
+    return (esp_wifi_ap_get_sta_list(&list) == ESP_OK) ? list.num : -1;
+}
+
+// cb_connection_ok() (wifi_manager task), at each IP: the tail's kind and first stop (see above),
+// with the SoftAP up. wifi_manager's GOT_IP has just armed its own default stop (60 s) if its
+// AP_STARTED bit was set; this one replaces it, from the mode itself. A count the driver cannot
+// give counts as a station: the longer tail.
+static void ap_tail_start(void)
+{
+    bool submit = s_attempt_submit;
+    uint32_t cap_ms = 0;
+    int stations = 0;
+    if (softap_up())
+    {
+        stations = ap_station_count();
+        cap_ms = submit ? AP_TAIL_SUBMIT_MS : (stations != 0) ? AP_TAIL_AUTO_MS : AP_TAIL_AUTO_EMPTY_MS;
+    }
+    TickType_t now = xTaskGetTickCount();
+    s_tail_submit = submit;
+    s_tail_cap_ms = cap_ms;
+    s_ip_tick = (now != 0) ? now : 1;   // last: wifi_task reads it first
+    if (cap_ms == 0)
+        return;
+    (void)wifi_manager_ap_stop_in(cap_ms);   // a failure prints its own line; the backstop stays
+    if (submit)
+        ESP_LOGI(WIFI_TAG, "SoftAP tail after a setup-page Connect (stations on it: %d) - it stops %d s after the IP, or %d s after the last station leaves (not before %d s)",
+                 stations, AP_TAIL_SUBMIT_MS / 1000, AP_TAIL_SUBMIT_LEFT_MS / 1000, AP_TAIL_SUBMIT_MIN_MS / 1000);
+    else if (stations != 0)
+        ESP_LOGI(WIFI_TAG, "SoftAP tail after an automatic rejoin (stations on it: %d) - it stops %d s after the IP, or %d s after the last station leaves",
+                 stations, AP_TAIL_AUTO_MS / 1000, AP_TAIL_AUTO_LEFT_MS / 1000);
+    else
+        ESP_LOGI(WIFI_TAG, "SoftAP tail after an automatic rejoin (no station on it) - it stops %d.%d s after the IP",
+                 AP_TAIL_AUTO_EMPTY_MS / 1000, (AP_TAIL_AUTO_EMPTY_MS % 1000) / 100);
+}
+
 /* ---- Wi-Fi channels (the G0 bench baseline) -------------------------------------------------
  * The radio's channel at each SoftAP start, STA IP and STA link loss, with the router's: whether
  * the router-fallback SoftAP follows the router's channel (plan section 4.5), and which channel a
@@ -474,12 +572,22 @@ static void cb_ap_started(void *pvParameter)
                  radio_channel(), (unsigned)wifi_settings.ap_channel, scan_note());
 }
 
-// WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected. This
-// is where Wi-Fi setup ends the window: about 60 s after the IP, from wifi_manager's own timer,
-// or from the safety net below.
+// WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected, once
+// the SoftAP and its servers are stopped: at the stop the SoftAP's tail set, or from its
+// backstop (see there). This is where Wi-Fi setup ends the window. Idempotent: a second STOP_AP
+// for the same IP (the backstop's after the timer's, or the other way round) finds the SoftAP
+// down already, and its call prints and closes nothing more.
 static void cb_ap_stopped(void *pvParameter)
 {
     (void)pvParameter;
+    TickType_t ip = s_ip_tick;
+    if (ip != 0 && ip != s_ap_stop_seen)
+    {
+        s_ap_stop_seen = ip;
+        uint32_t ms = (uint32_t)(xTaskGetTickCount() - ip) * portTICK_PERIOD_MS;
+        ESP_LOGI(WIFI_TAG, "SoftAP stopped (its servers too) %lu.%lu s after the IP",
+                 (unsigned long)(ms / 1000), (unsigned long)((ms % 1000) / 100));
+    }
     portal_priority_close("AP stopped");
 }
 
@@ -500,6 +608,7 @@ static void cb_connect_sta(void *pvParameter)
     s_attempt_tick = (now != 0) ? now : 1;   // 0 means "no attempt yet"
     s_attempt_in_flight = true;
     s_connect_submit = false;
+    s_attempt_submit = !retry;   // the SoftAP tail's kind, if this attempt gets the IP (see there)
     if (s_portal_priority)
         return;
     if (!retry && page_open(now))
@@ -611,28 +720,6 @@ static void cb_disconnect_sta(void *pvParameter)
         s_forget_pending = true;
     else
         forget_post();
-}
-
-/* Safety net, on wifi_task: the window is open, Wi-Fi was set up in it, and the setup AP has not
- * stopped PORTAL_AP_STOP_MARGIN_MS past WIFI_MANAGER_SHUTDOWN_AP_TIMER. wifi_manager starts no
- * AP-shutdown timer if its AP_STARTED bit was clear at the IP, and its xTimerStart() does not
- * wait for room in the timer queue. Sends the STOP_AP once per GOT_IP tick (*stop_sent_for,
- * wifi_task's own). On the wifi_manager task it stops the AP if the STA is connected, and
- * cb_ap_stopped() closes the window; if the STA is not, its disconnect reaches
- * cb_connection_lost(), which closes the window or clears the tick. Nothing is written here:
- * every window write stays on the wifi_manager task. */
-static void portal_priority_net(TickType_t *stop_sent_for)
-{
-    TickType_t setup = s_setup_ok_tick;
-    if (setup == 0 || setup == *stop_sent_for || !s_portal_priority)
-        return;
-    TickType_t elapsed = xTaskGetTickCount() - setup;
-    if (elapsed <= pdMS_TO_TICKS(WIFI_MANAGER_SHUTDOWN_AP_TIMER + PORTAL_AP_STOP_MARGIN_MS))
-        return;
-    *stop_sent_for = setup;
-    ESP_LOGW(WIFI_TAG, "portal priority: setup AP still up %u s after Wi-Fi connected - stopping it",
-             (unsigned)(elapsed / configTICK_RATE_HZ));
-    wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
 }
 
 /* ---- Portal client log (the G0 bench baseline) --------------------------------------------
@@ -941,15 +1028,18 @@ void cb_connection_ok(void *pvParameter)
     // Wi-Fi is set up, but the portal priority window stays open until the setup AP stops
     // (cb_ap_stopped()): the phone that submitted the credentials is still on the SoftAP and
     // loads the portal's success status from it. Only the time of this IP is kept, for
-    // cb_connection_lost() and the safety net. Nothing when the window is not open (a router
-    // reconnect, or a boot with saved credentials).
+    // cb_connection_lost(). Nothing when the window is not open (a router reconnect, or a boot
+    // with saved credentials). The line gives the tail's cap (60 s); the tail's own line follows.
     if (s_portal_priority)
     {
         TickType_t now = xTaskGetTickCount();
         s_setup_ok_tick = (now != 0) ? now : 1;   // 0 means "no setup in this window"
         ESP_LOGI(WIFI_TAG, "portal priority: Wi-Fi connected - BLE scanning stays paused until the setup AP stops (about %d s)",
-                 WIFI_MANAGER_SHUTDOWN_AP_TIMER / 1000);
+                 AP_TAIL_SUBMIT_MS / 1000);
     }
+
+    // The SoftAP's tail, with the SoftAP up (see there): its kind and its first stop.
+    ap_tail_start();
 
     // BLE is not started here, and never waits for Wi-Fi: iothub_task starts it at boot
     // from the provisioned device set, together with leak protection.
@@ -976,6 +1066,14 @@ void cb_connection_lost(void *pvParameter)
     if (s_sta_connected)
         ESP_LOGI(WIFI_TAG, "Wi-Fi channel at link loss: radio %u, router was on %u%s",
                  radio_channel(), (unsigned)s_router_channel, scan_note());
+
+    // No IP any more: no SoftAP tail and no backstop (a SoftAP that is up stays up, as a
+    // router-fallback portal). The attempt's mark ends with it, except for the synthetic
+    // disconnect of a CONNECT_STA that did not start: the attempt that order met may still be
+    // running (see the SoftAP's tail above).
+    s_ip_tick = 0;
+    if (reason != WIFI_REASON_CONNECTION_FAIL)
+        s_attempt_submit = false;
 
     // The link was lost, or a connect attempt ended, and its radio hold with it (the deadline stays
     // for RADIO_HOLD_GAP_MS). The router retry counts from here too: this disconnect may have armed
@@ -1025,7 +1123,8 @@ void cb_connection_lost(void *pvParameter)
     iothub_on_wifi_lost();
 }
 
-// wifi_task's own state for the Wi-Fi radio hold's log lines and the router retry.
+// wifi_task's own state for the Wi-Fi radio hold's log lines, the router retry and the SoftAP's
+// tail.
 typedef struct
 {
     bool hold_on;            // a hold's ON line is printed, its OFF line not yet
@@ -1038,6 +1137,10 @@ typedef struct
     bool retry_pending;      // that retry is sent and wifi_manager has not taken it yet
     unsigned retries;        // router retries sent since the fallback began
     bool defer_logged;       // the "retry deferred" line is printed for the page open now
+    TickType_t tail_ip;      // the IP (s_ip_tick) whose SoftAP tail is followed, 0 = none
+    TickType_t tail_stop;    // that tail's stop as last set, in ticks after the IP
+    TickType_t tail_empty;   // ticks after the IP when the SoftAP was first seen with no station, 0 = one on it
+    TickType_t backstop_for; // the IP the backstop sent its STOP_AP for
 } wifi_task_state_t;
 
 // Prints each Wi-Fi radio hold's start and end as wifi_task sees them. It looks on every pass,
@@ -1174,6 +1277,78 @@ static void router_retry(wifi_task_state_t *st)
     wifi_manager_connect_async();
 }
 
+// The SoftAP's tail (see there), on every wifi_task pass: one a second while a tail is followed.
+// Moves the stop by the stations on the SoftAP, and sends the backstop's STOP_AP. Writes only its
+// own state: the stop goes through wifi_manager_ap_stop_in() (never waits), the backstop's order
+// through wifi_manager's queue, as the router retry's does.
+static void ap_tail_maintain(wifi_task_state_t *st)
+{
+    TickType_t ip = s_ip_tick;   // first: the rest of this IP's tail is written before it
+    if (ip == 0 || !s_sta_connected || !softap_up())
+    {
+        st->tail_ip = 0;
+        return;
+    }
+    TickType_t since = xTaskGetTickCount() - ip;
+
+    // The backstop, once per IP. wifi_manager stops the SoftAP only with the STA connected. In the
+    // portal window it prints the window's old safety-net line.
+    if (since >= pdMS_TO_TICKS(AP_TAIL_BACKSTOP_MS))
+    {
+        if (st->backstop_for != ip)
+        {
+            st->backstop_for = ip;
+            unsigned s = (unsigned)(since / configTICK_RATE_HZ);
+            if (s_portal_priority)
+                ESP_LOGW(WIFI_TAG, "portal priority: setup AP still up %u s after Wi-Fi connected - stopping it", s);
+            else
+                ESP_LOGW(WIFI_TAG, "SoftAP still up %u s after Wi-Fi connected - stopping it", s);
+            wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
+        }
+        return;
+    }
+
+    uint32_t cap_ms = s_tail_cap_ms;
+    if (cap_ms == 0)
+        return;   // the SoftAP was down at the IP and came up later: the backstop only
+    TickType_t cap = (TickType_t)(cap_ms / portTICK_PERIOD_MS);
+    if (st->tail_ip != ip)
+    {
+        st->tail_ip = ip;
+        st->tail_stop = cap;   // as ap_tail_start() set it
+        st->tail_empty = 0;
+    }
+    int stations = ap_station_count();
+    if (stations < 0)
+        return;   // the driver cannot say: the next pass decides
+
+    // The stop: the cap, or sooner once no station is left (never before the Connect's minimum).
+    TickType_t stop = cap;
+    if (stations > 0)
+        st->tail_empty = 0;
+    else
+    {
+        if (st->tail_empty == 0)
+            st->tail_empty = (since != 0) ? since : 1;
+        TickType_t by_left = st->tail_empty +
+                             (s_tail_submit ? pdMS_TO_TICKS(AP_TAIL_SUBMIT_LEFT_MS) : pdMS_TO_TICKS(AP_TAIL_AUTO_LEFT_MS));
+        if (s_tail_submit && by_left < pdMS_TO_TICKS(AP_TAIL_SUBMIT_MIN_MS))
+            by_left = pdMS_TO_TICKS(AP_TAIL_SUBMIT_MIN_MS);
+        if (by_left < stop)
+            stop = by_left;
+    }
+    if (stop == st->tail_stop)
+        return;
+    TickType_t in = (stop > since) ? stop - since : 0;
+    if (!wifi_manager_ap_stop_in((uint32_t)in * portTICK_PERIOD_MS))
+        return;   // tried again on the next pass
+    st->tail_stop = stop;
+    uint32_t stop_ms = (uint32_t)stop * portTICK_PERIOD_MS;
+    ESP_LOGI(WIFI_TAG, "SoftAP tail: %s - it stops %lu.%lu s after the IP",
+             (stations > 0) ? "a station on it again" : "no station left on it",
+             (unsigned long)(stop_ms / 1000), (unsigned long)((stop_ms % 1000) / 100));
+}
+
 void wifi_task(void *pvParameter)
 {
     (void)pvParameter;
@@ -1183,17 +1358,17 @@ void wifi_task(void *pvParameter)
     // lock, which the loop holds while it runs wifi_manager's handler, and that handler can block
     // posting to the wifi_manager task. The wifi_manager task creates the default loop, so a first
     // try can find none (ESP_ERR_INVALID_STATE, silent): retried every second until each is in.
-    // Each pass also runs the portal priority window's safety net (portal_priority_net()), the
-    // router retry (router_retry()) and the Wi-Fi radio hold's log (radio_hold_log()): every
-    // second while the STA is down or a hold's OFF line or a page chain's last line is still due,
-    // else every 5 s.
+    // Each pass also runs the SoftAP's tail and its backstop (ap_tail_maintain()), the router
+    // retry (router_retry()) and the Wi-Fi radio hold's log (radio_hold_log()): every second while
+    // the STA is down, a tail is followed, or a hold's OFF line or a page chain's last line is
+    // still due, else every 5 s.
     bool ap_log_on = false;
     bool lease_log_on = false;
-    TickType_t stop_sent_for = 0;   // the GOT_IP tick the net already sent a STOP_AP for
     wifi_task_state_t st = { 0 };
     while (1)
     {
-        bool fast = !ap_log_on || !lease_log_on || !s_sta_connected || st.hold_on || st.page_on;
+        bool fast = !ap_log_on || !lease_log_on || !s_sta_connected || st.hold_on || st.page_on ||
+                    st.tail_ip != 0;
         vTaskDelay(pdMS_TO_TICKS(fast ? 1000 : 5000));
         if (!ap_log_on)
             ap_log_on = (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
@@ -1201,7 +1376,7 @@ void wifi_task(void *pvParameter)
         if (!lease_log_on)
             lease_log_on = (esp_event_handler_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED,
                                                        &ap_lease_event_handler, NULL) == ESP_OK);
-        portal_priority_net(&stop_sent_for);
+        ap_tail_maintain(&st);
         router_retry(&st);
         radio_hold_log(&st);
     }
