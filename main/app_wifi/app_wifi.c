@@ -585,9 +585,17 @@ static void cb_ap_started(void *pvParameter)
 // backstop (see there). This is where Wi-Fi setup ends the window. Idempotent: a second STOP_AP
 // for the same IP (the backstop's after the timer's, or the other way round) finds the SoftAP
 // down already, and its call prints and closes nothing more.
+// Parameter 1: wifi_manager could not leave APSTA mode (its E line says why), so the SoftAP and
+// its servers stay up and it tries the stop again in 5 s. The window closes all the same: this
+// is when the tail meant it to, and BLE must never stay paused while the hub is on Wi-Fi, which
+// a mode switch that keeps failing would otherwise do for good. No "SoftAP stopped" line.
 static void cb_ap_stopped(void *pvParameter)
 {
-    (void)pvParameter;
+    if ((uintptr_t)pvParameter != 0)
+    {
+        portal_priority_close("SoftAP stop failed");
+        return;
+    }
     TickType_t ip = s_ip_tick;
     if (ip != 0 && ip != s_ap_stop_seen)
     {

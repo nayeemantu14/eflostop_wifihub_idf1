@@ -1688,14 +1688,18 @@ void wifi_manager( void * pvParameters ){
 					 * the stop went on to take its DNS, its HTTP server and its network list away
 					 * (plan I11 broken, nothing repaired it), and the app's cloud admission, which
 					 * admits no TLS while the AP is up, waited for good. Now the AP keeps all of
-					 * them, the callback is not called (the AP is not stopped), and the stop is
-					 * tried again WIFI_MANAGER_STOP_AP_RETRY_MS later through the shutdown timer,
-					 * which a lost link stops (the AP then stays up, as after any lost link) */
+					 * them, and the stop is tried again WIFI_MANAGER_STOP_AP_RETRY_MS later through
+					 * the shutdown timer, which a lost link stops (the AP then stays up, as after
+					 * any lost link). The callback is told, with parameter 1 (the AP is not
+					 * stopped): the app ends what waited only for this moment (its portal window,
+					 * which pauses BLE leak scanning), as it did when the result was ignored, so a
+					 * switch that keeps failing cannot hold it with the STA connected */
 					esp_err_t stop_err = esp_wifi_set_mode(WIFI_MODE_STA);
 					if(stop_err != ESP_OK){
 						ESP_LOGE(TAG, "ORDER_STOP_AP: esp_wifi_set_mode failed (%s) - AP kept up, stopped again in %d s",
 								esp_err_to_name(stop_err), WIFI_MANAGER_STOP_AP_RETRY_MS / 1000);
 						xTimerChangePeriod( wifi_manager_shutdown_ap_timer, pdMS_TO_TICKS(WIFI_MANAGER_STOP_AP_RETRY_MS), (TickType_t)0 );
+						if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])((void*)(uintptr_t)1);
 						break;
 					}
 
