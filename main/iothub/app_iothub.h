@@ -60,9 +60,17 @@ void initialize_iothub(void);
 void iothub_on_wifi_connected(void);
 
 // Wi-Fi STA lost its link, or a connect attempt ended without one (the Wi-Fi manager's
-// callback; safe at any time). A flag, a count and a wake only: iothub_task stops MQTT on
-// its next pass and holds the cloud off until the next admission.
+// callback; safe at any time). A flag, a count and a wake only: iothub_task withdraws the
+// admission on its next pass, asks wifi_task to stop MQTT (iothub_mqtt_stop_service()) and
+// holds the cloud off until the next admission.
 void iothub_on_wifi_lost(void);
+
+// wifi_task only (app_wifi.c), on every pass and when woken: runs the MQTT client stop that
+// iothub_task asked for, if any, then wakes iothub_task. It can take as long as the stop:
+// about 1 s in a session, up to 5 s between esp-mqtt's reconnects, 10-30 s with a connect in
+// flight. Holds no lock of the app's meanwhile. Safe at any time, even before
+// initialize_iothub(); its first call records the caller as the task iothub_task wakes.
+void iothub_mqtt_stop_service(void);
 
 // Apply the provisioned device set to BLE: the valve target becomes the provisioned valve
 // (or none), and BLE starts when there is a valve or a BLE leak sensor to serve. The target

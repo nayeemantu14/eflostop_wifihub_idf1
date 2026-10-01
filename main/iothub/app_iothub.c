@@ -80,9 +80,10 @@ static volatile time_t s_sas_expiry     = 0;
 // starts the client while it is set - not the admission's own resume, not cloud_bringup(),
 // not sas_refresh() - and sas_maintain() does not even mint (2.1.4 WP2, plan I4).
 static volatile bool   s_mqtt_suspended = true;
-// Serialises client start/stop/reconfigure: mqtt_stop_for()/mqtt_resume() and
-// sas_refresh() run on iothub_task, esp-mqtt's own events on its task; the mutex keeps a
-// stop/set_config/start sequence whole so g_mqtt_running never lies.
+// Serialises client start/reconfigure: mqtt_resume() and sas_refresh() run on iothub_task;
+// the mutex keeps a stop/set_config/start sequence whole so g_mqtt_running never lies. Not
+// taken for the stop at a link loss or a SoftAP start: wifi_task runs that one
+// (mqtt_stop_request()), with no lock of the app's held.
 // Statically allocated so creation cannot fail — the alternative (bailing out of
 // iothub_task) would silently take leak evaluation and rules_engine_tick with it.
 // Initialised before mqtt_client, so a non-NULL mqtt_client implies a live mutex.
@@ -682,7 +683,7 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 // ---------------------------------------------------------------------------
 
 static void publish_twin_reported(void);   // forward declaration
-static void mark_mqtt_disconnected(void);  // forward declaration (used by mqtt_stop_for)
+static void mark_mqtt_disconnected(void);  // forward declaration (used by mqtt_stop_request)
 
 // Reject an "open the valve" request while the valve's RMLEAK latch is asserted
 // (valve locked after an auto-close). Forwarding the open anyway lets the valve
@@ -1683,7 +1684,7 @@ static void handle_twin_get_response(const char *data, int data_len)
 }
 
 // ---------------------------------------------------------------------------
-// MQTT stop / resume, on iothub_task only (cloud_admission())
+// MQTT stop / resume: iothub_task decides (cloud_admission()), wifi_task stops
 //
 // The esp-mqtt client auto-reconnects with TLS. If WiFi STA drops (e.g. a button
 // WiFi reset that brings up the SoftAP captive portal without rebooting), leaving
@@ -1697,24 +1698,81 @@ static void handle_twin_get_response(const char *data, int data_len)
 // as long as a TLS connect runs, and the resume at the IP started TLS beside the SoftAP
 // of the AP tail (E4: internal heap down to 152 B, 4 failed allocations). Now the
 // callbacks only set flags (iothub_on_wifi_connected() / _lost()), and iothub_task
-// stops, admits and resumes.
+// admits, withdraws and resumes.
+//
+// The stop itself runs on wifi_task (app_wifi.c), never on iothub_task, which evaluates the
+// leaks and commands the valve: leak protection never waits on the cloud (2.1.4, the user's
+// decision on ADM-3 / WP2-CONC-2). esp_mqtt_client_stop() holds its caller until the
+// client's task has ended. It first takes esp-mqtt's API lock, which that task holds through
+// a connect in flight (DNS, TCP, TLS and the CONNACK, each up to the 10 s network timeout),
+// sends a connected session's DISCONNECT, then waits for the task to leave its current wait:
+// up to 1 s in a session (its read poll), up to 5 s between reconnects (half the 10 s
+// reconnect timeout). wifi_task, which runs the router retry and the AP tail's checks, can
+// spare that once per outage. The hand-over, each variable with one writer:
+//   - iothub_task asks (mqtt_stop_request()): it clears g_mqtt_running, counts the request in
+//     s_mqtt_stop_req, marks MQTT disconnected (nothing more for the outbox the stop deletes)
+//     and wakes wifi_task. It alone writes those, creates mqtt_client and starts the client.
+//   - wifi_task stops the client (iothub_mqtt_stop_service(), at that wake and on every pass),
+//     then writes the request it served to s_mqtt_stop_done and wakes iothub_task.
+//   - A stop is under way while the two differ (mqtt_stop_pending()). Until it has ended,
+//     iothub_task starts nothing: the admission waits for it (cloud_admission()), and with it
+//     the resume, DPS and the SAS mint. A request follows only a start (g_mqtt_running), so
+//     at most one stop is under way, and a link loss during it is only counted.
+//   - wifi_task holds no lock of the app's while it waits, and esp-mqtt's API lock only inside
+//     esp_mqtt_client_stop(), for that DISCONNECT.
 // ---------------------------------------------------------------------------
+static volatile uint32_t     s_mqtt_stop_req  = 0;      // stops asked; iothub_task only
+static volatile uint32_t     s_mqtt_stop_done = 0;      // the last one served; wifi_task only
+static volatile TaskHandle_t s_mqtt_stopper   = NULL;   // wifi_task's handle; wifi_task only
+
+// wifi_task has a stop to run, or is running it.
+static bool mqtt_stop_pending(void)
+{
+    return s_mqtt_stop_req != s_mqtt_stop_done;
+}
+
+// iothub_task only, with the client started (g_mqtt_running). Never waits.
+static void mqtt_stop_request(void)
+{
+    g_mqtt_running = false;
+    s_mqtt_stop_req++;          // before the mark: MQTT_EVENT_CONNECTED reads it after its own
+    mark_mqtt_disconnected();   // stop() dispatches no event; clear the flags ourselves
+    TaskHandle_t stopper = s_mqtt_stopper;
+    if (stopper != NULL)
+        xTaskNotifyGive(stopper);   // else wifi_task's next pass, at most 5 s on
+}
+
 static void mqtt_stop_for(const char *why)
 {
     s_mqtt_suspended = true;   // also blocks sas_maintain() from restarting behind us
-    if (mqtt_client == NULL) return;
+    if (mqtt_client == NULL || !g_mqtt_running) return;
 
-    xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
-    if (g_mqtt_running) {
-        // "WiFi down" prints the line it always printed, byte for byte.
-        ESP_LOGW(IOTHUB_TAG, "%s — stopping MQTT client (free TLS heap for AP/captive portal)", why);
-        esp_mqtt_client_stop(mqtt_client);
-        g_mqtt_running = false;
-        mark_mqtt_disconnected();   // stop() dispatches no event; clear the flags ourselves
-    }
-    xSemaphoreGive(s_mqtt_ctl_mutex);
+    // "WiFi down" prints the line it always printed, byte for byte, as the stop is asked.
+    ESP_LOGW(IOTHUB_TAG, "%s — stopping MQTT client (free TLS heap for AP/captive portal)", why);
+    mqtt_stop_request();
 }
 
+// wifi_task (see above): every pass, and at mqtt_stop_request()'s wake.
+void iothub_mqtt_stop_service(void)
+{
+    if (s_mqtt_stopper == NULL)
+        s_mqtt_stopper = xTaskGetCurrentTaskHandle();
+    uint32_t req = s_mqtt_stop_req;
+    if (req == s_mqtt_stop_done)
+        return;
+    int64_t t0 = esp_timer_get_time();
+    esp_mqtt_client_stop(mqtt_client);   // a request implies a client, and it is never cleared
+    // A connect that ended as the stop was asked may have marked MQTT connected again
+    // (MQTT_EVENT_CONNECTED); the client's task has ended now, so this mark stays.
+    if (telemetry_v2_is_connected())
+        mark_mqtt_disconnected();
+    unsigned long ms = (unsigned long)((esp_timer_get_time() - t0) / 1000);
+    ESP_LOGI(IOTHUB_TAG, "MQTT client stopped on wifi_task in %lu.%lu s", ms / 1000, (ms % 1000) / 100);
+    s_mqtt_stop_done = req;          // last: iothub_task may start the client from here on
+    telemetry_v2_wake_snapshot();    // its next pass, not its 1 s poll
+}
+
+// iothub_task only, from the admission, which has waited for the last stop to end.
 static void mqtt_resume(void)
 {
     s_mqtt_suspended = false;
@@ -2075,6 +2133,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(IOTHUB_TAG, "Connected to Azure IoT Hub!");
+        // A connect that ended as iothub_task asked wifi_task to stop this client: the
+        // session ends with that stop, which deletes its outbox. Not marked connected, so
+        // iothub_task hands it nothing (events go to the offline buffer), and no SUBSCRIBE.
+        if (mqtt_stop_pending())
+            break;
         g_iot_hub_connected = true;
         telemetry_v2_set_connected(true);
         net_status_set_mqtt(true);   // status LED -> fully connected (ramp blue)
@@ -2107,6 +2170,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
                 esp_mqtt_client_disconnect(mqtt_client);
             }
         }
+        // The stop asked while this ran (iothub_task counts the request before it marks MQTT
+        // disconnected, and this reads it after marking): undone here, and again by wifi_task
+        // once the stop has ended (iothub_mqtt_stop_service()).
+        if (mqtt_stop_pending())
+            mark_mqtt_disconnected();
         break;
 
     case MQTT_EVENT_SUBSCRIBED:
@@ -2287,8 +2355,11 @@ static void initialize_sntp(void)
 // ADMIT_AP_STOP_MAX_MS at most (W), then the heap gate decides.
 // Once admitted, the gate is not checked again (the session's own heap would fail it):
 // esp-mqtt's reconnects and the SAS renewal run as before, with the SoftAP down. A link loss,
-// or a SoftAP start with the STA still connected, withdraws the admission: MQTT stops at once
-// (mqtt_stop_for()), and s_mqtt_suspended keeps every start off until the next admission.
+// or a SoftAP start with the STA still connected, withdraws the admission: MQTT's stop is
+// asked at once (mqtt_stop_for(); wifi_task runs it), and s_mqtt_suspended keeps every start
+// off until the next admission. That admission also waits until the stop has ended
+// (mqtt_stop_pending()): no start races a stop in flight, and the heap gate then reads the
+// stopped session's memory as back.
 // A normal boot with Wi-Fi saved has no SoftAP and about 44 KB of internal DMA-capable heap
 // free before TLS (G0 run B), so it is admitted on the pass that sees the IP: its cloud comes
 // up as fast as before.
@@ -2316,6 +2387,7 @@ typedef enum {
     ADMIT_NO_IP = 0,   // no STA IP, nothing to admit
     ADMIT_IP,          // an IP this task has not decided on yet
     ADMIT_WAIT_AP,     // deferred: the SoftAP is up
+    ADMIT_WAIT_STOP,   // deferred: wifi_task has not finished the MQTT client's last stop
     ADMIT_AP_SETTLE,   // deferred: the SoftAP's stop is under way or just finished (ADMIT_AP_SETTLE_MS)
     ADMIT_WAIT_HEAP,   // deferred: the heap gate
     ADMIT_DONE,        // admitted
@@ -2401,6 +2473,15 @@ static void cloud_admission(void)
     }
     if (s_admit_state == ADMIT_DONE)
         return;
+    // The MQTT client's last stop (wifi_task: about 1 s in a session, up to 5 s between
+    // esp-mqtt's reconnects, 10-30 s with a connect in flight) has ended first. Its end wakes
+    // this task (iothub_mqtt_stop_service()); the heap gate's clock does not run meanwhile.
+    if (mqtt_stop_pending()) {
+        if (s_admit_state != ADMIT_WAIT_STOP)
+            ESP_LOGI(IOTHUB_TAG, "cloud admission deferred: the last MQTT stop is still under way");
+        s_admit_state = ADMIT_WAIT_STOP;
+        return;
+    }
     // The SoftAP's stop (ADMIT_AP_SETTLE_MS), read after the mode, on every pass until the heap
     // gate has the IP: also on the first look at it, which may come while STOP_AP, past its mode
     // switch, still frees the servers. A boot with no SoftAP, or a stop long finished, passes.
@@ -2669,8 +2750,8 @@ static esp_err_t cloud_bringup(void)
     esp_mqtt_client_config_t mqtt_cfg;
     build_mqtt_cfg(&mqtt_cfg, sas_token);
 
-    // Must be live before mqtt_client is published: stop/resume gate on a non-NULL
-    // mqtt_client and then take this mutex unconditionally.
+    // Must be live before mqtt_client is published: the resume and the SAS refresh gate on a
+    // non-NULL mqtt_client and then take this mutex unconditionally.
     if (s_mqtt_ctl_mutex == NULL) {
         s_mqtt_ctl_mutex = xSemaphoreCreateMutexStatic(&s_mqtt_ctl_mutex_buf);
     }
@@ -3340,9 +3421,10 @@ void iothub_task(void *param)
         char *auto_close_json = rules_engine_take_pending_telemetry();
 
         // ---- Connection maintenance ----
-        // Deliberately AFTER Phase 2: both can block this task (esp_mqtt_client_stop()
-        // waits on the mqtt task, and DPS registration runs a whole MQTT session), and
-        // leak evaluation must never queue behind that within an iteration.
+        // Deliberately AFTER Phase 2: a live DPS registration runs a whole MQTT session on
+        // this task, and the SAS renewal stops the client here (esp_mqtt_client_stop()
+        // waits on the mqtt task), and leak evaluation must never queue behind that within
+        // an iteration. The stop at a link loss or a SoftAP start runs on wifi_task.
         net_maintain();   // SNTP start on the first Wi-Fi IP; first-sync watch
         dps_maintain();   // no cloud yet? keep trying, without stalling the loop
         sas_maintain();   // mint on first valid clock, then renew before expiry

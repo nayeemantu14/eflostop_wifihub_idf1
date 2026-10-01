@@ -1133,10 +1133,11 @@ void cb_connection_lost(void *pvParameter)
     // inside net_status so a later reconnect shows "connecting" first.
     net_status_set_wifi(false);
 
-    // Tell iothub_task: a flag, a count and a wake (2.1.4 WP2). It stops the MQTT client on
-    // its next pass, so it doesn't thrash TLS handshakes (fragmenting the heap the SoftAP
-    // captive portal needs) while STA is down / in AP mode. This task no longer waits on
-    // the MQTT control mutex and esp_mqtt_client_stop() here.
+    // Tell iothub_task: a flag, a count and a wake (2.1.4 WP2). Its next pass withdraws the
+    // cloud admission and asks wifi_task to stop the MQTT client, so it doesn't thrash TLS
+    // handshakes (fragmenting the heap the SoftAP captive portal needs) while STA is down /
+    // in AP mode. This task no longer waits on the MQTT control mutex and
+    // esp_mqtt_client_stop() here.
     iothub_on_wifi_lost();
 }
 
@@ -1381,6 +1382,13 @@ void wifi_task(void *pvParameter)
     // retry (router_retry()) and the Wi-Fi radio hold's log (radio_hold_log()): every second while
     // the STA is down, a tail is followed, or a hold's OFF line or a page chain's last line is
     // still due, else every 5 s.
+    // First on each pass, the MQTT client's stop when iothub_task has asked for one (2.1.4: a
+    // link loss, a SoftAP start). iothub_task evaluates the leaks, so it never
+    // waits in esp_mqtt_client_stop(); this task can: about 1 s in a session, up to 5 s
+    // between esp-mqtt's reconnects, 10-30 s with a connect in flight, once per outage
+    // (iothub_mqtt_stop_service()). First, so it never falls between a router retry's hold and
+    // its order. iothub_task's ask wakes the pass (a task notification); every other wake is
+    // harmless, as each step reads its own facts and ticks.
     bool ap_log_on = false;
     bool lease_log_on = false;
     wifi_task_state_t st = { 0 };
@@ -1388,7 +1396,8 @@ void wifi_task(void *pvParameter)
     {
         bool fast = !ap_log_on || !lease_log_on || !s_sta_connected || st.hold_on || st.page_on ||
                     st.tail_ip != 0;
-        vTaskDelay(pdMS_TO_TICKS(fast ? 1000 : 5000));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(fast ? 1000 : 5000));
+        iothub_mqtt_stop_service();
         if (!ap_log_on)
             ap_log_on = (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
                                                     &ap_station_event_handler, NULL) == ESP_OK);
