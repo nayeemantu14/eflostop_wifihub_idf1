@@ -58,6 +58,8 @@ extern "C" {
  *
  * To save memory and avoid nasty out of memory errors,
  * we can limit the number of APs detected in a wifi scan.
+ *
+ * LOCAL PATCH (2.1.4 C2b): the list keeps the MAX_AP_NUM strongest networks of a scan.
  */
 #define MAX_AP_NUM 							15
 
@@ -297,16 +299,15 @@ void wifi_manager_start();
 void wifi_manager_destroy();
 
 /**
- * Filters the AP scan list to unique SSIDs
- */
-void filter_unique( wifi_ap_record_t * aplist, uint16_t * ap_num);
-
-/**
  * Main task for the wifi_manager
  */
 void wifi_manager( void * pvParameters );
 
 
+/**
+ * @brief the network list's JSON. LOCAL PATCH (2.1.4 C2b): NULL while the AP is down (it exists
+ * from START_AP to STOP_AP). Read it under wifi_manager_lock_json_buffer().
+ */
 char* wifi_manager_get_ap_list_json();
 char* wifi_manager_get_ip_info_json();
 
@@ -377,13 +378,8 @@ void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code)
 void wifi_manager_clear_ip_info_json();
 
 /**
- * @brief Generates the list of access points after a wifi scan.
- * @note This is not thread-safe and should be called only if wifi_manager_lock_json_buffer call is successful.
- */
-void wifi_manager_generate_acess_points_json();
-
-/**
- * @brief Clear the list of access points.
+ * @brief Clear the list of access points (LOCAL PATCH 2.1.4 C2b: nothing while the AP is down).
+ * The list itself is rebuilt inside wifi_manager.c after each scan.
  * @note This is not thread-safe and should be called only if wifi_manager_lock_json_buffer call is successful.
  */
 void wifi_manager_clear_access_points_json();

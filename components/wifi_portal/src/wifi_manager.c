@@ -76,11 +76,16 @@ TimerHandle_t wifi_manager_shutdown_ap_timer = NULL;
 SemaphoreHandle_t wifi_manager_json_mutex = NULL;
 SemaphoreHandle_t wifi_manager_sta_ip_mutex = NULL;
 char *wifi_manager_sta_ip = NULL;
-uint16_t ap_num = MAX_AP_NUM;
-wifi_ap_record_t *accessp_records;
+/* LOCAL PATCH (2.1.4 C2b): the network list's JSON exists only while the AP is up (the page is its
+ * only reader): allocated at START_AP, freed at STOP_AP, NULL otherwise. The scan's records are read
+ * one at a time onto the stack (wifi_manager_read_ap_records()): the MAX_AP_NUM wifi_ap_record_t
+ * array the list was built from (1,380 B of heap, for good) is gone. */
 char *accessp_json = NULL;
 /* the size of accessp_json (LOCAL PATCH 2.1.4 C2e: one constant for the allocation and the bounds) */
 #define ACCESSP_JSON_SIZE	(MAX_AP_NUM * JSON_ONE_APP_SIZE + 4) /* 4 bytes for json encapsulation of "[\n" and "]\0" */
+/* START_AP sets it, STOP_AP clears it: the list should exist (a failed allocation is retried at the
+ * next SCAN_DONE). wifi_manager task only. */
+static bool ap_list_wanted = false;
 char *ip_info_json = NULL;
 wifi_config_t* wifi_manager_config_sta = NULL;
 
@@ -195,9 +200,6 @@ void wifi_manager_start(){
 	 * 5 more 8-byte slots: +40 B of heap. */
 	wifi_manager_queue = xQueueCreate( 8, sizeof( queue_message) );
 	wifi_manager_json_mutex = xSemaphoreCreateMutex();
-	accessp_records = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * MAX_AP_NUM);
-	accessp_json = (char*)malloc(ACCESSP_JSON_SIZE);
-	wifi_manager_clear_access_points_json();
 	ip_info_json = (char*)malloc(sizeof(char) * JSON_IP_INFO_SIZE);
 	wifi_manager_clear_ip_info_json();
 	wifi_manager_config_sta = (wifi_config_t*)malloc(sizeof(wifi_config_t));
@@ -472,8 +474,28 @@ void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code)
 
 
 void wifi_manager_clear_access_points_json(){
-	strcpy(accessp_json, "[]\n");
+	/* LOCAL PATCH (2.1.4 C2b): no list while the AP is down */
+	if(accessp_json){
+		strcpy(accessp_json, "[]\n");
+	}
 }
+
+/**
+ * LOCAL PATCH (2.1.4 C2b): one network of the list, as the page needs it: 35 bytes on the stack,
+ * where the wifi_ap_record_t the list was built from took 92 bytes of heap.
+ */
+typedef struct {
+	uint8_t ssid[MAX_SSID_SIZE];	/* zero-padded; no terminator when 32 bytes long */
+	uint8_t chan;
+	int8_t rssi;
+	uint8_t auth;					/* wifi_auth_mode_t */
+} wifi_manager_ap_t;
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C2b): the most records one scan's list is read for; the driver frees
+ * the rest (esp_wifi_clear_ap_list()). The driver keeps them strongest first.
+ */
+#define WIFI_MANAGER_SCAN_RECORDS_MAX		64
 
 /**
  * LOCAL PATCH (2.1.4 C2e): appends one access point to the list, which is len bytes long, never
@@ -510,7 +532,11 @@ static bool wifi_manager_ap_json_entry(size_t *len, size_t limit, const uint8_t 
 	return true;
 }
 
-void wifi_manager_generate_acess_points_json(){
+/**
+ * @brief Generates the list of access points from count compact entries. Returns how many did not
+ * fit. Called under the json lock, with accessp_json allocated.
+ */
+static unsigned wifi_manager_generate_acess_points_json(const wifi_manager_ap_t *aps, uint16_t count){
 
 	/* LOCAL PATCH (2.1.4 C2e): built with bounds (an SSID of control characters overran the buffer,
 	 * N4). An entry that does not fit is left out, and the list stays valid JSON: "[" and the
@@ -520,11 +546,11 @@ void wifi_manager_generate_acess_points_json(){
 	unsigned left_out = 0;
 
 	accessp_json[len++] = '[';
-	for(int i=0; i<ap_num;i++){
+	for(int i=0; i<count;i++){
 
-		wifi_ap_record_t *ap = &accessp_records[i];
+		const wifi_manager_ap_t *ap = &aps[i];
 
-		if(!wifi_manager_ap_json_entry(&len, limit, ap->ssid, ap->primary, ap->rssi, (int)ap->authmode)){
+		if(!wifi_manager_ap_json_entry(&len, limit, ap->ssid, ap->chan, ap->rssi, ap->auth)){
 			left_out++;
 		}
 	}
@@ -532,10 +558,126 @@ void wifi_manager_generate_acess_points_json(){
 	accessp_json[len++] = '\n';
 	accessp_json[len] = '\0';
 
-	if(left_out){
-		ESP_LOGW(TAG, "network list: %u access points left out (list buffer full)", left_out);
+	return left_out;
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C2b, C2 (b)): reads the last scan's records and rebuilds the network
+ * list. Called on a successful SCAN_DONE while the list exists.
+ *
+ * The records are read from the driver one at a time (esp_wifi_scan_get_ap_record()) into a
+ * compact array on this task's stack, keeping the MAX_AP_NUM strongest named networks: one entry
+ * per SSID and auth mode, at its strongest access point's RSSI and channel (a hidden network, with
+ * no SSID, is left out as before), strongest first. esp_wifi_clear_ap_list() then frees what the
+ * driver still holds. A read that fails (it never aborts, where esp_wifi_scan_get_ap_records()
+ * under ESP_ERROR_CHECK rebooted the hub) keeps the list as it was. Only the rebuild takes the
+ * json lock. In a frame of its own, about 0.7 KB, given back before the SCAN_DONE callback runs.
+ */
+static __attribute__((noinline)) void wifi_manager_read_ap_records(){
+
+	wifi_manager_ap_t aps[MAX_AP_NUM];
+	wifi_ap_record_t rec;
+	uint16_t count = 0;
+	esp_err_t err = ESP_OK;
+
+	for(int i=0; i<WIFI_MANAGER_SCAN_RECORDS_MAX; i++){
+
+		/* ESP_FAIL: no record left */
+		err = esp_wifi_scan_get_ap_record(&rec);
+		if(err != ESP_OK){
+			break;
+		}
+
+		uint8_t ssid[MAX_SSID_SIZE] = { 0 };
+		size_t ssid_len = strnlen((const char*)rec.ssid, MAX_SSID_SIZE);
+		if(ssid_len == 0){
+			continue;
+		}
+		memcpy(ssid, rec.ssid, ssid_len);
+
+		/* the same SSID and auth mode: one network, at its strongest access point */
+		int k;
+		for(k=0; k<count; k++){
+			if(aps[k].auth == (uint8_t)rec.authmode && memcmp(aps[k].ssid, ssid, MAX_SSID_SIZE) == 0){
+				break;
+			}
+		}
+		if(k < count){
+			if(rec.rssi > aps[k].rssi){
+				aps[k].rssi = rec.rssi;
+				aps[k].chan = rec.primary;
+			}
+			continue;
+		}
+
+		/* a new network: in a free entry, else in place of the weakest if it is stronger */
+		if(count < MAX_AP_NUM){
+			k = count++;
+		}
+		else{
+			k = 0;
+			for(int j=1; j<count; j++){
+				if(aps[j].rssi < aps[k].rssi){
+					k = j;
+				}
+			}
+			if(rec.rssi <= aps[k].rssi){
+				continue;
+			}
+		}
+		memcpy(aps[k].ssid, ssid, MAX_SSID_SIZE);
+		aps[k].chan = rec.primary;
+		aps[k].rssi = rec.rssi;
+		aps[k].auth = (uint8_t)rec.authmode;
 	}
 
+	/* frees the records not read, or all of them after an error */
+	esp_wifi_clear_ap_list();
+
+	if(err != ESP_OK && err != ESP_FAIL){
+		ESP_LOGW(TAG, "esp_wifi_scan_get_ap_record failed (%s) - network list kept", esp_err_to_name(err));
+		return;
+	}
+
+	/* strongest first */
+	for(int i=1; i<count; i++){
+		wifi_manager_ap_t ap = aps[i];
+		int j = i;
+		while(j > 0 && aps[j-1].rssi < ap.rssi){
+			aps[j] = aps[j-1];
+			j--;
+		}
+		aps[j] = ap;
+	}
+
+	/* make sure the http server isn't trying to access the list while it gets refreshed */
+	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(1000) )){
+		unsigned left_out = wifi_manager_generate_acess_points_json(aps, count);
+		wifi_manager_unlock_json_buffer();
+		if(left_out){
+			ESP_LOGW(TAG, "network list: %u access points left out (list buffer full)", left_out);
+		}
+	}
+	else{
+		ESP_LOGE(TAG, "could not get access to json mutex in wifi_scan");
+	}
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C2b): allocates the network list (START_AP, or a SCAN_DONE after a
+ * failed allocation while the AP is up). wifi_manager task only.
+ */
+static void wifi_manager_alloc_ap_list(){
+
+	if(accessp_json != NULL || !wifi_manager_lock_json_buffer( portMAX_DELAY )){
+		return;
+	}
+	accessp_json = (char*)malloc(ACCESSP_JSON_SIZE);
+	wifi_manager_clear_access_points_json();
+	wifi_manager_unlock_json_buffer();
+	if(accessp_json == NULL){
+		ESP_LOGW(TAG, "network list: no memory for its %u B - the page lists no network yet", (unsigned)ACCESSP_JSON_SIZE);
+	}
 }
 
 
@@ -838,8 +980,6 @@ void wifi_manager_destroy(){
 	task_wifi_manager = NULL;
 
 	/* heap buffers */
-	free(accessp_records);
-	accessp_records = NULL;
 	free(accessp_json);
 	accessp_json = NULL;
 	free(ip_info_json);
@@ -862,58 +1002,6 @@ void wifi_manager_destroy(){
 	wifi_manager_queue = NULL;
 
 
-}
-
-
-void wifi_manager_filter_unique( wifi_ap_record_t * aplist, uint16_t * aps) {
-	int total_unique;
-	wifi_ap_record_t * first_free;
-	total_unique=*aps;
-
-	first_free=NULL;
-
-	for(int i=0; i<*aps-1;i++) {
-		wifi_ap_record_t * ap = &aplist[i];
-
-		/* skip the previously removed APs */
-		if (ap->ssid[0] == 0) continue;
-
-		/* remove the identical SSID+authmodes */
-		for(int j=i+1; j<*aps;j++) {
-			wifi_ap_record_t * ap1 = &aplist[j];
-			if ( (strcmp((const char *)ap->ssid, (const char *)ap1->ssid)==0) && 
-			     (ap->authmode == ap1->authmode) ) { /* same SSID, different auth mode is skipped */
-				/* save the rssi for the display */
-				if ((ap1->rssi) > (ap->rssi)) ap->rssi=ap1->rssi;
-				/* clearing the record */
-				memset(ap1,0, sizeof(wifi_ap_record_t));
-			}
-		}
-	}
-	/* reorder the list so APs follow each other in the list */
-	for(int i=0; i<*aps;i++) {
-		wifi_ap_record_t * ap = &aplist[i];
-		/* skipping all that has no name */
-		if (ap->ssid[0] == 0) {
-			/* mark the first free slot */
-			if (first_free==NULL) first_free=ap;
-			total_unique--;
-			continue;
-		}
-		if (first_free!=NULL) {
-			memcpy(first_free, ap, sizeof(wifi_ap_record_t));
-			memset(ap,0, sizeof(wifi_ap_record_t));
-			/* find the next free slot */
-			for(int j=0; j<*aps;j++) {
-				if (aplist[j].ssid[0]==0) {
-					first_free=&aplist[j];
-					break;
-				}
-			}
-		}
-	}
-	/* update the length of the list */
-	*aps = total_unique;
 }
 
 
@@ -1046,22 +1134,18 @@ void wifi_manager( void * pvParameters ){
 			case WM_EVENT_SCAN_DONE:{
 				/* LOCAL PATCH (2.1.4 C2a): the parameter is the scan's status (0 = success), not a pointer */
 				uint32_t scan_status = (uint32_t)(uintptr_t)msg.param;
-				/* only check for AP if the scan is succesful */
-				if(scan_status == 0){
-					/* As input param, it stores max AP number ap_records can hold. As output param, it receives the actual AP number this API returns.
-					* As a consequence, ap_num MUST be reset to MAX_AP_NUM at every scan */
-					ap_num = MAX_AP_NUM;
-					ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_num, accessp_records));
-					/* make sure the http server isn't trying to access the list while it gets refreshed */
-					if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(1000) )){
-						/* Will remove the duplicate SSIDs from the list and update ap_num */
-						wifi_manager_filter_unique(accessp_records, &ap_num);
-						wifi_manager_generate_acess_points_json();
-						wifi_manager_unlock_json_buffer();
-					}
-					else{
-						ESP_LOGE(TAG, "could not get access to json mutex in wifi_scan");
-					}
+				/* LOCAL PATCH (2.1.4 C2b, C2 (b)): a list that failed to allocate at START_AP is tried
+				 * again while the AP is up */
+				if(ap_list_wanted){
+					wifi_manager_alloc_ap_list();
+				}
+				/* only check for AP if the scan is succesful, and while there is a list to build */
+				if(scan_status == 0 && accessp_json != NULL){
+					wifi_manager_read_ap_records();
+				}
+				else{
+					/* a failed scan, or no list: free whatever the driver keeps of it */
+					esp_wifi_clear_ap_list();
 				}
 
 				/* callback */
@@ -1289,6 +1373,10 @@ void wifi_manager( void * pvParameters ){
 
 				ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
+				/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up */
+				ap_list_wanted = true;
+				wifi_manager_alloc_ap_list();
+
 				/* restart HTTP daemon */
 				http_app_stop();
 				http_app_start(true);
@@ -1321,6 +1409,14 @@ void wifi_manager( void * pvParameters ){
 					/* restart HTTP daemon */
 					http_app_stop();
 					http_app_start(false);
+
+					/* LOCAL PATCH (2.1.4 C2b): the network list goes with the AP (+1,489 B of heap) */
+					ap_list_wanted = false;
+					if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
+						free(accessp_json);
+						accessp_json = NULL;
+						wifi_manager_unlock_json_buffer();
+					}
 
 					/* callback */
 					if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);

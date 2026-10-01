@@ -359,7 +359,11 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				httpd_resp_set_type(req, http_content_type_json);
 				httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_cache);
 				httpd_resp_set_hdr(req, http_pragma_hdr, http_pragma_no_cache);
-				char* ap_buf = wifi_manager_get_ap_list_json();
+				/* LOCAL PATCH (2.1.4 C2b): no list while the AP is down: an empty one */
+				const char* ap_buf = wifi_manager_get_ap_list_json();
+				if(ap_buf == NULL){
+					ap_buf = "[]\n";
+				}
 				httpd_resp_send(req, ap_buf, strlen(ap_buf));
 				wifi_manager_unlock_json_buffer();
 			}
