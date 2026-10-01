@@ -107,6 +107,9 @@ static bool ap_servers_down = false;
 static TickType_t ap_servers_tick = 0;
 #define WIFI_MANAGER_AP_SERVERS_RETRY_MS	5000
 #define WIFI_MANAGER_AP_SERVER_STACK		4096
+/* LOCAL PATCH (2.1.4 WP2): a STOP_AP whose switch to STA mode failed is tried again this much
+ * later, through the AP-shutdown timer (see WM_ORDER_STOP_AP) */
+#define WIFI_MANAGER_STOP_AP_RETRY_MS		5000
 /* LOCAL PATCH (2.1.4 WP1, a bench diagnostic): a scan this task started is in flight, from the
  * esp_wifi_scan_start() that succeeded to this task's WM_EVENT_SCAN_DONE (done, failed or
  * stopped); the radio then visits every channel (wifi_manager_scan_in_flight()). Not cleared at a
@@ -1677,8 +1680,21 @@ void wifi_manager( void * pvParameters ){
 				 */
 				if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
 
-					/* set to STA only */
-					esp_wifi_set_mode(WIFI_MODE_STA);
+					/* set to STA only
+					 * LOCAL PATCH (2.1.4 WP2): checked. A switch that fails leaves the AP up, and
+					 * the stop went on to take its DNS, its HTTP server and its network list away
+					 * (plan I11 broken, nothing repaired it), and the app's cloud admission, which
+					 * admits no TLS while the AP is up, waited for good. Now the AP keeps all of
+					 * them, the callback is not called (the AP is not stopped), and the stop is
+					 * tried again WIFI_MANAGER_STOP_AP_RETRY_MS later through the shutdown timer,
+					 * which a lost link stops (the AP then stays up, as after any lost link) */
+					esp_err_t stop_err = esp_wifi_set_mode(WIFI_MODE_STA);
+					if(stop_err != ESP_OK){
+						ESP_LOGE(TAG, "ORDER_STOP_AP: esp_wifi_set_mode failed (%s) - AP kept up, stopped again in %d s",
+								esp_err_to_name(stop_err), WIFI_MANAGER_STOP_AP_RETRY_MS / 1000);
+						xTimerChangePeriod( wifi_manager_shutdown_ap_timer, pdMS_TO_TICKS(WIFI_MANAGER_STOP_AP_RETRY_MS), (TickType_t)0 );
+						break;
+					}
 
 					/* stop DNS
 					 * LOCAL PATCH (2.1.4 C4): waits up to 1 s for its task to close its socket */
