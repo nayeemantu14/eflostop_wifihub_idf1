@@ -663,17 +663,17 @@ void telemetry_v2_clear_settings(void)
 
 // ---- Lifecycle ------------------------------------------------------------
 
-void telemetry_v2_publish_lifecycle(void)
+bool telemetry_v2_publish_lifecycle(void)
 {
     cJSON *root = build_envelope("lifecycle");
-    if (!root) return;
+    if (!root) return false;
 
     // Every object here is created already attached ("data" is the last root key anyway),
     // so a failed attach cannot leave a detached subtree to leak. Key order is unchanged.
     cJSON *data = cJSON_AddObjectToObject(root, "data");
     if (!data) {
         drop_unbuilt(root, "lifecycle");
-        return;
+        return false;
     }
     cJSON_AddStringToObject(data, "event", "online");
     cJSON_AddStringToObject(data, "reset_reason", reset_reason_str());
@@ -702,7 +702,7 @@ void telemetry_v2_publish_lifecycle(void)
         }
     }
 
-    publish_json(root, "lifecycle");
+    return publish_json(root, "lifecycle");
 }
 
 // ---- Snapshot -------------------------------------------------------------

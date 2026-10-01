@@ -118,8 +118,13 @@ void telemetry_v2_start_snapshot_timer(void);
 // (offline_buffer_stamp_presync()), or at the latest from telemetry_v2_drain_offline().
 // ---------------------------------------------------------------------------
 
-/** Publish type="lifecycle" birth message (online, reset_reason, config). */
-void telemetry_v2_publish_lifecycle(void);
+/**
+ * Publish type="lifecycle" birth message (online, reset_reason, config).
+ * @return true ONLY if it reached esp-mqtt (online, msg_id >= 0); false if it was
+ *         refused (the outbox full: -2), dropped offline, or not built. iothub_task
+ *         publishes it again while connected until true (2.1.4 WP2).
+ */
+bool telemetry_v2_publish_lifecycle(void);
 
 /**
  * @brief Publish type="snapshot" with all current device + sensor state.

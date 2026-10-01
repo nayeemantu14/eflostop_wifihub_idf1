@@ -121,6 +121,12 @@ static bool g_needs_lifecycle = false;
 // iothub_task only; see REPLAY_RETRY_MS).
 static int64_t s_replay_retry_ms = 0;
 
+// The lifecycle of this connection has not reached esp-mqtt yet (refused for room): sent
+// again while connected, every LIFECYCLE_RETRY_MS, until it does. iothub_task only.
+#define LIFECYCLE_RETRY_MS 5000
+static bool    s_lifecycle_owed     = false;
+static int64_t s_lifecycle_retry_ms = 0;
+
 // Full-decommission reboot: set by handle_c2d_command ('decommission all', which
 // runs in the esp-mqtt event task) and consumed by iothub_task, which publishes a
 // final snapshot of the cleared state and reboots. The publish MUST happen in
@@ -3089,8 +3095,9 @@ void iothub_task(void *param)
         // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
-        // A replay owed while connected (REPLAY_RETRY_MS) also polls at 2 s.
-        bool replay_pending = mqtt_up && telemetry_v2_replay_owed();
+        // A replay or a lifecycle owed while connected (REPLAY_RETRY_MS, LIFECYCLE_RETRY_MS)
+        // also polls at 2 s.
+        bool replay_pending = mqtt_up && (telemetry_v2_replay_owed() || s_lifecycle_owed);
         int64_t base = admit_pending ? 1000 :
                        (commission_pending || cloud_pending || s_ble_apply_owed ||
                         g_devset_changed || replay_pending ||
@@ -3296,21 +3303,36 @@ void iothub_task(void *param)
         // transition, by on_hub_emptied().
 
         // ---- Lifecycle on first connect / reconnect ----
+        // Once per CONNECTED: every (re)connect, esp-mqtt's own reconnects included, raises
+        // g_needs_lifecycle, so a lifecycle lost with its session is sent again by the next
+        // one (E4: the 234 s lifecycle expired from the outbox across two failed handshakes,
+        // and the 269 s connect's reached IoT Hub). One that esp-mqtt did not take at all
+        // (refused for room, MQTT_OUTBOX_LIMIT_BYTES) is owed until it does, while connected:
+        // never a second copy on a connect whose first was taken.
         if (g_needs_lifecycle) {
             g_needs_lifecycle = false;
             telemetry_v2_drain_offline();   // Replay buffered events before lifecycle
-            telemetry_v2_publish_lifecycle();
+            s_lifecycle_owed = !telemetry_v2_publish_lifecycle();
+            s_lifecycle_retry_ms = snap_now_ms() + LIFECYCLE_RETRY_MS;
+            if (s_lifecycle_owed)
+                ESP_LOGW(IOTHUB_TAG, "Lifecycle not taken by MQTT - sent again every %d s while connected",
+                         LIFECYCLE_RETRY_MS / 1000);
             publish_twin_reported();        // Update Device Twin reported properties
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
             g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
             g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
-        } else if (telemetry_v2_is_connected() && telemetry_v2_replay_owed() &&
-                   snap_now_ms() >= s_replay_retry_ms) {
-            // Events the outbox refused for room while connected, or the rest of a drain
-            // cut short, wait in the offline buffer: replayed now, at most every
-            // REPLAY_RETRY_MS, not only at the next connect (MQTT_OUTBOX_LIMIT_BYTES).
-            s_replay_retry_ms = snap_now_ms() + REPLAY_RETRY_MS;
-            telemetry_v2_drain_offline();
+        } else if (telemetry_v2_is_connected()) {
+            if (telemetry_v2_replay_owed() && snap_now_ms() >= s_replay_retry_ms) {
+                // Events the outbox refused for room while connected, or the rest of a drain
+                // cut short, wait in the offline buffer: replayed now, at most every
+                // REPLAY_RETRY_MS, not only at the next connect (MQTT_OUTBOX_LIMIT_BYTES).
+                s_replay_retry_ms = snap_now_ms() + REPLAY_RETRY_MS;
+                telemetry_v2_drain_offline();
+            }
+            if (s_lifecycle_owed && snap_now_ms() >= s_lifecycle_retry_ms) {
+                s_lifecycle_retry_ms = snap_now_ms() + LIFECYCLE_RETRY_MS;
+                s_lifecycle_owed = !telemetry_v2_publish_lifecycle();
+            }
         }
 
         // NOTE: the rules-engine events (auto_close, rmleak_*) are held in
