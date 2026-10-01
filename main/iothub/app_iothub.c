@@ -149,7 +149,7 @@ static volatile bool g_decommission_reboot = false;
 static volatile bool g_devset_changed = false;
 
 // The C2D device-set changes, counted (2.1.4 WP2c, R1-3): incremented on the esp-mqtt task
-// just before each C2D raise of g_devset_changed (devset_changed_c2d()), its only writer. A
+// just after each C2D raise of g_devset_changed (devset_changed_c2d()), its only writer. A
 // snapshot carries the count its pass saw at the loop top; cloud_tx drops it as stale when a
 // change has landed since, so the next build shows the reconciled table (E-10) rather than a
 // removed device after its ack.
@@ -331,6 +331,8 @@ static struct {
 #define SNAP_RES_OK      1u   // esp-mqtt took it (msg_id >= 0)
 #define SNAP_RES_FAILED  2u   // refused, or the session not up: the 5 s retry floor
 #define SNAP_RES_STALE   3u   // its session or the device set changed first: built again
+#define SNAP_RES_OK_LATE 4u   // took it, but the device set changed during the write: as OK,
+                              // and the reconciled one is built at once (cloud_tx_snapshot())
 static volatile uint32_t s_snap_result = 0;
 
 // A snapshot item's tag: the session it was built for (16 bits), the C2D device-set sequence
@@ -1266,7 +1268,7 @@ static void snap_result_take(void)
     uint32_t res = (r >> 8) & 0xFFu;
     s_fl.out = false;
 
-    if (res == SNAP_RES_OK) {
+    if (res == SNAP_RES_OK || res == SNAP_RES_OK_LATE) {
         s_snap_last_pub_ms = s_fl.flush_now;
         // This snapshot already carries the rating changes sampled before its build. One seen
         // during the flight was requested again (s_snap_next): not marked as published.
@@ -1314,6 +1316,20 @@ static void snap_result_take(void)
         s_snap_next.set = false;
         snap_request(SNAP_EVENT, s_snap_next.tier, s_snap_next.evt);
     }
+
+    // Published as it is, but a C2D device-set change landed while its write waited for
+    // esp-mqtt's API lock, which the C2D handler holds while it acks: it may have gone out
+    // after that ack, with the set from before it (E-10). Its bookkeeping is done (it is this
+    // connect's boot snapshot, if it was one); the reconciled table goes out next, at once
+    // rather than at the min interval. The flush still waits for the reconcile (devset_unseen).
+    if (res == SNAP_RES_OK_LATE) {
+        ESP_LOGW(IOTHUB_TAG, "SNAP published while the device set changed - the reconciled one follows now");
+        s_snap_due_ms = snap_now_ms();
+        s_snap_reason = SNAP_EVENT;
+        s_snap_tier   = SNAP_TIER_HIGH;
+        if (s_snap_evt[0] == '\0')
+            snprintf(s_snap_evt, sizeof(s_snap_evt), "%s", "devset_changed");
+    }
 }
 
 // Build one rules-engine event taken from rules_engine_take_pending_telemetry(), hand it to
@@ -1332,13 +1348,17 @@ static void publish_rules_telemetry(char *rules_json)
     free(rules_json);
 }
 
-// esp-mqtt task: a C2D handler changed the device set (D0). The count first (s_devset_seq):
-// a snapshot whose pass read it before this change is stale at cloud_tx, so none built before
-// the reconcile goes out after this command's ack (E-10, R1-3).
+// esp-mqtt task: a C2D handler changed the device set (D0). The flag first, then the count
+// (s_devset_seq), both volatile, so stored in this order; iothub_task reads them the other way
+// round. A pass that reads the new count then also finds the flag raised (or consumed by a pass
+// that applied this change), so it never builds from the table before the reconcile under the
+// new count; a pass that read the old count builds a snapshot that cloud_tx finds stale, and it
+// is built again. So none built before the reconcile goes out after this command's ack, short
+// of the wait for esp-mqtt's API lock (cloud_tx_snapshot(); E-10, R1-3).
 static void devset_changed_c2d(void)
 {
-    s_devset_seq++;
     g_devset_changed = true;
+    s_devset_seq++;
 }
 
 static void handle_c2d_command(const char *data, size_t data_len)
@@ -3328,7 +3348,7 @@ static void cloud_tx_lifecycle(const telem_tx_item_t *it)
         return;
     if (gen == s_tx_gen_seen)
         s_tx_lc_tried_gen = gen;        // ends the hold
-    if (pub_begin_for(gen) && telemetry_v2_tx_publish(it->json, "lifecycle") >= 0) {
+    if (pub_begin_for(gen) && telemetry_v2_tx_publish(it->json, "lifecycle", NULL, 0) >= 0) {
         s_tx_lc_taken_gen = gen;
         s_lifecycle_owed  = false;
         return;
@@ -3415,22 +3435,39 @@ static bool cloud_tx_session_work(uint32_t *gen_out)
     return true;
 }
 
+// A snapshot built for the session it is still in, with no C2D device-set change landed since
+// its pass read the count (tag: SNAP_TAG()). cloud_tx.
+static bool snap_current(uint32_t tag)
+{
+    return SNAP_TAG_GEN(tag) == (telemetry_v2_session_gen() & 0xFFFFu) &&
+           SNAP_TAG_DEVSET(tag) == (s_devset_seq & 0xFFu);
+}
+
 // A snapshot (the FIFO). Published only into the session it was built for, and only if no C2D
 // device-set change has landed since its pass read the count: otherwise stale, and iothub_task
-// builds it again from the reconciled table (E-10, R1-3). Not up: failed, as a snapshot dropped
-// offline was (the 5 s floor). The result goes back to iothub_task (snap_result_take()), except
+// builds it again from the reconciled table (E-10, R1-3). Checked before its "Pub" line, and
+// again after it, right before the write (telemetry_v2_tx_publish()). A change that lands while
+// the write waits for esp-mqtt's API lock - held by the C2D handler, which acks inside it - can
+// still let this go out after the ack; read again after the publish, it reports the result late,
+// and iothub_task publishes the reconciled table at once (snap_result_take()). Not up: failed, as
+// a snapshot dropped offline was (the 5 s floor). The result goes back to iothub_task, except
 // for the decommission's, which nothing waits for.
 static void cloud_tx_snapshot(const telem_tx_item_t *it)
 {
     bool final = (it->flags & TELEM_TX_FINAL) != 0;
     uint32_t res = SNAP_RES_FAILED;
     if (iothub_pub_begin()) {
-        if (!final && (SNAP_TAG_GEN(it->tag) != (telemetry_v2_session_gen() & 0xFFFFu) ||
-                       SNAP_TAG_DEVSET(it->tag) != (s_devset_seq & 0xFFu))) {
+        if (!final && !snap_current(it->tag)) {
             iothub_pub_end(NULL, 0, 0);
             res = SNAP_RES_STALE;
-        } else if (telemetry_v2_tx_publish(it->json, "snapshot") >= 0) {
-            res = SNAP_RES_OK;
+        } else {
+            int msg_id = telemetry_v2_tx_publish(it->json, "snapshot",
+                                                 final ? NULL : snap_current, it->tag);
+            if (msg_id == TELEM_TX_NOT_CURRENT)
+                res = SNAP_RES_STALE;
+            else if (msg_id >= 0)
+                res = (SNAP_TAG_DEVSET(it->tag) == (s_devset_seq & 0xFFu)) ? SNAP_RES_OK
+                                                                            : SNAP_RES_OK_LATE;
         }
     }
     if (final)

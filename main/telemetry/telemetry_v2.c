@@ -204,9 +204,20 @@ static bool build_str(cJSON *root, telem_msg_t *out)
 // The "Pub" line, the publish and its "failed" line. gated: the caller holds the publish gate
 // (iothub_pub_begin(), app_iothub.c), given back right after the publish, so that an MQTT stop
 // waiting for it (wifi_task) waits for this one write, and none of the lines after it.
-static int publish_logged(const char *json_str, const char *type_hint, bool gated)
+// current (cloud_tx's snapshot; NULL otherwise): asked again after the line, right before the
+// write. A C2D device-set change can land while a full-hub snapshot's line prints (about 0.9 s)
+// and ack first; that snapshot, built before it, is then not sent (E-10, R1-3).
+static int publish_logged(const char *json_str, const char *type_hint, bool gated,
+                          telem_tx_current_fn current, uint32_t tag)
 {
     ESP_LOGI(TELEM_TAG, "Pub %s: %s", type_hint, json_str);
+    if (current != NULL && !current(tag)) {
+        if (gated)
+            iothub_pub_end(NULL, 0, 0);
+        ESP_LOGW(TELEM_TAG, "Pub %s not sent - the device set or session changed during its line; built again",
+                 type_hint);
+        return TELEM_TX_NOT_CURRENT;
+    }
     int64_t t0 = esp_timer_get_time();
     int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
     if (gated)
@@ -297,7 +308,7 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
     if (online && !behind) {
         // Online: publish directly
         uint32_t pub_gen = telemetry_v2_session_gen();   // the session it is handed to (A-1)
-        int msg_id = publish_logged(json_str, type_hint, gated);
+        int msg_id = publish_logged(json_str, type_hint, gated, NULL, 0);
         sent = (msg_id >= 0);
         // -2: refused for room (the outbox limit, app_iothub.c build_mqtt_cfg()), nothing
         // queued. An event is kept for the replay rather than lost; cloud_tx replays it
@@ -1628,9 +1639,10 @@ void telemetry_v2_tx_send_event(const telem_tx_item_t *it, uint32_t gen)
     (void)send_str(&m, "event", &gen);
 }
 
-int telemetry_v2_tx_publish(const char *json, const char *type_hint)
+int telemetry_v2_tx_publish(const char *json, const char *type_hint,
+                            telem_tx_current_fn current, uint32_t tag)
 {
-    return publish_logged(json, type_hint, true);
+    return publish_logged(json, type_hint, true, current, tag);
 }
 
 void telemetry_v2_tx_freeze(void)

@@ -389,12 +389,25 @@ bool telemetry_v2_tx_health_admit(size_t *free_b, size_t *largest);
  */
 void telemetry_v2_tx_send_event(const telem_tx_item_t *it, uint32_t gen);
 
+/** cloud_tx: whether a message is still the one to send (a snapshot: its session and its
+ *  device set, app_iothub.c), given the item's tag. */
+typedef bool (*telem_tx_current_fn)(uint32_t tag);
+
+/** telemetry_v2_tx_publish()'s answer when `current` said no after the "Pub" line: nothing
+ *  was published. Never an esp-mqtt msg_id (those are >= -2). */
+#define TELEM_TX_NOT_CURRENT  (-100)
+
 /**
  * @brief cloud_tx: publishes json (a snapshot, the lifecycle) with the "Pub" line and its
  *        "failed" line. The caller holds the publish gate (iothub_pub_begin()); this gives it
  *        back right after the publish. The msg_id: >= 0 = esp-mqtt took it.
+ *        `current` (NULL: none) is asked again after the "Pub" line, right before the write: a
+ *        full-hub snapshot's line holds the console for about 0.9 s. If it says no, nothing is
+ *        published, the gate is given back, a W line says so, and TELEM_TX_NOT_CURRENT is
+ *        returned.
  */
-int telemetry_v2_tx_publish(const char *json, const char *type_hint);
+int telemetry_v2_tx_publish(const char *json, const char *type_hint,
+                            telem_tx_current_fn current, uint32_t tag);
 
 /**
  * @brief iothub_task, at a decommission whose clear cloud_tx did not finish in time: from now
