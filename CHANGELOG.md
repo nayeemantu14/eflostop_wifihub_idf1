@@ -167,9 +167,9 @@ checkpoint 6 (HANDOFF §15h-§15m).
   - **A link loss stops MQTT from the hub's cloud task** (`iothub_task`) on its next pass, no longer from the
     Wi-Fi manager's task, and a SoftAP that comes up while the cloud is connected stops it too; the Wi-Fi
     callbacks only set flags. The stop can hold the cloud task, which also evaluates leaks, for about 1-5 s
-    (about 10-20 s if a connect was in flight): a leak is acted on that much later, never missed (HANDOFF §15i,
-    for the user's decision). WP2b (next entry) moves the stop itself to the Wi-Fi task: leak handling no
-    longer waits for it.
+    (about 10-20 s if a connect was in flight): a leak is acted on that much later, never missed (HANDOFF §15i;
+    decided by the user on 2026-10-01). WP2b (next entry) moves the stop itself to the Wi-Fi task: leak
+    handling no longer waits for it.
   - **DPS (first commissioning).** A registration in progress gives up within about 1 s when Wi-Fi is lost or
     the SoftAP comes up, and runs again as soon as the cloud is admitted again, with no back-off and no attempt
     counted.
@@ -237,7 +237,11 @@ checkpoint 6 (HANDOFF §15h-§15m).
     queue is not sent again until the next report (HANDOFF §15i).
 - **The MQTT stop no longer holds leak handling (WP2b; the user's decision of 2026-10-01 on WP2's stall).**
   Commits `fd682be` … `d0d5284` (`main/iothub`, `main/app_wifi`, `main/telemetry`, `main/offline_buffer`);
-  details in HANDOFF §15m, the bench check in §15k item 7.
+  details in HANDOFF §15m, the bench checks in §15k items 7 and 10. Reviewed and voted 3/3 SHIP by the council
+  (rtos, safety, cloud), with no firmware change asked; Build checkpoint 6 is of `d0d5284`. This closes WP2's
+  open decision on the stall (ADM-3, HANDOFF §15i). At CP6 the bench checks that, at a router pull, the cloud
+  task's next line follows `WiFi down — stopping MQTT client` within about 50 ms, and that a leak raised at the
+  pull closes the valve as fast as one raised with Wi-Fi up, while the Wi-Fi task may still be inside the stop.
   - **The stop at a link loss, a SoftAP start or a SAS renewal runs on the Wi-Fi helper task** (`wifi_task`),
     no longer on the cloud task (`iothub_task`), which evaluates leaks and commands the valve close: those never
     wait for it. The cloud task asks for the stop and goes on; the Wi-Fi task may be held about 1-5 s (10-30 s
