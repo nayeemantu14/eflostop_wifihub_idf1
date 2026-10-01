@@ -64,11 +64,21 @@ bool offline_buffer_store_presync(const char *json, size_t len);
  *        dropped (logged): its real time can never be known. Should the clock still be
  *        unsynced, the drain stops there and keeps it.
  *
- * @param client  MQTT client handle
- * @param topic   MQTT topic string
+ *        An entry is published only while still_up() says the MQTT session is up, and
+ *        erased only if it still says so after the publish. A session that ended mid-drain
+ *        (the link lost, a failed read on the esp-mqtt task) still takes a QoS 1 publish
+ *        into its outbox and returns a msg_id, but the stop at a link loss deletes that
+ *        outbox, and it expires after 30 s anyway: the drain stops there instead and keeps
+ *        that entry and the rest for the next connect's drain. One kept although it did
+ *        reach the broker is sent again then (a QoS 1 duplicate, never a loss).
+ *
+ * @param client    MQTT client handle
+ * @param topic     MQTT topic string
+ * @param still_up  true while the MQTT session is connected (telemetry_v2_is_connected)
  * @return Number of events published (0 on lock timeout)
  */
-int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic);
+int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic,
+                         bool (*still_up)(void));
 
 /**
  * @brief Stamp every pre-sync event stored this boot with its real time, in NVS, once the

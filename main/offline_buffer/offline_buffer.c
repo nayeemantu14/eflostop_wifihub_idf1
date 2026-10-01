@@ -350,7 +350,8 @@ static ob_replay_t ob_prepare_replay_locked(uint8_t slot, const char *key,
 }
 
 // Call with s_lock held and s_count > 0.
-static int drain_locked(esp_mqtt_client_handle_t client, const char *topic)
+static int drain_locked(esp_mqtt_client_handle_t client, const char *topic,
+                        bool (*still_up)(void))
 {
     ESP_LOGI(OB_TAG, "Draining %d buffered event(s)...", s_count);
 
@@ -380,7 +381,19 @@ static int drain_locked(esp_mqtt_client_handle_t client, const char *topic)
             ob_replay_t action = ob_prepare_replay_locked(s_tail, key, buf, &len, sizeof(buf));
             if (action == OB_REPLAY_HOLD) break;
             if (action == OB_REPLAY_PUBLISH) {
-                int msg_id = esp_mqtt_client_publish(client, topic, buf, (int)len, 1, 0);
+                // Only into a session still up, and erased only if it is still up after the
+                // publish (offline_buffer_drain() in the header): else this entry and the rest
+                // wait for the next connect's drain. A publish whose own write failed ended
+                // the session too, and keeps its line below.
+                bool up = still_up();
+                int msg_id = up ? esp_mqtt_client_publish(client, topic, buf, (int)len, 1, 0) : -1;
+                if (up && msg_id >= 0)
+                    up = still_up();
+                if (!up) {
+                    ESP_LOGW(OB_TAG, "MQTT session ended - drain stopped at [%s], kept for the next connect",
+                             key);
+                    break;
+                }
                 if (msg_id >= 0) {
                     published++;
                     ESP_LOGI(OB_TAG, "Replayed [%s] (%u bytes)", key, (unsigned)len);
@@ -412,16 +425,17 @@ static int drain_locked(esp_mqtt_client_handle_t client, const char *topic)
     return published;
 }
 
-int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic)
+int offline_buffer_drain(esp_mqtt_client_handle_t client, const char *topic,
+                         bool (*still_up)(void))
 {
-    if (!s_ready || !client || !topic) return 0;
+    if (!s_ready || !client || !topic || !still_up) return 0;
 
     // The lock is held across the replay publishes. A store() that arrives meanwhile
     // waits up to OB_LOCK_TIMEOUT_MS and is then dropped (logged), never interleaved.
     // Each publish takes esp-mqtt's API lock, so the esp-mqtt task, which holds that lock
     // in its event handler, stores only through offline_buffer_try_store().
     if (!ob_lock("drain")) return 0;
-    int published = (s_count > 0) ? drain_locked(client, topic) : 0;
+    int published = (s_count > 0) ? drain_locked(client, topic, still_up) : 0;
     ob_unlock();
     return published;
 }

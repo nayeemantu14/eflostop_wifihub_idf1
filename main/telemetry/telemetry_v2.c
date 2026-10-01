@@ -1291,10 +1291,11 @@ void telemetry_v2_drain_offline(void)
     if (pending == 0) return;
 
     ESP_LOGI(TELEM_TAG, "Draining %d offline event(s) before lifecycle...", pending);
-    int published = offline_buffer_drain(s_mqtt, s_topic);
+    int published = offline_buffer_drain(s_mqtt, s_topic, telemetry_v2_is_connected);
     ESP_LOGI(TELEM_TAG, "Offline drain complete: %d event(s) replayed", published);
     // Cut short with the client still connected (a publish refused: the outbox full): the
-    // rest is owed now, not at the next connect.
+    // rest is owed now, not at the next connect. Cut short by the session's end (the drain
+    // reads the connection at each entry): the next CONNECTED drains it.
     if (s_connected && offline_buffer_count() > 0)
         s_replay_owed = true;
 }
