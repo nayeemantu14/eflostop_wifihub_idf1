@@ -291,6 +291,11 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
         // dispatches DISCONNECTED on this task). The event is then buffered, not handed to a
         // client that a link loss may stop with it still in its outbox.
         online = s_connected;
+        // Then it is stored as offline, under the offline line, as before 2.1.4 WP2c: what
+        // is still buffered is the next connect's replay, not an outbox refusal (the store
+        // is the same, behind them).
+        if (!online)
+            behind = false;
     }
 
     // Published only under the gate, with the session up (connected, its stop not asked:
@@ -381,24 +386,43 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
     return sent;
 }
 
+// publish_json() on iothub_task: builds the event and hands it to cloud_tx. The event's name
+// (data.event) is read before the build frees root, so that the line saying it was lost, should
+// the FIFO be full, names it. Apart, and not inlined, so that its buffer is not on the esp-mqtt
+// task's stack, whose cmd_ack goes through publish_json() too.
+static __attribute__((noinline)) void post_event(cJSON *root, const char *type_hint)
+{
+    char what[48];
+    const char *ev = cJSON_GetStringValue(cJSON_GetObjectItemCaseSensitive(
+        cJSON_GetObjectItemCaseSensitive(root, "data"), "event"));
+    if (ev != NULL)
+        snprintf(what, sizeof(what), "%s %s", ev, type_hint);
+    else
+        snprintf(what, sizeof(what), "%s", type_hint);
+
+    telem_msg_t m;
+    if (!build_str(root, &m)) return;
+    telem_tx_item_t it = {
+        .json  = m.json,
+        .tag   = 0,
+        .kind  = TELEM_TX_EVENT,
+        .flags = m.presync ? TELEM_TX_PRESYNC : 0,
+    };
+    telemetry_v2_tx_post(&it, what);   // frees it if the FIFO is full
+}
+
 // Builds one event and sends it (build_str(), then send_str()), or, on iothub_task, hands it
 // to cloud_tx (2.1.4 WP2c, LS-1): iothub_task evaluates the leaks and commands the valve, and
 // never waits on the network. The event's ts, and whether it is pre-sync, are fixed here, at
 // the build. send_str()'s result; false on a NULL root, a message not built, or one handed on.
 static bool publish_json(cJSON *root, const char *type_hint)
 {
-    telem_msg_t m;
-    if (!build_str(root, &m)) return false;
     if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
-        telem_tx_item_t it = {
-            .json  = m.json,
-            .tag   = 0,
-            .kind  = TELEM_TX_EVENT,
-            .flags = m.presync ? TELEM_TX_PRESYNC : 0,
-        };
-        telemetry_v2_tx_post(&it, type_hint);   // frees it if the FIFO is full
+        post_event(root, type_hint);
         return false;
     }
+    telem_msg_t m;
+    if (!build_str(root, &m)) return false;
     bool sent = send_str(&m, type_hint, NULL);
     free(m.json);
     return sent;
@@ -1558,8 +1582,9 @@ bool telemetry_v2_tx_post(telem_tx_item_t *it, const char *what)
         telemetry_v2_tx_kick();
         return true;
     }
-    // Lost: at least 24 items inside one stall of cloud_tx's (WP2c section 2.3). An event's
-    // state still reaches the cloud in the next snapshot.
+    // Lost: 24 items queued inside one stall of cloud_tx's (WP2c section 2.3). Up to
+    // TX_HEALTH_MAX_QUEUED (16) of them can be health alerts, so as few as 8 leak, valve or
+    // rules events fill it. An event's state still reaches the cloud in the next snapshot.
     if (what)
         ESP_LOGE(TELEM_TAG, "TX queue full (%d) - %s not sent", TELEM_TX_FIFO_LEN, what);
     free(it->json);
