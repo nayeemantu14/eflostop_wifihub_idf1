@@ -110,6 +110,13 @@ static TickType_t ap_servers_tick = 0;
 /* LOCAL PATCH (2.1.4 WP2): a STOP_AP whose switch to STA mode failed is tried again this much
  * later, through the AP-shutdown timer (see WM_ORDER_STOP_AP) */
 #define WIFI_MANAGER_STOP_AP_RETRY_MS		5000
+/* LOCAL PATCH (2.1.4 WP2): the AP's stop, for wifi_manager_ap_stop_done(). ap_stop_busy is set
+ * just before STOP_AP's switch to STA mode and cleared once its DNS task, HTTP server and network
+ * list are gone (at once if the switch fails: the AP stays up); ap_stop_done_tick is when the last
+ * one finished (forced non-zero), 0 = none yet, written before ap_stop_busy is cleared.
+ * wifi_manager task only (read from any task) */
+static volatile bool ap_stop_busy = false;
+static volatile TickType_t ap_stop_done_tick = 0;
 /* LOCAL PATCH (2.1.4 WP1, a bench diagnostic): a scan this task started is in flight, from the
  * esp_wifi_scan_start() that succeeded to this task's WM_EVENT_SCAN_DONE (done, failed or
  * stopped); the radio then visits every channel (wifi_manager_scan_in_flight()). Not cleared at a
@@ -945,6 +952,22 @@ bool wifi_manager_scan_in_flight(){
 	return scan_in_flight;
 }
 
+bool wifi_manager_ap_stop_done(uint32_t *ms_since){
+
+	/* LOCAL PATCH (2.1.4 WP2): see wifi_manager.h. The flag first: the tick is written before
+	 * the flag is cleared */
+	if(ap_stop_busy){
+		return false;
+	}
+	if(ms_since){
+		TickType_t done = ap_stop_done_tick;
+		TickType_t ticks = xTaskGetTickCount() - done;
+		*ms_since = (done == 0 || ticks > UINT32_MAX / portTICK_PERIOD_MS) ? UINT32_MAX :
+				(uint32_t)ticks * portTICK_PERIOD_MS;
+	}
+	return true;
+}
+
 
 /**
  * @brief Standard wifi event handler
@@ -1693,9 +1716,14 @@ void wifi_manager( void * pvParameters ){
 					 * any lost link). The callback is told, with parameter 1 (the AP is not
 					 * stopped): the app ends what waited only for this moment (its portal window,
 					 * which pauses BLE leak scanning), as it did when the result was ignored, so a
-					 * switch that keeps failing cannot hold it with the STA connected */
+					 * switch that keeps failing cannot hold it with the STA connected.
+					 * LOCAL PATCH (2.1.4 WP2): the stop is under way from just before the switch
+					 * (ap_stop_busy), so a mode read as STA from here on finds it so until the
+					 * servers and the list below are freed (wifi_manager_ap_stop_done()) */
+					ap_stop_busy = true;
 					esp_err_t stop_err = esp_wifi_set_mode(WIFI_MODE_STA);
 					if(stop_err != ESP_OK){
+						ap_stop_busy = false;
 						ESP_LOGE(TAG, "ORDER_STOP_AP: esp_wifi_set_mode failed (%s) - AP kept up, stopped again in %d s",
 								esp_err_to_name(stop_err), WIFI_MANAGER_STOP_AP_RETRY_MS / 1000);
 						xTimerChangePeriod( wifi_manager_shutdown_ap_timer, pdMS_TO_TICKS(WIFI_MANAGER_STOP_AP_RETRY_MS), (TickType_t)0 );
@@ -1720,6 +1748,11 @@ void wifi_manager( void * pvParameters ){
 						accessp_json = NULL;
 						wifi_manager_unlock_json_buffer();
 					}
+
+					/* LOCAL PATCH (2.1.4 WP2): the stop has finished (wifi_manager_ap_stop_done()) */
+					TickType_t stop_done = xTaskGetTickCount();
+					ap_stop_done_tick = (stop_done != 0) ? stop_done : 1;
+					ap_stop_busy = false;
 
 					/* callback */
 					if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);

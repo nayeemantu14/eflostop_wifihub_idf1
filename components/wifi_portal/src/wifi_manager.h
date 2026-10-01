@@ -366,6 +366,18 @@ void wifi_manager_disconnect_async();
 bool wifi_manager_ap_stop_in(uint32_t ms);
 
 /**
+ * @brief LOCAL PATCH (2.1.4 WP2): the SoftAP's stop has finished, for the app's cloud admission
+ * (no TLS until the AP's memory is back, plan section 4.6). false while a STOP_AP is under way:
+ * from just before its switch to STA mode until its DNS task, HTTP server and network list are
+ * gone (the DNS stop waits up to 1 s, the HTTP stop until a running handler returns). true
+ * otherwise, with *ms_since (when not NULL) set to the time since the last STOP_AP finished,
+ * UINT32_MAX if none has (saturating). A STOP_AP whose switch fails clears it at once (the AP
+ * stays up, and the mode says so). Never waits, from any task. Read it after the mode: a mode
+ * read as STA during a stop then always finds the stop under way.
+ */
+bool wifi_manager_ap_stop_done(uint32_t *ms_since);
+
+/**
  * @brief Tries to get access to json buffer mutex.
  *
  * The HTTP server can try to access the json to serve clients while the wifi manager thread can try
