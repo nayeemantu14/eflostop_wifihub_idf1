@@ -1383,12 +1383,12 @@ void wifi_task(void *pvParameter)
     // the STA is down, a tail is followed, or a hold's OFF line or a page chain's last line is
     // still due, else every 5 s.
     // First on each pass, the MQTT client's stop when iothub_task has asked for one (2.1.4: a
-    // link loss, a SoftAP start). iothub_task evaluates the leaks, so it never
+    // link loss, a SoftAP start, a SAS renewal). iothub_task evaluates the leaks, so it never
     // waits in esp_mqtt_client_stop(); this task can: about 1 s in a session, up to 5 s
-    // between esp-mqtt's reconnects, 10-30 s with a connect in flight, once per outage
-    // (iothub_mqtt_stop_service()). First, so it never falls between a router retry's hold and
-    // its order. iothub_task's ask wakes the pass (a task notification); every other wake is
-    // harmless, as each step reads its own facts and ticks.
+    // between esp-mqtt's reconnects, 10-30 s with a connect in flight, once per outage or
+    // renewal (iothub_mqtt_stop_service()). First, so it never falls between a router retry's
+    // hold and its order. iothub_task's ask wakes the pass (a task notification); every other
+    // wake is harmless, as each step reads its own facts and ticks.
     bool ap_log_on = false;
     bool lease_log_on = false;
     wifi_task_state_t st = { 0 };

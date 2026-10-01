@@ -80,15 +80,9 @@ static volatile time_t s_sas_expiry     = 0;
 // starts the client while it is set - not the admission's own resume, not cloud_bringup(),
 // not sas_refresh() - and sas_maintain() does not even mint (2.1.4 WP2, plan I4).
 static volatile bool   s_mqtt_suspended = true;
-// Serialises client start/reconfigure: mqtt_resume() and sas_refresh() run on iothub_task;
-// the mutex keeps a stop/set_config/start sequence whole so g_mqtt_running never lies. Not
-// taken for the stop at a link loss or a SoftAP start: wifi_task runs that one
-// (mqtt_stop_request()), with no lock of the app's held.
-// Statically allocated so creation cannot fail — the alternative (bailing out of
-// iothub_task) would silently take leak evaluation and rules_engine_tick with it.
-// Initialised before mqtt_client, so a non-NULL mqtt_client implies a live mutex.
-static StaticSemaphore_t s_mqtt_ctl_mutex_buf;
-static SemaphoreHandle_t s_mqtt_ctl_mutex = NULL;
+// No control mutex around the client any more (2.1.4): iothub_task alone starts and
+// reconfigures it (mqtt_resume(), sas_refresh(), cloud_bringup()), and never while a stop is
+// under way; wifi_task alone stops it (iothub_mqtt_stop_service()). See "MQTT stop / resume".
 
 // Cloud bring-up state. Neither Wi-Fi, SNTP nor DPS registration may block iothub_task
 // before its event loop: this task is the sole caller of rules_engine_tick() and
@@ -1708,16 +1702,19 @@ static void handle_twin_get_response(const char *data, int data_len)
 // sends a connected session's DISCONNECT, then waits for the task to leave its current wait:
 // up to 1 s in a session (its read poll), up to 5 s between reconnects (half the 10 s
 // reconnect timeout). wifi_task, which runs the router retry and the AP tail's checks, can
-// spare that once per outage. The hand-over, each variable with one writer:
+// spare that once per outage, and once per SAS renewal (sas_maintain(), about every 18 h).
+// The hand-over, each variable with one writer:
 //   - iothub_task asks (mqtt_stop_request()): it clears g_mqtt_running, counts the request in
 //     s_mqtt_stop_req, marks MQTT disconnected (nothing more for the outbox the stop deletes)
 //     and wakes wifi_task. It alone writes those, creates mqtt_client and starts the client.
 //   - wifi_task stops the client (iothub_mqtt_stop_service(), at that wake and on every pass),
 //     then writes the request it served to s_mqtt_stop_done and wakes iothub_task.
 //   - A stop is under way while the two differ (mqtt_stop_pending()). Until it has ended,
-//     iothub_task starts nothing: the admission waits for it (cloud_admission()), and with it
-//     the resume, DPS and the SAS mint. A request follows only a start (g_mqtt_running), so
-//     at most one stop is under way, and a link loss during it is only counted.
+//     iothub_task starts and reconfigures nothing: the admission waits for it
+//     (cloud_admission()), and with it the resume, DPS and the SAS mint; so does the SAS
+//     renewal's set_config and restart (sas_maintain()). A request follows only a start
+//     (g_mqtt_running), so at most one stop is under way, and a link loss during it is only
+//     counted.
 //   - wifi_task holds no lock of the app's while it waits, and esp-mqtt's API lock only inside
 //     esp_mqtt_client_stop(), for that DISCONNECT.
 // ---------------------------------------------------------------------------
@@ -1778,7 +1775,6 @@ static void mqtt_resume(void)
     s_mqtt_suspended = false;
     if (mqtt_client == NULL) return;
 
-    xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
     if (!g_mqtt_running) {
         // Starting with a token that is missing, or too close to expiry to be worth
         // a TLS handshake, would just 401. Leave it: sas_maintain() mints a fresh one
@@ -1791,7 +1787,6 @@ static void mqtt_resume(void)
             g_mqtt_running = true;
         }
     }
-    xSemaphoreGive(s_mqtt_ctl_mutex);
 }
 
 // Run on the wifi_manager task (its GOT_IP and STA_DISCONNECTED callbacks). A flag and a
@@ -2621,7 +2616,11 @@ static void mark_mqtt_disconnected(void)
     net_status_set_mqtt(false);
 }
 
-// Mint a fresh token and hand it to the client. Caller guarantees a valid clock.
+// Mint a fresh token and hand it to the client. Caller (sas_maintain()) guarantees a valid
+// clock, a client that is not started (g_mqtt_running false) and no stop under way:
+// set_config reallocates the client's RX/TX buffers, so it must not run under a live
+// connection, and esp-mqtt's API lock it takes is free only once the client's task has
+// ended. So none of it waits: the stop before it ran on wifi_task.
 static bool sas_refresh(void)
 {
     time_t now = time(NULL);
@@ -2634,16 +2633,6 @@ static bool sas_refresh(void)
 
     esp_mqtt_client_config_t cfg;
     build_mqtt_cfg(&cfg, tok);
-
-    xSemaphoreTake(s_mqtt_ctl_mutex, portMAX_DELAY);
-
-    // set_config reallocates the client's RX/TX buffers, so it must not run under a
-    // live connection: stop, swap, start — the sequence stop/resume already uses.
-    if (g_mqtt_running) {
-        esp_mqtt_client_stop(mqtt_client);
-        g_mqtt_running = false;
-        mark_mqtt_disconnected();
-    }
 
     esp_err_t err = esp_mqtt_set_config(mqtt_client, &cfg);
     free(tok);   // esp-mqtt strdup'd it into its own storage
@@ -2659,7 +2648,6 @@ static bool sas_refresh(void)
         ESP_LOGE(IOTHUB_TAG,
                  "SAS: esp_mqtt_set_config failed (%s) — client destroyed, rebooting",
                  esp_err_to_name(err));
-        xSemaphoreGive(s_mqtt_ctl_mutex);
         vTaskDelay(pdMS_TO_TICKS(200));   // let the log drain
         esp_restart();
     }
@@ -2669,12 +2657,15 @@ static bool sas_refresh(void)
         esp_mqtt_client_start(mqtt_client);
         g_mqtt_running = true;
     }
-    xSemaphoreGive(s_mqtt_ctl_mutex);
 
     ESP_LOGI(IOTHUB_TAG, "SAS: token renewed (valid %d h, expires ts=%ld)",
              SAS_TTL_SEC / 3600, (long)s_sas_expiry);
     return true;
 }
+
+// A renewal found the client started and asked wifi_task to stop it (mqtt_stop_request()):
+// the mint, set_config and restart follow on the first pass after that stop. iothub_task only.
+static bool s_sas_renew_stopping = false;
 
 // Called every iteration of the iothub_task loop (which wakes at least every 30 s).
 // Covers both "the clock finally arrived, mint the first real token and connect"
@@ -2687,21 +2678,37 @@ static void sas_maintain(void)
     // would be TLS beside the SoftAP. mqtt_resume() defers to us, so a stale token is
     // refreshed on the pass after the admission.
     if (s_mqtt_suspended) return;
+    // The client's stop still under way on wifi_task (this renewal's): set_config and the
+    // restart wait for its end, which wakes this task.
+    if (mqtt_stop_pending()) return;
 
     time_t now = time(NULL);
     if (now < SNTP_EPOCH_VALID) return;   // no trustworthy clock: can't mint a usable token
 
-    if (s_sas_expiry != 0 && now < s_sas_expiry - SAS_RENEW_MARGIN_SEC) {
-        return;                            // still comfortably valid
-    }
+    if (!s_sas_renew_stopping) {
+        if (s_sas_expiry != 0 && now < s_sas_expiry - SAS_RENEW_MARGIN_SEC) {
+            return;                            // still comfortably valid
+        }
 
-    if (s_sas_expiry == 0) {
-        ESP_LOGW(IOTHUB_TAG, "SAS: clock valid (ts=%ld) — minting first token, starting MQTT",
-                 (long)now);
-    } else {
-        ESP_LOGI(IOTHUB_TAG, "SAS: within %d h of expiry — renewing",
-                 SAS_RENEW_MARGIN_SEC / 3600);
+        if (s_sas_expiry == 0) {
+            ESP_LOGW(IOTHUB_TAG, "SAS: clock valid (ts=%ld) — minting first token, starting MQTT",
+                     (long)now);
+        } else {
+            ESP_LOGI(IOTHUB_TAG, "SAS: within %d h of expiry — renewing",
+                     SAS_RENEW_MARGIN_SEC / 3600);
+        }
     }
+    // A started client must be stopped before its set_config (sas_refresh()), and the stop can
+    // take seconds (esp_mqtt_client_stop(), see "MQTT stop / resume"): wifi_task runs it, and
+    // this task renews on the pass after. A link loss in between keeps the renewal owed: the
+    // next admission's resume holds MQTT for it, and the first pass after renews. Read on
+    // every pass, not only at the first look, so sas_refresh() never meets a started client.
+    if (g_mqtt_running) {
+        s_sas_renew_stopping = true;
+        mqtt_stop_request();
+        return;
+    }
+    s_sas_renew_stopping = false;
     sas_refresh();
 }
 
@@ -2749,12 +2756,6 @@ static esp_err_t cloud_bringup(void)
 
     esp_mqtt_client_config_t mqtt_cfg;
     build_mqtt_cfg(&mqtt_cfg, sas_token);
-
-    // Must be live before mqtt_client is published: the resume and the SAS refresh gate on a
-    // non-NULL mqtt_client and then take this mutex unconditionally.
-    if (s_mqtt_ctl_mutex == NULL) {
-        s_mqtt_ctl_mutex = xSemaphoreCreateMutexStatic(&s_mqtt_ctl_mutex_buf);
-    }
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
     free(sas_token);   // esp-mqtt copied it into its own storage
@@ -3421,10 +3422,10 @@ void iothub_task(void *param)
         char *auto_close_json = rules_engine_take_pending_telemetry();
 
         // ---- Connection maintenance ----
-        // Deliberately AFTER Phase 2: a live DPS registration runs a whole MQTT session on
-        // this task, and the SAS renewal stops the client here (esp_mqtt_client_stop()
-        // waits on the mqtt task), and leak evaluation must never queue behind that within
-        // an iteration. The stop at a link loss or a SoftAP start runs on wifi_task.
+        // Deliberately AFTER Phase 2: a live DPS registration (no cached assignment) runs a
+        // whole MQTT session on this task, its stop included, and leak evaluation must never
+        // queue behind that within an iteration. The main client's stops (a link loss, a
+        // SoftAP start, a SAS renewal) run on wifi_task: nothing here waits for them.
         net_maintain();   // SNTP start on the first Wi-Fi IP; first-sync watch
         dps_maintain();   // no cloud yet? keep trying, without stalling the loop
         sas_maintain();   // mint on first valid clock, then renew before expiry
