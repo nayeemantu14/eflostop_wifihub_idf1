@@ -174,7 +174,14 @@ static void switch_sync_word(uint8_t newSync) {
 // Tasks
 // -----------------------------------------------------------------------------
 
-void uart_command_task(void *pvParameters) {
+// Bench keys on the console UART: s sends a test packet, r restarts RX, d prints the
+// counters, a toggles the LoRa ACKs. Polled from lora_task's own loop since 2.1.4 WP2c: they
+// had a task of their own, uart_cmd_task (4,096 B of stack on the heap, priority 5), which
+// did nothing else, and its stack now pays for the cloud sender, so the task count is
+// unchanged. The same keys, lines and 500 ms lora_mutex take; one byte is read per
+// lora_task pass (about every 10 ms; the task read one every 150 ms), never waited for. The
+// production tool sends none of them.
+static void lora_uart_keys_init(void) {
     uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -185,42 +192,43 @@ void uart_command_task(void *pvParameters) {
     };
     uart_driver_install(UART_NUM_0, 2048, 0, 0, NULL, 0);
     uart_param_config(UART_NUM_0, &uart_config);
+}
 
+// lora_task only, between two radio passes.
+static void lora_uart_keys_poll(void) {
     uint8_t dtmp[1];
-    while(1) {
-        int len = uart_read_bytes(UART_NUM_0, dtmp, 1, pdMS_TO_TICKS(100));
-        if(len > 0) {
-            char cmd = (char)dtmp[0];
-            
-            // MUTEX PROTECTION: Don't touch LoRa while the other task might be reading/writing
-            if (xSemaphoreTake(lora_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
-                switch(cmd) {
-                    case 's': 
-                        ESP_LOGI(TAG, "Sending Test Packet");
-                        lora_driver->beginPacket(0);
-                        lora_driver->write((uint8_t*)"Test", 4);
-                        lora_driver->endPacket(false);
-                        lora_driver->receive(0);
-                        break;
-                    case 'r': 
-                        ESP_LOGI(TAG, "Restarting RX...");
-                        lora_driver->receive(0); 
-                        break;
-                    case 'd':
-                        ESP_LOGI(TAG, "Stats: RX=%ld, ACKs=%ld, LastRSSI=%d", 
-                                 lora_state.rxCount, lora_state.ackSentCount, 0);
-                        break;
-                }
-                xSemaphoreGive(lora_mutex);
+    int len = uart_read_bytes(UART_NUM_0, dtmp, 1, 0);   // 0: never waits for a key
+    if(len > 0) {
+        char cmd = (char)dtmp[0];
+
+        // lora_mutex, as when another task polled the keys; lora_task has given it, and no
+        // other task takes it, so this does not wait.
+        if (xSemaphoreTake(lora_mutex, pdMS_TO_TICKS(500)) == pdTRUE) {
+            switch(cmd) {
+                case 's':
+                    ESP_LOGI(TAG, "Sending Test Packet");
+                    lora_driver->beginPacket(0);
+                    lora_driver->write((uint8_t*)"Test", 4);
+                    lora_driver->endPacket(false);
+                    lora_driver->receive(0);
+                    break;
+                case 'r':
+                    ESP_LOGI(TAG, "Restarting RX...");
+                    lora_driver->receive(0);
+                    break;
+                case 'd':
+                    ESP_LOGI(TAG, "Stats: RX=%ld, ACKs=%ld, LastRSSI=%d",
+                             lora_state.rxCount, lora_state.ackSentCount, 0);
+                    break;
             }
-            
-            // Non-LoRa commands (Thread safe)
-            if (cmd == 'a') {
-                lora_state.sendAck = !lora_state.sendAck;
-                ESP_LOGI(TAG, "ACK %s", lora_state.sendAck ? "ENABLED" : "DISABLED");
-            }
+            xSemaphoreGive(lora_mutex);
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
+
+        // Non-LoRa commands (Thread safe)
+        if (cmd == 'a') {
+            lora_state.sendAck = !lora_state.sendAck;
+            ESP_LOGI(TAG, "ACK %s", lora_state.sendAck ? "ENABLED" : "DISABLED");
+        }
     }
 }
 
@@ -251,8 +259,8 @@ extern "C" void lora_task(void* param)
     // 3. Initialize Crypto Module
     lora_crypto_init();
 
-    // 4. Start Aux Task
-    xTaskCreate(uart_command_task, "uart_cmd_task", 4096, NULL, 5, NULL);
+    // 4. Bench keys on the console UART (polled in the loop below)
+    lora_uart_keys_init();
 
     ESP_LOGI(TAG, "LoRa Task Started. Listening (encrypted mode)...");
 
@@ -321,6 +329,8 @@ extern "C" void lora_task(void* param)
             xSemaphoreGive(lora_mutex);
         }
 
+        // Bench keys (s, r, d, a): one byte, never waited for.
+        lora_uart_keys_poll();
 
         // Yield to other tasks
         vTaskDelay(pdMS_TO_TICKS(10));
