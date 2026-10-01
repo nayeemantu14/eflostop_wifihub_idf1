@@ -244,7 +244,8 @@ void telemetry_v2_clear_settings(void);
 /** Set MQTT connectivity state. When false, event telemetry is buffered to NVS. */
 void telemetry_v2_set_connected(bool connected);
 
-/** Drain all NVS-buffered events via MQTT. Call on reconnect before lifecycle. */
+/** Drain all NVS-buffered events via MQTT. Call on reconnect before lifecycle. Does nothing
+ *  while the client is not connected (2.1.4 WP2). */
 void telemetry_v2_drain_offline(void);
 
 /**

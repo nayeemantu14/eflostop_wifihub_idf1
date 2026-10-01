@@ -1279,6 +1279,9 @@ void telemetry_v2_set_connected(bool connected)
 
 void telemetry_v2_drain_offline(void)
 {
+    // Not into a client that is not connected: a stopped one still takes a QoS 1 publish into
+    // its outbox (a msg_id, so the slot is erased), and expires it there after 30 s.
+    if (!s_connected) return;
     s_replay_owed = false;
     int pending = offline_buffer_count();
     if (pending == 0) return;

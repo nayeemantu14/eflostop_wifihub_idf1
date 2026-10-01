@@ -3325,8 +3325,15 @@ void iothub_task(void *param)
         // and the 269 s connect's reached IoT Hub). One that esp-mqtt did not take at all
         // (refused for room, MQTT_OUTBOX_LIMIT_BYTES) is owed until it does, while connected:
         // never a second copy on a connect whose first was taken.
-        if (g_needs_lifecycle) {
+        // Only while still connected: this pass's cloud_admission() may have stopped the client
+        // since that CONNECTED (a link loss, or the SoftAP up). A stopped client still takes a
+        // QoS 1 publish into its outbox and returns its msg_id, so the replay would count every
+        // buffered event as sent and erase it, and the outbox expires them after 30 s. The flag
+        // is cleared before the connection is read, so a CONNECTED after that raises it again.
+        bool lifecycle_due = g_needs_lifecycle;
+        if (lifecycle_due)
             g_needs_lifecycle = false;
+        if (lifecycle_due && telemetry_v2_is_connected()) {
             telemetry_v2_drain_offline();   // Replay buffered events before lifecycle
             s_lifecycle_owed = !telemetry_v2_publish_lifecycle();
             s_lifecycle_retry_ms = snap_now_ms() + LIFECYCLE_RETRY_MS;
@@ -3337,7 +3344,7 @@ void iothub_task(void *param)
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
             g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
             g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
-        } else if (telemetry_v2_is_connected()) {
+        } else if (!lifecycle_due && telemetry_v2_is_connected()) {
             if (telemetry_v2_replay_owed() && snap_now_ms() >= s_replay_retry_ms) {
                 // Events the outbox refused for room while connected, or the rest of a drain
                 // cut short, wait in the offline buffer: replayed now, at most every
