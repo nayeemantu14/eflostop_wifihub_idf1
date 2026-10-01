@@ -32,112 +32,139 @@ OTHER DEALINGS IN THE SOFTWARE.
 #include "json.h"
 
 
-bool json_print_string(const unsigned char *input, unsigned char *output_buffer)
+/* LOCAL PATCH (2.1.4 C2e): cJSON's escaper, json_print_string(), wrote into a buffer of unchecked
+ * size: a control character costs 6 bytes, so a beaconed SSID of control characters overran the
+ * network list's buffer (N4), and a 32-byte SSID field with no terminator ran on into the
+ * password. json_print_ssid() replaces it, bounded by its output buffer. */
+
+/**
+ * @brief true if the n bytes at s are well-formed UTF-8 (RFC 3629: no overlong form, no
+ * surrogate, nothing above U+10FFFF).
+ */
+static bool json_utf8_valid(const unsigned char *s, size_t n)
 {
-	const unsigned char *input_pointer = NULL;
-	unsigned char *output = NULL;
-	unsigned char *output_pointer = NULL;
-	size_t output_length = 0;
-	/* numbers of additional characters needed for escaping */
-	size_t escape_characters = 0;
-
-	if (output_buffer == NULL)
+	size_t i = 0;
+	while (i < n)
 	{
-		return false;
-	}
-
-	/* empty string */
-	if (input == NULL)
-	{
-		//output = ensure(output_buffer, sizeof("\"\""), hooks);
-		if (output == NULL)
+		unsigned char c = s[i];
+		size_t len;
+		unsigned long cp;
+		if (c < 0x80)
 		{
-			return false;
+			i++;
+			continue;
 		}
-		strcpy((char*)output, "\"\"");
-
-		return true;
-	}
-
-	/* set "flag" to 1 if something needs to be escaped */
-	for (input_pointer = input; *input_pointer; input_pointer++)
-	{
-		if (strchr("\"\\\b\f\n\r\t", *input_pointer))
+		else if (c >= 0xC2 && c <= 0xDF)
 		{
-			/* one character escape sequence */
-			escape_characters++;
+			len = 2;
+			cp = c & 0x1F;
 		}
-		else if (*input_pointer < 32)
+		else if (c >= 0xE0 && c <= 0xEF)
 		{
-			/* UTF-16 escape sequence uXXXX */
-			escape_characters += 5;
+			len = 3;
+			cp = c & 0x0F;
 		}
-	}
-	output_length = (size_t)(input_pointer - input) + escape_characters;
-
-	/* in the original cJSON it is possible to realloc here in case output buffer is too small.
-	 * This is overkill for an embedded system. */
-	output = output_buffer;
-
-	/* no characters have to be escaped */
-	if (escape_characters == 0)
-	{
-		output[0] = '\"';
-		memcpy(output + 1, input, output_length);
-		output[output_length + 1] = '\"';
-		output[output_length + 2] = '\0';
-
-		return true;
-	}
-
-	output[0] = '\"';
-	output_pointer = output + 1;
-	/* copy the string */
-	for (input_pointer = input; *input_pointer != '\0'; (void)input_pointer++, output_pointer++)
-	{
-		if ((*input_pointer > 31) && (*input_pointer != '\"') && (*input_pointer != '\\'))
+		else if (c >= 0xF0 && c <= 0xF4)
 		{
-			/* normal character, copy */
-			*output_pointer = *input_pointer;
+			len = 4;
+			cp = c & 0x07;
 		}
 		else
 		{
-			/* character needs to be escaped */
-			*output_pointer++ = '\\';
-			switch (*input_pointer)
-			{
-			case '\\':
-				*output_pointer = '\\';
-				break;
-			case '\"':
-				*output_pointer = '\"';
-				break;
-			case '\b':
-				*output_pointer = 'b';
-				break;
-			case '\f':
-				*output_pointer = 'f';
-				break;
-			case '\n':
-				*output_pointer = 'n';
-				break;
-			case '\r':
-				*output_pointer = 'r';
-				break;
-			case '\t':
-				*output_pointer = 't';
-				break;
-			default:
-				/* escape and print as unicode codepoint */
-				sprintf((char*)output_pointer, "u%04x", *input_pointer);
-				output_pointer += 4;
-				break;
-			}
+			return false;
 		}
+		if (n - i < len)
+		{
+			return false;
+		}
+		for (size_t k = 1; k < len; k++)
+		{
+			if ((s[i + k] & 0xC0) != 0x80)
+			{
+				return false;
+			}
+			cp = (cp << 6) | (s[i + k] & 0x3F);
+		}
+		if ((len == 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) ||
+			(len == 4 && (cp < 0x10000 || cp > 0x10FFFF)))
+		{
+			return false;
+		}
+		i += len;
 	}
-	output[output_length + 1] = '\"';
-	output[output_length + 2] = '\0';
-
 	return true;
 }
 
+size_t json_print_ssid(const unsigned char *ssid, size_t ssid_size, char *out, size_t out_size, bool *raw)
+{
+	static const char hex[] = "0123456789abcdef";
+	size_t n = (ssid != NULL) ? strnlen((const char *)ssid, ssid_size) : 0;
+	bool is_raw = !json_utf8_valid(ssid, n);
+	size_t o = 0;
+
+	if (raw != NULL)
+	{
+		*raw = false;
+	}
+	/* the two quotes and the terminator at least */
+	if (out == NULL || out_size < 3)
+	{
+		if (out != NULL && out_size > 0)
+		{
+			out[0] = '\0';
+		}
+		return 0;
+	}
+
+	out[o++] = '\"';
+	for (size_t i = 0; i < n; i++)
+	{
+		unsigned char c = ssid[i];
+		char esc[6];
+		size_t len;
+		if (c < 0x20 || c == 0x7F)
+		{
+			/* a control character: replaced */
+			esc[0] = '?';
+			len = 1;
+		}
+		else if (c == '\"' || c == '\\')
+		{
+			esc[0] = '\\';
+			esc[1] = (char)c;
+			len = 2;
+		}
+		else if (c >= 0x80 && is_raw)
+		{
+			/* a raw SSID's byte, as the code point of the same value */
+			esc[0] = '\\';
+			esc[1] = 'u';
+			esc[2] = '0';
+			esc[3] = '0';
+			esc[4] = hex[c >> 4];
+			esc[5] = hex[c & 0x0F];
+			len = 6;
+		}
+		else
+		{
+			esc[0] = (char)c;
+			len = 1;
+		}
+		/* room for it, the closing quote and the terminator */
+		if (o + len + 2 > out_size)
+		{
+			out[0] = '\0';
+			return 0;
+		}
+		memcpy(out + o, esc, len);
+		o += len;
+	}
+	out[o++] = '\"';
+	out[o] = '\0';
+
+	if (raw != NULL)
+	{
+		*raw = is_raw;
+	}
+	return o;
+}

@@ -79,6 +79,8 @@ char *wifi_manager_sta_ip = NULL;
 uint16_t ap_num = MAX_AP_NUM;
 wifi_ap_record_t *accessp_records;
 char *accessp_json = NULL;
+/* the size of accessp_json (LOCAL PATCH 2.1.4 C2e: one constant for the allocation and the bounds) */
+#define ACCESSP_JSON_SIZE	(MAX_AP_NUM * JSON_ONE_APP_SIZE + 4) /* 4 bytes for json encapsulation of "[\n" and "]\0" */
 char *ip_info_json = NULL;
 wifi_config_t* wifi_manager_config_sta = NULL;
 
@@ -194,7 +196,7 @@ void wifi_manager_start(){
 	wifi_manager_queue = xQueueCreate( 8, sizeof( queue_message) );
 	wifi_manager_json_mutex = xSemaphoreCreateMutex();
 	accessp_records = (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * MAX_AP_NUM);
-	accessp_json = (char*)malloc(MAX_AP_NUM * JSON_ONE_APP_SIZE + 4); /* 4 bytes for json encapsulation of "[\n" and "]\0" */
+	accessp_json = (char*)malloc(ACCESSP_JSON_SIZE);
 	wifi_manager_clear_access_points_json();
 	ip_info_json = (char*)malloc(sizeof(char) * JSON_IP_INFO_SIZE);
 	wifi_manager_clear_ip_info_json();
@@ -422,44 +424,44 @@ void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code)
 	wifi_config_t *config = wifi_manager_get_wifi_sta_config();
 	if(config){
 
-		const char *ip_info_json_format = ",\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"urc\":%d}\n";
+		/* LOCAL PATCH (2.1.4 C2e): built with bounds. json_print_ssid() writes the SSID bounded by
+		 * its 32-byte field, which has no terminator when the SSID is 32 bytes long (the password
+		 * stored after it ran into this JSON), and a raw SSID (json.h) gets "raw":1 after it. */
+		const char *ip_info_json_format = "%s,\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"urc\":%d}\n";
 
-		memset(ip_info_json, 0x00, JSON_IP_INFO_SIZE);
-
-		/* to avoid declaring a new buffer we copy the data directly into the buffer at its correct address */
-		strcpy(ip_info_json, "{\"ssid\":");
-		json_print_string(config->sta.ssid,  (unsigned char*)(ip_info_json+strlen(ip_info_json)) );
-
-		size_t ip_info_json_len = strlen(ip_info_json);
-		size_t remaining = JSON_IP_INFO_SIZE - ip_info_json_len;
+		/* the reason code tells why this was updated without a connection: "0" for each address then */
+		char ip[IP4ADDR_STRLEN_MAX] = "0"; /* note: IP4ADDR_STRLEN_MAX is defined in lwip */
+		char gw[IP4ADDR_STRLEN_MAX] = "0";
+		char netmask[IP4ADDR_STRLEN_MAX] = "0";
 		if(update_reason_code == UPDATE_CONNECTION_OK){
-			/* rest of the information is copied after the ssid */
 			esp_netif_ip_info_t ip_info;
 			ESP_ERROR_CHECK(esp_netif_get_ip_info(esp_netif_sta, &ip_info));
-
-			char ip[IP4ADDR_STRLEN_MAX]; /* note: IP4ADDR_STRLEN_MAX is defined in lwip */
-			char gw[IP4ADDR_STRLEN_MAX];
-			char netmask[IP4ADDR_STRLEN_MAX];
 
 			esp_ip4addr_ntoa(&ip_info.ip, ip, IP4ADDR_STRLEN_MAX);
 			esp_ip4addr_ntoa(&ip_info.gw, gw, IP4ADDR_STRLEN_MAX);
 			esp_ip4addr_ntoa(&ip_info.netmask, netmask, IP4ADDR_STRLEN_MAX);
-
-
-			snprintf( (ip_info_json + ip_info_json_len), remaining, ip_info_json_format,
-					ip,
-					netmask,
-					gw,
-					(int)update_reason_code);
 		}
-		else{
-			/* notify in the json output the reason code why this was updated without a connection */
-			snprintf( (ip_info_json + ip_info_json_len), remaining, ip_info_json_format,
-								"0",
-								"0",
-								"0",
-								(int)update_reason_code);
+
+		/* to avoid declaring a new buffer we copy the data directly into the buffer at its correct address */
+		static const char ssid_key[] = "{\"ssid\":";
+		size_t len = sizeof(ssid_key) - 1;
+		memcpy(ip_info_json, ssid_key, len);
+		bool raw = false;
+		size_t ssid_len = json_print_ssid(config->sta.ssid, sizeof(config->sta.ssid), ip_info_json + len, JSON_IP_INFO_SIZE - len, &raw);
+		if(ssid_len == 0){
+			/* cannot happen: JSON_IP_INFO_SIZE takes the longest SSID */
+			wifi_manager_clear_ip_info_json();
+			return;
 		}
+		len += ssid_len;
+
+		/* rest of the information is copied after the ssid */
+		snprintf( (ip_info_json + len), JSON_IP_INFO_SIZE - len, ip_info_json_format,
+				raw ? ",\"raw\":1" : "",
+				ip,
+				netmask,
+				gw,
+				(int)update_reason_code);
 	}
 	else{
 		wifi_manager_clear_ip_info_json();
@@ -472,32 +474,66 @@ void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code)
 void wifi_manager_clear_access_points_json(){
 	strcpy(accessp_json, "[]\n");
 }
+
+/**
+ * LOCAL PATCH (2.1.4 C2e): appends one access point to the list, which is len bytes long, never
+ * past limit (the length the list may reach before its closing "]\n"): {"ssid":...,"chan":N,
+ * "rssi":N,"auth":N}, with ,"raw":1 before the brace for a raw SSID (json.h), after ",\n" if an
+ * entry precedes it. Returns false, *len unchanged, if the entry does not fit.
+ */
+static bool wifi_manager_ap_json_entry(size_t *len, size_t limit, const uint8_t *ssid, int chan, int rssi, int auth){
+
+	size_t o = *len;
+	bool raw = false;
+
+	int n = snprintf(accessp_json + o, limit + 1 - o, "%s{\"ssid\":", (o > 1) ? ",\n" : "");
+	if(n < 0 || (size_t)n > limit - o){
+		return false;
+	}
+	o += (size_t)n;
+
+	/* ssid needs to be json escaped. To save on heap memory it's directly printed at the correct address */
+	size_t ssid_len = json_print_ssid(ssid, MAX_SSID_SIZE, accessp_json + o, limit + 1 - o, &raw);
+	if(ssid_len == 0){
+		return false;
+	}
+	o += ssid_len;
+
+	/* print the rest of the json for this access point: no more string to escape */
+	n = snprintf(accessp_json + o, limit + 1 - o, ",\"chan\":%d,\"rssi\":%d,\"auth\":%d%s}",
+			chan, rssi, auth, raw ? ",\"raw\":1" : "");
+	if(n < 0 || (size_t)n > limit - o){
+		return false;
+	}
+
+	*len = o + (size_t)n;
+	return true;
+}
+
 void wifi_manager_generate_acess_points_json(){
 
-	strcpy(accessp_json, "[");
+	/* LOCAL PATCH (2.1.4 C2e): built with bounds (an SSID of control characters overran the buffer,
+	 * N4). An entry that does not fit is left out, and the list stays valid JSON: "[" and the
+	 * entries joined by ",\n", then "]\n", as before; "[]\n" for no entry (it was "[", invalid). */
+	const size_t limit = ACCESSP_JSON_SIZE - 3;   /* room for the closing "]\n" and the terminator */
+	size_t len = 0;
+	unsigned left_out = 0;
 
-
-	const char oneap_str[] = ",\"chan\":%d,\"rssi\":%d,\"auth\":%d}%c\n";
-
-	/* stack buffer to hold on to one AP until it's copied over to accessp_json */
-	char one_ap[JSON_ONE_APP_SIZE];
+	accessp_json[len++] = '[';
 	for(int i=0; i<ap_num;i++){
 
-		wifi_ap_record_t ap = accessp_records[i];
+		wifi_ap_record_t *ap = &accessp_records[i];
 
-		/* ssid needs to be json escaped. To save on heap memory it's directly printed at the correct address */
-		strcat(accessp_json, "{\"ssid\":");
-		json_print_string( (unsigned char*)ap.ssid,  (unsigned char*)(accessp_json+strlen(accessp_json)) );
+		if(!wifi_manager_ap_json_entry(&len, limit, ap->ssid, ap->primary, ap->rssi, (int)ap->authmode)){
+			left_out++;
+		}
+	}
+	accessp_json[len++] = ']';
+	accessp_json[len++] = '\n';
+	accessp_json[len] = '\0';
 
-		/* print the rest of the json for this access point: no more string to escape */
-		snprintf(one_ap, (size_t)JSON_ONE_APP_SIZE, oneap_str,
-				ap.primary,
-				ap.rssi,
-				ap.authmode,
-				i==ap_num-1?']':',');
-
-		/* add it to the list */
-		strcat(accessp_json, one_ap);
+	if(left_out){
+		ESP_LOGW(TAG, "network list: %u access points left out (list buffer full)", left_out);
 	}
 
 }

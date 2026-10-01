@@ -28,17 +28,36 @@ OTHER DEALINGS IN THE SOFTWARE.
 #ifndef JSON_H_INCLUDED
 #define JSON_H_INCLUDED
 
+#include <stdbool.h>
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
- * @brief Render the cstring provided to a JSON escaped version that can be printed.
- * @param input the input buffer to be escaped.
- * @param output_buffer the output buffer to write to. You must ensure it is big enough to contain the final string.
- * @see cJSON equivlaent static cJSON_bool print_string_ptr(const unsigned char * const input, printbuffer * const output_buffer)
+ * @brief LOCAL PATCH (2.1.4 C2e): the longest JSON string json_print_ssid() writes for a 32-byte
+ * SSID, quotes included and the terminator not: every byte as \u00XX.
  */
-bool json_print_string(const unsigned char *input, unsigned char *output_buffer);
+#define JSON_SSID_STR_MAX					(2 + 6 * 32)
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C2e): writes an SSID as a JSON string, quotes included, never past
+ * out_size. It replaces cJSON's json_print_string(), which wrote into a buffer of unchecked size.
+ *
+ * The SSID is the bytes at ssid up to the first NUL, ssid_size of them at most: a 32-byte SSID
+ * field (wifi_config_t) has no terminator.
+ *  - '"' and '\' are escaped. A control character (0x00-0x1F, 0x7F) is written as '?'.
+ *  - An SSID that is valid UTF-8 is otherwise copied as it is, and *raw is cleared.
+ *  - An SSID that is not (a Latin-1 or GBK one, say) is "raw": each of its bytes 0x80-0xFF is
+ *    written as \u00XX, so every code point of the JSON string is one byte of the SSID, and *raw
+ *    is set. JSON readers then see valid JSON, and the page can send the SSID's bytes back.
+ *
+ * @param raw set to whether the SSID was written raw; may be NULL.
+ * @return the length written, the terminator excluded; 0 if the string did not fit in out_size,
+ * with out set to "" (when out_size allows it).
+ */
+size_t json_print_ssid(const unsigned char *ssid, size_t ssid_size, char *out, size_t out_size, bool *raw);
 
 #ifdef __cplusplus
 }

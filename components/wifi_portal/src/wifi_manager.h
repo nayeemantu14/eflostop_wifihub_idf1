@@ -167,6 +167,10 @@ extern "C" {
  *  BUT: we need to escape JSON. Imagine a ssid full of \" ? so it's 32 more bytes hence 77 + 32 = 99.\n
  *  this is an edge case but I don't think we should crash in a catastrophic manner just because
  *  someone decided to have a funny wifi name.
+ *
+ *  LOCAL PATCH (2.1.4 C2e): this is now the average room per access point in the list's buffer
+ *  (MAX_AP_NUM of them), not a bound: a raw SSID (json.h) takes up to 6 bytes a character, and
+ *  the list is built with bounds, leaving out an entry that does not fit (a valid list still).
  */
 #define JSON_ONE_APP_SIZE					99
 
@@ -182,8 +186,12 @@ extern "C" {
  * console.log(JSON.stringify(a).length); // => 158 +1 for null
  * console.log(JSON.stringify(a)); // print it
  * ```
+ *
+ * LOCAL PATCH (2.1.4 C2e): with a raw SSID (json.h) the worst case is {"ssid": (8) + the SSID's
+ * JSON string (JSON_SSID_STR_MAX, 194) + ,"raw":1 (8) + ,"ip":"255.255.255.255","netmask":"...",
+ * "gw":"...","urc":3}\n (84) + the terminator: 295 bytes (136 more than the 159 of before).
  */
-#define JSON_IP_INFO_SIZE 					159
+#define JSON_IP_INFO_SIZE 					295
 
 
 /**
