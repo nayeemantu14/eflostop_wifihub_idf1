@@ -317,6 +317,14 @@ static int next_twin_rid(void)
 // cleared once the GET is sent, so exactly one GET is issued per connection.
 static int g_twin_res_sub_id = -1;
 
+// That GET was not taken by esp-mqtt (refused for room, MQTT_OUTBOX_LIMIT_BYTES, or no
+// memory): iothub_task sends it again while connected, every TWIN_GET_RETRY_MS, until it is
+// (2.1.4 WP2). Set at the SUBACK and cleared at each CONNECTED (esp-mqtt task), cleared by
+// iothub_task once its GET is taken. s_twin_get_retry_ms: iothub_task only.
+#define TWIN_GET_RETRY_MS 5000
+static volatile bool s_twin_get_owed     = false;
+static int64_t       s_twin_get_retry_ms = 0;
+
 // ---------------------------------------------------------------------------
 // Telemetry v2 caches (shared with telemetry module for snapshot reads)
 // ---------------------------------------------------------------------------
@@ -2042,6 +2050,19 @@ static void rx_continue(esp_mqtt_event_handle_t e)
     rx_reset();
 }
 
+// The full-twin GET of this connection (MQTT_EVENT_SUBSCRIBED, and iothub_task's retry while
+// s_twin_get_owed). false = esp-mqtt did not take it: refused for room (-2) or no memory.
+static bool twin_get_send(void)
+{
+    char topic[64];
+    int rid = next_twin_rid();
+    snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", rid);
+    if (esp_mqtt_client_publish(mqtt_client, topic, "", 0, 1, 0) < 0)
+        return false;
+    ESP_LOGI(IOTHUB_TAG, "Twin GET requested (rid=%d)", rid);
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // MQTT event handler
 // ---------------------------------------------------------------------------
@@ -2057,6 +2078,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         telemetry_v2_set_connected(true);
         net_status_set_mqtt(true);   // status LED -> fully connected (ramp blue)
         g_needs_lifecycle = true;  // Event loop will publish lifecycle + snapshot
+        s_twin_get_owed = false;   // this connection's GET follows its SUBACK
         telemetry_v2_wake_snapshot();  // wake iothub_task now so the first post-reconnect snapshot is prompt
         {
             char sub_topic[128];
@@ -2093,11 +2115,15 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         // still advertises the operator's values.
         if (g_twin_res_sub_id > 0 && event->msg_id == g_twin_res_sub_id) {
             g_twin_res_sub_id = -1;             // one GET per connection
-            char topic[64];
-            int rid = next_twin_rid();
-            snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", rid);
-            esp_mqtt_client_publish(mqtt_client, topic, "", 0, 1, 0);
-            ESP_LOGI(IOTHUB_TAG, "Twin GET requested (rid=%d)", rid);
+            // Refused for room (the last session's unacknowledged messages, which survive a
+            // quick reconnect, plus the SUBSCRIBEs, over MQTT_OUTBOX_LIMIT_BYTES), it is owed:
+            // iothub_task sends it again while connected, so this session still reads the
+            // twin (a change made during an outage would otherwise wait for the next connect).
+            if (!twin_get_send()) {
+                s_twin_get_owed = true;
+                ESP_LOGW(IOTHUB_TAG, "Twin GET not taken by MQTT - sent again every %d s while connected",
+                         TWIN_GET_RETRY_MS / 1000);
+            }
         }
         break;
 
@@ -3111,9 +3137,10 @@ void iothub_task(void *param)
         // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
-        // A replay or a lifecycle owed while connected (REPLAY_RETRY_MS, LIFECYCLE_RETRY_MS)
-        // also polls at 2 s.
-        bool replay_pending = mqtt_up && (telemetry_v2_replay_owed() || s_lifecycle_owed);
+        // A replay, a lifecycle or a twin GET owed while connected (REPLAY_RETRY_MS,
+        // LIFECYCLE_RETRY_MS, TWIN_GET_RETRY_MS) also polls at 2 s.
+        bool replay_pending = mqtt_up && (telemetry_v2_replay_owed() || s_lifecycle_owed ||
+                                          s_twin_get_owed);
         int64_t base = admit_pending ? 1000 :
                        (commission_pending || cloud_pending || s_ble_apply_owed ||
                         g_devset_changed || replay_pending ||
@@ -3355,6 +3382,12 @@ void iothub_task(void *param)
             if (s_lifecycle_owed && snap_now_ms() >= s_lifecycle_retry_ms) {
                 s_lifecycle_retry_ms = snap_now_ms() + LIFECYCLE_RETRY_MS;
                 s_lifecycle_owed = !telemetry_v2_publish_lifecycle();
+            }
+            if (s_twin_get_owed && snap_now_ms() >= s_twin_get_retry_ms) {
+                // This connection's full-twin GET, refused at its SUBACK (MQTT_EVENT_SUBSCRIBED).
+                s_twin_get_retry_ms = snap_now_ms() + TWIN_GET_RETRY_MS;
+                if (twin_get_send())
+                    s_twin_get_owed = false;
             }
         }
 
