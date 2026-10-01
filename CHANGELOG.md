@@ -27,7 +27,9 @@ The user approved the 2.1.4 radio and setup-portal plan on 2026-10-01
 (`docs/field_logs/2.1.4/RADIO_PORTAL_PLAN.md`; progress in `docs/field_logs/2.1.4/HANDOFF.md` §15). Its
 packages land one at a time, each behind a bench gate, and the last one (WP10) folds this part into the
 sections below. The first two, WP-V and WP0, change no behaviour. The third, WP1, removes every way the setup
-portal could reboot the hub; it is built and benched as Build checkpoint 6 (HANDOFF §15h-§15j).
+portal could reboot the hub. The fourth, WP2, starts the cloud's TLS only once the setup SoftAP is down, stops
+the SoftAP soon after Wi-Fi connects, and keeps the setup web server off the home network. WP1 and WP2 are
+built and benched together as Build checkpoint 6 (HANDOFF §15h-§15l).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -79,7 +81,7 @@ portal could reboot the hub; it is built and benched as Build checkpoint 6 (HAND
     entry.
 - **The setup portal can no longer reboot the hub (WP1: C2 a-h, C2b, C4, C5).** Commits `97ce041` … `5bd0762`
   (`components/wifi_portal`, `main/app_wifi`; the diagnostics below also in `main/systemservices` and
-  `main/ble_leak_scanner`); details and the bench gates in HANDOFF §15h-§15j.
+  `main/ble_leak_scanner`); details in HANDOFF §15h, the build and the bench gates in §15j-§15k.
   - **No reboot path is left in the portal.** These used to reboot the hub, and no longer do: a Connect from the
     setup page while another connect attempt is still running (the router retry's, or an earlier Connect's); a
     Wi-Fi scan result read at low memory; the SoftAP start's mode switch or an IP read failing; a forget's
@@ -149,10 +151,94 @@ portal could reboot the hub; it is built and benched as Build checkpoint 6 (HAND
   - **Known until later packages:** the DNS and the web server run beside the cloud's TLS start in the SoftAP's
     last 60 s after a rejoin, so failed allocations there are expected (WP2 admits the cloud only after the SoftAP
     stops); the web server still answers on the home LAN (WP2, C3); an open network still gets HTTP 400 (WP4).
+    WP2 (next entry) closes the first two, and is built with WP1, so no bench image has them.
+- **The cloud waits for the setup SoftAP, the SoftAP stops sooner, and the setup web server stays off the home
+  network (WP2: cloud admission and the SoftAP's stop; C3; C12's API).** Commits `dc9db75` … `0aae305`
+  (`main/iothub`, `main/dps_client`, `main/telemetry`, `main/offline_buffer`, `main/app_wifi`,
+  `components/wifi_portal`); details and the bench gates in HANDOFF §15i-§15k.
+  - **No TLS beside the SoftAP.** The MQTT and DPS connections start only once Wi-Fi has its IP address, the
+    setup SoftAP is down with its web and DNS servers freed (plus 0.5 s), and the internal DMA-capable heap has
+    36 KB free with a 12 KB block. On a normal boot there is no SoftAP and that holds at once, so the cloud comes
+    up as fast as before. Below those figures the hub waits; after 60 s it connects with an 8 KB block (a
+    warning), and after 180 s whatever the heap (an error). After a router outage the hub used to start TLS
+    beside the SoftAP right after it rejoined (on the bench: internal heap down to 152 B and 4 failed
+    allocations, and the largest free block stuck at 6,400 B afterwards).
+  - **A link loss stops MQTT from the hub's cloud task** (`iothub_task`) on its next pass, no longer from the
+    Wi-Fi manager's task, and a SoftAP that comes up while the cloud is connected stops it too; the Wi-Fi
+    callbacks only set flags. The stop can hold the cloud task, which also evaluates leaks, for about 1-5 s
+    (about 10-20 s if a connect was in flight): a leak is acted on that much later, never missed (HANDOFF §15i,
+    for the user's decision).
+  - **DPS (first commissioning).** A registration in progress gives up within about 1 s when Wi-Fi is lost or
+    the SoftAP comes up, and runs again as soon as the cloud is admitted again, with no back-off and no attempt
+    counted.
+  - **The SoftAP stops soon after Wi-Fi connects.** After an automatic rejoin (a router outage) it stops 0.5 s
+    after the IP address with no phone on it; with a phone on it, 20 s after the IP or 10 s after the last phone
+    leaves. After a Connect on the setup page it stops 60 s after the IP, or 15 s after the last phone leaves,
+    never before 15 s. It used to stay up 60 s in every case. The setup portal's BLE pause ends at that stop, so
+    leak scanning resumes sooner after a setup. Any SoftAP still up 75 s after the IP is stopped by the hub (the
+    safety net used to cover only the no-credential portal). If the Wi-Fi driver will not leave SoftAP mode, the
+    SoftAP keeps its servers, the stop is tried again every 5 s, and BLE scanning resumes anyway.
+  - **The setup web server runs only while the SoftAP is up,** and answers only requests to 10.10.0.1 from a
+    phone on the SoftAP (10.10.0.0/24): any other request, from the home network included, gets `403 Forbidden`
+    and nothing is done. The hub's address on the home network used to serve the setup page, its Connect and its
+    Forget. With the SoftAP down nothing listens on port 80. The captive DNS also ignores queries from outside
+    the SoftAP's subnet. Free heap at rest with Wi-Fi connected is about 5 KB higher (no web server running).
+  - **The MQTT queue is bounded** (`outbox.limit` 12 KB: the largest message, a full hub's snapshot of about
+    8 KB, plus 4 KB). An event the queue refuses is kept in the offline buffer and replayed in order while
+    connected (every 10 s); a refused snapshot is tried again 5 s later; refused subscriptions at a connect make
+    the hub reconnect. The `lifecycle` message and the twin GET are sent again every 5 s while connected until
+    MQTT takes them.
+  - **Log lines.** New:
+    - `IOTHUB`: `cloud admitted %lu.%lu s after the IP (internal DMA free %u B, largest %u B)`, `cloud admission
+      deferred: SoftAP up - no TLS or DPS until it stops`, `cloud admission deferred: internal DMA free %u B,
+      largest %u B (needs %u / %u)`, `cloud admission withdrawn (%s)` (`WiFi down`, `SoftAP up`); warnings `cloud
+      admitted %lu.%lu s after the IP below the heap gate (internal DMA free %u B, largest %u B) - escape %lu
+      since boot`, `cloud admission: the SoftAP's stop still not finished after %d s - the heap gate decides`,
+      `SoftAP up — stopping MQTT client (free TLS heap for AP/captive portal)`, `Lifecycle not taken by MQTT -
+      sent again every %d s while connected`, `Twin GET not taken by MQTT - sent again every %d s while
+      connected`; errors `cloud admitted %lu.%lu s after the IP whatever the heap (internal DMA free %u B,
+      largest %u B) - escape %lu since boot`, `Subscribe refused (%d %d %d, outbox %d B) - reconnecting`.
+    - `DPS`: warning `DPS registration aborted after %lu s: Wi-Fi lost or SoftAP up - tried again once the cloud
+      is admitted again`; errors `DPS registration not started (no memory)`, `DPS registration failed (MQTT
+      client not created)`.
+    - `TELEMETRY_V2` (warnings): `Outbox full - %s kept for replay`, `Outbox full - %s kept for replay, behind
+      the buffered ones`, `Outbox full - %s not kept`. `OFFLINE_BUF` (warning): `store: buffer busy - skipped,
+      not waited for`.
+    - `APP_WIFI`: `SoftAP tail after an automatic rejoin (no station on it) - it stops %d.%d s after the IP`,
+      `SoftAP tail after an automatic rejoin (stations on it: %d) - it stops %d s after the IP, or %d s after the
+      last station leaves`, `SoftAP tail after a setup-page Connect (stations on it: %d) - it stops %d s after
+      the IP, or %d s after the last station leaves (not before %d s)`, `SoftAP tail: %s - it stops %lu.%lu s
+      after the IP` (`no station left on it`, `a station on it again`, `its stop not set at the IP, set now`),
+      `SoftAP stopped (its servers too) %lu.%lu s after the IP`; warning `SoftAP still up %u s after Wi-Fi
+      connected - stopping it` (outside the portal window; should never appear). `portal priority OFF (%s) - BLE
+      scanning resumed` has a new reason, `SoftAP stop failed`.
+    - `wifi_manager` (warnings and errors print under the tag's WARN cap): warning `AP stop in %lu ms not set
+      (timer queue full)`; error `ORDER_STOP_AP: esp_wifi_set_mode failed (%s) - AP kept up, stopped again in
+      %d s`. `dns_server`: error `captive DNS: DEFAULT_AP_NETMASK is not an IPv4 netmask - not started`.
+  - **Same text, new place or time:** `IOTHUB: WiFi down — stopping MQTT client (free TLS heap for AP/captive
+    portal)` now comes from the cloud task, right after `cloud admission withdrawn (WiFi down)`; `IOTHUB: WiFi
+    up — restarting MQTT client` now prints at the admission, after `cloud admitted ...` (after a rejoin: once
+    the SoftAP has stopped); `IOTHUB: Connected to Azure IoT Hub!` after a setup or a rejoin now follows the
+    SoftAP's stop; `IOTHUB: Twin GET requested (rid=%d)` prints only once MQTT took the GET; `APP_WIFI: portal
+    priority: setup AP still up %u s after Wi-Fi connected - stopping it` is now the 75 s stop in the portal
+    window; `APP_WIFI: portal priority: Wi-Fi connected - BLE scanning stays paused until the setup AP stops
+    (about %d s)` still says `60`, now the longest it waits. The `http_server` lines `POST %s` and `DELETE %s`
+    (capped at WARN, so not printed) are logged only for phones on the SoftAP; a refused request is a DEBUG line.
+  - No line was removed, and every other line is unchanged. The production tool matches none of the new or moved
+    lines (none prints at its boot, which has no Wi-Fi), and no line prints a credential.
+  - Memory (estimated from the objects; Build checkpoint 6 measures it): `.bss` +86 B, `.data` +1 B; flash about
+    +7.9 KB; no IRAM; no new task, timer or allocation; free heap at rest about +5 KB with Wi-Fi connected and
+    the SoftAP down. The MQTT queue holds at most 12 KB during a stalled session (it had no limit).
+  - **Known until later packages:** the setup page's Finish button and `POST /finish.json` (C12's other half)
+    come with WP4, so after a Connect the SoftAP stays up to 60 s while the phone stays joined; the Forget is
+    still reachable from a phone on the SoftAP (D9 kept); a twin reported-property update refused by a full
+    queue is not sent again until the next report (HANDOFF §15i).
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and
-  its `limit` line, which is gone; WP10 rewrites them.
+  its `limit` line, which is gone, and, since WP2, the SoftAP stopping about 60 s after the IP address, the
+  safety net at about 75-80 s in the portal window only, and MQTT restarting at the IP address (*Fixed*'s router
+  retry, *Safety*'s portal window, *Upgrade notes*' serial-log lines); WP10 rewrites them.
 
 ### Fixed (2.1.3 field defects)
 
