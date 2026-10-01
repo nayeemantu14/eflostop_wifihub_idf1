@@ -242,6 +242,13 @@ void telemetry_v2_set_connected(bool connected);
 /** Drain all NVS-buffered events via MQTT. Call on reconnect before lifecycle. */
 void telemetry_v2_drain_offline(void);
 
+/**
+ * True while events wait in the offline buffer with the client connected: an event the
+ * outbox refused for room (msg_id -2), or the rest of a drain cut short. iothub_task then
+ * calls telemetry_v2_drain_offline() again while connected (2.1.4 WP2).
+ */
+bool telemetry_v2_replay_owed(void);
+
 #ifdef __cplusplus
 }
 #endif

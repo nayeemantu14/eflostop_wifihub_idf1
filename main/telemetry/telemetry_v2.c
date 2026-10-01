@@ -44,6 +44,11 @@ static bool           s_connected      = false;
 static TimerHandle_t  s_snapshot_timer = NULL;
 static QueueHandle_t  s_snapshot_queue = NULL;
 
+// Events wait in the offline buffer although the client is connected: an event the outbox
+// refused for room (publish_json()), or the rest of a drain cut short. Set by whichever task
+// published, cleared by the drain (iothub_task); a lost race costs one retry's delay.
+static volatile bool  s_replay_owed    = false;
+
 // Heartbeat interval in SECONDS. Written by the Twin desired-property handler
 // (telemetry_v2_set_snapshot_interval, esp-mqtt task) as a single 32-bit store —
 // naturally atomic on the 32-bit Xtensa core — and read by the iothub_task
@@ -158,6 +163,15 @@ static bool publish_json(cJSON *root, const char *type_hint)
         sent = (msg_id >= 0);
         if (!sent)
             ESP_LOGW(TELEM_TAG, "Pub %s failed (msg_id=%d)", type_hint, msg_id);
+        // -2: refused for room (the outbox limit, app_iothub.c build_mqtt_cfg()), nothing
+        // queued. An event is kept for the replay rather than lost; iothub_task replays it
+        // while connected (telemetry_v2_replay_owed()). Not for -1: that can be a message
+        // esp-mqtt queued whose write failed, and esp-mqtt sends that one itself.
+        if (msg_id == -2 && strcmp(type_hint, "event") == 0) {
+            ESP_LOGW(TELEM_TAG, "Outbox full - keeping %s for replay", type_hint);
+            if (offline_buffer_store(json_str, strlen(json_str)))
+                s_replay_owed = true;
+        }
     } else if (strcmp(type_hint, "event") == 0) {
         if (presync) {
             // Built before the first clock sync (build_envelope() has logged it). Buffered
@@ -1231,10 +1245,20 @@ void telemetry_v2_set_connected(bool connected)
 
 void telemetry_v2_drain_offline(void)
 {
+    s_replay_owed = false;
     int pending = offline_buffer_count();
     if (pending == 0) return;
 
     ESP_LOGI(TELEM_TAG, "Draining %d offline event(s) before lifecycle...", pending);
     int published = offline_buffer_drain(s_mqtt, s_topic);
     ESP_LOGI(TELEM_TAG, "Offline drain complete: %d event(s) replayed", published);
+    // Cut short with the client still connected (a publish refused: the outbox full): the
+    // rest is owed now, not at the next connect.
+    if (s_connected && offline_buffer_count() > 0)
+        s_replay_owed = true;
+}
+
+bool telemetry_v2_replay_owed(void)
+{
+    return s_replay_owed;
 }

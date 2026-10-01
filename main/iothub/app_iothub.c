@@ -117,6 +117,10 @@ static int64_t s_sntp_start_ms  = 0;       // monotonic ms of esp_sntp_init()
 // Lifecycle flag: set in MQTT_EVENT_CONNECTED, consumed in event loop
 static bool g_needs_lifecycle = false;
 
+// The next replay of events kept in the offline buffer while connected (monotonic ms;
+// iothub_task only; see REPLAY_RETRY_MS).
+static int64_t s_replay_retry_ms = 0;
+
 // Full-decommission reboot: set by handle_c2d_command ('decommission all', which
 // runs in the esp-mqtt event task) and consumed by iothub_task, which publishes a
 // final snapshot of the cleared state and reboots. The publish MUST happen in
@@ -1765,6 +1769,28 @@ void iothub_on_wifi_lost(void)
 #define MQTT_RX_BUFFER_BYTES   4096   // esp_mqtt_client_config_t buffer.size
 #define MQTT_TX_BUFFER_BYTES   1024   // buffer.out_size — see build_mqtt_cfg()
 
+// The outbox ceiling (esp_mqtt_client_config_t outbox.limit; 2.1.4 WP2, plan section 4.6).
+// esp-mqtt keeps every QoS 1 message whole in its outbox from the publish to its PUBACK, or
+// for 30 s (OUTBOX_EXPIRED_TIMEOUT_MS) when none comes - also one whose session broke (E4:
+// the lifecycle sat there through two failed handshakes and expired 5 s before the next
+// connect). Unbounded, a stalled session piles up a snapshot every few seconds in internal
+// heap. With a limit, esp-mqtt refuses (-2) a publish that, with the queue, would pass it,
+// and refuses every SUBSCRIBE while the queue is over it.
+// The plan asked for about 4 KB. That alone would refuse a big hub's snapshot for ever: about
+// 0.2-0.25 KB per device with its label (2.1.3 log: 1,436 B for a valve and 4 BLE sensors),
+// so 7.5-8 KB for 16 BLE + 16 LoRa sensors and the valve. So the ceiling is about 4 KB of
+// backlog over the largest message the hub sends. What a refusal costs: an event is kept in
+// the offline buffer and replayed while connected (telemetry_v2.c), the rest of a drain
+// waits likewise, a snapshot retries 5 s later (SNAP_RETRY_FLOOR_MS), and refused SUBSCRIBEs
+// at a connect reconnect (MQTT_EVENT_CONNECTED).
+#define MQTT_TX_MAX_MESSAGE        8192   // the largest message the hub publishes (a full hub's snapshot)
+#define MQTT_OUTBOX_BACKLOG_BYTES  4096
+#define MQTT_OUTBOX_LIMIT_BYTES    (MQTT_TX_MAX_MESSAGE + MQTT_OUTBOX_BACKLOG_BYTES)
+
+// How often iothub_task replays events kept in the offline buffer while connected
+// (telemetry_v2_replay_owed()).
+#define REPLAY_RETRY_MS            10000
+
 // Hard ceiling on a reassembled message. The largest legal `provision` (16 BLE +
 // 16 LoRa sensors + 32 metadata entries at the full SENSOR_META_LABEL_MAX label)
 // is about 5.1 KB, so this admits every payload the firmware can act on while
@@ -2031,7 +2057,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             // C2D messages
             snprintf(sub_topic, sizeof(sub_topic),
                      "devices/%s/messages/devicebound/#", g_device_id);
-            esp_mqtt_client_subscribe(mqtt_client, sub_topic, 1);
+            int c2d_sub = esp_mqtt_client_subscribe(mqtt_client, sub_topic, 1);
             // Device Twin — response to GET/PATCH requests.
             // Remember the msg_id: the twin GET must not be published until this
             // subscription is CONFIRMED, or the response can arrive before the
@@ -2039,8 +2065,18 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
             g_twin_res_sub_id = esp_mqtt_client_subscribe(mqtt_client,
                                                           "$iothub/twin/res/#", 1);
             // Device Twin — desired property change notifications
-            esp_mqtt_client_subscribe(mqtt_client,
+            int desired_sub = esp_mqtt_client_subscribe(mqtt_client,
                                       "$iothub/twin/PATCH/properties/desired/#", 1);
+            // A refused SUBSCRIBE (-2: the outbox still over MQTT_OUTBOX_LIMIT_BYTES with the
+            // last session's unacknowledged messages; -1: no memory) would leave this whole
+            // session without C2D or the twin, maybe for days. Reconnect instead: esp-mqtt
+            // expires those messages within 30 s, and the next CONNECTED subscribes again.
+            if (c2d_sub < 0 || g_twin_res_sub_id < 0 || desired_sub < 0) {
+                ESP_LOGE(IOTHUB_TAG, "Subscribe refused (%d %d %d, outbox %d B) - reconnecting",
+                         c2d_sub, g_twin_res_sub_id, desired_sub,
+                         esp_mqtt_client_get_outbox_size(mqtt_client));
+                esp_mqtt_client_disconnect(mqtt_client);
+            }
         }
         break;
 
@@ -2420,6 +2456,10 @@ static void build_mqtt_cfg(esp_mqtt_client_config_t *cfg, const char *password)
     // why snapshots have always gone out intact at ~978 bytes. Keeping this at
     // the historical 1024 holds the net cost of the change to +3 KB.
     cfg->buffer.out_size = MQTT_TX_BUFFER_BYTES;
+
+    // Outbox ceiling: see MQTT_OUTBOX_LIMIT_BYTES. Set here, so sas_refresh()'s
+    // esp_mqtt_set_config() keeps it.
+    cfg->outbox.limit = MQTT_OUTBOX_LIMIT_BYTES;
 }
 
 // esp_mqtt_client_stop() does NOT dispatch MQTT_EVENT_DISCONNECTED — the client task
@@ -3049,9 +3089,12 @@ void iothub_task(void *param)
         // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
+        // A replay owed while connected (REPLAY_RETRY_MS) also polls at 2 s.
+        bool replay_pending = mqtt_up && telemetry_v2_replay_owed();
         int64_t base = admit_pending ? 1000 :
                        (commission_pending || cloud_pending || s_ble_apply_owed ||
-                        g_devset_changed || rules_engine_auto_clear_pending()) ? 2000 : 30000;
+                        g_devset_changed || replay_pending ||
+                        rules_engine_auto_clear_pending()) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
@@ -3261,6 +3304,13 @@ void iothub_task(void *param)
             g_boot_snapshot_sent = false;   // Wait for boot sync before first snapshot
             g_fast_snapshot_sent = false;   // Re-arm the fast valve-ready snapshot for this (re)connect
             g_fast_arm_ms = snap_now_ms();  // restart the ceiling clock from THIS (re)connect (not absolute uptime)
+        } else if (telemetry_v2_is_connected() && telemetry_v2_replay_owed() &&
+                   snap_now_ms() >= s_replay_retry_ms) {
+            // Events the outbox refused for room while connected, or the rest of a drain
+            // cut short, wait in the offline buffer: replayed now, at most every
+            // REPLAY_RETRY_MS, not only at the next connect (MQTT_OUTBOX_LIMIT_BYTES).
+            s_replay_retry_ms = snap_now_ms() + REPLAY_RETRY_MS;
+            telemetry_v2_drain_offline();
         }
 
         // NOTE: the rules-engine events (auto_close, rmleak_*) are held in
