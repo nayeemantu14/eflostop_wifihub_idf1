@@ -3532,14 +3532,18 @@ static bool cloud_tx_service_one(uint32_t gen)
 }
 
 // How long cloud_tx may sleep: CLOUD_TX_POLL_MS, or less for the lifecycle hold's end, a
-// replay or a twin GET owed while connected.
+// replay or a twin GET owed while connected. Not for those two during the hold: they wait
+// behind it (cloud_tx_session_work()), so a deadline already past would make each round a
+// 1-tick spin until the hold ends. The hold ends at its own deadline, or at the post of the
+// lifecycle, which wakes this task.
 static TickType_t cloud_tx_wait(void)
 {
     int64_t now  = snap_now_ms();
     int64_t wait = CLOUD_TX_POLL_MS;
-    if (s_tx_lc_hold && s_tx_lc_until_ms - now < wait)
-        wait = s_tx_lc_until_ms - now;
-    if (telemetry_v2_is_connected()) {
+    if (s_tx_lc_hold) {
+        if (s_tx_lc_until_ms - now < wait)
+            wait = s_tx_lc_until_ms - now;
+    } else if (telemetry_v2_is_connected()) {
         if ((telemetry_v2_replay_owed() || offline_buffer_pending() > 0) &&
             s_tx_replay_ms - now < wait)
             wait = s_tx_replay_ms - now;
