@@ -886,8 +886,10 @@ void app_wifi_start()
     wifi_manager_set_callback(WM_ORDER_DISCONNECT_STA, &cb_disconnect_sta);
 #if CONFIG_APP_BENCH_DIAG
     // Bench build (main/Kconfig.projbuild): wifi_manager_start() turned the Wi-Fi driver's log
-    // off; back to INFO, so the bench log has its channel switch and CSA (csa_count) lines.
+    // off; back to INFO, so the bench log has its channel switch and CSA (csa_count) lines. The
+    // warning marks the log of a bench image: not for release or the production tool.
     esp_log_level_set("wifi", ESP_LOG_INFO);
+    ESP_LOGW(WIFI_TAG, "bench build (APP_BENCH_DIAG): Wi-Fi driver log at INFO - not for release");
 #endif
     xTaskCreate(&wifi_task, "wifi_task", 4096, NULL, 5, &wifiTaskHandle);
 }

@@ -1,16 +1,20 @@
-menu "eFloStop Hub"
+config APP_BENCH_DIAG
+    bool
+    default y
+    help
+        Bench diagnostics for the 2.1.4 G0 baseline (plan section 2.4). wifi_manager_start() turns
+        the Wi-Fi driver's "wifi" log tag off. With this option, app_wifi_start() sets it back to
+        INFO right after, so the bench log carries the driver's own lines: channel switches and
+        CSA (csa_count), station join and leave, and the STA's connect states. It also prints one
+        warning at boot, "bench build (APP_BENCH_DIAG): ...", so a log shows the kind of image.
 
-    config APP_BENCH_DIAG
-        bool "Bench diagnostics: the Wi-Fi driver's log at INFO"
-        default y
-        help
-            wifi_manager_start() turns the Wi-Fi driver's "wifi" log tag off. With this option,
-            app_wifi_start() sets it back to INFO right after, so the bench log carries the
-            driver's own lines: channel switches and CSA (csa_count), station join and leave,
-            and the STA's connect states. For the 2.1.4 G0 bench baseline (plan section 2.4).
+        No prompt, on purpose: the default below is the value of every build. sdkconfig is
+        untracked, and kconfgen loads it over the defaults, so a prompted option would keep the
+        y an earlier build stored there, and a change of the default would not reach that
+        machine. To turn it off, set the default to n here: WP10 does so for the release.
 
-            Default y during 2.1.4 development only: WP10 turns it off for the release. The
-            driver prints many lines, and its connect line carries the router's SSID next to
-            its BSSID.
-
-endmenu
+        Default y during 2.1.4 development only. Not for a release image or the production
+        tool: the driver prints many lines, and its connect line carries the router's SSID next
+        to its BSSID ("connected with <SSID>, ..., bssid = <MAC>"). With an SSID that contains
+        "mac", the production tool's boot-log parse (a line with "wifi", "mac" and a colon-MAC)
+        would take the router's BSSID for the hub's Wi-Fi MAC.
