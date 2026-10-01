@@ -53,6 +53,8 @@
 #define BURST_PHY_1M            0x01             // burst_phy bits: the primary PHYs heard
 #define BURST_PHY_CODED         0x02
 #define BURST_PHY_OTHER         0x04
+#define BURST_LOG_SLOTS         4                // tracking slots with a burst log: the first
+                                                 // sensors heard (a bench has a few), 8 B each
 
 /* ---------------------------------------------------------
  * Internal types
@@ -68,16 +70,23 @@ typedef struct {
     char last_fw_version[12];
     bool seen;              // true after first advertisement received
     // The advert burst being counted, for the burst log only (burst_log()). The count and the
-    // PHYs sit in what was padding before the ticks.
+    // PHYs sit in what was padding before the ticks; the times are in s_burst_times[], for the
+    // first BURST_LOG_SLOTS slots only.
     uint8_t burst_n;        // adverts heard in it so far (stops at 255); 0 = no burst open
     uint8_t burst_phy;      // BURST_PHY_* bits of their primary PHYs
     TickType_t last_event_tick;    // last telemetry event (drives BLE_LEAK_HEARTBEAT_MS)
     TickType_t last_health_tick;   // last health check-in (drives HEALTH_CHECKIN_MIN_MS)
-    uint16_t burst_first_ms;       // burst clock (burst_now_ms()) at its first advert
-    uint16_t burst_last_ms;        // ... and at its last
-    uint16_t burst_dt_min;         // shortest and longest gap between two of its adverts, ms
-    uint16_t burst_dt_max;
 } sensor_state_t;
+
+// The times of a slot's open burst (burst log only). A slot's burst_n of 0 marks them stale: a
+// claimed or pruned slot starts from 0, and the next advert sets them all.
+typedef struct {
+    uint16_t first_ms;      // burst clock (burst_now_ms()) at its first advert
+    uint16_t last_ms;       // ... and at its last
+    uint16_t dt_min;        // shortest and longest gap between two of its adverts, ms
+    uint16_t dt_max;
+} burst_times_t;
+_Static_assert(BURST_LOG_SLOTS <= MAX_TRACKED_SENSORS, "burst log slots are tracking slots");
 
 /* ---------------------------------------------------------
  * Static variables
@@ -94,7 +103,10 @@ static uint8_t s_whitelist_count = 0;
 // Per-sensor tracking for dedup
 static sensor_state_t s_sensors[MAX_TRACKED_SENSORS];
 
-/* Guards s_whitelist[], s_whitelist_count and s_sensors[].
+// The burst log's times for s_sensors[0 .. BURST_LOG_SLOTS - 1]
+static burst_times_t s_burst_times[BURST_LOG_SLOTS];
+
+/* Guards s_whitelist[], s_whitelist_count, s_sensors[] and s_burst_times[].
  *
  * The whitelist is rewritten by the scan task (every 10 s) while the NimBLE host task
  * reads it for every advertisement, and 2.1.3 published the new count BEFORE the new
@@ -206,8 +218,9 @@ static int sensor_alloc_locked(const uint8_t *mac)
 /* ---------------------------------------------------------
  * Burst log (2.1.4 G0 bench baseline)
  * A leak sensor (FW 1.1.0) sends its adverts in bursts: a 2.5 s one every 15 s while wet and
- * about every 100 s dry, a 4 s one at a leak edge. For each provisioned sensor the hub counts
- * the adverts it hears in a burst, the shortest and longest gap between two of them, and the
+ * about every 100 s dry, a 4 s one at a leak edge. For each sensor in the first BURST_LOG_SLOTS
+ * tracking slots (slots go to sensors in the order they are first heard) the hub counts the
+ * adverts it hears in a burst, the shortest and longest gap between two of them, and the
  * primary PHYs they came on, and prints one line once the burst is over (BURST_GAP_MS with
  * none): the sensor's real advert interval (the shortest gap) and how many adverts a radio mode
  * loses. The NimBLE host task counts, in process_leak_adv()'s lookup section
@@ -222,20 +235,21 @@ static uint16_t burst_now_ms(void)
     return (uint16_t)(esp_timer_get_time() / 1000);
 }
 
-// Counts one advert into the sensor's open burst, or opens one. Call with s_wl_lock held.
-static void burst_note_locked(sensor_state_t *s, uint16_t now_ms, uint8_t phy_bit)
+// Counts one advert into the sensor's open burst, or opens one; t is its slot's times. Call with
+// s_wl_lock held.
+static void burst_note_locked(sensor_state_t *s, burst_times_t *t, uint16_t now_ms, uint8_t phy_bit)
 {
     if (s->burst_n == 0) {
-        s->burst_first_ms = now_ms;
-        s->burst_dt_min = UINT16_MAX;
-        s->burst_dt_max = 0;
+        t->first_ms = now_ms;
+        t->dt_min = UINT16_MAX;
+        t->dt_max = 0;
         s->burst_phy = 0;
     } else {
-        uint16_t dt = (uint16_t)(now_ms - s->burst_last_ms);
-        if (dt < s->burst_dt_min) s->burst_dt_min = dt;
-        if (dt > s->burst_dt_max) s->burst_dt_max = dt;
+        uint16_t dt = (uint16_t)(now_ms - t->last_ms);
+        if (dt < t->dt_min) t->dt_min = dt;
+        if (dt > t->dt_max) t->dt_max = dt;
     }
-    s->burst_last_ms = now_ms;
+    t->last_ms = now_ms;
     s->burst_phy |= phy_bit;
     if (s->burst_n < UINT8_MAX) s->burst_n++;
 }
@@ -325,20 +339,21 @@ static const char *const k_burst_phy[8] = {
 
 static void burst_log(void)
 {
-    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+    for (int i = 0; i < BURST_LOG_SLOTS; i++) {
         uint8_t mac[6] = {0};
         uint8_t n = 0, phy = 0;
         uint16_t span = 0, dt_min = 0, dt_max = 0;
         taskENTER_CRITICAL(&s_wl_lock);
         sensor_state_t *s = &s_sensors[i];
+        const burst_times_t *t = &s_burst_times[i];
         if (s->in_use && s->burst_n > 0) {
-            span = (uint16_t)(s->burst_last_ms - s->burst_first_ms);
-            if ((uint16_t)(burst_now_ms() - s->burst_last_ms) > BURST_GAP_MS || span >= BURST_MAX_MS) {
+            span = (uint16_t)(t->last_ms - t->first_ms);
+            if ((uint16_t)(burst_now_ms() - t->last_ms) > BURST_GAP_MS || span >= BURST_MAX_MS) {
                 memcpy(mac, s->mac, 6);
                 n = s->burst_n;
                 phy = s->burst_phy;
-                dt_min = s->burst_dt_min;
-                dt_max = s->burst_dt_max;
+                dt_min = t->dt_min;
+                dt_max = t->dt_max;
                 s->burst_n = 0;
             }
         }
@@ -415,7 +430,8 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     memset(&snap, 0, sizeof(snap));
     bool listed;
     int slot = -1;
-    // The burst log's count rides in the same section (burst_note_locked()).
+    // The burst log's count rides in the same section (burst_note_locked()), for the first
+    // BURST_LOG_SLOTS slots.
     uint16_t burst_ms = burst_now_ms();
     uint8_t phy_bit = (prim_phy == BLE_HCI_LE_PHY_1M)    ? BURST_PHY_1M
                     : (prim_phy == BLE_HCI_LE_PHY_CODED) ? BURST_PHY_CODED
@@ -426,7 +442,9 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
         slot = sensor_find_locked(adv_mac);
         if (slot < 0) slot = sensor_alloc_locked(adv_mac);
         if (slot >= 0) {
-            burst_note_locked(&s_sensors[slot], burst_ms, phy_bit);
+            if (slot < BURST_LOG_SLOTS) {
+                burst_note_locked(&s_sensors[slot], &s_burst_times[slot], burst_ms, phy_bit);
+            }
             memcpy(&snap, &s_sensors[slot], sizeof(snap));
         }
     }
