@@ -47,7 +47,8 @@ static QueueHandle_t  s_snapshot_queue = NULL;
 
 // Events wait in the offline buffer although the client is connected: an event the outbox
 // refused for room (publish_json()), or the rest of a drain cut short. Set by whichever task
-// published, cleared by the drain (iothub_task); a lost race costs one retry's delay.
+// published, cleared by the drain (iothub_task); a lost race costs one retry's delay. While
+// it is set, iothub_task's next event drains first and never overtakes them (publish_json()).
 static volatile bool  s_replay_owed    = false;
 
 // Heartbeat interval in SECONDS. Written by the Twin desired-property handler
@@ -157,7 +158,24 @@ static bool publish_json(cJSON *root, const char *type_hint)
     if (!json_str) return false;
 
     bool sent = false;
-    if (s_mqtt && s_connected && !presync) {
+    bool is_event  = (strcmp(type_hint, "event") == 0);
+    bool on_iothub = (xTaskGetCurrentTaskHandle() == iothub_task_handle);
+    bool online    = s_mqtt && s_connected && !presync;
+
+    // Events wait in the offline buffer although the client is connected (refused for room,
+    // or the rest of a drain cut short): an event from iothub_task must not overtake them,
+    // or a consequence reaches the cloud before its cause (F-08: leak_detected and
+    // auto_close kept for the replay, then the valve's "closed" published first). They are
+    // offered first; if the outbox still refuses some, this event waits behind them for the
+    // replay. Not on the esp-mqtt task (a cmd_ack, an answer, not a cause): it must not
+    // drain, as it holds esp-mqtt's API lock (see the -2 refusal below).
+    bool behind = false;
+    if (online && is_event && on_iothub && s_replay_owed) {
+        telemetry_v2_drain_offline();
+        behind = s_replay_owed;
+    }
+
+    if (online && !behind) {
         // Online: publish directly
         ESP_LOGI(TELEM_TAG, "Pub %s: %s", type_hint, json_str);
         int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
@@ -172,10 +190,9 @@ static bool publish_json(cJSON *root, const char *type_hint)
         // esp-mqtt's API lock held - the buffer is not waited for: iothub_task's drain holds
         // it while it waits for that lock (offline_buffer_drain()), so a wait would stall both
         // tasks for the buffer's 1 s timeout and keep nothing.
-        if (msg_id == -2 && strcmp(type_hint, "event") == 0) {
-            bool kept = (xTaskGetCurrentTaskHandle() == iothub_task_handle)
-                            ? offline_buffer_store(json_str, strlen(json_str))
-                            : offline_buffer_try_store(json_str, strlen(json_str));
+        if (msg_id == -2 && is_event) {
+            bool kept = on_iothub ? offline_buffer_store(json_str, strlen(json_str))
+                                  : offline_buffer_try_store(json_str, strlen(json_str));
             if (kept) {
                 s_replay_owed = true;
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay", type_hint);
@@ -183,12 +200,18 @@ static bool publish_json(cJSON *root, const char *type_hint)
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s not kept", type_hint);
             }
         }
-    } else if (strcmp(type_hint, "event") == 0) {
+    } else if (is_event) {
         if (presync) {
             // Built before the first clock sync (build_envelope() has logged it). Buffered
             // even when online - MQTT cannot normally connect before the clock syncs - so
             // the drain stamps it with the real time before it reaches the cloud.
             offline_buffer_store_presync(json_str, strlen(json_str));
+        } else if (behind) {
+            // Behind the events the replay could not send yet (see above), in order.
+            if (offline_buffer_store(json_str, strlen(json_str)))
+                ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay, behind the buffered ones", type_hint);
+            else
+                ESP_LOGW(TELEM_TAG, "Outbox full - %s not kept", type_hint);
         } else {
             // Offline: buffer critical events for replay on reconnect
             ESP_LOGW(TELEM_TAG, "Offline — buffering %s event", type_hint);
