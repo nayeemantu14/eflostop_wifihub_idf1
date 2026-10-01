@@ -33,7 +33,11 @@
 #define NVS_NS_TELEM       "telemetry"
 #define NVS_KEY_SNAP_INT   "snap_int"
 
-// ---- Module state (all accessed from iothub_task only) --------------------
+// ---- Module state ----------------------------------------------------------
+// The client, its topic and the caches are set by iothub_task, which builds every message here
+// but the esp-mqtt task's cmd_ack. Since 2.1.4 WP2c cloud_tx sends them (see "The hand-over"
+// below): the client and topic are set before the client starts, so before any session it
+// sends into. s_connected has its own rules (telemetry_v2_set_connected()).
 
 static esp_mqtt_client_handle_t s_mqtt   = NULL;
 static char s_device_id[64]              = {0};
@@ -56,10 +60,10 @@ static QueueHandle_t  s_snapshot_queue = NULL;
 static volatile uint32_t s_sess_gen   = 0;
 
 // Events wait in the offline buffer although the client is connected: an event the outbox
-// refused for room (publish_json()), or the rest of a drain cut short. Set by whichever task
-// published, cleared by the drain (iothub_task); a lost race costs one retry's delay. While
-// it is set, or anything is buffered, iothub_task's next event drains first and never
-// overtakes them (send_str()).
+// refused for room (send_str()), or the rest of a drain cut short. Set by whichever task
+// published, cleared by the drain (cloud_tx, 2.1.4 WP2c); a lost race costs one retry's delay.
+// While it is set, or anything is buffered, cloud_tx's next event drains first and never
+// overtakes them (send_str()), and cloud_tx replays them every 10 s while connected.
 static volatile bool  s_replay_owed    = false;
 
 // Heartbeat interval in SECONDS. Written by the Twin desired-property handler
@@ -222,19 +226,25 @@ static bool tx_store(const char *json, size_t len)
 
 // A message's send: publishes a message from build_str(), or buffers or drops it. Does not
 // free m->json. Runs on cloud_tx for what iothub_task built (2.1.4 WP2c), and on the esp-mqtt
-// task for its own cmd_ack.
+// task for its own cmd_ack; never on iothub_task, which evaluates the leaks (refused, E line).
 // `gen`: on cloud_tx, the session whose replay and lifecycle it has done, the only one an
 // event may go into; NULL elsewhere.
 // Returns true ONLY when the message actually reached esp-mqtt (online branch
 // taken AND esp_mqtt_client_publish accepted it, msg_id >= 0). Returns false
 // offline (buffered or dropped), or on a negative msg_id (e.g. outbox
-// saturated). The snapshot scheduler re-arms the heartbeat only on a true return,
-// so an offline/pre-SNTP/outbox-full drop never counts as "sent". A pre-sync event
-// is always buffered, never sent, so it returns false too.
+// saturated). A pre-sync event is always buffered, never sent, so it returns false too.
+// (The snapshot's result, which re-arms the heartbeat, is cloud_tx_snapshot()'s, app_iothub.c.)
 static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t *gen)
 {
     const char *json_str = m->json;
     bool presync = m->presync;
+
+    // The guard (2.1.4 WP2c): every publish of iothub_task's messages is cloud_tx's. Should
+    // never print; the message is dropped rather than wait on the network there.
+    if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
+        ESP_LOGE(TELEM_TAG, "%s called on iothub_task - refused", __func__);
+        return false;
+    }
 
     bool sent = false;
     bool is_event  = (strcmp(type_hint, "event") == 0);
@@ -1489,6 +1499,11 @@ static offline_buffer_pub_t replay_publish(const char *json, size_t len)
 
 void telemetry_v2_drain_offline(void)
 {
+    // The guard (2.1.4 WP2c): the drain publishes, and holds the buffer's lock while it does.
+    if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
+        ESP_LOGE(TELEM_TAG, "%s called on iothub_task - refused", __func__);
+        return;
+    }
     // Not into a client that is not connected: a stopped one still takes a QoS 1 publish into
     // its outbox (a msg_id, so the slot is erased), and expires it there after 30 s. Nor once
     // a decommission's fallback has erased the buffer (telemetry_v2_tx_freeze()).

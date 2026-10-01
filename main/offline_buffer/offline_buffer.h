@@ -22,6 +22,8 @@ void offline_buffer_init(void);
  * store / drain / count / clear may be called from any task: each holds the buffer's
  * mutex (1000 ms). On a timeout they fail safe - store returns false, drain publishes
  * nothing, count returns 0, clear does nothing - and log it. try_store does not wait.
+ * Since 2.1.4 WP2c the waiting calls run on cloud_tx (app_iothub.c), never on iothub_task,
+ * which evaluates the leaks; the esp-mqtt task uses try_store().
  */
 
 /**

@@ -39,9 +39,10 @@ static bool    s_ready = false;
 _Static_assert(OFFLINE_BUF_MAX_ENTRIES <= 16, "s_presync_mask has one bit per ring slot");
 static uint16_t s_presync_mask = 0;
 
-// store() runs on whichever task publishes an event while offline (iothub_task, or the
-// esp-mqtt task for a cmd_ack; since 2.1.4 WP2 that task uses try_store(), for a cmd_ack
-// the outbox refused for room); drain and clear run on iothub_task. head/tail/count and
+// Since 2.1.4 WP2c every waiting call - store, drain, stamp, count, clear - runs on cloud_tx,
+// the sender (app_iothub.c), and the esp-mqtt task stores a cmd_ack only with try_store().
+// iothub_task, which evaluates the leaks, only initialises the buffer at boot (and erases it
+// for a decommission's restart, offline_buffer_erase_for_restart()). head/tail/count and
 // the NVS slots are one ring, so every entry point holds this lock (N18). Static storage:
 // no heap. On a timeout each call fails safe (nothing stored, nothing drained, count 0)
 // rather than touching the ring unlocked.
@@ -426,7 +427,8 @@ int offline_buffer_drain(offline_buffer_publish_fn publish)
     if (!s_ready || !publish) return 0;
 
     // The lock is held across the replay publishes. A store() that arrives meanwhile
-    // waits up to OB_LOCK_TIMEOUT_MS and is then dropped (logged), never interleaved.
+    // waits up to OB_LOCK_TIMEOUT_MS and is then dropped (logged), never interleaved; since
+    // 2.1.4 WP2c the drain and every waiting store run on one task, cloud_tx, so none does.
     // Each publish (the caller's `publish`) takes esp-mqtt's API lock, so the esp-mqtt task,
     // which holds that lock in its event handler, stores only through
     // offline_buffer_try_store().

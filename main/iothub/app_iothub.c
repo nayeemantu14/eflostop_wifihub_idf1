@@ -133,9 +133,10 @@ static volatile bool s_lifecycle_owed     = false;
 static int64_t       s_lifecycle_retry_ms = 0;   // iothub_task only
 
 // Full-decommission reboot: set by handle_c2d_command ('decommission all', which
-// runs in the esp-mqtt event task) and consumed by iothub_task, which publishes a
-// final snapshot of the cleared state and reboots. The publish MUST happen in
-// iothub_task (the single snapshot-flush context) so it doesn't race the caches.
+// runs in the esp-mqtt event task) and consumed by iothub_task, which builds a
+// final snapshot of the cleared state and reboots. The build MUST happen in
+// iothub_task (the single snapshot-flush context) so it doesn't race the caches;
+// cloud_tx publishes it (2.1.4 WP2c).
 static volatile bool g_decommission_reboot = false;
 
 // Device-set change (D0): set by the C2D provision/decommission handlers on the esp-mqtt
@@ -279,7 +280,7 @@ static snap_reason_t s_snap_reason       = SNAP_HEARTBEAT;
 static snap_tier_t   s_snap_tier         = SNAP_TIER_LOW;
 static char          s_snap_evt[32]      = {0};                 // event name (log + observability)
 static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from Twin each iteration
-static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only on lifecycle)
+static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only at a new session's reset)
 static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms when the fast snapshot was (re)armed; ceiling is relative to THIS
 static uint32_t      s_rating_seq_seen    = 0;                  // health_get_rating_seq() already requested/published (see Phase 3)
 // A due snapshot held last pass for cloud_tx (2.1.4 WP2c): TX not idle, one in flight, or a
@@ -308,6 +309,7 @@ typedef struct {
 } snap_flight_t;
 static snap_flight_t s_fl;                  // iothub_task only
 static uint8_t       s_snap_ticket = 0;     // the last ticket handed out (never 0)
+#define SNAP_RESULT_LATE_MS  60000          // "SNAP result outstanding" after this long
 
 // The commission epoch (R1-2): bumped by everything that re-arms the boot/commission state
 // behind a snapshot in flight - arm_commission_snapshot(), on_hub_emptied(), the removal clamp,
@@ -345,6 +347,7 @@ static volatile uint32_t s_snap_result = 0;
 // idle or the heap has room. Lossless, and in order. iothub_task only.
 static health_alert_t s_alert_parked;
 static bool           s_alert_held        = false;
+static bool           s_alert_hold_logged = false;   // this hold's "health alerts held" line printed
 
 // Delta-gate for valve_state_changed (was emitted on every BLE_UPD_STATE notify).
 // -2 sentinel = nothing published yet; valve states are 1=open / 0=closed / -1=unknown.
@@ -891,7 +894,7 @@ static void purge_telemetry_caches(void)
 // branch did, which cleared g_boot_snapshot_sent on every wake and so re-fired BOOT each
 // time the loop ran. Marking boot/fast as sent here is what stops a BOOT/FAST storm on a
 // hub with nothing to sync: the command-ack EVENT is the single owner of the transition
-// snapshot. After a reboot or an MQTT (re)connect the lifecycle block clears
+// snapshot. After a reboot or an MQTT (re)connect the session reset clears
 // g_boot_snapshot_sent again and, because an empty table is sync-complete, exactly one
 // "boot" snapshot is published; heartbeats follow at the interval.
 static void on_hub_emptied(void)
@@ -1249,8 +1252,17 @@ static void snap_result_take(void)
     if (!s_fl.out)
         return;
     uint32_t r = __atomic_load_n(&s_snap_result, __ATOMIC_ACQUIRE);
-    if ((uint8_t)r != s_fl.ticket)
-        return;   // still in flight
+    if ((uint8_t)r != s_fl.ticket) {
+        // Still in flight. Past SNAP_RESULT_LATE_MS, once: cloud_tx is held (a write into a
+        // dead WAN, a long replay). No state changes, and no second build can start (WP2c 2.6).
+        int64_t age = snap_now_ms() - s_fl.flush_now;
+        if (!s_fl.late_logged && age >= SNAP_RESULT_LATE_MS) {
+            s_fl.late_logged = true;
+            ESP_LOGW(IOTHUB_TAG, "SNAP result outstanding for %lu s - cloud_tx busy",
+                     (unsigned long)(age / 1000));
+        }
+        return;
+    }
     uint32_t res = (r >> 8) & 0xFFu;
     s_fl.out = false;
 
@@ -1304,9 +1316,9 @@ static void snap_result_take(void)
     }
 }
 
-// Publish (or, offline, buffer) one rules-engine event taken from
-// rules_engine_take_pending_telemetry() and couple its snapshot, then free it. NULL is a
-// no-op. iothub_task only, like snap_request().
+// Build one rules-engine event taken from rules_engine_take_pending_telemetry(), hand it to
+// cloud_tx (which publishes or, offline, buffers it) and couple its snapshot, then free it.
+// NULL is a no-op. iothub_task only, like snap_request(); never waits on the network.
 static void publish_rules_telemetry(char *rules_json)
 {
     if (!rules_json) return;
@@ -1492,11 +1504,11 @@ static void handle_c2d_command(const char *data, size_t data_len)
                 // the g_decommission_reboot block) before the final snapshot, so that
                 // snapshot renders the cleared (no-device) state.
 
-                // Ack now, then hand off to iothub_task: it publishes one last
-                // "decommissioned" snapshot and reboots to re-register with DPS. The
-                // snapshot must be published from iothub_task (this handler runs in
-                // the esp-mqtt event task), so we flag + wake instead of publishing
-                // and rebooting here.
+                // Ack now, then hand off to iothub_task: it builds one last
+                // "decommissioned" snapshot (cloud_tx publishes it, then clears the offline
+                // buffer) and reboots to re-register with DPS. The snapshot must be built on
+                // iothub_task (this handler runs in the esp-mqtt event task), so we flag +
+                // wake instead of publishing and rebooting here.
                 if (cmd.is_envelope || cmd.id[0]) {
                     telemetry_v2_publish_cmd_ack(cmd.id, cmd.cmd, true, NULL);
                 }
@@ -1758,6 +1770,14 @@ static char *build_twin_reported(void)
 // here right after the publish. The msg_id.
 static int send_twin_reported(const char *json, bool gated)
 {
+    // The guard (2.1.4 WP2c): iothub_task builds the twin and hands it to cloud_tx. Should never
+    // print; the report is dropped rather than wait on the network there.
+    if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
+        ESP_LOGE(IOTHUB_TAG, "%s called on iothub_task - refused", __func__);
+        if (gated)
+            iothub_pub_end(NULL, 0, 0);
+        return -1;
+    }
     char topic[128];
     int rid = next_twin_rid();
     snprintf(topic, sizeof(topic),
@@ -1929,8 +1949,9 @@ static void handle_twin_get_response(const char *data, int data_len)
 //     renewal's set_config and restart (sas_maintain()). A request follows only a start
 //     (g_mqtt_running), so at most one stop is under way, and a link loss during it is only
 //     counted.
-//   - wifi_task holds no lock of the app's while it waits, and esp-mqtt's API lock only inside
-//     esp_mqtt_client_stop(), for that DISCONNECT.
+//   - wifi_task holds no lock of the app's while it waits but the publish gate (below), which
+//     nobody waits for, and esp-mqtt's API lock only inside esp_mqtt_client_stop(), for that
+//     DISCONNECT.
 // The publish gate (2.1.4 WP2c, R0-1). esp-mqtt's task frees its outbox as the stop ends it
 // WITHOUT its API lock, and esp_mqtt_client_publish() queues into that outbox even with the
 // client not connected: a publish from another task beside a stop's end corrupts the list.
@@ -1974,6 +1995,17 @@ void iothub_pub_end(const char *what, int msg_id, int64_t t0_us)
     TaskHandle_t stopper = s_mqtt_stopper;
     if (mqtt_stop_pending() && stopper != NULL)
         xTaskNotifyGive(stopper);   // its stop may have found the gate taken
+    // The LS-1 evidence: a publish that held cloud_tx for a second or more (a write into a
+    // dead WAN, or the wait for esp-mqtt's API lock behind its own write). After the gate is
+    // given back, so a waiting stop never waits for this line.
+    if (what != NULL) {
+        int64_t us = esp_timer_get_time() - t0_us;
+        if (us >= 1000000) {
+            unsigned long ms = (unsigned long)(us / 1000);
+            ESP_LOGW(IOTHUB_TAG, "Pub %s took %lu.%lu s (msg_id=%d)",
+                     what, ms / 1000, (ms % 1000) / 100, msg_id);
+        }
+    }
 }
 
 // iothub_task only, with the client started (g_mqtt_running). Never waits.
@@ -1997,7 +2029,8 @@ static void mqtt_stop_for(const char *why)
     mqtt_stop_request();
 }
 
-// wifi_task (see above): every pass, and at mqtt_stop_request()'s wake.
+// wifi_task (see above): every pass, at mqtt_stop_request()'s wake, and at cloud_tx's after a
+// publish this found under way (iothub_pub_end()).
 void iothub_mqtt_stop_service(void)
 {
     if (s_mqtt_stopper == NULL)
@@ -2367,6 +2400,13 @@ static void rx_continue(esp_mqtt_event_handle_t e)
 // memory. gated: cloud_tx, which holds the publish gate and gets it back here.
 static int twin_get_send(bool gated)
 {
+    // The guard (2.1.4 WP2c): the retry is cloud_tx's, the first GET the esp-mqtt task's.
+    if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
+        ESP_LOGE(IOTHUB_TAG, "%s called on iothub_task - refused", __func__);
+        if (gated)
+            iothub_pub_end(NULL, 0, 0);
+        return -1;
+    }
     char topic[64];
     int rid = next_twin_rid();
     snprintf(topic, sizeof(topic), "$iothub/twin/GET/?$rid=%d", rid);
@@ -2876,9 +2916,9 @@ static void build_mqtt_cfg(esp_mqtt_client_config_t *cfg, const char *password)
 // publish_json() takes the online branch, hands a leak event to an outbox that is
 // about to be discarded, and skips the NVS offline buffer entirely. Call when a stop is
 // asked (mqtt_stop_request()), before it runs: wifi_task's stop can take seconds, and
-// iothub_task, which keeps publishing meanwhile, must hand nothing more to the outbox the
-// stop deletes, nor wait on esp-mqtt's API lock behind it. wifi_task calls it again after
-// the stop if a CONNECTED raced in (iothub_mqtt_stop_service()).
+// cloud_tx, which keeps sending meanwhile (2.1.4 WP2c), must hand nothing more to the outbox
+// the stop deletes (it also reads the stop as pending: iothub_pub_begin()). wifi_task calls it
+// again after the stop if a CONNECTED raced in (iothub_mqtt_stop_service()).
 static void mark_mqtt_disconnected(void)
 {
     g_iot_hub_connected = false;
@@ -4049,6 +4089,9 @@ void iothub_task(void *param)
 
         // =================================================================
         // Phase 3: PUBLISH (every pass; the flush below needs a connection)
+        // Since 2.1.4 WP2c every message here is BUILT on this task and handed to cloud_tx,
+        // which publishes it or stores it in the offline buffer: nothing below waits on the
+        // network, the API lock or the buffer's lock (LS-1).
         // =================================================================
         // There is deliberately NO "provisioned" gate here any more. 2.1.3 `continue`d
         // past this whole phase while unprovisioned, which skipped the lifecycle, the
@@ -4123,10 +4166,16 @@ void iothub_task(void *param)
                 }
                 size_t free_b = 0, largest = 0;
                 if (!telemetry_v2_tx_health_admit(&free_b, &largest)) {
+                    if (!s_alert_hold_logged) {   // once per episode
+                        s_alert_hold_logged = true;
+                        ESP_LOGW(IOTHUB_TAG, "health alerts held - TX busy, internal free %u B, largest %u B",
+                                 (unsigned)free_b, (unsigned)largest);
+                    }
                     tx_wake_request();   // cloud_tx wakes this task as it goes idle
                     break;
                 }
                 s_alert_held = false;
+                s_alert_hold_logged = false;
                 char *json = health_alert_to_json(&s_alert_parked);
                 if (json) {
                     telemetry_v2_publish_health_event(json);
@@ -4342,7 +4391,7 @@ void iothub_task(void *param)
         // valve struct is FILLED, so the fast snapshot carries real valve data, not
         // defaults. Ceiling: fire by 150 s even if the valve never becomes ready.
         // One-shot per (re)connect; armed ONLY on the boot/reconnect path
-        // (g_fast_snapshot_sent is reset only in the lifecycle block, never by
+        // (g_fast_snapshot_sent is reset only at a new session's reset, never by
         // arm_commission_snapshot), so the provision/commission path keeps its
         // complete-wait behavior. On the successful publish the flush opens the refresh
         // grace window so the remaining sensors fill in via incremental refresh.

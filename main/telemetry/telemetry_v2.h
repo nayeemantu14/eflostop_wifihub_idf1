@@ -114,6 +114,11 @@ void telemetry_v2_start_snapshot_timer(void);
 // ---------------------------------------------------------------------------
 // Publishers — all run in iothub_task context, non-blocking
 //
+// Since 2.1.4 WP2c they BUILD the message there (its ts, and whether it is pre-sync, fixed at
+// the build) and hand it to cloud_tx, which sends it (see "The sender" below); iothub_task
+// never waits on the network. Not telemetry_v2_publish_cmd_ack(): the esp-mqtt task builds and
+// sends its own, inside its session.
+//
 // Before the first clock sync the lifecycle and the snapshot are suppressed, but an
 // event (type="event") is built around the unsynced ts and held in the offline buffer,
 // never published directly. It gets its real time when the clock syncs

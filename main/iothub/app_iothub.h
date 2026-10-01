@@ -68,8 +68,10 @@ void iothub_on_wifi_lost(void);
 // wifi_task only (app_wifi.c), on every pass and when woken: runs the MQTT client stop that
 // iothub_task asked for, if any, then wakes iothub_task. It can take as long as the stop:
 // about 1 s in a session, up to 5 s between esp-mqtt's reconnects, 10-30 s with a connect in
-// flight. Holds no lock of the app's meanwhile. Safe at any time, even before
-// initialize_iothub(); its first call records the caller as the task iothub_task wakes.
+// flight. Holds no lock of the app's meanwhile but the publish gate (2.1.4 WP2c, below), which
+// nobody waits for; with the gate taken by a cloud_tx publish it returns at once, and cloud_tx
+// wakes it after that publish. Safe at any time, even before initialize_iothub(); its first
+// call records the caller as the task iothub_task and cloud_tx wake.
 void iothub_mqtt_stop_service(void);
 
 // The publish gate (2.1.4 WP2c, R0-1): every publish of cloud_tx's runs under it, and so does
