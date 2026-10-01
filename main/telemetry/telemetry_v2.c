@@ -173,6 +173,10 @@ static bool publish_json(cJSON *root, const char *type_hint)
     if (online && is_event && on_iothub && s_replay_owed) {
         telemetry_v2_drain_offline();
         behind = s_replay_owed;
+        // Read again: a replay publish whose write fails ends the session (esp-mqtt aborts and
+        // dispatches DISCONNECTED on this task). The event is then buffered, not handed to a
+        // client that a link loss may stop with it still in its outbox.
+        online = s_connected;
     }
 
     if (online && !behind) {
