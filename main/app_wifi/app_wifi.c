@@ -360,12 +360,13 @@ static const char *radio_hold_reason(TickType_t now)
  * saved one. So after a submit that does not match the router (a mistyped password, another
  * SSID) the retries fail, router back or not, until a reboot or a new submit; in the idle state,
  * with no SoftAP to submit from, until a reboot (or the 10 s reset).
- * wifi_manager's own retries, its first three after a link loss and its endless ones after
- * "Wi-Fi lost after setup" (the SoftAP stays up and its retry timer keeps running), come about
- * every 10 s, so the 30 s rule adds none beside them.
+ * wifi_manager's own retries, its first three after a link loss with the SoftAP down, come about
+ * every 10 s, so the 30 s rule adds none beside them. With the SoftAP up (the fallback portal, or
+ * the setup AP left up by "Wi-Fi lost after setup") it starts none (its C5), and this retry is
+ * the only one.
  *
- * Counted from an attempt's end too, not only its start: every lost-link disconnect arms
- * wifi_manager's one-shot retry timer (WIFI_MANAGER_RETRY_TIMER, 5 s) before our
+ * Counted from an attempt's end too, not only its start: every lost-link disconnect with the
+ * SoftAP down arms wifi_manager's one-shot retry timer (WIFI_MANAGER_RETRY_TIMER, 5 s) before our
  * STA_DISCONNECTED callback runs, and only START_AP stops it. A link loss can come long after
  * the last attempt started (a link up for minutes), and a retry sent then would still be
  * connecting when that timer's CONNECT_STA arrives, which reboots the hub (below).

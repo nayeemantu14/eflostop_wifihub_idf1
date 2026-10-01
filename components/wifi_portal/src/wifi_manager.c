@@ -152,6 +152,13 @@ const int WIFI_MANAGER_REQUEST_DISCONNECT_BIT = BIT8;
 
 void wifi_manager_timer_retry_cb( TimerHandle_t xTimer ){
 
+	/* LOCAL PATCH (2.1.4 C5): no retry of the component's own once the AP is up, which it can be by
+	 * the time this fires (see wifi_manager_start_retry_timer()) */
+	if(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_AP_STARTED_BIT){
+		xTimerStop( xTimer, (TickType_t) 0 );
+		return;
+	}
+
 	ESP_LOGI(TAG, "Retry Timer Tick! Sending ORDER_CONNECT_STA with reason CONNECTION_REQUEST_AUTO_RECONNECT");
 
 	/* stop the timer */
@@ -160,6 +167,18 @@ void wifi_manager_timer_retry_cb( TimerHandle_t xTimer ){
 	/* Attempt to reconnect */
 	wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_AUTO_RECONNECT);
 
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C5): starts the retry timer, only while the AP is down
+ * (WIFI_MANAGER_AP_STARTED_BIT clear). While the AP is up the app's router retry is the only
+ * retry owner (plan I9): with two, each could send a connect into the other's attempt. The timer
+ * callback checks the bit again, for an AP that comes up while the timer runs.
+ */
+static void wifi_manager_start_retry_timer(){
+	if(! (xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_AP_STARTED_BIT) ){
+		xTimerStart( wifi_manager_retry_timer, (TickType_t)0 );
+	}
 }
 
 void wifi_manager_timer_shutdown_ap_cb( TimerHandle_t xTimer){
@@ -1366,8 +1385,12 @@ void wifi_manager( void * pvParameters ){
 						wifi_manager_unlock_json_buffer();
 					}
 
-					/* Start the timer that will try to restore the saved config */
-					xTimerStart( wifi_manager_retry_timer, (TickType_t)0 );
+					/* Start the timer that will try to restore the saved config
+					 * LOCAL PATCH (2.1.4 C5): only while the AP is down. With the AP up (the router-fallback
+					 * portal, or the setup AP's tail after an IP, where it stays up once the STA is lost)
+					 * the app's router retry owns the retries; here they went on every few seconds, and
+					 * a portal Submit or the app's retry could land in one of their attempts. */
+					wifi_manager_start_retry_timer();
 
 					/* if it was a restore attempt connection, we clear the bit */
 					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
@@ -1403,7 +1426,8 @@ void wifi_manager( void * pvParameters ){
 				 * resulting esp_wifi_connect() races with captive-portal scan requests,
 				 * producing ESP_ERR_WIFI_STATE in WM_ORDER_START_WIFI_SCAN. The timer
 				 * is naturally re-armed by WM_EVENT_STA_DISCONNECTED if a later STA
-				 * attempt fails. */
+				 * attempt fails. (2.1.4 C5: only once the AP is down again; while it is
+				 * up, the app's router retry is the only retry.) */
 				if(xTimerIsTimerActive(wifi_manager_retry_timer) == pdTRUE){
 					xTimerStop(wifi_manager_retry_timer, (TickType_t)0);
 				}
@@ -1415,7 +1439,7 @@ void wifi_manager( void * pvParameters ){
 				esp_err_t ap_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
 				if(ap_err != ESP_OK){
 					ESP_LOGE(TAG, "ORDER_START_AP: esp_wifi_set_mode failed (%s) - no AP, tried again through the retry timer", esp_err_to_name(ap_err));
-					xTimerStart( wifi_manager_retry_timer, (TickType_t)0 );
+					wifi_manager_start_retry_timer();
 					break;
 				}
 
