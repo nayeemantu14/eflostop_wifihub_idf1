@@ -21,6 +21,64 @@ analysis is in `docs/field_logs/2.1.3/ROOT_CAUSE.md`.
 The telemetry schema is still `eflostop.v2`. No key is renamed or removed, and no NVS data changes. Some values
 and shapes are new, and parsers must accept them (see *Wire changes*).
 
+### Development builds (2.1.4 plan, from 2026-10-01)
+
+The user approved the 2.1.4 radio and setup-portal plan on 2026-10-01
+(`docs/field_logs/2.1.4/RADIO_PORTAL_PLAN.md`; progress in `docs/field_logs/2.1.4/HANDOFF.md` §15). Its
+packages land one at a time, each behind a bench gate, and the last one (WP10) folds this part into the
+sections below. The first two, WP-V and WP0, change no behaviour.
+
+- **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
+  - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
+    project's local patches) to `components/wifi_portal`, byte for byte. `main/idf_component.yml` and
+    `dependencies.lock` no longer list `ankayca/esp32-wifi-manager`; the other registry components are
+    unchanged.
+  - A re-resolve, `IDF_COMPONENT_OVERWRITE_MANAGED_COMPONENTS` or a deleted directory can no longer put the
+    upstream copy back silently, and `idf.py fullclean` no longer stops with `ComponentModifiedError`. The
+    local patches are ordinary tracked code, marked `LOCAL PATCH`.
+  - The component's library is now `libwifi_portal.a`, linked after `main`. Two `__FILE__` strings are 24 B
+    shorter each; nothing else in the image changes.
+- **No Wi-Fi password in any log line (WP0, C1).** The `http_server` and `wifi_manager` lines that printed the
+  password now print its length (`pwd_len`), and the `wifi_manager` lines print the SSID bounded to 32
+  characters: a 32-character SSID has no terminator, and the password stored right after it used to print with
+  it. Both tags are still capped at WARN, so these lines do not print.
+- **Bench diagnostics for gate G0 (WP0; log lines only, no behaviour change).**
+  - `CONFIG_APP_BENCH_DIAG` (`main/Kconfig.projbuild`) has no prompt, so its default decides: **y during
+    development, n for the release (WP10)**. It sets the Wi-Fi driver's `wifi` log tag back to INFO (the Wi-Fi
+    manager turns it off) and prints a warning at boot. The first configure adds `CONFIG_APP_BENCH_DIAG=y` to
+    `sdkconfig`, so the file's hash changes once.
+  - The monitor task samples the internal DMA-capable heap every second, and failed heap allocations are
+    counted from boot.
+  - New lines:
+    - `MONITOR`: `idma: free=%lu min=%lu largest=%lu min_largest=%lu allocfail=%lu`, right after each `heap:`
+      line (`min` and `min_largest`: the lowest since the line before); ` (last: %lu B, caps 0x%lx, %lu B free,
+      %s)` is appended when an allocation failed since the line before.
+    - `APP_WIFI`: `Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router last seen on %u` (or
+      `..., router not joined since boot`), `Wi-Fi channel at IP: radio %u, router %u` and `Wi-Fi channel at
+      link loss: radio %u, router was on %u` (only when the link was up).
+    - `APP_WIFI`: `SoftAP: station %02X:%02X:%02X:%02X:%02X:%02X got %d.%d.%d.%d, %lu ms after joining` (or
+      `... got %d.%d.%d.%d (join not seen)`), at each DHCP lease on the SoftAP.
+    - `APP_WIFI`: `portal client %d.%d.%d.%d: first %s, %lu ms after joining` (or `... first %s (no SoftAP join
+      seen)`), once per phone and kind: `DNS query`, `captive probe (302 sent)`, `page request`,
+      `Connect/Disconnect request`, `network list request`, `status request`.
+    - `BLE_LEAK`: `eleak %02X:%02X:%02X:%02X:%02X:%02X burst: n=%u in %u.%02u s, dT %u-%u ms, phy=%s` (or
+      `... burst: n=1, phy=%s`), about 1.5-2 s after each advertising burst ends, for the first 4 sensors
+      heard: the advertisements heard, the shortest and longest gap between two of them, and their primary
+      PHYs (`1M`, `Coded`, `1M+Coded`, `other` and its combinations).
+    - `APP_WIFI` (warning, bench builds only): `bench build (APP_BENCH_DIAG): Wi-Fi driver log at INFO - not
+      for release`, after `AP SSID:`; then the driver's own `wifi:` lines (channel switches and CSA, SoftAP
+      station join and leave, the station's connect states).
+  - Unchanged: every existing line, including those the production tool matches. A bench build must not go
+    through the production tool with Wi-Fi credentials saved: the driver's connect line carries the router's
+    SSID and BSSID, and with an SSID that contains "mac" the tool would take the router's BSSID for the hub's
+    Wi-Fi MAC.
+  - Memory: `.bss` +121 B, `.data` +8 B and about 40-60 B of permanent heap (one more event handler); no IRAM;
+    flash about +5 KB. No new task or timer; the monitor task wakes every second instead of every 10 s.
+- **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
+  network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
+  forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and
+  its `limit` line, which is gone; WP10 rewrites them.
+
 ### Fixed (2.1.3 field defects)
 
 - **BUG-1: a valve with a flat battery was never rated critical, and an unknown battery read as 0 %.**
