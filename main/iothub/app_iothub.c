@@ -2244,7 +2244,8 @@ static void initialize_sntp(void)
 // The cloud - MQTT's start, DPS, the SAS restart - is admitted only when all three hold:
 //   - the STA has its IP (s_wifi_up);
 //   - the SoftAP is down: esp_wifi_get_mode() reads WIFI_MODE_STA. A fact read on every
-//     pass, never a flag a missed callback could leave stale;
+//     pass, never a flag a missed callback could leave stale. A SoftAP seen up for this IP
+//     must have been seen down for ADMIT_AP_SETTLE_MS (its servers' teardown);
 //   - internal DMA-capable heap: ADMIT_IDMA_FREE_MIN free, with a block of
 //     ADMIT_IDMA_LARGEST_MIN. Bringing the cloud up takes about 20 KB of it (G0 run B:
 //     36,904 -> 16,800 B), and the long-lived blocks of a session started in a fragmented
@@ -2270,11 +2271,17 @@ static void initialize_sntp(void)
 #define ADMIT_ESCAPE_MS           (60 * 1000)    // then a block of ADMIT_ESCAPE_LARGEST_MIN will do
 #define ADMIT_ESCAPE_LARGEST_MIN  (8 * 1024)
 #define ADMIT_FORCE_MS            (180 * 1000)   // then admitted whatever the heap
+// After a SoftAP seen up for this IP, its stop is let finish first: wifi_manager's STOP_AP
+// switches the mode to STA, then waits up to 1 s for the DNS task, stops the HTTP server
+// and frees the network list (the whole AP stop gave back 6.7 KB on the CP5 bench). TLS's
+// long-lived blocks are allocated once that memory is back, not around it.
+#define ADMIT_AP_SETTLE_MS        1000
 
 typedef enum {
     ADMIT_NO_IP = 0,   // no STA IP, nothing to admit
     ADMIT_IP,          // an IP this task has not decided on yet
     ADMIT_WAIT_AP,     // deferred: the SoftAP is up
+    ADMIT_AP_SETTLE,   // deferred: the SoftAP has just stopped (ADMIT_AP_SETTLE_MS)
     ADMIT_WAIT_HEAP,   // deferred: the heap gate
     ADMIT_DONE,        // admitted
 } admit_state_t;
@@ -2282,6 +2289,7 @@ typedef enum {
 static admit_state_t s_admit_state      = ADMIT_NO_IP;
 static uint32_t      s_wifi_losses_seen = 0;   // s_wifi_losses as last acted on
 static int64_t       s_admit_ip_ms      = 0;   // when this task first saw the IP
+static int64_t       s_admit_settle_ms  = 0;   // when it first saw that IP's SoftAP down
 static int64_t       s_admit_heap_ms    = 0;   // when the heap gate first held it back; 0 = not
 static uint32_t      s_admit_escapes    = 0;   // admissions past the heap gate since boot
 
@@ -2358,6 +2366,12 @@ static void cloud_admission(void)
     }
     if (s_admit_state == ADMIT_DONE)
         return;
+    if (s_admit_state == ADMIT_WAIT_AP) {
+        s_admit_state     = ADMIT_AP_SETTLE;
+        s_admit_settle_ms = now;
+    }
+    if (s_admit_state == ADMIT_AP_SETTLE && now - s_admit_settle_ms < ADMIT_AP_SETTLE_MS)
+        return;   // the SoftAP's stop is still freeing its servers (no line: a second at most)
 
     size_t free_b  = heap_caps_get_free_size(ADMIT_IDMA_CAPS);
     size_t largest = heap_caps_get_largest_free_block(ADMIT_IDMA_CAPS);
