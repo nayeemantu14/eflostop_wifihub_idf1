@@ -457,6 +457,12 @@ esp_err_t dps_register(const char *id_scope, const char *group_key,
     // Read once the client is stopped: its task no longer writes the state. An assignment
     // that arrived as the wait ended is kept.
     if (s_ctx.state != DPS_STATE_DONE) {
+        // The hook is asked once more, after the stop. A link loss mostly ends the session
+        // by itself (DISCONNECTED or ERROR: FAILED and the semaphore given) before a slice
+        // runs out and asks it, and by now the loss has reached the hook: that end is an
+        // abort too, not a failed attempt with its back-off.
+        if (!aborted && keep_going != NULL && !keep_going())
+            aborted = true;
         if (aborted) {
             ESP_LOGW(DPS_TAG, "DPS registration aborted after %lu s: Wi-Fi lost or SoftAP up - "
                      "tried again once the cloud is admitted again",

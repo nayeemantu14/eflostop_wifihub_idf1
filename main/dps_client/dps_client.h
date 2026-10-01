@@ -27,8 +27,10 @@ typedef struct {
  * @param keep_going      Abort hook, or NULL: asked about every second while a live
  *                        registration waits (on the caller's task). false stops and
  *                        destroys the registration's MQTT client and returns
- *                        ESP_ERR_INVALID_STATE. iothub_task passes its cloud admission
- *                        (2.1.4 WP2: no DPS TLS session while the SoftAP is up).
+ *                        ESP_ERR_INVALID_STATE. Asked once more after a registration that
+ *                        ended without an assignment: false then makes it an abort too (a
+ *                        link loss that ended the session itself). iothub_task passes its
+ *                        cloud admission (2.1.4 WP2: no DPS TLS session while the SoftAP is up).
  * @return ESP_OK on success; ESP_ERR_INVALID_STATE when the registration did not run or
  *         was aborted (no valid clock, or keep_going said stop): not a failed attempt;
  *         ESP_ERR_NO_MEM or ESP_FAIL on registration failure
