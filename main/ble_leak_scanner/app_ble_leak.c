@@ -673,6 +673,21 @@ static void start_passive_scan(void)
 #endif
 }
 
+// The scan-alive heartbeat line. While our scan is paused it says so, for how long and for what
+// (2.1.4 WP1: until WP8 the no-credential portal's pause has no time cap); otherwise it is as it
+// always was. In a frame of its own, so the scan task's loop frame does not carry its arguments.
+static __attribute__((noinline)) void heartbeat_log(bool paused, bool portal, TickType_t paused_since)
+{
+    if (paused) {
+        ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors, scanning paused for %lu s (%s)",
+                 s_whitelist_count,
+                 (unsigned long)((xTaskGetTickCount() - paused_since) / configTICK_RATE_HZ),
+                 portal ? "Wi-Fi setup portal" : "Wi-Fi radio hold");
+    } else {
+        ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors", s_whitelist_count);
+    }
+}
+
 /* ---------------------------------------------------------
  * Main scanner task
  * --------------------------------------------------------- */
@@ -701,6 +716,7 @@ static void ble_leak_scan_task(void *param)
     TickType_t last_heartbeat_log = xTaskGetTickCount();
     bool paused = false;          // this task's view of the window or a Wi-Fi radio hold
     bool portal_paused = false;   // the window's own pause, for its log lines
+    TickType_t paused_since = 0;  // when that pause began, for the heartbeat line
 
     for (;;) {
         // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no scan of ours while
@@ -715,6 +731,9 @@ static void ble_leak_scan_task(void *param)
             if (portal && !portal_paused) {
                 portal_paused = true;
                 ESP_LOGI(BLE_LEAK_TAG, "Scan paused - Wi-Fi setup portal has the radio");
+            }
+            if (!paused) {
+                paused_since = xTaskGetTickCount();
             }
             paused = true;
             s_scan_restart_needed = false;
@@ -761,9 +780,9 @@ static void ble_leak_scan_task(void *param)
         // The burst log: a line for each sensor's burst that is over (paused or not).
         burst_log();
 
-        // Periodic scan-alive heartbeat (every 60s)
+        // Periodic scan-alive heartbeat (every 60s), with the pause if our scan is paused
         if ((xTaskGetTickCount() - last_heartbeat_log) >= pdMS_TO_TICKS(60000)) {
-            ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors", s_whitelist_count);
+            heartbeat_log(paused, portal, paused_since);
             last_heartbeat_log = xTaskGetTickCount();
         }
 
