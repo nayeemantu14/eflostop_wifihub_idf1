@@ -96,6 +96,17 @@ static bool ap_list_logged = false;
  * (MONITOR's allocfail, the figure the memory gates pass on) and replaces the record of the last
  * one, which should name the allocation that could not wait. */
 #define WIFI_MANAGER_HEAP_MARGIN	4096
+/* LOCAL PATCH (2.1.4 WP1): the AP is up with its HTTP or DNS server not running: START_AP could
+ * not start it (httpd_start() or the DNS task's creation failed, for lack of memory), and nothing
+ * else would before the next START_AP or STOP_AP, which the setup portal may never see (plan I11:
+ * both up from START_AP to STOP_AP). The task's loop then starts them again every
+ * WIFI_MANAGER_AP_SERVERS_RETRY_MS, counted from ap_servers_tick (the last try), each try once the
+ * largest free block has room for a server task's stack (WIFI_MANAGER_AP_SERVER_STACK, httpd's)
+ * and WIFI_MANAGER_HEAP_MARGIN. STOP_AP clears it. wifi_manager task only. */
+static bool ap_servers_down = false;
+static TickType_t ap_servers_tick = 0;
+#define WIFI_MANAGER_AP_SERVERS_RETRY_MS	5000
+#define WIFI_MANAGER_AP_SERVER_STACK		4096
 /* LOCAL PATCH (2.1.4 WP1, a bench diagnostic): a scan this task started is in flight, from the
  * esp_wifi_scan_start() that succeeded to this task's WM_EVENT_SCAN_DONE (done, failed or
  * stopped); the radio then visits every channel (wifi_manager_scan_in_flight()). Not cleared at a
@@ -801,6 +812,36 @@ static void wifi_manager_alloc_ap_list(){
 	}
 }
 
+/**
+ * @brief LOCAL PATCH (2.1.4 WP1): starts the AP's HTTP and DNS servers: at START_AP, and again
+ * (retry) from the task's loop while one of them is not running (see ap_servers_down). Each start
+ * does nothing while its server runs. A retry waits for room in the heap (a start that fails is a
+ * failed allocation, MONITOR's allocfail), and prints nothing while it waits. Every try that
+ * leaves a server down prints one W line; the try that brings both back prints one too.
+ * wifi_manager task only.
+ */
+static void wifi_manager_start_ap_servers(bool retry){
+
+	ap_servers_tick = xTaskGetTickCount();
+	if(retry && !wifi_manager_heap_has(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT, WIFI_MANAGER_AP_SERVER_STACK)){
+		return;
+	}
+
+	bool http_up = http_app_start(true);
+	bool dns_up = dns_server_start();
+	bool was_down = ap_servers_down;
+	ap_servers_down = !(http_up && dns_up);
+
+	if(ap_servers_down){
+		ESP_LOGW(TAG, "AP up without its %s - tried again every %d s",
+				http_up ? "DNS server" : (dns_up ? "HTTP server" : "HTTP and DNS servers"),
+				WIFI_MANAGER_AP_SERVERS_RETRY_MS / 1000);
+	}
+	else if(was_down){
+		ESP_LOGW(TAG, "AP servers running again (HTTP and DNS)");
+	}
+}
+
 
 
 bool wifi_manager_lock_sta_ip_string(TickType_t xTicksToWait){
@@ -1252,7 +1293,22 @@ void wifi_manager( void * pvParameters ){
 
 	/* main processing loop */
 	for(;;){
-		xStatus = xQueueReceive( wifi_manager_queue, &msg, portMAX_DELAY );
+		/* LOCAL PATCH (2.1.4 WP1): with the AP up and one of its servers down, they are started
+		 * again every WIFI_MANAGER_AP_SERVERS_RETRY_MS between messages, and the wait for the next
+		 * message ends at the next try. Otherwise the task waits for a message as before. */
+		TickType_t wait = portMAX_DELAY;
+		if(ap_servers_down){
+			TickType_t since = xTaskGetTickCount() - ap_servers_tick;
+			if(since >= pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS)){
+				wifi_manager_start_ap_servers(true);
+				since = 0;
+			}
+			if(ap_servers_down){
+				wait = pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS) - since;
+			}
+		}
+
+		xStatus = xQueueReceive( wifi_manager_queue, &msg, wait );
 
 		if( xStatus == pdPASS ){
 			switch(msg.code){
@@ -1557,12 +1613,13 @@ void wifi_manager( void * pvParameters ){
 
 				/* restart HTTP daemon */
 				http_app_stop();
-				http_app_start(true);
 
-				/* start DNS
-				 * LOCAL PATCH (2.1.4 C4): nothing to do while it runs (START_AP with the AP up). It
-				 * now runs until STOP_AP: no longer stopped at GOT_IP */
-				dns_server_start();
+				/* start HTTP, and DNS
+				 * LOCAL PATCH (2.1.4 C4): DNS: nothing to do while it runs (START_AP with the AP up).
+				 * It now runs until STOP_AP: no longer stopped at GOT_IP.
+				 * LOCAL PATCH (2.1.4 WP1): a server that does not start is started again while the
+				 * AP is up (wifi_manager_start_ap_servers()) */
+				wifi_manager_start_ap_servers(false);
 
 				/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up.
 				 * LOCAL PATCH (2.1.4 WP1): after the servers, which captive detection needs (plan
@@ -1594,6 +1651,7 @@ void wifi_manager( void * pvParameters ){
 					/* stop DNS
 					 * LOCAL PATCH (2.1.4 C4): waits up to 1 s for its task to close its socket */
 					dns_server_stop();
+					ap_servers_down = false;	/* LOCAL PATCH (2.1.4 WP1): no retry with the AP down */
 
 					/* restart HTTP daemon */
 					http_app_stop();

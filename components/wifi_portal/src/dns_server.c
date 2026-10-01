@@ -370,17 +370,17 @@ static void dns_server_wait_end(void){
 	}
 }
 
-void dns_server_start(){
+bool dns_server_start(){
 
 	if(dns_task_alive){
 		if(dns_run){
-			return;		/* it runs: START_AP with the AP already up */
+			return true;	/* it runs: START_AP with the AP already up */
 		}
 		/* a stop that did not see the task end: never two tasks on the port */
 		dns_server_wait_end();
 		if(dns_task_alive){
 			ESP_LOGW(TAG, "captive DNS: the stopped task has not ended - not started");
-			return;
+			return false;
 		}
 	}
 
@@ -389,8 +389,11 @@ void dns_server_start(){
 	if(xTaskCreate(&dns_server, "dns_server", DNS_TASK_STACK, NULL, WIFI_MANAGER_TASK_PRIORITY-1, NULL) != pdPASS){
 		dns_run = false;
 		dns_task_alive = false;
-		ESP_LOGE(TAG, "captive DNS: task not created (no memory) - no DNS until the next AP start");
+		/* LOCAL PATCH (2.1.4 WP1): wifi_manager tries again while the AP is up */
+		ESP_LOGE(TAG, "captive DNS: task not created (no memory)");
+		return false;
 	}
+	return true;
 }
 
 void dns_server_stop(){

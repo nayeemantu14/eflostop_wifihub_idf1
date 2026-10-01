@@ -52,8 +52,11 @@ extern "C" {
 
 /** 
  * @brief spawns the http server 
+ * LOCAL PATCH (2.1.4 WP1): does nothing while it runs. Returns whether it runs after the call:
+ * false when httpd_start() failed (logged), for lack of memory, which wifi_manager tries again
+ * while the AP is up.
  */
-void http_app_start(bool lru_purge_enable);
+bool http_app_start(bool lru_purge_enable);
 
 /**
  * @brief stops the http server 

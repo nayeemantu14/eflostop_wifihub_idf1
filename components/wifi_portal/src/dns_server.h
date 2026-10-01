@@ -48,9 +48,11 @@ extern "C" {
  * with the AP already up. If a stop did not see the task end, it waits up to 1 s more for it,
  * and does not start a second one beside it. No reboot path: a task that cannot be created, or
  * a socket that cannot be opened or bound, is logged (the task retries the socket every 1 s).
- * wifi_manager task only.
+ * LOCAL PATCH (2.1.4 WP1): returns whether a task runs after the call (its socket maybe still
+ * being retried): false when it could not be created, or a stopped one has not ended, which
+ * wifi_manager tries again while the AP is up. wifi_manager task only.
  */
-void dns_server_start();
+bool dns_server_start();
 
 /**
  * @brief Stops the captive DNS task. LOCAL PATCH (2.1.4 C4): clears its run flag, which the task
