@@ -269,8 +269,18 @@ void telemetry_v2_clear_settings(void);
 // Offline buffer integration
 // ---------------------------------------------------------------------------
 
-/** Set MQTT connectivity state. When false, event telemetry is buffered to NVS. */
+/** Set MQTT connectivity state. When false, event telemetry is buffered to NVS. true also
+ *  starts the next session generation (telemetry_v2_session_gen()): only the
+ *  MQTT_EVENT_CONNECTED handler, on the esp-mqtt task, calls it with true. */
 void telemetry_v2_set_connected(bool connected);
+
+/**
+ * @brief The MQTT session's generation (2.1.4 WP2c): how many CONNECTEDs have marked the
+ *        session connected since boot. Read after telemetry_v2_is_connected() returned true,
+ *        it is that session's number or a later one; a change between two reads means a
+ *        session ended and another began in between. Any task; never waits.
+ */
+uint32_t telemetry_v2_session_gen(void);
 
 /** Drain all NVS-buffered events via MQTT. Call on reconnect before lifecycle. Does nothing
  *  while the client is not connected (2.1.4 WP2). */

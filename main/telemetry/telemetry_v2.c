@@ -45,10 +45,19 @@ static bool           s_connected      = false;
 static TimerHandle_t  s_snapshot_timer = NULL;
 static QueueHandle_t  s_snapshot_queue = NULL;
 
+// The MQTT session's generation (2.1.4 WP2c): how many MQTT_EVENT_CONNECTEDs have marked the
+// session connected since boot. One writer, telemetry_v2_set_connected(true), which only the
+// CONNECTED handler calls (the esp-mqtt task), so its plain increment is safe. Stored before
+// s_connected, both with release: a task that reads s_connected true and then this reads
+// that session's number or a later one. A change across a publish means that the session it
+// was handed to ended and another began (send_str()'s A-1, replay_publish()).
+static volatile uint32_t s_sess_gen   = 0;
+
 // Events wait in the offline buffer although the client is connected: an event the outbox
 // refused for room (publish_json()), or the rest of a drain cut short. Set by whichever task
 // published, cleared by the drain (iothub_task); a lost race costs one retry's delay. While
-// it is set, iothub_task's next event drains first and never overtakes them (publish_json()).
+// it is set, or anything is buffered, iothub_task's next event drains first and never
+// overtakes them (send_str()).
 static volatile bool  s_replay_owed    = false;
 
 // Heartbeat interval in SECONDS. Written by the Twin desired-property handler
@@ -186,10 +195,15 @@ static bool send_str(const telem_msg_t *m, const char *type_hint)
     // offered first; if the outbox still refuses some, this event waits behind them for the
     // replay. Not on the esp-mqtt task (a cmd_ack, an answer, not a cause): it must not
     // drain, as it holds esp-mqtt's API lock (see the -2 refusal below).
+    // Whenever any are buffered (offline_buffer_pending(), 2.1.4 WP2c), not only while the
+    // replay is owed: a drain cut short by its session's end leaves the flag clear, so on the
+    // pass where the next CONNECTED lands after the lifecycle block, this pass's events
+    // overtook the buffered ones (HANDOFF 15m residual 8); and a drain whose count read timed
+    // out left them unowed (15i residual 8).
     bool behind = false;
-    if (online && is_event && on_iothub && s_replay_owed) {
+    if (online && is_event && on_iothub && (s_replay_owed || offline_buffer_pending() > 0)) {
         telemetry_v2_drain_offline();
-        behind = s_replay_owed;
+        behind = s_replay_owed || offline_buffer_pending() > 0;
         // Read again: a replay publish whose write fails ends the session (esp-mqtt aborts and
         // dispatches DISCONNECTED on this task). The event is then buffered, not handed to a
         // client that a link loss may stop with it still in its outbox.
@@ -199,14 +213,14 @@ static bool send_str(const telem_msg_t *m, const char *type_hint)
     if (online && !behind) {
         // Online: publish directly
         ESP_LOGI(TELEM_TAG, "Pub %s: %s", type_hint, json_str);
+        uint32_t gen = telemetry_v2_session_gen();   // the session it is handed to (A-1)
         int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json_str, 0, 1, 0);
         sent = (msg_id >= 0);
         if (!sent)
             ESP_LOGW(TELEM_TAG, "Pub %s failed (msg_id=%d)", type_hint, msg_id);
         // -2: refused for room (the outbox limit, app_iothub.c build_mqtt_cfg()), nothing
         // queued. An event is kept for the replay rather than lost; iothub_task replays it
-        // while connected (telemetry_v2_replay_owed()). Not for -1: that can be a message
-        // esp-mqtt queued whose write failed, and esp-mqtt sends that one itself.
+        // while connected (telemetry_v2_replay_owed()). A -1 is kept by A-1, below.
         // Off iothub_task - the esp-mqtt task, for a cmd_ack, inside its event handler with
         // esp-mqtt's API lock held - the buffer is not waited for: iothub_task's drain holds
         // it while it waits for that lock (offline_buffer_drain()), so a wait would stall both
@@ -219,6 +233,26 @@ static bool send_str(const telem_msg_t *m, const char *type_hint)
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s kept for replay", type_hint);
             } else {
                 ESP_LOGW(TELEM_TAG, "Outbox full - %s not kept", type_hint);
+            }
+        } else if (is_event && on_iothub &&
+                   (msg_id < 0 || !s_connected || telemetry_v2_session_gen() != gen)) {
+            // A-1 (2.1.4 WP2c; the user's decision D3 of 2026-10-02, at-least-once): an event
+            // esp-mqtt did not take (-1: a failed write, such as the LS-1 write into a dead
+            // WAN that times out and ends the session, or no memory), or took into a session
+            // that did not stay up, is also kept for the replay. Such a message sits at most
+            // in an outbox that the stop at a link loss deletes and that expires its items
+            // after 30 s; it used to be lost. The session's end is known by now: esp-mqtt
+            // dispatches DISCONNECTED on the publishing task before its publish returns, and
+            // on any other task before it releases the API lock this publish then took. The
+            // outbox can still deliver its copy too, possibly after newer events: the cloud
+            // dedupes on gateway.id + ts + event + device id and keeps the first copy. Not the
+            // esp-mqtt task's cmd_ack (it cannot wait for the buffer, above).
+            if (offline_buffer_store(json_str, m->len)) {
+                s_replay_owed = true;
+                ESP_LOGW(TELEM_TAG, "Pub %s not confirmed (msg_id=%d) - kept for replay, a duplicate is possible",
+                         type_hint, msg_id);
+            } else {
+                ESP_LOGW(TELEM_TAG, "Pub %s not confirmed (msg_id=%d) - not kept", type_hint, msg_id);
             }
         }
     } else if (is_event) {
@@ -1330,21 +1364,32 @@ void telemetry_v2_publish_cmd_ack(const char *correlation_id,
 
 void telemetry_v2_set_connected(bool connected)
 {
-    s_connected = connected;
+    // A new session's generation first, then its mark (see s_sess_gen).
+    if (connected)
+        __atomic_store_n(&s_sess_gen, s_sess_gen + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_connected, connected, __ATOMIC_RELEASE);
     ESP_LOGI(TELEM_TAG, "MQTT connected = %s", connected ? "true" : "false");
 }
 
+uint32_t telemetry_v2_session_gen(void)
+{
+    return __atomic_load_n(&s_sess_gen, __ATOMIC_ACQUIRE);
+}
+
 // The drain's publish (offline_buffer_drain()): one replayed entry, only into a session that
-// is up, and taken only if the session is still up after the publish. A publish whose own
-// write failed has ended the session too (esp-mqtt aborts and dispatches DISCONNECTED on this
-// task), and is reported as failed, its own line. The client exists whenever the session is
-// up: s_connected is set only by its CONNECTED.
+// is up, and taken only if that same session is still up after the publish: not if it ended,
+// nor if it ended and another began meanwhile (its generation, as for A-1 in send_str()). A
+// publish whose own write failed has ended the session too (esp-mqtt aborts and dispatches
+// DISCONNECTED on this task), and is reported as failed, its own line. The client exists
+// whenever the session is up: s_connected is set only by its CONNECTED.
 static offline_buffer_pub_t replay_publish(const char *json, size_t len)
 {
     if (!s_mqtt || !s_connected) return OFFLINE_BUF_PUB_DOWN;
+    uint32_t gen = telemetry_v2_session_gen();
     int msg_id = esp_mqtt_client_publish(s_mqtt, s_topic, json, (int)len, 1, 0);
     if (msg_id < 0) return OFFLINE_BUF_PUB_FAILED;
-    return s_connected ? OFFLINE_BUF_PUB_TAKEN : OFFLINE_BUF_PUB_DOWN;
+    return (s_connected && telemetry_v2_session_gen() == gen) ? OFFLINE_BUF_PUB_TAKEN
+                                                              : OFFLINE_BUF_PUB_DOWN;
 }
 
 void telemetry_v2_drain_offline(void)
