@@ -1740,9 +1740,19 @@ void wifi_manager( void * pvParameters ){
 
 				/* order wifi discconect */
 				/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK. The request bit stays set, as it
-				 * did: the next disconnect (the app's own forget event for an idle STA) still erases. */
+				 * did: the next disconnect (the app's own forget event for an idle STA) still erases.
+				 * LOCAL PATCH (2.1.4 WP1): not with the STA connected (it has its IP), where no
+				 * disconnect event follows a failed call: the bit, and the app's forget waiting for
+				 * that event, would stay armed, and the next link loss, maybe days later, would erase
+				 * the saved network then. The forget is dropped instead (nothing erased, the STA
+				 * stays connected), and the callback is not called. */
 				esp_err_t disconnect_err = esp_wifi_disconnect();
 				if(disconnect_err != ESP_OK){
+					if(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT){
+						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
+						ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s) - still connected, nothing erased", esp_err_to_name(disconnect_err));
+						break;
+					}
 					ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s)", esp_err_to_name(disconnect_err));
 				}
 
