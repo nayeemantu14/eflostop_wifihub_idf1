@@ -33,6 +33,7 @@ Contains the freeRTOS task and all necessary support
 #define WIFI_MANAGER_H_INCLUDED
 
 #include <stdbool.h>
+#include <stdint.h>
 
 
 #ifdef __cplusplus
@@ -351,6 +352,18 @@ void wifi_manager_scan_awifi_manager_send_messagesync();
  * @brief requests to disconnect and forget about the access point.
  */
 void wifi_manager_disconnect_async();
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C12): the SoftAP stops in ms milliseconds (rounded up to a tick, at
+ * least one), for the app's AP-tail policy (plan section 4.6): re-arms the single AP-shutdown
+ * timer, whose STOP_AP stops the AP only with the STA connected. Only while the STA is
+ * connected (WIFI_MANAGER_WIFI_CONNECTED_BIT): false otherwise, and false with a W line when
+ * the timer task's queue is full. A later call replaces the deadline, sooner or later; each
+ * GOT_IP with the AP up arms the default WIFI_MANAGER_SHUTDOWN_AP_TIMER again first, and a lost
+ * link stops the timer (the AP stays up). Never waits, from any task: a GOT_IP callback on the
+ * wifi_manager task (a post to its own queue could wait for good), wifi_task, an HTTP handler.
+ */
+bool wifi_manager_ap_stop_in(uint32_t ms);
 
 /**
  * @brief Tries to get access to json buffer mutex.

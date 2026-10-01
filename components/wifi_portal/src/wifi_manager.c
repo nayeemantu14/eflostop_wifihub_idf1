@@ -250,6 +250,37 @@ void wifi_manager_timer_shutdown_ap_cb( TimerHandle_t xTimer){
 	wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
 }
 
+bool wifi_manager_ap_stop_in(uint32_t ms){
+
+	/* LOCAL PATCH (2.1.4 C12): see wifi_manager.h. Only with the STA connected, as STOP_AP itself */
+	if(wifi_manager_event_group == NULL || wifi_manager_shutdown_ap_timer == NULL ||
+			!(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT)){
+		return false;
+	}
+
+	/* rounded up to a tick, and at least one: a timer's period cannot be 0 */
+	TickType_t t = (TickType_t)(ms / portTICK_PERIOD_MS + ((ms % portTICK_PERIOD_MS) ? 1 : 0));
+	if(t == 0){
+		t = 1;
+	}
+
+	/* never waits: with the timer task's queue full the call fails, and the AP keeps its stop */
+	if(xTimerChangePeriod(wifi_manager_shutdown_ap_timer, t, (TickType_t)0) != pdPASS){
+		ESP_LOGW(TAG, "AP stop in %lu ms not set (timer queue full)", (unsigned long)ms);
+		return false;
+	}
+
+	/* the link lost since the check above: its STA_DISCONNECTED stops the timer, and that stop may
+	 * have reached the timer task before this re-arm did. Stopped again, after the re-arm (the
+	 * timer task takes its commands in the order they were sent), so the AP stays up as the lost
+	 * link leaves it */
+	if(!(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT)){
+		xTimerStop(wifi_manager_shutdown_ap_timer, (TickType_t)0);
+		return false;
+	}
+	return true;
+}
+
 void wifi_manager_scan_async(){
 	wifi_manager_send_message(WM_ORDER_START_WIFI_SCAN, NULL);
 }
@@ -1528,10 +1559,11 @@ void wifi_manager( void * pvParameters ){
 				/* reset saved sta IP */
 				wifi_manager_safe_update_sta_ip_string((uint32_t)0);
 
-				/* if there was a timer on to stop the AP, well now it's time to cancel that since connection was lost! */
-				if(xTimerIsTimerActive(wifi_manager_shutdown_ap_timer) == pdTRUE ){
-					xTimerStop( wifi_manager_shutdown_ap_timer, (TickType_t)0 );
-				}
+				/* if there was a timer on to stop the AP, well now it's time to cancel that since connection was lost!
+				 * LOCAL PATCH (2.1.4 C12): stopped whether it reads active or not: a re-arm sent from
+				 * another task (wifi_manager_ap_stop_in()) may not have reached the timer task yet,
+				 * and a stop sent now reaches it after that re-arm */
+				xTimerStop( wifi_manager_shutdown_ap_timer, (TickType_t)0 );
 
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 				if( uxBits & WIFI_MANAGER_REQUEST_STA_CONNECT_BIT ){
@@ -1719,7 +1751,11 @@ void wifi_manager( void * pvParameters ){
 
 					/* if for whatever reason user configured the shutdown timer to be less than 1 tick, the AP is stopped straight away */
 					if(t > 0){
-						xTimerStart( wifi_manager_shutdown_ap_timer, (TickType_t)0 );
+						/* LOCAL PATCH (2.1.4 C12): with the default period again, which a
+						 * wifi_manager_ap_stop_in() at an earlier IP may have changed (a timer keeps
+						 * its last period); xTimerChangePeriod() starts it too, as xTimerStart() did.
+						 * The callback below may set this IP's own stop (wifi_manager_ap_stop_in()) */
+						xTimerChangePeriod( wifi_manager_shutdown_ap_timer, t, (TickType_t)0 );
 					}
 					else{
 						wifi_manager_send_message(WM_ORDER_STOP_AP, (void*)NULL);
