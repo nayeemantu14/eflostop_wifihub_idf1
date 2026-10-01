@@ -76,7 +76,7 @@ static volatile TickType_t s_setup_ok_tick = 0;
 /* For the window the wifi_manager task runs at PORTAL_TASK_PRIORITY: above the app tasks (5),
  * far below lwIP (18) and the Wi-Fi and BT tasks (20-23). Insurance only: the portal was short
  * of radio time, not CPU. Only this task is raised. The HTTP and DNS server tasks ("httpd",
- * "dns_server") keep their priority: their handles are private to the managed component, and
+ * "dns_server") keep their priority: their handles are private to the portal component, and
  * the one lookup by name, xTaskGetHandle(), is not linked in this image and is IRAM-resident
  * (CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH is off). Linking it would add about 0.4 KB of
  * IRAM, which on the ESP32-S3 moves the IRAM/DRAM split up by 512 B of heap.

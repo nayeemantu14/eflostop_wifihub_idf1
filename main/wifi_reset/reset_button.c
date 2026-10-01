@@ -11,7 +11,7 @@
 
 // wifi_manager's NVS namespace ("espwifimgr"). wifi_manager.c defines it with external linkage
 // but wifi_manager.h does not declare it, so it is declared here rather than the string being
-// repeated: the managed component stays its only definition.
+// repeated: the portal component (components/wifi_portal) stays its only definition.
 extern const char wifi_manager_nvs_namespace[];
 
 // ---------------------------------------------------------------------------
