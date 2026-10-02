@@ -99,12 +99,14 @@ static bool g_last_set_ok = false;              // false until a device set was 
 static rules_config_t g_last_rules = { .auto_close_enabled = true, .trigger_mask = RULES_TRIGGER_ALL };
 static bool g_prov_busy_logged = false;         // one W line per busy episode
 
-/* Wet reports the rules lock refused, oldest first, evaluated again by the next tick and
- * ahead of the next report. iothub_task only (the sole caller of evaluate_leak() and
- * tick()), so no lock. */
-#define KEPT_WET_MAX 4
-static struct { leak_source_t source; char id[18]; } g_kept_wet[KEPT_WET_MAX];
-static uint8_t g_kept_wet_n = 0;
+/* Reports the rules lock refused, oldest first, evaluated again by the next tick and
+ * ahead of the next report: wet ones, and a dry one from a source whose wet one is kept,
+ * so the pair is replayed in order (the valve never repeats a steady state, so a dry
+ * report lost behind its kept wet one would leave its flood source wet in the engine).
+ * iothub_task only (the sole caller of evaluate_leak() and tick()), so no lock. */
+#define KEPT_MAX 4
+static struct { leak_source_t source; bool leak; char id[18]; } g_kept[KEPT_MAX];
+static uint8_t g_kept_n = 0;
 static bool g_lock_busy_logged = false;         // one W line per busy episode
 
 // 24h override window state
@@ -981,41 +983,54 @@ static bool evaluate_leak_once(leak_source_t source, bool leak_active, const cha
     return true;
 }
 
-// Evaluates the kept wet reports, oldest first. False while the rules lock is still busy;
-// the rest stay kept, in order. One no longer in the device set (a removal since) is dropped.
-static bool kept_wet_retry(void)
+// Evaluates the kept reports, oldest first. False while the rules lock is still busy; the
+// rest stay kept, in order. One no longer in the device set (a removal since) is dropped.
+static bool kept_retry(void)
 {
-    while (g_kept_wet_n > 0) {
-        if (set_has_source(&g_last_set, g_kept_wet[0].id) &&
-            !evaluate_leak_once(g_kept_wet[0].source, true, g_kept_wet[0].id))
+    while (g_kept_n > 0) {
+        if (set_has_source(&g_last_set, g_kept[0].id) &&
+            !evaluate_leak_once(g_kept[0].source, g_kept[0].leak, g_kept[0].id))
             return false;
-        g_kept_wet_n--;
-        memmove(&g_kept_wet[0], &g_kept_wet[1], g_kept_wet_n * sizeof(g_kept_wet[0]));
+        g_kept_n--;
+        memmove(&g_kept[0], &g_kept[1], g_kept_n * sizeof(g_kept[0]));
     }
     g_lock_busy_logged = false;   // a busy episode, if any, is over
     return true;
 }
 
-// The rules lock refused a wet report: keep it for the next pass. Only one from a sensor in
-// the last known device set; any other is dropped, as before.
-static void keep_wet_report(leak_source_t source, const char *source_id)
+// True while a report from this source is kept: a newer one must be replayed after it.
+static bool kept_has(leak_source_t source, const char *source_id)
+{
+    for (int i = 0; source_id && i < g_kept_n; i++) {
+        if (g_kept[i].source == source && strcmp(g_kept[i].id, source_id) == 0) return true;
+    }
+    return false;
+}
+
+// The rules lock refused a report: keep it for the next pass. Only one from a sensor in the
+// last known device set; any other is dropped, as before. A wet one starts the episode: a
+// dry one is kept only behind its source's kept wet one (the caller's test).
+static void keep_report(leak_source_t source, bool leak_active, const char *source_id)
 {
     if (!source_id || !g_last_set_ok || !set_has_source(&g_last_set, source_id)) {
         ESP_LOGW(RULES_TAG, "Failed to take mutex");
         return;
     }
-    for (int i = 0; i < g_kept_wet_n; i++) {
-        if (g_kept_wet[i].source == source && strcmp(g_kept_wet[i].id, source_id) == 0)
-            return;   // already kept: one evaluation covers both
+    for (int i = g_kept_n - 1; i >= 0; i--) {
+        if (g_kept[i].source == source && strcmp(g_kept[i].id, source_id) == 0) {
+            if (g_kept[i].leak == leak_active) return;   // same as its last kept: one evaluation covers both
+            break;
+        }
     }
-    if (g_kept_wet_n == KEPT_WET_MAX) {
-        ESP_LOGE(RULES_TAG, "Rules lock busy - %d wet reports already kept, the one from %s sensor %s is lost",
-                 KEPT_WET_MAX, leak_source_to_str(source), source_id);
+    if (g_kept_n == KEPT_MAX) {
+        ESP_LOGE(RULES_TAG, "Rules lock busy - %d leak reports already kept, the %s one from %s sensor %s is lost",
+                 KEPT_MAX, leak_active ? "wet" : "dry", leak_source_to_str(source), source_id);
         return;
     }
-    g_kept_wet[g_kept_wet_n].source = source;
-    snprintf(g_kept_wet[g_kept_wet_n].id, sizeof(g_kept_wet[0].id), "%s", source_id);
-    g_kept_wet_n++;
+    g_kept[g_kept_n].source = source;
+    g_kept[g_kept_n].leak = leak_active;
+    snprintf(g_kept[g_kept_n].id, sizeof(g_kept[0].id), "%s", source_id);
+    g_kept_n++;
     if (!g_lock_busy_logged) {
         g_lock_busy_logged = true;
         ESP_LOGW(RULES_TAG, "Rules lock busy for 1 s - wet report from %s sensor %s kept, evaluated again next pass",
@@ -1028,12 +1043,16 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     if (!g_initialized) return;
 
     // Kept reports go first, in arrival order; a new one waits behind any still kept.
-    if (kept_wet_retry() && evaluate_leak_once(source, leak_active, source_id)) return;
+    if (kept_retry() && evaluate_leak_once(source, leak_active, source_id)) return;
 
-    // The rules lock stayed busy for 1 s (WP2d). A wet report is kept, not dropped. A dry one
-    // is dropped as before: its source stays wet in the engine, which fails safe.
-    if (leak_active) {
-        keep_wet_report(source, source_id);
+    // The rules lock stayed busy for 1 s (WP2d). A wet report is kept, not dropped, and so
+    // is a dry one whose source's wet one is kept: dropped, the wet one alone would be
+    // replayed and leave the source wet in the engine. The valve never repeats a steady
+    // state, so its flood source would stay wet until its next link-up: no auto-clear,
+    // LEAK_RESET refused, a close at an override's expiry. Any other dry one is dropped as
+    // before (its source stays wet in the engine, which fails safe).
+    if (leak_active || kept_has(source, source_id)) {
+        keep_report(source, leak_active, source_id);
     } else {
         ESP_LOGW(RULES_TAG, "Failed to take mutex");
     }
@@ -1041,7 +1060,7 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
 
 bool rules_engine_has_kept_reports(void)
 {
-    return g_kept_wet_n > 0;   // iothub_task's own state, read on iothub_task
+    return g_kept_n > 0;   // iothub_task's own state, read on iothub_task
 }
 
 // The rules for closing on leaks already tracked: provisioning's, or the last copy when its
@@ -1713,11 +1732,11 @@ void rules_engine_tick(void)
 {
     if (!g_initialized) return;
 
-    // Wet reports the rules lock refused (WP2d) go first, and this tick's own work waits a
+    // Reports the rules lock refused (WP2d) go first, and this tick's own work waits a
     // pass: its auto-clear must not run ahead of them, and an event it raised would replace
     // theirs in the one pending slot before the loop takes it (F-08).
-    if (g_kept_wet_n > 0) {
-        (void)kept_wet_retry();
+    if (g_kept_n > 0) {
+        (void)kept_retry();
         return;
     }
 

@@ -85,9 +85,10 @@ void rules_engine_init(void);
  *
  * A lock timeout never drops a wet report (2.1.4 WP2d). Provisioning busy for 1 s: it is
  * decided on the last rules and device set read, for a sensor in that set only. Rules
- * mutex busy for 1 s: it is kept (sensors in that set, up to 4) and evaluated again, in
- * arrival order, by the next tick and ahead of the next report. A dry report that meets a
- * busy rules mutex is dropped as before (its source stays wet: fail-safe).
+ * mutex busy for 1 s: it is kept (sensors in that set, up to 4 reports) and evaluated
+ * again, in arrival order, by the next tick and ahead of the next report. A dry report that
+ * meets a busy rules mutex is kept too when its source's wet report is kept, so the pair is
+ * replayed in order; any other is dropped as before (its source stays wet: fail-safe).
  *
  * iothub_task only.
  *
@@ -98,7 +99,7 @@ void rules_engine_init(void);
 void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const char *source_id);
 
 /**
- * @brief True while a wet report the rules mutex refused is kept for the next pass (WP2d).
+ * @brief True while a report the rules mutex refused is kept for the next pass (WP2d).
  *        iothub_task polls at 100 ms meanwhile; the tick evaluates it. iothub_task only.
  */
 bool rules_engine_has_kept_reports(void);
