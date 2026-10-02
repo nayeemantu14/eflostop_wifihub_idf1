@@ -92,8 +92,8 @@ static SemaphoreHandle_t g_mutex = NULL;
  *
  * The last provisioning values read. The device set is written only on iothub_task (init
  * and every device-set change, forget_unprovisioned()), so that task reads it unlocked.
- * The rules are written under g_mutex, by every read in evaluate_leak(), every device-set
- * change and a rules_config. */
+ * The rules are written under g_mutex, by every read in evaluate_leak() and
+ * rules_live_or_last(), every device-set change and a rules_config. */
 static prov_device_set_t g_last_set;            // ~376 B
 static bool g_last_set_ok = false;              // false until a device set was read
 static rules_config_t g_last_rules = { .auto_close_enabled = true, .trigger_mask = RULES_TRIGGER_ALL };
@@ -1044,6 +1044,19 @@ bool rules_engine_has_kept_reports(void)
     return g_kept_wet_n > 0;   // iothub_task's own state, read on iothub_task
 }
 
+// The rules for closing on leaks already tracked: provisioning's, or the last copy when its
+// mutex stays busy for 1 s (WP2d), so a busy read never skips the close. With g_mutex held.
+static rules_config_t rules_live_or_last(void)
+{
+    rules_config_t rules;
+    if (provisioning_get_rules_config(&rules)) {   // logs its own timeout
+        g_last_rules = rules;
+    } else {
+        rules = g_last_rules;
+    }
+    return rules;
+}
+
 bool rules_engine_handle_config_command(const char *json_str)
 {
     if (!json_str || !g_initialized) {
@@ -1289,8 +1302,7 @@ bool rules_engine_cancel_override(void)
     // Note: g_leak_incident_active may have been cleared during the override window
     // (e.g., by auto-clear timer), so we check g_active_leak_count directly.
     if (g_active_leak_count > 0) {
-        rules_config_t rules;
-        if (provisioning_get_rules_config(&rules) && rules.auto_close_enabled) {
+        if (rules_live_or_last().auto_close_enabled) {
             ESP_LOGW(RULES_TAG, "Override cancelled with %d active leak(s) — executing auto-close",
                      g_active_leak_count);
 
@@ -1500,8 +1512,7 @@ void rules_engine_on_valve_connected(void)
     // This handles the case where leaks were detected while valve was offline.
     // Single evaluation regardless of how many sensors are leaking (anti-spam).
     if (g_active_leak_count > 0) {
-        rules_config_t rules;
-        if (provisioning_get_rules_config(&rules) && rules.auto_close_enabled) {
+        if (rules_live_or_last().auto_close_enabled) {
 
             /* IDEMPOTENCE GUARD — mirrors rules_engine_evaluate_leak().
              *
@@ -1781,8 +1792,7 @@ void rules_engine_tick(void)
             // If leaks are still active, immediately trigger auto-close.
             // This resumes normal protection as soon as the override expires.
             if (g_active_leak_count > 0) {
-                rules_config_t rules;
-                if (provisioning_get_rules_config(&rules) && rules.auto_close_enabled) {
+                if (rules_live_or_last().auto_close_enabled) {
                     ESP_LOGW(RULES_TAG, "Override expired with %d active leak(s) — executing auto-close",
                              g_active_leak_count);
 
