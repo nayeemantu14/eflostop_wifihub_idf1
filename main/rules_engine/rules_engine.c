@@ -766,11 +766,10 @@ void rules_engine_init(void)
 // The body of rules_engine_evaluate_leak(), entered with g_mutex held. Gives it on every path.
 static void evaluate_leak_locked(leak_source_t source, bool leak_active, const char *source_id)
 {
-    // Track active leak sources for auto-clear timeout
-    track_leak_source(source_id, leak_active);
-
-    // Only act on leak-detected events for auto-close
+    // Only act on leak-detected events for auto-close. A dry report untracks its source
+    // whatever the device set: forgetting a leak closes nothing.
     if (!leak_active) {
+        track_leak_source(source_id, false);
         xSemaphoreGive(g_mutex);
         return;
     }
@@ -799,6 +798,13 @@ static void evaluate_leak_locked(leak_source_t source, bool leak_active, const c
         xSemaphoreGive(g_mutex);
         return;
     }
+
+    // Track active leak sources for auto-clear timeout: a wet one only once it is decided
+    // this hub's. Tracked before that, a source decided "not provisioned here" (a
+    // neighbour's sensor heard while provisioning was busy) stayed in the active-leak set,
+    // and its later packets, refused at the membership gate, never removed it: a close at
+    // the next valve reconnect, no auto-clear, LEAK_RESET refused (WP2d review).
+    track_leak_source(source_id, true);
 
     // Check master enable
     if (!rules.auto_close_enabled) {
