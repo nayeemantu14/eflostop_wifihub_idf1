@@ -29,8 +29,9 @@ packages land one at a time, each behind a bench gate, and the last one (WP10) f
 sections below. The first two, WP-V and WP0, change no behaviour. The third, WP1, removes every way the setup
 portal could reboot the hub. The fourth, WP2, starts the cloud's TLS only once the setup SoftAP is down, stops
 the SoftAP soon after Wi-Fi connects, and keeps the setup web server off the home network. WP2b moves the
-MQTT stop off the task that handles leaks. WP1, WP2 and WP2b are built and benched together as Build
-checkpoint 6 (HANDOFF §15h-§15m).
+MQTT stop off the task that handles leaks, and WP2c moves every cloud publish off it too, onto a sender task of
+its own. WP2d makes a busy lock delay a leak decision instead of dropping it. WP1, WP2, WP2b, WP2c and WP2d are
+built and benched together as Build checkpoint 6, of `fcc0979` (HANDOFF §15h-§15o).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -261,9 +262,99 @@ checkpoint 6 (HANDOFF §15h-§15m).
     +0.65 KB; no IRAM; no new task, timer or allocation, except about 0.1-0.15 KB once per boot at the first
     stop of a connected session (the Wi-Fi task's first network call).
   - **Known, for the user's decision (HANDOFF §15m):** a live DPS registration (first commissioning, or every
-    hub after a provisioning-epoch change) still runs on the cloud task, for up to about 60 s; a publish on the
+    hub after a provisioning-epoch change) still runs on the cloud task, for up to about 60 s (decided on
+    2026-10-02: kept there for now, and made asynchronous before any provisioning-epoch change); a publish on the
     cloud task can wait about 10-20 s on a full network send buffer when the internet link dies silently under
-    a connected session.
+    a connected session (decided on 2026-10-02 and closed by WP2c, next entry).
+- **Leak handling no longer waits on the internet: every cloud publish moves to a sender task, `cloud_tx` (WP2c;
+  the user's decisions D1-D7 of 2026-10-02).** Commits `f79805d` … `4ed8c77` (`main/iothub`, `main/telemetry`,
+  `main/offline_buffer`, `main/app_lora`); details in HANDOFF §15n, the bench checks in §15k items 11-16.
+  Reviewed, fixed, and voted 4/4 SHIP by the council (rtos, safety, cloud, wifi-portal).
+  - **The cloud task that evaluates leaks (`iothub_task`) no longer publishes anything.** It still makes every
+    decision and builds every message (an event's `ts` is still its build time), and hands each one over without
+    waiting to a new task, `cloud_tx`, which makes every publish, the offline buffer's replay and every store
+    into it. When the internet link died under a working Wi-Fi connection, a publish could hold leak handling
+    for about 10-20 s (the bench measured that from a leak to its valve close); now the close is posted within
+    milliseconds of the leak, whatever the cloud does. What is left on that path is local: the serial log, the
+    flash, and the hub's own locks (WP2d, next entry). A live DPS registration (first commissioning, or after a
+    provisioning-epoch change) still runs on the cloud task (decision D2).
+  - **The order on the wire is kept.** Buffered events are replayed before each connection's `lifecycle`, and
+    live events follow it; the replay also runs before any new event whenever anything is buffered, and every
+    10 s while connected. A snapshot is built only while the sender is idle, one at a time, and its heartbeat
+    bookkeeping runs when its result comes back; one whose device list changed before it went out is not sent
+    and is built again.
+  - **At-least-once delivery (decision D3): the cloud must dedupe on gateway.id + ts + event + device id, keeping
+    the first copy.** An event whose publish sees its connection end is also kept in the offline buffer and
+    replayed, so it can reach the cloud twice, and the second copy can arrive after newer events (it used to be
+    lost when the MQTT queue expired it 30 s later). Every duplicate is the same bytes. The key is under review
+    (HANDOFF §15n, TC-2): it also merges two different `cmd_ack`s, or two `valve_state_changed`, in the same
+    second. An event that MQTT accepted into a connection that then dies silently can still be lost, as before.
+    Cloud-side detail in `C2D_COMMANDS.md` §3.5.
+  - **The MQTT stop and a publish never overlap.** The sender's publishes and the Wi-Fi task's MQTT stop share a
+    gate that neither side waits for; a stop that meets a publish runs as soon as it ends (`MQTT stop waits for
+    cloud_tx's publish`). The MQTT client frees its queue without a lock as it stops, so the two must not meet.
+  - **Health alerts wait, without loss,** while the sender is busy and memory is low (fewer than 16 queued, and
+    12 KB free with a 4.5 KB block, unless the sender is idle), so a stalled connection cannot pile them up. With
+    24 messages already queued in a stall, a further event is dropped with an error line that names it; the
+    next snapshot carries the state, and the valve close is not affected.
+  - **Decommission-all** sends the twin, the final snapshot and the offline buffer's clear through the sender, in
+    that order, and waits up to 25 s for them; if the sender is stuck, the hub erases the offline buffer itself
+    before it restarts, so no old event is replayed afterwards.
+  - **The serial bench keys** `s`, `r`, `d` and `a` (a LoRa test packet, restart RX, the counters, LoRa ACKs on
+    and off) are read by the LoRa task; their own task, `uart_cmd_task`, is gone. The same lines; the production
+    tool sends none of them.
+  - **Log lines.** New:
+    - `IOTHUB`: `cloud_tx started (stack %u B, priority %u)` (at boot); warnings `Pub %s took %lu.%lu s
+      (msg_id=%d)` (a publish that held the sender 1 s or more), `lifecycle not built in 1 s - live messages go
+      first`, `health alerts held - TX busy, internal free %u B, largest %u B`, `SNAP result outstanding for %lu s
+      - cloud_tx busy`, `SNAP published while the device set changed - the reconciled one follows now`,
+      `decommission: cloud_tx did not finish in %d s - offline buffer erased here`; `MQTT stop waits for
+      cloud_tx's publish`; errors `cloud_tx: creation failed - rebooting`, `%s called on iothub_task - refused`.
+    - `TELEMETRY_V2`: warnings `Pub %s not confirmed (msg_id=%d) - kept for replay, a duplicate is possible`, `Pub
+      %s not confirmed (msg_id=%d) - not kept`, `Pub %s not sent - the device set or session changed during its
+      line; built again`; errors `TX queue full (%d) - %s not sent` (for example `TX queue full (24) -
+      leak_detected event not sent`), `%s called on iothub_task - refused`. The two `called on iothub_task` lines
+      should never print.
+  - **Same text, new task or time:** the `TELEMETRY_V2` `Pub …`, `Outbox full …`, `Offline — buffering …`
+    and `Draining …` lines, every `OFFLINE_BUF` line, `IOTHUB: Twin reported …`, `IOTHUB: Lifecycle not taken
+    by MQTT …` and `IOTHUB: Twin GET requested …` (on a retry) now come from the sender, so their place among
+    the cloud task's lines changes; `IOTHUB: SNAP heartbeat=reset …` and `SNAP heartbeat=suppressed
+    (publish-failed)` now print when the snapshot's result is read, after its `Pub snapshot` line. No line was
+    removed or reworded; the production tool matches none of the new lines, and none prints a credential.
+  - Memory (estimated from the objects; Build checkpoint 6 measures it): `.bss` +6.3 KB, the sender's static
+    5,120 B stack and its queues (an exception to the plan's "no new task, no heap at rest" rule, approved by the
+    user); `.data` 0; flash about +7.7 KB; no IRAM; no heap held at rest. The removed `uart_cmd_task` frees about
+    4.4 KB of heap, so about 1.8 KB more internal RAM is in use at rest.
+  - **Known, for the user's decision (HANDOFF §15n):** the dedupe key (TC-2); up to 16 of the 24 queue places can
+    be health alerts in a stall (SAFE-1); a reported twin value can be overwritten by an older one after a
+    reconnect with a backlog, or by a provision's report right after a quick `rules_config` or `set_hub_name`,
+    until the next report (TW-1).
+- **A busy lock no longer drops a leak (WP2d; the user's decision D5 of 2026-10-02).** Commits `dd4eb0f` …
+  `fcc0979` (`main/rules_engine`, `main/provisioning_manager`, `main/iothub`); details in HANDOFF §15o, the bench
+  check in §15k item 17. Reviewed, fixed, and voted 3/3 SHIP by the council (safety, rtos, cloud).
+  - **Before** (2.1.3 too): a wet report that found the rules engine's lock or the provisioning lock busy for
+    1 s was dropped, with no latch and no valve close, and a BLE sensor may not report the same state again for
+    up to 5 min. **Now:** with provisioning busy, the leak is decided on the last device list and rules the hub
+    applied, so a sensor in that list closes the valve as usual, about 2 s after its report, and any other is
+    ignored; with the rules lock busy, the report is kept (up to 4, wet and dry in order) and evaluated again
+    within about 100 ms of the lock coming free, after any event that was already waiting, so `auto_close` still
+    follows `leak_detected`. `leak_detected` goes out at once in both cases. With both locks free nothing changes.
+  - The same fallback in three places that read a busy provisioning lock as "auto-close off": cancelling an
+    override (it cleared the incident with no close), the valve's reconnect check (it could read a physical
+    override and block auto-close for 24 h), and the end of an override window (it skipped the close).
+  - **Log lines.** New: `RULES_ENGINE`: warnings `Provisioning busy for 1 s - leak from %s sensor %s decided on
+    the last known devices and rules (%s)`, `Rules lock busy for 1 s - wet report from %s sensor %s kept,
+    evaluated again next pass`, `Rules lock busy - the copy used while provisioning is busy keeps the old rules`,
+    `Provisioning busy for 1 s - the rules copy was not refreshed, the device-set change is retried`; error
+    `Rules lock busy - %d leak reports already kept, the %s one from %s sensor %s is lost`. `IOTHUB`: warning
+    `Boot: rules engine missed the device list or rules - reading them again in the loop`. None should print in a
+    normal run. `RULES_ENGINE: Failed to take mutex` now prints only for a report that is dropped. No line was
+    removed; the production tool matches none of these, and none prints a credential.
+  - Memory (estimated from the objects): `.bss` +477 B (the copy of the device list and the kept reports),
+    `.data` +2 B, flash about +2.7 KB; no IRAM; no new task, timer or allocation.
+  - **Known, for the user's decision (HANDOFF §15o):** a dry report from the valve's own flood probe can still be
+    dropped behind a busy lock when its wet one was not kept (pre-existing; the valve then counts as wet until it
+    links again); the hardening ideas for WP3.
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and

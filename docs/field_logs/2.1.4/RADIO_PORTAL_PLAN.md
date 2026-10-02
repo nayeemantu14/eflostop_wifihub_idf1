@@ -3,6 +3,8 @@
 > **Approved by the user on 2026-10-01** ("Approve, start with WP-V/WP0"), with the recommended option on every decision in §13 **except D9, which is not approved: Forget stays** (`DELETE /connect.json` and the page's Disconnect are kept, so the D9 parts of §6.2 C9, §9 and §13 do not apply). The user's answers: D1, some leak sensors in the field are in 1M mode (mixed fleets are real); D2, leak protection keeps running in the reset portal; D10, nothing but the setup page calls the portal API.
 >
 > Copied unchanged from the council's scratchpad (`PROPOSAL_2_1_4.md`): nothing below this note is edited, so "proposal", "for your approval" and "nothing has been edited" read as of 2026-10-01, and its `managed_components/ankayca__esp32-wifi-manager` paths are now `components/wifi_portal`. Progress and the status of each package: `HANDOFF.md` §15.
+>
+> **Update 2026-10-02 (WP2c and WP2d).** Two dated notes are added below, and nothing else: after §3's invariant table (I10: the user approved a task swap as an exception, WP2c's decision D1 (i)) and after §10's table (the `.bss` gate). Details: `HANDOFF.md` §15n and §15o.
 
 **Status.** This is a proposal for your approval (answer 8). Nothing has been edited, built or flashed. The only files written are model runs in the scratchpad.
 
@@ -221,6 +223,8 @@ You excluded portal-on-demand and a WPA2 password on the setup AP. They appear o
 | I12 | **No reboot path in the portal stack.** No `ESP_ERROR_CHECK`, `abort()` or `exit()` on a runtime path in `wifi_manager.c`, `http_app.c` or `dns_server.c`. Malformed input is dropped or refused | C2, C4; G-FAULT, P-13 |
 | I13 | **Credentials.** Never logged. Never written to the live config or to NVS until the candidate gets an IP. On failure the previous network stays | C1, C8; G8x |
 | I14 | **Load-bearing sdkconfig values are asserted at compile time** (`#if … #error`), because `sdkconfig` is untracked | §4.9 |
+
+> **Update 2026-10-02: an approved exception to I10 (WP2c, the user's decision D1 (i); `HANDOFF.md` §15n).** To take every cloud publish off `iothub_task` (LS-1: on a dead WAN under a connected Wi-Fi a publish held leak handling for 10-20 s), WP2c adds a **static task, `cloud_tx`** (5,120 B stack and its TCB in `.bss`, priority 3), and **removes `uart_cmd_task`** (4,096 B of stack on the heap, priority 5), whose four bench keys `lora_task` now polls without waiting. The task count is unchanged, `cloud_tx` holds no heap at rest, and IRAM stays 0 (DIRAM `.text` = 113,387 B). The cost: `.bss` +6,301 B, so, net of `uart_cmd_task`'s freed stack, TCB and headers (about 4.4-4.5 KB of heap), about 1.8 KB more internal RAM in use at rest. I10 otherwise stands through WP8. WP9 may trim `cloud_tx` to 4,096 B if the T6-11 high-water mark shows 1.5 KB or more free.
 
 ---
 
@@ -893,6 +897,8 @@ If every line ships, the set frees an estimated **+40-50 KB**; the two IRAM line
 - No new task and no new timer.
 - The DNS task now also lives through the tail: ≤ 60 s, or ≤ 2 s after Finish.
 - Free heap at rest while connected: about +12 KB.
+
+> **Update 2026-10-02: the `.bss` gate (`HANDOFF.md` §15n, §15o).** Two packages that are not in the table above were added before CP6. WP2c's +6,301 B (`cloud_tx`'s static stack and TCB, its two static queues, the busy mutex and the publish gate, the snapshot's flight context) is outside the ≤ +450 B gate: the I10 exception the user approved (§3). WP2d's +477 B (the rules engine's copy of the last applied device set, about 376 B, its four kept leak reports and flags; the user's decision D5: a busy lock no longer drops a wet report) counts against it. Recorded per package against `520b17a`: WP0 +121, WP1 −38, WP2 +86, WP2b −75, WP2c +6,301, WP2d +477 B (object figures; CP6 measures the link). Without WP2c that is **+571 B, 121 B over the gate** before WP3-WP8's planned ≈ +340 B: whether WP2d's copy counts under D5's approval, or WP9 recovers it, is the user's call (`HANDOFF.md` §15o). Flash, also outside the table: WP2c about +7.7 KB, WP2d about +2.7 KB (objects, `.text` and `.rodata`).
 
 ---
 
