@@ -1754,7 +1754,8 @@ static uint32_t          s_twin_req_done = 0;       // iothub_task only
 // A device-set change's report not handed to cloud_tx (8 or more items in the FIFO, or no
 // memory for its build), or one esp-mqtt refused: owed like a request. iothub_task only.
 static bool              s_twin_due      = false;
-// The build number of the last report built. iothub_task only.
+// The build number of the last report handed to cloud_tx (twin_posted()). A build whose post
+// failed was freed and never reached cloud_tx, so its number is used again. iothub_task only.
 static uint16_t          s_twin_seq      = 0;
 // Reports esp-mqtt refused with their session still up, counted: cloud_tx_twin() is the only
 // writer. iothub_task takes each as owed (s_twin_refused_seen, its copy) and builds the report
@@ -1869,19 +1870,20 @@ static void twin_request(void)
 
 // iothub_task: the one build of a twin report, numbered. *req: the requests it covers, read
 // before the build, so that what they asked to report is in it. NULL out of memory. The caller
-// hands the report to cloud_tx and, if that worked, calls twin_posted(*req).
+// hands the report to cloud_tx and, if that worked, calls twin_posted(*seq, *req).
 static char *twin_build(uint16_t *seq, uint32_t *req)
 {
     *req = s_twin_req;
     char *json = build_twin_reported();
     if (json != NULL)
-        *seq = ++s_twin_seq;
+        *seq = (uint16_t)(s_twin_seq + 1);
     return json;
 }
 
-// iothub_task: a report built after those requests is with cloud_tx: none is owed now.
-static void twin_posted(uint32_t req)
+// iothub_task: report `seq`, built after those requests, is with cloud_tx: none is owed now.
+static void twin_posted(uint16_t seq, uint32_t req)
 {
+    s_twin_seq      = seq;
     s_twin_req_done = req;
     s_twin_due      = false;
 }
@@ -1911,7 +1913,7 @@ static void post_twin_reported(void)
     }
     telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0, .seq = seq };
     if (telemetry_v2_tx_post(&it, "twin"))
-        twin_posted(req);
+        twin_posted(seq, req);
     else
         s_twin_due = true;
 }
@@ -3356,7 +3358,7 @@ static uint32_t s_tx_lc_taken_gen = 0;       // the session whose lifecycle esp-
 static int64_t  s_tx_replay_ms    = 0;       // next replay of events kept while connected
 static int64_t  s_tx_twin_get_ms  = 0;       // next twin GET while it is owed
 static bool     s_tx_stamped      = false;   // the clock sync's pre-sync stamp has run
-static uint16_t s_tx_twin_seq     = 0;       // the build number of the last twin report esp-mqtt took
+static uint16_t s_tx_twin_seq     = 0;       // build number of the newest twin report seen
 
 // iothub_task asks to be woken when TX goes idle (a held snapshot or health alert): it
 // increments the request, cloud_tx sets the answer equal and wakes it. One writer each.
@@ -3394,7 +3396,7 @@ static bool post_session_twin(uint32_t gen)
     telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0, .seq = seq };
     if (!telemetry_v2_tx_post_session(&it))
         return false;
-    twin_posted(req);
+    twin_posted(seq, req);
     return true;
 }
 
@@ -3458,24 +3460,31 @@ static void cloud_tx_lifecycle(const telem_tx_item_t *it)
 // MQTT_OUTBOX_LIMIT_BYTES; -1: no memory), as the lifecycle is: iothub_task cleared what it
 // covers when it posted it, so nothing else would report that change until the next one
 // (2.1.4 TW-1 review). iothub_task builds a fresh report TWIN_REPORT_RETRY_MS later.
-// Never one built before a report esp-mqtt has already taken (2.1.4 TW-1): the session queue is
+// Never one built before a report that came here first (2.1.4 TW-1): the session queue is
 // served ahead of the FIFO, so a FIFO report can be older than a session report sent first.
-// Build numbers are compared modulo 2^16: far more builds than ever wait at once.
+// That report counts whatever became of it. Taken, it is newer on the wire. Refused, it is owed,
+// and a fresh one follows. Dropped with its session, so is every older report, whose session
+// is the same or earlier (iothub_task reads the session, then numbers the build). Build numbers
+// are compared modulo 2^16. Every report posted comes here, and iothub_task numbers only the
+// reports it posts (twin_posted()), so the newest seen trails the newest built by at most the
+// reports still queued, never 2^15 (2.1.4 TW-1 review F3).
 static void cloud_tx_twin(const telem_tx_item_t *it)
 {
+    uint16_t newest = s_tx_twin_seq;
+    bool newer = (int16_t)(uint16_t)(it->seq - newest) > 0;
+    if (newer)
+        s_tx_twin_seq = it->seq;
     if (!pub_begin_for(it->tag))
         return;   // its session is not up: dropped, as before
-    if ((int16_t)(uint16_t)(it->seq - s_tx_twin_seq) <= 0) {
+    if (!newer) {
         iothub_pub_end(NULL, 0, 0);
         ESP_LOGI(IOTHUB_TAG, "Twin report %u not sent - report %u, built after it, went first",
-                 (unsigned)it->seq, (unsigned)s_tx_twin_seq);
+                 (unsigned)it->seq, (unsigned)newest);
         return;
     }
     int msg_id = send_twin_reported(it->json);
-    if (msg_id >= 0) {
-        s_tx_twin_seq = it->seq;
+    if (msg_id >= 0)
         return;
-    }
     // A write that failed ended the session first (esp-mqtt dispatches DISCONNECTED on this
     // task before its publish returns): the next CONNECTED's report covers it.
     if (telemetry_v2_is_connected() && telemetry_v2_session_gen() == it->tag) {
