@@ -377,11 +377,12 @@ void telemetry_v2_tx_idle_give(void);
 
 /**
  * @brief iothub_task, before it takes a health alert (device_offline / device_recovered):
- *        whether one may go to cloud_tx now. Yes while fewer than 16 items wait in the FIFO,
- *        and either TX is idle or internal DMA-capable heap has 12 KB free with a 4.5 KB
- *        block. Otherwise the alerts wait, losslessly, for TX to go idle: a stall must not
- *        pile health events on top of a stalled session's heap (WP2c section 2.3). Sets the
- *        heap figures it read (0 when it did not need them).
+ *        whether one may go to cloud_tx now. Yes while fewer than 8 items wait in the FIFO
+ *        (so at least 16 of its 24 slots stay for the other messages: 2.1.4 SAFE-1), and
+ *        either TX is idle or internal DMA-capable heap has 12 KB free with a 4.5 KB block.
+ *        Otherwise the alerts wait, losslessly, for TX to go idle: a stall must not pile
+ *        health events on top of a stalled session's heap (WP2c section 2.3). Sets the heap
+ *        figures it read (0 when it did not need them).
  */
 bool telemetry_v2_tx_health_admit(size_t *free_b, size_t *largest);
 
