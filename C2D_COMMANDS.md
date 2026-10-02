@@ -139,6 +139,26 @@ The hub publishes a `cmd_ack` only when **`cmd.is_envelope || cmd.id[0]`** is tr
 
 ⚠️ **Before the clock syncs.** The hub only connects to IoT Hub once its clock is SNTP-synced, so no command can reach it earlier. No `eflostop.v2` message goes out with a `ts` before epoch `1704067200` (2024-01-01 UTC). Since 2.1.4 an event built before the first sync, `cmd_ack` included, is held in the offline buffer and sent after the first connect, its `ts` corrected from the hub uptime once the clock syncs; one left over from a restart before the sync is dropped. Snapshots and lifecycle are not sent before the sync. Up to 2.1.3 every pre-sync event was discarded. An ack can still arrive late or not at all (a restart, a full offline buffer), so confirm real state from the next snapshot and never assume failure from a missing ack. (Twin reported PATCHes are *not* clock-gated — see §8.)
 
+## 3.5 Duplicates, order and dedupe (2.1.4) — for the cloud team
+
+This applies to every `eflostop.v2` message on `devices/<device_id>/messages/events/` (events, `cmd_ack`, snapshots, lifecycle), not only to acks. Background: HANDOFF §15n (WP2c) and §15o (WP2d) in `docs/field_logs/2.1.4/`.
+
+**Delivery is at-least-once (QoS 1).** Since 2.1.4 an event whose publish sees the hub's MQTT connection end is also kept in the hub's offline buffer and replayed at the next connect (decision D3); it used to be lost when the MQTT client's queue expired it 30 s later. So:
+- **The same event can arrive twice,** and the second copy can arrive **after newer events** (the MQTT client's own resend, or the replay, comes later). Every duplicate the hub produces is the same bytes, `ts` included, with one exception below.
+- **Dedupe rule (decision D3, 2026-10-02): the cloud must dedupe on `gateway.id + ts + event + device id`, keeping the first copy.** `event` is `data.event`; the device id is `data.valve_id` or `data.sensor_id`, whichever is present.
+- ⚠️ **The key is under review (HANDOFF §15n, TC-2).** `ts` has one-second resolution, so the key also merges two *different* messages: two `cmd_ack` in the same second (they carry no device id and differ only in `data.id` and `data.cmd`), two `valve_state_changed` for one valve in the same second (they differ in `data.valve_state`), and two `auto_close` for one sensor in one second (they differ in `data.cause`). Because every duplicate is byte-identical, deduping on the whole message body, or a hash of it, drops only true duplicates; the firmware reviewers recommend that. Until it is decided, a backend that keeps the key should add `data.id`, `data.cmd`, `data.valve_state` and `data.cause` where present.
+- **The one exception:** an event raised before the hub's first clock sync gets its real `ts` when the clock syncs. If writing that `ts` to flash failed, it is worked out again at each replay, so two copies can differ in `ts` by about 1 s.
+- **At-least-once is not "never lost".** An event the MQTT client accepted into a connection that is dying silently (the internet down while Wi-Fi stays up), before the broker acknowledged it, can still be lost, as before 2.1.4. The offline buffer holds 16 events and overwrites the oldest. The first snapshot after the reconnect carries the state.
+
+**Order.**
+- Order events by `ts` (the time the hub built the message), never by arrival or IoT Hub enqueued time: replayed events keep their original `ts` and `gateway.uptime_s`, and duplicates can arrive late.
+- After a reconnect, buffered events come before that connection's `lifecycle`, and new events after it.
+- `leak_detected` is sent before the `auto_close` it causes. Since 2.1.4 a leak report that meets a busy lock on the hub is decided a little later, so its `auto_close` can arrive after the same sensor's `leak_cleared`. Match an `auto_close` to its leak by `sensor_id` (or `valve_id`) and `ts`, not by position.
+- A `device_offline` or `device_recovered` held on the hub during a stall can arrive after the `decommission` ack that removed that device. Ignore health events for device ids the hub no longer has.
+- A `cmd_ack` still comes before the snapshot its command causes; other events can come between them.
+
+**Twin reported (§8.1).** Since 2.1.4 the hub builds its twin reports on one task and sends them from another, while some command handlers still report at once. After a reconnect with buffered events, or a `provision` followed within about a second by `rules_config` or `set_hub_name`, an older reported value can be written after a newer one and stay until the hub's next report (HANDOFF §15n, TW-1, under review). Before acting on a value that was just changed, use the command's `cmd_ack`, or read `reported` again after the next report.
+
 ---
 
 # 4 Command Reference

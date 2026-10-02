@@ -24,6 +24,8 @@
 
 > **Note 2026-10-01, the approved radio and portal plan.** The user approved the 2.1.4 radio and portal plan (`docs/field_logs/2.1.4/RADIO_PORTAL_PLAN.md`, HANDOFF §15). T4-10 will be rewritten in WP10, the plan's last package, for the radio policy that replaces the portal window and the radio holds in WP8, together with the plan's new gates (G-CNA, G-FAULT, G8x, G6b, G3b). Until then T4-10 is not re-baselined for the page round; on the CP5 image the G0 runs of HANDOFF §15d stand in for its Parts D and F.
 
+> **Note 2026-10-02, WP2c and WP2d (firmware after `d0d5284`; Build checkpoint 6 is of `fcc0979`).** WP2c (HANDOFF §15n, the user's decisions D1-D7) moves every cloud publish off the task that evaluates leaks (`iothub_task`) onto a new sender task, `cloud_tx`, so that a dead internet link under a working Wi-Fi can no longer hold a leak's valve close for 10-20 s (LS-1); WP2d (§15o, D5) makes a busy rules or provisioning lock delay a leak decision instead of dropping it. For this plan: (1) a new boot line, `IOTHUB: cloud_tx started (stack 5120 B, priority 3)` (0.14); (2) the `TELEMETRY_V2: Pub …`, `Offline — buffering …`, `Draining …`, `OFFLINE_BUF: …` and `IOTHUB: Twin reported …` lines now print on `cloud_tx`, so they no longer sit next to the leak or command line that caused them, and `IOTHUB: SNAP heartbeat=reset …` prints when the snapshot's result is read: **wherever a test matches lines by adjacency, use the ESP log's own times or the IoT Hub capture** (0.14; WP10 rewrites those tests); (3) the bench keys `s`, `r`, `d`, `a` are read by `lora_task` (0.6); (4) delivery is at-least-once: an event can reach IoT Hub twice, the second copy possibly after newer events (count duplicates by identical body, keep the first; `C2D_COMMANDS.md` §3.5). `docs/telemetry/validate_capture.py` checks order in arrival order with no dedupe, so a late duplicate can be flagged: classify such a FAIL with the UART log (`Pub … not confirmed … kept for replay` for that event), as VAL-15 step 3 does for an overwritten entry; (5) new test **T6-21** (LS-1); T6-11 adds `cloud_tx`, `wifi_task` and `lora_task`; notes on T6-18 and DEC-14. CP6's build expectations and the WP2c and WP2d bench gates (including three bench-only images) are in HANDOFF §15j and §15k items 11-17.
+
 ## How to use this document
 
 1. **Read section 0 once** (equipment, flashing, capturing UART and IoT Hub, sending C2D, LED legend, timing constants, result codes). Keep 0.5 (identities), 0.13 (LEDs) and 0.15 (timing) open while you test.
@@ -186,6 +188,7 @@
   - [T6-18](#t6-18--iothub_task-stalled-behind-a-blocking-c2d-override_enable-with-the-valve-off-then-a-leak-within-2-s) iothub_task stalled behind a blocking C2D (override_enable with the valve off, then a …
   - [T6-19](#t6-19--a-leak-sensor-unheard-during-a-hanging-valve-connect--30-s-known-limitation) A leak sensor unheard during a hanging valve connect (≤ 30 s, known limitation)
   - [T6-20](#t6-20--ble-start-claimed-twice-at-once-boot-apply-and-c2d-provision) BLE start claimed twice at once (boot apply and C2D provision)
+  - [T6-21](#t6-21--a-leak-closes-the-valve-within-200-ms-during-a-wan-black-hole-with-wi-fi-up-ls-1-wp2c) A leak closes the valve within 200 ms during a WAN black-hole with Wi-Fi up (LS-1, WP2c)
 - [9. Validation and exit criteria](#9-validation-and-exit-criteria)
   - [VAL-01](#val-01-build-checkpoint-5-gate-0f08d32-p0) Build checkpoint 5 gate (0f08d32) (P0)
   - [VAL-02](#val-02-upgrade-213--214-in-place-keeps-provisioning-rules-the-incident-latch-and-the-override-p0) Upgrade 2.1.3 → 2.1.4 in place keeps provisioning, rules, the incident latch and the …
@@ -356,6 +359,7 @@ Notes:
 - The device's own `(NNNNN)` number in each line is milliseconds since boot. Use it to measure intervals inside one boot. Use the host timestamp to line UART up with the IoT Hub capture.
 - A reboot restarts the `(NNNNN)` counter. A counter that drops back to a small number, without a power cycle you did yourself, **is an unplanned reboot** and fails the soak criterion (9.4, EC-6).
 - The ANSI colour codes stay in the file. That does not matter for grep or for the validator.
+- **The monitor sends what you type to the hub.** Four single keys are bench commands: `s` sends a LoRa test packet, `r` restarts LoRa RX, `d` prints `APP_LORA: Stats: RX=…, ACKs=…, LastRSSI=0`, and `a` toggles the LoRa ACKs (`APP_LORA: ACK DISABLED` / `ACK ENABLED`: leave them enabled). Since WP2c (CP6) they are read by `lora_task`, one key per radio pass (about 10-110 ms), from `APP_LORA: LoRa Task Started …` on, and they work while the cloud is stalled; their old task, `uart_cmd_task`, is gone. Do not type them by accident during a capture; Ctrl+T commands go to the monitor, not to the hub. The production tool sends none of them.
 
 ### 0.7 Capturing the IoT Hub (D2C) stream to a file
 
@@ -555,6 +559,7 @@ After **every** flash or reboot, check these lines (in boot order) and tick them
 | `HUB_IDENT: WiFi STA MAC: 7C:4F:AD:AE:69:C8` (format) | `hub_identity.c` |
 | `PROVISIONING: Loaded existing config from NVS`, then `PROVISIONING: State: PROVISIONED` (format), `PROVISIONING: Valve MAC: %s`, `PROVISIONING: LoRa sensors: %d`, `PROVISIONING: BLE leak sensors: %d`, `PROVISIONING: Rules: auto_close=%s triggers=0x%02X` (format) | `provisioning_manager.c`. On a never-provisioned hub: `PROVISIONING: No existing config found, starting UNPROVISIONED` |
 | `HEALTH_ENGINE: Device table loaded: %d device(s) (+%u added, -%u removed)` (format) | `health_engine.c` (a bench anchor) |
+| `IOTHUB: cloud_tx started (stack 5120 B, priority 3)` (since WP2c, CP6), once per boot, **before** `APP_WIFI: Connected! IP: %s` | `app_iothub.c`: the sender task that makes every cloud publish (HANDOFF §15n) |
 | `IOTHUB: Starting BLE (valve=%s, BLE sensors=%u)` (format), printed **before** `APP_WIFI: Connected! IP: %s` | `app_iothub.c`. Printed only when a valve or at least one BLE sensor is provisioned (P0-b). |
 | `IOTHUB: Boot: hub is empty - clearing any persisted rules-engine state` | Only on a hub with no devices |
 | `BLE_VALVE: [INIT] Signal received. Starting BLE stack...` (exactly once per boot) and `BLE_VALVE: [HOST] NimBLE host task started` | `app_ble_valve.c` |
@@ -565,6 +570,8 @@ After **every** flash or reboot, check these lines (in boot order) and tick them
 | `TELEMETRY_V2: Pub lifecycle: {...}` (format) | The lifecycle `online` message |
 
 How to see what the hub published: every message that goes out live is printed as `TELEMETRY_V2: Pub snapshot: {...}`, `TELEMETRY_V2: Pub event: {...}` or `TELEMETRY_V2: Pub lifecycle: {...}` (format `Pub %s: %s`). Events replayed from the offline buffer do **not** print `Pub event:`; they print `OFFLINE_BUF: Replayed [%s] (%u bytes)` (format), so check those in the IoT Hub capture.
+
+**Since WP2c (CP6, HANDOFF §15n): two tasks print these lines.** `iothub_task` evaluates leaks, runs the rules engine and builds every message; a separate task, `cloud_tx`, publishes them and prints the `TELEMETRY_V2: Pub …`, `Pub … failed`, `Outbox full …`, `Offline — buffering …`, `Draining …` and `Offline drain complete …` lines, every `OFFLINE_BUF` line, `IOTHUB: Twin reported …`, `IOTHUB: Lifecycle not taken by MQTT …`, and `IOTHUB: Disconnected.` when its own write ends the session. So a `Pub event:` line is no longer printed right after the leak, rules or command line that caused it: other lines can come between, and the order of two tasks' lines on the UART is not the order on the wire. `IOTHUB: SNAP heartbeat=reset …` and `SNAP heartbeat=suppressed (publish-failed)` now print when `iothub_task` reads the snapshot's result, after its `Pub snapshot` line. Where a test below expects one line right after another across these two groups, read the ESP log's own `(N)` times (taken when each line is logged, before it waits for the console) or the IoT Hub capture instead; WP10 rewrites those tests. New `cloud_tx` lines a test may meet: `IOTHUB: Pub %s took %lu.%lu s (msg_id=%d)` (a publish that took 1 s or more), `TELEMETRY_V2: Pub %s not confirmed (msg_id=%d) - kept for replay, a duplicate is possible`, `IOTHUB: MQTT stop waits for cloud_tx's publish`; the full list is in HANDOFF §15n and `CHANGELOG.md`.
 
 ### 0.15 Timing constants and tolerances
 
@@ -1168,6 +1175,7 @@ Final council:
 | T6-18 | `iothub_task` stalled behind a blocking C2D (`override_enable` with the valve off, then a leak within 2 s) | council:iothub stall behind blocking C2D, <=10 s | also runs T5-15 |
 | T6-19 | A leak sensor unheard during a hanging valve connect (≤ 30 s, known limitation) | council:sensors unheard during pending valve connect, deferred | — |
 | T6-20 | BLE start claimed twice at once (boot apply and C2D `provision`) | council:atomic BLE start claim | — |
+| T6-21 | A leak closes the valve within 200 ms during a WAN black-hole with Wi-Fi up (LS-1, WP2c) | WP2b-LS-1 decided by WP2c (D1-D7, HANDOFF §15n): no network term between a leak and its CLOSE; at-least-once delivery (D3) and the R5 classification; D4's local terms measured | HANDOFF §15k item 12 |
 | VAL-01 | Build checkpoint 5 gate (0f08d32) (P0) | CP5 build gate (0f08d32: the D1 and router-rejoin fixes with the 2026-09-30 decisions; CP4 of 46a1f0a recorded): warnings, DIRAM .text 113,387, .bss 36,336 or 36,344, .data 21,572, IRAM unchanged, version; council final vote 'pending a clean CP3' (met at CP3); E-20 static RAM budget | — |
 | VAL-02 | Upgrade 2.1.3 → 2.1.4 in place keeps provisioning, rules, the incident latch and the override (P0) | S25 upgrade 2.1.3 -> 2.1.4 without erasing flash (no OTA client in 2.1.4; app-only flash); council:upgrade/rollback keeps provisioning, rules opt-out, latched incident, override (F5); F-01 (owed-clear flag is RAM only; owed line must not appear after a boot); user decision: RMLEAK auto-clear 10 s (lands 10-12 s) | runs A and B are T6-03; run C stays in VAL-02 |
 | VAL-03 | Rollback 2.1.4 → 2.1.3 keeps provisioning, and 2.1.3 reads the 2.1.4 offline buffer | S25 rollback 2.1.4 -> 2.1.3; council:upgrade/rollback keeps provisioning, rules opt-out, latched incident, override (F5); E-22 (stamped offline entries readable by 2.1.3) | run as T6-04 |
@@ -2293,6 +2301,8 @@ The step 5 command (the DEC-01 `provision` payload with a new id):
 - the valve relinks after every re-add.
 
 Match the snapshots to the acks by UART order (`Pub event: …cmd_ack…` then `Pub snapshot:`), or by `ts` in the IoT Hub capture.
+
+**Since WP2c (CP6, HANDOFF §15n).** `Pub snapshot:` lines print on `cloud_tx` (0.14): where the UART order is unclear, match by `ts` in the IoT Hub capture. A `Pub snapshot:` line followed by `TELEMETRY_V2: Pub snapshot not sent - the device set or session changed during its line; built again` was **not published** (the device set changed while it printed; it is rebuilt): do not count it. `IOTHUB: SNAP published while the device set changed - the reconciled one follows now` marks the known residual R15 (the change landed while the write waited for the MQTT client's lock): that snapshot may still show the old set. Record it, and judge the snapshot right after it, which must show the change.
 
 **Fail.** Any snapshot after an `ok` ack still containing the removed device, or lacking the added one. Also a Fail: the valve not relinking within 60 s of a re-add (compare with DEC-16 step 5, a known limitation for a same-pass re-add).
 
@@ -5848,6 +5858,9 @@ Some entries in the CHANGELOG *Known limitations* list are exercised here: E-01 
 | `fleet_led_task` | 2560 |
 | `ble_starter` | 3072 (the task exits after the BLE start) |
 | `monitor` | 3072 |
+| `cloud_tx` | 5120, static (since WP2c, CP6: every cloud publish, the offline buffer's replay and stores) |
+| `wifi_task` | 4096 (since WP2b it runs the MQTT stop, with its TLS write) |
+| `lora_task` | 10240 (since WP2c it also reads the bench keys) |
 
 ---
 
@@ -6549,12 +6562,13 @@ The full 33-device payload (16 + 16 + valve) is about 4.7 KB.
 
 | Field | Value |
 |---|---|
-| Purpose | Measure the stack headroom of the tasks that run new or changed code. The only guard in production is the FreeRTOS canary (`CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y`). |
+| Purpose | Measure the stack headroom of the tasks that run new or changed code. The only guard in production is the FreeRTOS canary (`CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY=y`). Since CP6 also `cloud_tx` (WP2c: 5,120 B, sized from estimates, about 1.9 KB margin expected), `wifi_task` (WP2b: the MQTT stop's TLS write) and `lora_task` (the bench keys). HANDOFF §15k item 16. |
 | Covers | council:stack headroom (E2F council[0] risk 0, council[1] risk 3, council[3] risk 5; final votes[0] risk 0, votes[1] risk 2, votes[3] risk 10); HANDOFF §10, the NimBLE host stack check (E-08 about +54 B on the notify path); final votes[1] NB4 (a `nimble_port_init` failure cannot recover: observe) |
 | Start state | A **separate debug image** (below), then the production 2.1.4 image for the canary check. Valve A = `<VALVE>`, valve B = `<VALVE_B>`, 4 BLE sensors, a LoRa sensor if available. |
 | Duration | about 3 h |
 
 **Building the debug image**
+- **For the CP6 run (HANDOFF §15k item 16), use `fcc0979` in place of `d9fa9c8` below, and compare the unmodified worktree's `idf.py size` with CP6's (HANDOFF §15j: `.bss` about 43,231 B, `.data` about 21,569 B) in place of CP3's.**
 - Build it in its own worktree: `git worktree add ..\hub_hwm d9fa9c8`, then `Copy-Item sdkconfig ..\hub_hwm\sdkconfig` **before** the first build (`sdkconfig` is git-ignored; without the copy the image gets a default config and its stack figures mean nothing). Before adding the instrumentation, an `idf.py size` of the unmodified worktree must match CP3 (`.bss` 36,280 B, `.data` 21,572 B). Never commit it, never merge it, and never flash it on a customer unit.
 - In that worktree, set `PROJECT_VER` in `CMakeLists.txt` to `"2.1.4-hwm"`, so every capture shows `gateway.fw:"2.1.4-hwm"`.
 - In `main/systemservices/monitoring.c`, add `#include <string.h>` and the function below, and call it every 6th loop (every 60 s) inside `monitoring_task()`, after the heap line.
@@ -6565,7 +6579,8 @@ The full 33-device payload (16 + 16 + valve) is about 4.7 KB.
 static void log_stack_hwm(void)
 {
     static const char *names[] = { "nimble_host", "ble_valve", "iothub_task", "mqtt_task",
-        "ble_leak_scan", "health_engine", "Tmr Svc", "fleet_led_task", "ble_starter", "monitor" };
+        "ble_leak_scan", "health_engine", "Tmr Svc", "fleet_led_task", "ble_starter", "monitor",
+        "cloud_tx", "wifi_task", "lora_task" };
     char line[256];
     size_t n = 0;
     for (size_t i = 0; i < sizeof(names) / sizeof(names[0]) && n < sizeof(line); i++) {
@@ -6581,7 +6596,8 @@ static void log_stack_hwm(void)
 ```
 
 - The debug image prints `MONITOR: stack_hwm_free_bytes: nimble_host=%u ble_valve=%u ...` (format; this line exists only in the debug image).
-- `ble_starter=-` after BLE has started is normal: that task exits.
+- `ble_starter=-` after BLE has started is normal: that task exits. On an image before WP2c (`cloud_tx` absent) `cloud_tx=-` is normal too.
+- **For the CP6 run, two more bench-only additions** (HANDOFF §15k items 13(b) and 16): set comprehensive heap poisoning in the worktree's `sdkconfig` after the size check (`idf.py menuconfig`: Component config → Heap memory debugging → Heap corruption detection → Comprehensive), and add one line in `mqtt_event_handler()`'s `MQTT_EVENT_CONNECTED` case (`main/iothub/app_iothub.c`): `ESP_LOGI(IOTHUB_TAG, "outbox at CONNECTED: %d B", esp_mqtt_client_get_outbox_size(event->client));`. It must read `0 B` at every reconnect.
 - A `-` for any other task means its name did not resolve. Check the name in the IDF sources: `nimble_port_freertos.c` creates `"nimble_host"` and `mqtt_client.c` creates `"mqtt_task"`.
 
 **Scenarios on the debug image.** Record the **lowest** value per task over the whole run.
@@ -6603,6 +6619,11 @@ static void log_stack_hwm(void)
 10. A 1 h soak:
     - at least 2 BLE sensors bursting (one kept wet for 10 min);
     - 10 valve relinks by switching the valve PSU off and on, including 3 with SET + CLOSE pended (B1 (b)) and 1 with the valve flood probe wet.
+11. **CP6 (WP2c): `cloud_tx`'s deepest paths.**
+    - T6-21 once, with a full replay into a dying session: fill the offline buffer (16 events) with the router off, restore it, and start the WAN DROP again while `OFFLINE_BUF: Draining …` runs.
+    - The pre-sync store path: power-cycle the hub with the router off, wet a sensor before the clock syncs, then restore the router.
+    - A decommission-all, then a re-provision (a live DPS registration on `iothub_task`), on a spare hub.
+    - The router's Wi-Fi switched off 10 times during a WAN-dead stall (`wifi_task`'s stop behind `cloud_tx`'s publish; HANDOFF §15k item 13(b)): no heap-corruption abort, and `outbox at CONNECTED: 0 B` at each reconnect.
 
 **Results table**
 
@@ -6618,6 +6639,9 @@ static void log_stack_hwm(void)
 | fleet_led_task | 2560 | | |
 | ble_starter | 3072 (until it exits) | | |
 | monitor | 3072 (includes this logging) | | |
+| cloud_tx | 5120, static (CP6 and later) | | |
+| wifi_task | 4096 | | |
+| lora_task | 10240 | | |
 
 **Production image, over the whole Phase G run:**
 - grep every UART capture for `stack overflow`, `Guru Meditation`, `assert failed` and `[INIT] nimble_port_init failed`;
@@ -6625,6 +6649,7 @@ static void log_stack_hwm(void)
 
 **Pass criteria**
 - At least 512 B free on every task, at every point of the debug run.
+- **On CP6 and later (HANDOFF §15k item 16):** `iothub_task` 2 KB or more free; **`cloud_tx` 1 KB or more free** (below that, raise it to 6,144 B before release); 1.5 KB or more on `cloud_tx` lets WP9 trim it to 4,096 B. A task list may show `cloud_tx` at priority 5 (inherited from a lock it waited on): not a finding.
 - No `***ERROR*** A stack overflow in task ... has been detected.` panic on either image.
 - No production lifecycle with `reset_reason` `panic` or `watchdog`.
 - **Record:** any `[INIT] nimble_port_init failed` (final votes[1] NB4: the retry cannot recover an NPL allocation failure; a reboot is the recovery).
@@ -7000,6 +7025,8 @@ print("12 sent in %.2f s" % (time.time() - t0))
 | T6-18 | 2 | | | [ ] Pass [ ] Fail |
 | T6-18 | 3 | | | [ ] Pass [ ] Fail |
 
+**Since WP2c (CP6, HANDOFF §15n).** `iothub_task` no longer publishes, so it no longer blocks at a publish behind the MQTT client's lock while the `override_enable` handler holds it: **on CP6 and later, Ta − Ts is the normal path, 200 ms or less** (more is a Fail there). The `leak_detected` publish now waits on `cloud_tx` instead: its `Pub event:` line (Tp) prints at once, before the write that waits, and the event reaches IoT Hub about when the handler ends (up to about 10 s; record that arrival time from the IoT Hub capture in place of Tp − Ts).
+
 ---
 
 ### T6-19 — A leak sensor unheard during a hanging valve connect (≤ 30 s, known limitation)
@@ -7077,6 +7104,36 @@ The exact race (an owed apply retry overlapping the C2D) cannot be forced from o
 
 ---
 
+### T6-21 — A leak closes the valve within 200 ms during a WAN black-hole with Wi-Fi up (LS-1, WP2c)
+
+| Field | Value |
+|---|---|
+| Purpose | Up to WP2b the task that evaluates leaks (`iothub_task`) also published to the cloud. When the internet died silently under a working Wi-Fi link, one publish could hold it for 10-20 s (its write into a full TCP buffer, or the MQTT client's lock behind the client's own write), and a leak waited as long for its valve close (CP5: 10-20 s). Since WP2c every publish runs on `cloud_tx`. Check that a leak closes the valve within 200 ms throughout such an outage, and that its events reach IoT Hub afterwards, in order. |
+| Covers | HANDOFF §15n (WP2c, decisions D3 and D4) and §15k item 12; WP2b-LS-1 (HANDOFF §15m); `C2D_COMMANDS.md` §3.5 |
+| Start state | CP6 (`fcc0979`) or later. Valve linked, `<BLE1>` and `<BLE2>` (a LoRa sensor too if fitted) provisioned and dry, auto-close on, MQTT up for 2 min or more. UART capture with timestamps (0.6) and the IoT Hub monitor (0.7) running. A router whose firewall can **DROP** (silently, not REJECT) the hub's outbound TCP 8883 while its Wi-Fi stays up; otherwise one whose WAN cable can be pulled with its Wi-Fi up. |
+| Duration | about 45 min (3 runs) |
+
+**Steps** (one run; T0 is the moment the DROP starts)
+
+1. Start the DROP. Wet `<BLE1>` at T0 + 1 s, `<BLE2>` at T0 + 5 s, and a LoRa sensor (or `<BLE1>` again after drying it) at T0 + 15 s; once more, wet a sensor right after an `IOTHUB: SNAP trigger=…` line (format). Type `d` once (0.6). Keep the DROP for 2 min or more: the MQTT client sees the session dead within about 10-90 s.
+2. **Expect for each wet:** `BLE_LEAK: eleak <MAC> — leak=1 …` (format; or the LoRa packet's line), `RULES_ENGINE: LEAK INCIDENT latched by …` (the first wet), `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by …`, and the valve's RMLEAK, then CLOSE. From `cloud_tx`, when its stalled write times out: `IOTHUB: Disconnected.`, `TELEMETRY_V2: MQTT connected = false`, `IOTHUB: Pub event took N.N s (msg_id=-1)` (format), `TELEMETRY_V2: Pub event failed (msg_id=-1)`, `TELEMETRY_V2: Pub event not confirmed (msg_id=-1) - kept for replay, a duplicate is possible`, then `TELEMETRY_V2: Offline — buffering … event` and `OFFLINE_BUF: Stored event [%s] (%u bytes), %d buffered` (format) for the events still queued, in the order they were built. `d` prints its `APP_LORA: Stats: …` line at once.
+3. Stop the DROP. **Expect:** the reconnect; `TELEMETRY_V2: Draining %d offline event(s) before lifecycle...` (format) and `OFFLINE_BUF: Replayed [%s] (%u bytes)` (format) in order; then `TELEMETRY_V2: Pub lifecycle: {...}`, `IOTHUB: Twin reported (%d): …` and live events; exactly one `boot` or `fast` snapshot in IoT Hub.
+4. Dry every sensor, let the auto-clear run, send `valve_open`, and wait 2 min before the next run.
+
+**Pass criteria**
+- **During the outage, in every run:** `leak=1` → `AUTO-CLOSE + RMLEAK triggered` **within 200 ms** for every wet, by the ESP log's own times (0.14), and the valve's CLOSE within the hub's usual leak-to-CLOSE time (T5-03); no rules line held back until a `Pub … took` line (its ESP time lies inside the stall); no `APP_LORA: Rx Queue Full! Packet dropped.`; no `TX queue full`.
+- **After the restore:** in IoT Hub the first copy of each event that the UART shows published or stored appears in the UART's build order, and each sensor's last event matches the UART's last. Duplicates are allowed (count them by identical body and keep the first; one whose `ts` differs by about 1 s is a pre-sync event re-stamped at a replay).
+- **Classify a missing event before calling it a Fail:** an event with a `Pub event:` line before `IOTHUB: Disconnected.`, and no `not confirmed` or `Stored event` line for it, was accepted by the MQTT client into the dying session before the broker acknowledged it: the known loss R5 (HANDOFF §15n; 2.1.3 and every earlier 2.1.4 image lose it too). The +1 s and +5 s wets are likely to be this. Grep `OFFLINE_BUF: Buffer full, oldest event overwritten` first (16 entries). In outages under 30 s the first copies can also invert: check each event's `Pub` msg_id.
+- **Record** for each run: the largest `leak=1` → `AUTO-CLOSE + RMLEAK triggered` and `leak=1` → CLOSE, the largest `Pub … took`, and next to any CLOSE over 200 ms the `OFFLINE_BUF: Stored event` lines and any `Pub snapshot:` line printing at that moment (the serial log and the flash: the user's D4 fixes them in WP3 if needed). Also any repeated LoRa packet.
+
+| ID | Run | Largest `leak=1` → `AUTO-CLOSE` (ms) | Largest `leak=1` → CLOSE (ms) | Largest `Pub … took` (s) | Missing events (R5 / overwritten / other) | Result |
+|---|---|---|---|---|---|---|
+| T6-21 | 1 | | | | | [ ] Pass [ ] Fail |
+| T6-21 | 2 | | | | | [ ] Pass [ ] Fail |
+| T6-21 | 3 | | | | | [ ] Pass [ ] Fail |
+
+---
+
 ### 6.x Residual-risk disposition
 
 **Numbering.**
@@ -7135,6 +7192,8 @@ The exact race (an owed apply retry overlapping the C2D) cannot be forced from o
 | Final v[1] NB4 | The `nimble_port_init` retry cannot recover an NPL allocation failure | T6-11 (observe) |
 | Final v[3] NB1 | An ENOMEM from mbuf exhaustion is not bounded by the 30 s GATT timeout | T6-16 (observe) |
 | Final v[4] NB3 items 2, 3, 4 | Old events replay after a power cut on decommission-all; mixed keys after a power cut mid-save; rollback enabled with no mark-valid | T6-02, T6-01, T6-03 |
+| WP2b-LS-1 (HANDOFF §15m), decided by WP2c (§15n) | A publish on the leak task waited 10-20 s on a dead WAN, and the leak's close with it | T6-21 |
+| WP2c R7 (HANDOFF §15n) | `cloud_tx`'s stack (5,120 B) rests on estimates | T6-11 (CP6 run) |
 
 **The second table lists risks whose tests are in other sections.** Section M.5 gives the test IDs for every one of them.
 
