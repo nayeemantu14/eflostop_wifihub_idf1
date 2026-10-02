@@ -75,8 +75,12 @@ typedef enum {
 /**
  * @brief Initialize the rules engine. Call after provisioning_init().
  *        Loads override window state from NVS if previously persisted.
+ *
+ * @return false when the device set or the rules that a leak is decided on while
+ *         provisioning is busy (WP2d) could not be read: run a device-set change, whose
+ *         rules_engine_forget_unprovisioned() reads them again. True otherwise.
  */
-void rules_engine_init(void);
+bool rules_engine_init(void);
 
 /**
  * @brief Evaluate a leak event and auto-close the valve if rules allow.

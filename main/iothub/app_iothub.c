@@ -3595,7 +3595,13 @@ void iothub_task(void *param)
 
     // Initialize sensor metadata and rules engine
     sensor_meta_init();
-    rules_engine_init();
+    // False: the rules engine could not read the device set or the rules it decides a leak
+    // on while provisioning is busy (2.1.4 WP2d). Nothing else reads them before the next C2D
+    // change: the loop's device-set change does, retried until it can (forget_unprovisioned()).
+    if (!rules_engine_init()) {
+        ESP_LOGW(IOTHUB_TAG, "Boot: rules engine missed the device list or rules - reading them again in the loop");
+        g_devset_changed = true;
+    }
     health_engine_init();
 
     /* Seed the empty-hub state from a DEFINITE provisioning read (false = unknown, never

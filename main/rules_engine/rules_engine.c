@@ -731,18 +731,19 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
-void rules_engine_init(void)
+bool rules_engine_init(void)
 {
-    if (g_initialized) return;
+    if (g_initialized) return true;
 
     g_mutex = xSemaphoreCreateMutex();
     if (!g_mutex) {
         ESP_LOGE(RULES_TAG, "Failed to create mutex");
-        return;
+        return true;   // the engine is off: nothing to read again
     }
 
     rules_config_t rules;
-    if (provisioning_get_rules_config(&rules)) {
+    bool rules_ok = provisioning_get_rules_config(&rules);
+    if (rules_ok) {
         g_last_rules = rules;
         ESP_LOGI(RULES_TAG, "Initialized: auto_close=%s triggers=0x%02X",
                  rules.auto_close_enabled ? "enabled" : "disabled",
@@ -765,11 +766,13 @@ void rules_engine_init(void)
     health_set_interlock_held(g_leak_incident_active);
 
     /* The devices a leak is decided on while provisioning is busy (WP2d). On iothub_task
-     * before its loop; a failed read leaves none, and the loop's first device-set change
-     * reads them again. */
+     * before its loop. A failed read leaves none, and a failed rules read above leaves the
+     * defaults as the copy: the false return makes iothub_task run a device-set change,
+     * whose forget_unprovisioned() reads both again until it can. */
     g_last_set_ok = provisioning_get_device_set(&g_last_set);
 
     g_initialized = true;
+    return g_last_set_ok && rules_ok;
 }
 
 // The body of rules_engine_evaluate_leak(), entered with g_mutex held. Gives it on every path.
@@ -2174,7 +2177,12 @@ bool rules_engine_forget_unprovisioned(void)
     bool provisioned;
     rules_config_t rules;
     bool rules_ok = provisioning_get_rules_and_state(&provisioned, &rules);
-    if (rules_ok) g_last_rules = rules;
+    if (rules_ok) {
+        g_last_rules = rules;
+    } else {
+        // The purge below still runs; the caller's "rules purge deferred" line follows.
+        ESP_LOGW(RULES_TAG, "Provisioning busy for 1 s - the rules copy was not refreshed, the device-set change is retried");
+    }
 
     int i = 0;
     while (i < g_active_leak_count) {
