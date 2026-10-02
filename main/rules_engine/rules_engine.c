@@ -514,9 +514,16 @@ const char *leak_identity_key(bool is_valve)
 // shipping a placeholder. It used to fall back to the literal "valve", which put
 // a device on the wire that matches nothing in any snapshot, twin or other event
 // — worse for joining than no identity at all, because it looks like a real id.
-static const char *wire_device_id(const char *source_id, char *buf)
+//
+// valve_mac: the provisioned valve's MAC when the caller already has it, NULL to read it.
+// A leak decided while provisioning is busy (WP2d) passes the last known device set's
+// copy (upper case, as provisioning_get_valve_mac() returns it): read again, it would
+// wait another 1 s before the close, and if still busy ship the event without valve_id.
+static const char *wire_device_id(const char *source_id, char *buf, const char *valve_mac)
 {
     if (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0) {
+        if (valve_mac)
+            return valve_mac;
         if (provisioning_get_valve_mac(buf))
             return buf;
         return NULL;                  // no valve provisioned (or provisioning busy)
@@ -525,11 +532,12 @@ static const char *wire_device_id(const char *source_id, char *buf)
 }
 
 // valve_id / sensor_id, emitted only when the identity resolves. Keeps every call
-// site honest without repeating the NULL check or the key selection.
-static void add_device_id(cJSON *root, const char *source_id, char *buf)
+// site honest without repeating the NULL check or the key selection. valve_mac as in
+// wire_device_id().
+static void add_device_id(cJSON *root, const char *source_id, char *buf, const char *valve_mac)
 {
     bool is_valve  = (source_id && strcmp(source_id, VALVE_SOURCE_ID) == 0);
-    const char *id = wire_device_id(source_id, buf);
+    const char *id = wire_device_id(source_id, buf, valve_mac);
     if (id) {
         cJSON_AddStringToObject(root, leak_identity_key(is_valve), id);
     } else if (is_valve) {
@@ -558,7 +566,7 @@ static void add_device_id(cJSON *root, const char *source_id, char *buf)
 static void add_interlock_device_id(cJSON *root)
 {
     char idbuf[WIRE_DEVICE_ID_BUF];
-    add_device_id(root, VALVE_SOURCE_ID, idbuf);
+    add_device_id(root, VALVE_SOURCE_ID, idbuf, NULL);
 }
 
 // The provisioned valve reads RMLEAK 1 under the latch. Must be called with g_mutex held.
@@ -685,8 +693,9 @@ static void track_leak_source(const char *source_id, bool leak_active)
 // the bench that produced an auto_close claiming rmleak_asserted:true alongside a
 // snapshot 300 ms later reporting connected:false. The false claim is the one an
 // alerting rule reads as success, which is the worst way to be wrong.
+// valve_mac as in wire_device_id().
 static void build_auto_close_telemetry(leak_source_t source, const char *source_id,
-                                       bool rmleak_issued)
+                                       bool rmleak_issued, const char *valve_mac)
 {
     cJSON *root = cJSON_CreateObject();
     if (!root) return;
@@ -694,7 +703,7 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
     char idbuf[WIRE_DEVICE_ID_BUF];
     cJSON_AddStringToObject(root, "event", "auto_close");
     cJSON_AddStringToObject(root, "source_type", leak_source_to_str(source));
-    add_device_id(root, source_id, idbuf);
+    add_device_id(root, source_id, idbuf, valve_mac);
     cJSON_AddBoolToObject(root, "rmleak_asserted", rmleak_issued);
 
     // Add location if available
@@ -798,6 +807,9 @@ static void evaluate_leak_locked(leak_source_t source, bool leak_active, const c
         xSemaphoreGive(g_mutex);
         return;
     }
+    // The valve's wire id for this report's events: busy, the copy, so the events neither
+    // wait another 1 s before the close nor ship without valve_id. Live, read as usual.
+    const char *valve_mac = (!live && g_last_set.has_valve) ? g_last_set.valve_mac : NULL;
 
     // Track active leak sources for auto-clear timeout: a wet one only once it is decided
     // this hub's. Tracked before that, a source decided "not provisioned here" (a
@@ -863,7 +875,7 @@ static void evaluate_leak_locked(leak_source_t source, bool leak_active, const c
                 char idbuf[WIRE_DEVICE_ID_BUF];
                 cJSON_AddStringToObject(root, "event", "auto_close_blocked_override");
                 cJSON_AddStringToObject(root, "source_type", leak_source_to_str(source));
-                add_device_id(root, source_id, idbuf);
+                add_device_id(root, source_id, idbuf, valve_mac);
                 if (remaining >= 0) {
                     cJSON_AddNumberToObject(root, "override_remaining_s", remaining);
                 }
@@ -931,7 +943,7 @@ static void evaluate_leak_locked(leak_source_t source, bool leak_active, const c
     // (leak_detected). Only the event is skipped; the latch and the rest stay as above.
     // Provisioning busy: the copy, so no second 1 s wait comes before the close.
     if (live ? valve_provisioned_or_unknown() : g_last_set.has_valve) {
-        build_auto_close_telemetry(source, source_id, valve_reachable);
+        build_auto_close_telemetry(source, source_id, valve_reachable, valve_mac);
     } else {
         ESP_LOGI(RULES_TAG, "AUTO-CLOSE: no provisioned valve - auto_close event not published");
     }
@@ -1658,7 +1670,7 @@ void rules_engine_on_valve_connected(void)
                 // it cannot name the device's type.
                 cJSON_AddStringToObject(root, "cause", "reconnect");
                 if (g_active_leak_count > 0)
-                    add_device_id(root, g_active_leak_ids[0], idbuf);
+                    add_device_id(root, g_active_leak_ids[0], idbuf, NULL);
                 // Same honesty rule as the main auto_close path: report whether the
                 // writes are actually being issued, not what we intended.
                 //
