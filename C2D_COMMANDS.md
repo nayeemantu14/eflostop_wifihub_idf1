@@ -141,13 +141,13 @@ The hub publishes a `cmd_ack` only when **`cmd.is_envelope || cmd.id[0]`** is tr
 
 ## 3.5 Duplicates, order and dedupe (2.1.4) — for the cloud team
 
-This applies to every `eflostop.v2` message on `devices/<device_id>/messages/events/` (events, `cmd_ack`, snapshots, lifecycle), not only to acks. Background: HANDOFF §15n (WP2c) and §15o (WP2d) in `docs/field_logs/2.1.4/`.
+This applies to every `eflostop.v2` message on `devices/<device_id>/messages/events/` (events, `cmd_ack`, snapshots, lifecycle), not only to acks. Background: HANDOFF §15n (WP2c), §15o (WP2d) and §15p (WP2e) in `docs/field_logs/2.1.4/`.
 
 **Delivery is at-least-once (QoS 1).** Since 2.1.4 an event whose publish sees the hub's MQTT connection end is also kept in the hub's offline buffer and replayed at the next connect (decision D3); it used to be lost when the MQTT client's queue expired it 30 s later. So:
 - **The same event can arrive twice,** and the second copy can arrive **after newer events** (the MQTT client's own resend, or the replay, comes later). Every duplicate the hub produces is the same bytes, `ts` included, with one exception below.
-- **Dedupe rule (decision D3, 2026-10-02): the cloud must dedupe on `gateway.id + ts + event + device id`, keeping the first copy.** `event` is `data.event`; the device id is `data.valve_id` or `data.sensor_id`, whichever is present.
-- ⚠️ **The key is under review (HANDOFF §15n, TC-2).** `ts` has one-second resolution, so the key also merges two *different* messages: two `cmd_ack` in the same second (they carry no device id and differ only in `data.id` and `data.cmd`), two `valve_state_changed` for one valve in the same second (they differ in `data.valve_state`), and two `auto_close` for one sensor in one second (they differ in `data.cause`). Because every duplicate is byte-identical, deduping on the whole message body, or a hash of it, drops only true duplicates; the firmware reviewers recommend that. Until it is decided, a backend that keeps the key should add `data.id`, `data.cmd`, `data.valve_state` and `data.cause` where present.
-- **The one exception:** an event raised before the hub's first clock sync gets its real `ts` when the clock syncs. If writing that `ts` to flash failed, it is worked out again at each replay, so two copies can differ in `ts` by about 1 s.
+- **Dedupe rule (decided 2026-10-02; HANDOFF §15n, TC-2): drop a message only when it is byte-identical to one already received, and keep the first copy.** Compare the whole message body, or a hash of it (for example SHA-256 of the raw payload bytes). Do not dedupe on a subset of fields: `ts` has one-second resolution, so a key such as `gateway.id + ts + event + device id` (the rule first given here, now withdrawn) also merges two *different* messages: two `cmd_ack` in the same second (they carry no device id and differ only in `data.id` and `data.cmd`), two `valve_state_changed` for one valve in the same second (they differ in `data.valve_state`), or two `auto_close` for one sensor in one second (they differ in `data.cause`).
+- **The one exception:** an event raised before the hub's first clock sync gets its real `ts` when the clock syncs. If writing that `ts` to flash failed, it is worked out again from the event's `gateway.uptime_s` at each replay, so two copies can differ in `ts` by about 1 s and in nothing else. The byte-identical rule keeps both: one harmless extra copy. If the cloud needs to drop these too, it may additionally treat two messages that are identical except for `ts`, with their `ts` at most 1 s apart, as the same message (keeping the first). `gateway.uptime_s` stays in that comparison, so two real events a second apart, whose `gateway.uptime_s` differ, are not merged.
+- **Two real messages can still be the same bytes.** The envelope carries no per-message counter, and `ts` and `gateway.uptime_s` are whole seconds. Two real occurrences that print identically within one second are taken as one: for example a sensor that goes wet, dry and wet again within a second with the same battery and RSSI arrives as `leak_detected`, `leak_cleared`, and its second `leak_detected` is dropped as a duplicate. The snapshot that follows leak events (within about 5 s) carries the true state.
 - **At-least-once is not "never lost".** An event the MQTT client accepted into a connection that is dying silently (the internet down while Wi-Fi stays up), before the broker acknowledged it, can still be lost, as before 2.1.4. The offline buffer holds 16 events and overwrites the oldest. The first snapshot after the reconnect carries the state.
 
 **Order.**
@@ -157,7 +157,9 @@ This applies to every `eflostop.v2` message on `devices/<device_id>/messages/eve
 - A `device_offline` or `device_recovered` held on the hub during a stall can arrive after the `decommission` ack that removed that device. Ignore health events for device ids the hub no longer has.
 - A `cmd_ack` still comes before the snapshot its command causes; other events can come between them.
 
-**Twin reported (§8.1).** Since 2.1.4 the hub builds its twin reports on one task and sends them from another, while some command handlers still report at once. After a reconnect with buffered events, or a `provision` followed within about a second by `rules_config` or `set_hub_name`, an older reported value can be written after a newer one and stay until the hub's next report (HANDOFF §15n, TW-1, under review). Before acting on a value that was just changed, use the command's `cmd_ack`, or read `reported` again after the next report.
+**Twin reported (§8.1).** Since 2.1.4 (HANDOFF §15p, TW-1) every reported-properties PATCH is built fresh on one hub task and written in build order by another, so the last report the hub writes is the newest it built. The hub reports at every connect (usually twice: once after the connection's buffered events and `lifecycle`, and again once the twin GET's answer has been applied), after every `provision` and `decommission`, after `rules_config` and `set_hub_name`, and after every desired-properties change.
+- **A command's `cmd_ack` goes out before the twin report it causes,** and the report follows, normally within a second. It can take longer: while 8 or more messages wait to be sent, the report waits too (checked again every 2 s), and one the MQTT client refuses is built again 5 s later. So do not read `reported` once when the ack arrives: wait for the reported property to change (a twin change notification, or a poll) before acting on a value that was just set.
+- **One limit remains (HANDOFF §15p, for the user's decision):** reports are sent at QoS 1, so on a slow or reconnecting link the MQTT client's own resend can deliver an older report after a newer one. The older value then stays until the hub's next report (the next change or connect).
 
 ---
 
@@ -716,7 +718,7 @@ Sets or clears the user-friendly name for this hub. Same name settable via Devic
 
 What happens:
 1. Name saved to NVS (`hub_ident` namespace; persists across reboot, survives WiFi reset, cleared on `decommission all`).
-2. A Twin reported PATCH is published immediately (this is **not** clock-gated — it goes out even before SNTP sync).
+2. A Twin reported PATCH follows the `cmd_ack`, normally within a second (since 2.1.4 it is built and sent in order with the hub's other messages: §3.5). Like every reported PATCH it is **not** clock-gated.
 3. The name appears in telemetry snapshots under `gateway.name`.
 
 | Error detail | Why |

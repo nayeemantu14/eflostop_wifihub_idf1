@@ -30,8 +30,10 @@ sections below. The first two, WP-V and WP0, change no behaviour. The third, WP1
 portal could reboot the hub. The fourth, WP2, starts the cloud's TLS only once the setup SoftAP is down, stops
 the SoftAP soon after Wi-Fi connects, and keeps the setup web server off the home network. WP2b moves the
 MQTT stop off the task that handles leaks, and WP2c moves every cloud publish off it too, onto a sender task of
-its own. WP2d makes a busy lock delay a leak decision instead of dropping it. WP1, WP2, WP2b, WP2c and WP2d are
-built and benched together as Build checkpoint 6, of `fcc0979` (HANDOFF §15h-§15o).
+its own. WP2d makes a busy lock delay a leak decision instead of dropping it. WP2e sends every twin report in
+order, newest last, and keeps 16 of the sender's 24 queue places for leak, valve and rules events. WP1, WP2,
+WP2b, WP2c, WP2d and WP2e are built and benched together as Build checkpoint 6, of `545b8f2` (HANDOFF
+§15h-§15p).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -235,7 +237,8 @@ built and benched together as Build checkpoint 6, of `fcc0979` (HANDOFF §15h-§
   - **Known until later packages:** the setup page's Finish button and `POST /finish.json` (C12's other half)
     come with WP4, so after a Connect the SoftAP stays up to 60 s while the phone stays joined; the Forget is
     still reachable from a phone on the SoftAP (D9 kept); a twin reported-property update refused by a full
-    queue is not sent again until the next report (HANDOFF §15i).
+    queue is not sent again until the next report (HANDOFF §15i; fixed by WP2e, which builds it again 5 s
+    later).
 - **The MQTT stop no longer holds leak handling (WP2b; the user's decision of 2026-10-01 on WP2's stall).**
   Commits `fd682be` … `d0d5284` (`main/iothub`, `main/app_wifi`, `main/telemetry`, `main/offline_buffer`);
   details in HANDOFF §15m, the bench checks in §15k items 7 and 10. Reviewed and voted 3/3 SHIP by the council
@@ -283,20 +286,22 @@ built and benched together as Build checkpoint 6, of `fcc0979` (HANDOFF §15h-§
     10 s while connected. A snapshot is built only while the sender is idle, one at a time, and its heartbeat
     bookkeeping runs when its result comes back; one whose device list changed before it went out is not sent
     and is built again.
-  - **At-least-once delivery (decision D3): the cloud must dedupe on gateway.id + ts + event + device id, keeping
-    the first copy.** An event whose publish sees its connection end is also kept in the offline buffer and
-    replayed, so it can reach the cloud twice, and the second copy can arrive after newer events (it used to be
-    lost when the MQTT queue expired it 30 s later). Every duplicate is the same bytes. The key is under review
-    (HANDOFF §15n, TC-2): it also merges two different `cmd_ack`s, or two `valve_state_changed`, in the same
-    second. An event that MQTT accepted into a connection that then dies silently can still be lost, as before.
-    Cloud-side detail in `C2D_COMMANDS.md` §3.5.
+  - **At-least-once delivery (decision D3): the cloud drops a message only when it is byte-identical to one it
+    already has (the payload, or a hash of it), keeping the first copy** (the user's decision on TC-2,
+    2026-10-02, HANDOFF §15n; it replaces D3's first rule, `gateway.id + ts + event + device id`, which also
+    merged two different `cmd_ack`s, or two `valve_state_changed`, in the same second). An event whose publish
+    sees its connection end is also kept in the offline buffer and replayed, so it can reach the cloud twice,
+    and the second copy can arrive after newer events (it used to be lost when the MQTT queue expired it 30 s
+    later). Every duplicate is the same bytes, except a pre-sync event whose time stamp could not be saved: its
+    copies can differ in `ts` by about 1 s. An event that MQTT accepted into a connection that then dies
+    silently can still be lost, as before. Cloud-side detail in `C2D_COMMANDS.md` §3.5.
   - **The MQTT stop and a publish never overlap.** The sender's publishes and the Wi-Fi task's MQTT stop share a
     gate that neither side waits for; a stop that meets a publish runs as soon as it ends (`MQTT stop waits for
     cloud_tx's publish`). The MQTT client frees its queue without a lock as it stops, so the two must not meet.
-  - **Health alerts wait, without loss,** while the sender is busy and memory is low (fewer than 16 queued, and
-    12 KB free with a 4.5 KB block, unless the sender is idle), so a stalled connection cannot pile them up. With
-    24 messages already queued in a stall, a further event is dropped with an error line that names it; the
-    next snapshot carries the state, and the valve close is not affected.
+  - **Health alerts wait, without loss,** while the sender is busy and memory is low (fewer than 16 queued, 8
+    since WP2e, and 12 KB free with a 4.5 KB block, unless the sender is idle), so a stalled connection cannot
+    pile them up. With 24 messages already queued in a stall, a further event is dropped with an error line that
+    names it; the next snapshot carries the state, and the valve close is not affected.
   - **Decommission-all** sends the twin, the final snapshot and the offline buffer's clear through the sender, in
     that order, and waits up to 25 s for them; if the sender is stuck, the hub erases the offline buffer itself
     before it restarts, so no old event is replayed afterwards.
@@ -325,10 +330,11 @@ built and benched together as Build checkpoint 6, of `fcc0979` (HANDOFF §15h-§
     5,120 B stack and its queues (an exception to the plan's "no new task, no heap at rest" rule, approved by the
     user); `.data` 0; flash about +7.7 KB; no IRAM; no heap held at rest. The removed `uart_cmd_task` frees about
     4.4 KB of heap, so about 1.8 KB more internal RAM is in use at rest.
-  - **Known, for the user's decision (HANDOFF §15n):** the dedupe key (TC-2); up to 16 of the 24 queue places can
-    be health alerts in a stall (SAFE-1); a reported twin value can be overwritten by an older one after a
-    reconnect with a backlog, or by a provision's report right after a quick `rules_config` or `set_hub_name`,
-    until the next report (TW-1).
+  - **Decided by the user on 2026-10-02 (HANDOFF §15n), and done in WP2e (below):** the dedupe rule is the
+    identical payload (TC-2, above); at most 8 of the 24 queue places can be health alerts, so at least 16 stay
+    for leak, valve and rules events (SAFE-1); and every twin report is built fresh and sent in order, so an
+    older reported value can no longer overwrite a newer one, as it could after a reconnect with a backlog, or
+    when a provision's report followed a quick `rules_config` or `set_hub_name` (TW-1).
 - **A busy lock no longer drops a leak (WP2d; the user's decision D5 of 2026-10-02).** Commits `dd4eb0f` …
   `fcc0979` (`main/rules_engine`, `main/provisioning_manager`, `main/iothub`); details in HANDOFF §15o, the bench
   check in §15k item 17. Reviewed, fixed, and voted 3/3 SHIP by the council (safety, rtos, cloud).
@@ -352,9 +358,41 @@ built and benched together as Build checkpoint 6, of `fcc0979` (HANDOFF §15h-§
     removed; the production tool matches none of these, and none prints a credential.
   - Memory (estimated from the objects): `.bss` +477 B (the copy of the device list and the kept reports),
     `.data` +2 B, flash about +2.7 KB; no IRAM; no new task, timer or allocation.
-  - **Known, for the user's decision (HANDOFF §15o):** a dry report from the valve's own flood probe can still be
-    dropped behind a busy lock when its wet one was not kept (pre-existing; the valve then counts as wet until it
-    links again); the hardening ideas for WP3.
+  - **Known:** a dry report from the valve's own flood probe can still be dropped behind a busy lock when its wet
+    one was not kept (pre-existing; the valve then counts as wet until it links again). **Decided by the user on
+    2026-10-02 (HANDOFF §15o), for WP3:** keep such dry valve-flood reports on a busy rules lock, and let the
+    live provisioning read decide membership in the same lock hold (WP2D-C4). WP2d's `.bss` counts under D5's
+    approval.
+- **Twin reports in order, and a reserve for safety events in the sender's queue (WP2e; the user's decisions of
+  2026-10-02 on TW-1, SAFE-1 and TC-2).** Commits `2ef2b58` … `545b8f2` (`main/iothub`, `main/telemetry`);
+  details in HANDOFF §15p, the bench checks in §15k items 14(g) and 15(a). Reviewed, fixed, and voted 3/3 SHIP by
+  the council (cloud, rtos, safety).
+  - **Every twin report is built fresh by the cloud task and sent in order by the sender.** `rules_config`,
+    `set_hub_name`, a desired-properties change and the twin GET's answer at each connect no longer publish a
+    report from the MQTT client's task: they ask for one, and the cloud task builds it on its next pass. Reports
+    are numbered as they are built, and the sender never writes one older than a report it has already seen, so
+    the last report written is the newest. A report the MQTT client refuses with the connection still up is
+    built again 5 s later (it used to wait for the next report). A report that finds 8 or more messages queued
+    waits, and is built fresh once there is room (checked every 2 s), instead of being lost to a full queue. The
+    twin is still reported at every connect and every device-set change, only while connected.
+  - **A command's `cmd_ack` now always goes out before the twin report it causes,** as `C2D_COMMANDS.md`
+    documents (`rules_config` and `set_hub_name` used to write the twin first). The report follows, normally
+    within a second: an app should wait for the reported property to change rather than read it once on the ack.
+  - **At least 16 of the sender's 24 queue places stay for leak, valve and rules events.** Health alerts and twin
+    reports go into the queue only while fewer than 8 messages wait (health alerts: 16 before), and a snapshot
+    only into an idle sender. A decommission-all's twin is skipped when 8 or more wait; the connect after the
+    restart reports it.
+  - **Log lines.** New, `IOTHUB`: `Twin report %u not sent - report %u, built after it, went first` (an older
+    report the sender skips; expected when a device-set change lands on a connect) and the warning `Twin report
+    %u not taken by MQTT (msg_id=%d) - built again after %d s`. `IOTHUB: Twin reported (%d): %s` is unchanged and
+    still prints for every report sent, now always from the sender; on the serial log it can print before the
+    command's `cmd_ack` line, though the ack goes out first. `TELEMETRY_V2: TX queue full (24) - twin not sent`
+    no longer prints, and `IOTHUB: health alerts held …` starts at 8 queued messages. No line was removed or
+    reworded; the production tool matches none of these, and none prints a credential.
+  - Memory (estimated from the objects): `.bss` +29 B, `.data` 0, flash about +0.8 KB; no IRAM; no new task,
+    timer or allocation.
+  - **Known, for the user's decision (HANDOFF §15p):** twin reports go at QoS 1, so on a slow or reconnecting link
+    the MQTT client's own resend can still deliver an older report after a newer one (pre-existing).
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and
