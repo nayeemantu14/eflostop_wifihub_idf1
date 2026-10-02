@@ -1751,10 +1751,17 @@ static void handle_c2d_command(const char *data, size_t data_len)
 static volatile uint32_t s_twin_req      = 0;       // the esp-mqtt task only
 static uint32_t          s_twin_req_done = 0;       // iothub_task only
 // A device-set change's report not handed to cloud_tx (the FIFO full, or no memory for its
-// build): owed like a request. iothub_task only.
+// build), or one esp-mqtt refused: owed like a request. iothub_task only.
 static bool              s_twin_due      = false;
 // The build number of the last report built. iothub_task only.
 static uint16_t          s_twin_seq      = 0;
+// Reports esp-mqtt refused with their session still up, counted: cloud_tx_twin() is the only
+// writer. iothub_task takes each as owed (s_twin_refused_seen, its copy) and builds the report
+// again no sooner than s_twin_retry_ms, so a full outbox is not tried in a loop.
+#define TWIN_REPORT_RETRY_MS 5000
+static volatile uint32_t s_tx_twin_refused   = 0;   // cloud_tx only
+static uint32_t          s_twin_refused_seen = 0;   // iothub_task only
+static int64_t           s_twin_retry_ms     = 0;   // iothub_task only
 
 // The twin report's build (2.1.4 WP2c: built apart from its send, like every message): the
 // reported-properties PATCH body, or NULL out of memory. Reads the provisioning state (its
@@ -3443,7 +3450,11 @@ static void cloud_tx_lifecycle(const telem_tx_item_t *it)
 }
 
 // A twin report: a session's (the session queue, at its CONNECTED), or a device-set change's or
-// an owed one (the FIFO). Not owed when it cannot go: every CONNECTED reports the twin again.
+// an owed one (the FIFO). Not owed when its session has ended: every CONNECTED reports the twin
+// again. Owed when esp-mqtt refuses it with its session still up (-2: the outbox over
+// MQTT_OUTBOX_LIMIT_BYTES; -1: no memory), as the lifecycle is: iothub_task cleared what it
+// covers when it posted it, so nothing else would report that change until the next one
+// (2.1.4 TW-1 review). iothub_task builds a fresh report TWIN_REPORT_RETRY_MS later.
 // Never one built before a report esp-mqtt has already taken (2.1.4 TW-1): the session queue is
 // served ahead of the FIFO, so a FIFO report can be older than a session report sent first.
 // Build numbers are compared modulo 2^16: far more builds than ever wait at once.
@@ -3457,8 +3468,19 @@ static void cloud_tx_twin(const telem_tx_item_t *it)
                  (unsigned)it->seq, (unsigned)s_tx_twin_seq);
         return;
     }
-    if (send_twin_reported(it->json) >= 0)
+    int msg_id = send_twin_reported(it->json);
+    if (msg_id >= 0) {
         s_tx_twin_seq = it->seq;
+        return;
+    }
+    // A write that failed ended the session first (esp-mqtt dispatches DISCONNECTED on this
+    // task before its publish returns): the next CONNECTED's report covers it.
+    if (telemetry_v2_is_connected() && telemetry_v2_session_gen() == it->tag) {
+        s_tx_twin_refused++;            // this task is its only writer
+        ESP_LOGW(IOTHUB_TAG, "Twin report %u not taken by MQTT (msg_id=%d) - built again after %d s",
+                 (unsigned)it->seq, msg_id, TWIN_REPORT_RETRY_MS / 1000);
+        telemetry_v2_wake_snapshot();   // iothub_task's next pass takes it, then polls at 2 s
+    }
 }
 
 // The session's work, before every FIFO item. *gen_out: the session the next item may go
@@ -4036,11 +4058,12 @@ void iothub_task(void *param)
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
         // A lifecycle or a twin owed to this session while connected (LIFECYCLE_RETRY_MS), a twin
-        // report owed while connected (2.1.4 TW-1: the FIFO was full), or a health alert held for
-        // cloud_tx, also polls at 2 s. The replay and the twin GET are cloud_tx's to retry now
-        // (2.1.4 WP2c).
+        // report owed while connected (2.1.4 TW-1: the FIFO was full, or esp-mqtt refused it), or
+        // a health alert held for cloud_tx, also polls at 2 s. The replay and the twin GET are
+        // cloud_tx's to retry now (2.1.4 WP2c).
         bool session_owed = mqtt_up && (s_iot_sess_owed != 0 || s_lifecycle_owed ||
-                                        s_twin_due || s_twin_req != s_twin_req_done);
+                                        s_twin_due || s_twin_req != s_twin_req_done ||
+                                        s_tx_twin_refused != s_twin_refused_seen);
         // A report the rules mutex refused is evaluated again on the next pass, after its tick
         // (2.1.4 WP2d): 100 ms, so its close follows the mutex's release.
         int64_t base = rules_engine_has_kept_reports() ? 100 :
@@ -4272,6 +4295,15 @@ void iothub_task(void *param)
         {
             bool connected = telemetry_v2_is_connected();
             uint32_t gen = telemetry_v2_session_gen();
+            // A twin report esp-mqtt refused with its session still up (cloud_tx_twin()): owed
+            // again, and built no sooner than TWIN_REPORT_RETRY_MS from now, so a full outbox is
+            // not tried in a loop. Taken first, so that a session report built below covers it.
+            uint32_t twin_refused = s_tx_twin_refused;
+            if (twin_refused != s_twin_refused_seen) {
+                s_twin_refused_seen = twin_refused;
+                s_twin_due          = true;
+                s_twin_retry_ms     = snap_now_ms() + TWIN_REPORT_RETRY_MS;
+            }
             if (connected && gen != s_iot_gen_seen) {
                 s_iot_gen_seen = gen;
                 s_iot_sess_owed = IOT_SESS_LIFECYCLE | IOT_SESS_TWIN;
@@ -4294,11 +4326,13 @@ void iothub_task(void *param)
                     s_iot_sess_owed &= (uint8_t)~IOT_SESS_TWIN;
             }
             // A twin report owed (2.1.4 TW-1): one the esp-mqtt task asked for (rules_config,
-            // set_hub_name, a desired-properties patch, the twin GET's answer), or a device-set
-            // change's that met a full FIFO. Built now, after this session's own above, which
-            // covers it when it was built after the request. While offline it stays owed, and
-            // the next CONNECTED's report covers it.
-            if (connected && (s_twin_due || s_twin_req != s_twin_req_done))
+            // set_hub_name, a desired-properties patch, the twin GET's answer), a device-set
+            // change's that met a full FIFO, or one esp-mqtt refused. Built now, after this
+            // session's own above, which covers it when it was built after the request; within
+            // TWIN_REPORT_RETRY_MS of a refusal, at its end (a request then meets the same
+            // outbox). While offline it stays owed, and the next CONNECTED's report covers it.
+            if (connected && (s_twin_due || s_twin_req != s_twin_req_done) &&
+                snap_now_ms() >= s_twin_retry_ms)
                 post_twin_reported();
         }
 
