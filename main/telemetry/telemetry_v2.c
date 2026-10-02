@@ -91,11 +91,11 @@ static volatile bool     s_tx_frozen = false;
 
 _Static_assert(sizeof(telem_tx_item_t) == 12, "the FIFO's item is 12 B (WP2c section 2.2)");
 
-// Health alerts go to cloud_tx while TX is idle, or while fewer than this many items wait and
-// the heap has room for their builds on top of a stalled session (telemetry_v2_tx_health_admit()).
-// 8 of the FIFO's 24: at least 16 slots are always left for the leak, valve and rules events
-// (2.1.4 SAFE-1, the user's decision of 2026-10-02; 16 until then left as few as 8).
-#define TX_HEALTH_MAX_QUEUED   8
+// Health alerts go to cloud_tx while fewer than TELEM_TX_DEFERRABLE_MAX (8) items wait, and
+// either TX is idle or the heap has room for their builds on top of a stalled session
+// (telemetry_v2_tx_health_admit()). Twin reports share that limit (post_twin_reported(),
+// app_iothub.c), so at least 16 of the FIFO's 24 slots are always left for the leak, valve and
+// rules events (2.1.4 SAFE-1, the user's decision of 2026-10-02; 16 until then left as few as 8).
 #define TX_HEALTH_FREE_MIN     (12 * 1024)   // G3's 8 KB floor plus one event's build
 #define TX_HEALTH_LARGEST_MIN  (4608)        // G3's 4.5 KB block
 #define TX_HEALTH_HEAP_CAPS    (MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA)
@@ -1590,10 +1590,10 @@ bool telemetry_v2_tx_post(telem_tx_item_t *it, const char *what)
         telemetry_v2_tx_kick();
         return true;
     }
-    // Lost: 24 items queued inside one stall of cloud_tx's (WP2c section 2.3). Up to
-    // TX_HEALTH_MAX_QUEUED (8) of them can be health alerts, so it takes at least 16 leak, valve
-    // or rules events to fill it (SAFE-1). An event's state still reaches the cloud in the next
-    // snapshot.
+    // Lost: 24 items queued inside one stall of cloud_tx's (WP2c section 2.3). At most
+    // TELEM_TX_DEFERRABLE_MAX (8) of them can be health alerts, twin reports or the snapshot, so
+    // it takes at least 16 leak, valve or rules events to fill it (SAFE-1). An event's state still
+    // reaches the cloud in the next snapshot.
     if (what)
         ESP_LOGE(TELEM_TAG, "TX queue full (%d) - %s not sent", TELEM_TX_FIFO_LEN, what);
     free(it->json);
@@ -1653,7 +1653,7 @@ bool telemetry_v2_tx_health_admit(size_t *free_b, size_t *largest)
 {
     *free_b  = 0;
     *largest = 0;
-    bool room = telemetry_v2_tx_queued() < TX_HEALTH_MAX_QUEUED;
+    bool room = telemetry_v2_tx_queued() < TELEM_TX_DEFERRABLE_MAX;
     if (room && telemetry_v2_tx_idle_take()) {
         telemetry_v2_tx_idle_give();
         return true;

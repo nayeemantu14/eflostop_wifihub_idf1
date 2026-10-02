@@ -311,6 +311,14 @@ bool telemetry_v2_replay_owed(void);
 #define TELEM_TX_FIFO_LEN     24
 #define TELEM_TX_SESSION_LEN  2
 
+// The messages that can wait losslessly, health alerts and twin reports, go into the FIFO only
+// while fewer than this many items wait (telemetry_v2_tx_health_admit(); post_twin_reported(),
+// app_iothub.c); the snapshot goes only into an idle TX. So at most 8 of the 24 slots ever hold
+// them, and at least 16 are always left for the leak, valve and rules events (2.1.4 SAFE-1, the
+// user's decision of 2026-10-02). The decommission's final snapshot and clear are posted
+// regardless: the hub they leave is empty.
+#define TELEM_TX_DEFERRABLE_MAX  8
+
 typedef enum {
     TELEM_TX_EVENT = 0,     // FIFO: an event (leak, valve, rules, health)
     TELEM_TX_TWIN,          // FIFO (a device-set change, a report owed) or session queue
@@ -378,11 +386,11 @@ void telemetry_v2_tx_idle_give(void);
 /**
  * @brief iothub_task, before it takes a health alert (device_offline / device_recovered):
  *        whether one may go to cloud_tx now. Yes while fewer than 8 items wait in the FIFO
- *        (so at least 16 of its 24 slots stay for the other messages: 2.1.4 SAFE-1), and
- *        either TX is idle or internal DMA-capable heap has 12 KB free with a 4.5 KB block.
- *        Otherwise the alerts wait, losslessly, for TX to go idle: a stall must not pile
- *        health events on top of a stalled session's heap (WP2c section 2.3). Sets the heap
- *        figures it read (0 when it did not need them).
+ *        (TELEM_TX_DEFERRABLE_MAX: at least 16 of its 24 slots stay for the leak, valve and
+ *        rules events, 2.1.4 SAFE-1), and either TX is idle or internal DMA-capable heap has
+ *        12 KB free with a 4.5 KB block. Otherwise the alerts wait, losslessly, for TX to go
+ *        idle: a stall must not pile health events on top of a stalled session's heap (WP2c
+ *        section 2.3). Sets the heap figures it read (0 when it did not need them).
  */
 bool telemetry_v2_tx_health_admit(size_t *free_b, size_t *largest);
 

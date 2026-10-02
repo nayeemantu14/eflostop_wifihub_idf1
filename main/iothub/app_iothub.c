@@ -1104,7 +1104,8 @@ static void apply_device_set_change(void)
 
     // Every device-set change refreshes the twin (Q7; L11: decommission used to leave the
     // twin claiming the removed device until the next reconnect). Built here and sent by
-    // cloud_tx in order with every other report; owed if the FIFO is full (2.1.4 TW-1).
+    // cloud_tx in order with every other report; owed while 8 or more items wait in the FIFO
+    // (2.1.4 TW-1, SAFE-1: post_twin_reported()).
     post_twin_reported();
 }
 
@@ -1750,8 +1751,8 @@ static void handle_c2d_command(const char *data, size_t data_len)
 // the two differ.
 static volatile uint32_t s_twin_req      = 0;       // the esp-mqtt task only
 static uint32_t          s_twin_req_done = 0;       // iothub_task only
-// A device-set change's report not handed to cloud_tx (the FIFO full, or no memory for its
-// build), or one esp-mqtt refused: owed like a request. iothub_task only.
+// A device-set change's report not handed to cloud_tx (8 or more items in the FIFO, or no
+// memory for its build), or one esp-mqtt refused: owed like a request. iothub_task only.
 static bool              s_twin_due      = false;
 // The build number of the last report built. iothub_task only.
 static uint16_t          s_twin_seq      = 0;
@@ -1888,9 +1889,11 @@ static void twin_posted(uint32_t req)
 // iothub_task: a device-set change's report (apply_device_set_change()) or an owed one (the
 // loop), into the FIFO: cloud_tx sends it in order with the events. Only while connected: every
 // CONNECTED reports the twin again (post_session_twin(), which also covers whatever is owed),
-// and a session that ends before cloud_tx gets to it drops it. Not into a full FIFO, where it
-// would be lost: owed instead, and posted on a later pass (the loop polls at 2 s meanwhile).
-// Only this task posts to the FIFO, so room seen here is still there at the post.
+// and a session that ends before cloud_tx gets to it drops it. Only while fewer than
+// TELEM_TX_DEFERRABLE_MAX (8) items wait, like a health alert, so that at least 16 of the
+// FIFO's slots stay for the leak, valve and rules events (2.1.4 SAFE-1, TW-1 review): otherwise
+// owed, and built fresh on a later pass (the loop polls at 2 s meanwhile). Only this task posts
+// to the FIFO, so room seen here is still there at the post.
 static void post_twin_reported(void)
 {
     // mqtt_client is NULL until cloud_bringup() succeeds.
@@ -1900,7 +1903,7 @@ static void post_twin_reported(void)
     uint16_t seq = 0;
     uint32_t req = 0;
     char *json = NULL;
-    if (telemetry_v2_tx_queued() < TELEM_TX_FIFO_LEN)
+    if (telemetry_v2_tx_queued() < TELEM_TX_DEFERRABLE_MAX)
         json = twin_build(&seq, &req);
     if (json == NULL) {
         s_twin_due = true;
@@ -3884,7 +3887,8 @@ void iothub_task(void *param)
             // from an empty table (and the caches, the rules sources and the twin agree).
             apply_device_set_change();
             // cloud_tx publishes the snapshot, then clears the offline buffer (L17), after the
-            // twin just built and every event before them, in that order (2.1.4 WP2c). Not
+            // twin just built (owed instead with 8 or more items queued: the restart's CONNECTED
+            // reports it) and every event before them, in that order (2.1.4 WP2c). Not
             // held for an idle TX: the hub is empty, its snapshot small, and nothing is in
             // flight that its result could matter to. An empty hub has no safety function, so
             // this task may wait for them, up to DECOM_TX_WAIT_MS.
@@ -4327,10 +4331,11 @@ void iothub_task(void *param)
             }
             // A twin report owed (2.1.4 TW-1): one the esp-mqtt task asked for (rules_config,
             // set_hub_name, a desired-properties patch, the twin GET's answer), a device-set
-            // change's that met a full FIFO, or one esp-mqtt refused. Built now, after this
-            // session's own above, which covers it when it was built after the request; within
-            // TWIN_REPORT_RETRY_MS of a refusal, at its end (a request then meets the same
-            // outbox). While offline it stays owed, and the next CONNECTED's report covers it.
+            // change's that met 8 or more items in the FIFO, or one esp-mqtt refused. Built now if
+            // fewer wait (post_twin_reported()), after this session's own above, which covers it
+            // when it was built after the request; within TWIN_REPORT_RETRY_MS of a refusal, at
+            // its end (a request then meets the same outbox). While offline it stays owed, and
+            // the next CONNECTED's report covers it.
             if (connected && (s_twin_due || s_twin_req != s_twin_req_done) &&
                 snap_now_ms() >= s_twin_retry_ms)
                 post_twin_reported();
