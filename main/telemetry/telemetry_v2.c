@@ -343,9 +343,13 @@ static bool send_str(const telem_msg_t *m, const char *type_hint, const uint32_t
             // after 30 s; it used to be lost. The session's end is known by now: esp-mqtt
             // dispatches DISCONNECTED on the publishing task before its publish returns, and
             // on any other task before it releases the API lock this publish then took. The
-            // outbox can still deliver its copy too, possibly after newer events: the cloud
-            // dedupes on gateway.id + ts + event + device id and keeps the first copy. Not the
-            // esp-mqtt task's cmd_ack (it cannot wait for the buffer, above).
+            // outbox can still deliver its copy too, possibly after newer events. The copy kept
+            // here is the published text, and the replay publishes it unchanged, so both copies
+            // are the same bytes, ts included: the cloud drops a message only when it is
+            // byte-identical to one it already has (the payload, or a hash of it; the user's
+            // decision on TC-2, 2026-10-02) and keeps the first copy, so two different messages
+            // are never merged. Not the esp-mqtt task's cmd_ack (it cannot wait for the buffer,
+            // above).
             if (tx_store(json_str, m->len)) {
                 s_replay_owed = true;
                 ESP_LOGW(TELEM_TAG, "Pub %s not confirmed (msg_id=%d) - kept for replay, a duplicate is possible",
