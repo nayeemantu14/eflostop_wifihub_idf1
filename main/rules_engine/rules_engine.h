@@ -320,7 +320,8 @@ bool rules_engine_forget_unprovisioned(void);
  * physical override and start a 24 h window. Nothing is written to either valve. If
  * another source is still wet, the latch and count stay, so the new valve is closed on
  * its first link. The override window is not touched. A wet new valve re-adds the source
- * with its own link-up leak report.
+ * with its own link-up leak report. A report from the old valve still kept since the rules
+ * mutex refused it (WP2d) is dropped too, whether or not the mutex is then free.
  *
  * Call from iothub_task when the provisioned valve MAC changes from one valve to another,
  * or when the valve is removed (not on a first provision): forget_unprovisioned() drops

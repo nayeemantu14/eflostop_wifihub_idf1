@@ -2187,6 +2187,21 @@ void rules_engine_on_valve_replaced(void)
     // Not initialised: nothing is tracked or latched yet.
     if (!g_initialized) return;
 
+    /* A report from the old valve still kept since the rules lock refused it (WP2d) goes
+     * too, for the same reason as the tracked source below: kept under the MAC-less
+     * VALVE_SOURCE_ID, the retry would replay it against the new valve. The kept list is
+     * this task's own, so before the lock, and even if the lock stays busy. */
+    bool kept_dropped = false;
+    for (int i = 0; i < g_kept_n; ) {
+        if (strcmp(g_kept[i].id, VALVE_SOURCE_ID) == 0) {
+            g_kept_n--;
+            memmove(&g_kept[i], &g_kept[i + 1], (g_kept_n - i) * sizeof(g_kept[0]));
+            kept_dropped = true;
+        } else {
+            i++;
+        }
+    }
+
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         ESP_LOGW(RULES_TAG, "Failed to take mutex (valve replaced)");
         return;
@@ -2198,7 +2213,7 @@ void rules_engine_on_valve_replaced(void)
      * re-adds the source and closes it through evaluate_leak(). */
     uint8_t before = g_active_leak_count;
     track_leak_source(VALVE_SOURCE_ID, false);
-    bool dropped = (g_active_leak_count < before);
+    bool dropped = (g_active_leak_count < before) || kept_dropped;
 
     /* The target change flushed any clear queued or pended for the old valve, and what
      * the old valve read confirms nothing about the next one. */
