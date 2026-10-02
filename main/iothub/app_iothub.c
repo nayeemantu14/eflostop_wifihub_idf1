@@ -390,9 +390,9 @@ static int s_valve_pub_linked = -1;
 static char s_det_valve_mac[18] = {0};
 
 // Device Twin: request ID counter for twin GET/PATCH operations. Only ever advanced
-// through next_twin_rid(): the esp-mqtt task (twin GET, reported echoes of C2D and
-// desired patches) and iothub_task (connect, device-set reconcile) both take ids, and a
-// plain ++ from the two could hand out the same $rid twice.
+// through next_twin_rid(): the esp-mqtt task (the twin GET at its SUBACK) and cloud_tx (every
+// reported PATCH, and the GET's retry; 2.1.4 WP2c, TW-1) both take ids, and a plain ++ from the
+// two could hand out the same $rid twice.
 static int g_twin_rid = 0;
 
 static int next_twin_rid(void)
@@ -768,7 +768,8 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 // C2D command dispatch (uses c2d_commands parser)
 // ---------------------------------------------------------------------------
 
-static void publish_twin_reported(void);   // forward declaration
+static void twin_request(void);            // forward declaration
+static void post_twin_reported(void);      // forward declaration
 static void mark_mqtt_disconnected(void);  // forward declaration (used by mqtt_stop_request)
 
 // Reject an "open the valve" request while the valve's RMLEAK latch is asserted
@@ -1102,8 +1103,9 @@ static void apply_device_set_change(void)
     sync_valve_detectors();
 
     // Every device-set change refreshes the twin (Q7; L11: decommission used to leave the
-    // twin claiming the removed device until the next reconnect).
-    publish_twin_reported();
+    // twin claiming the removed device until the next reconnect). Built here and sent by
+    // cloud_tx in order with every other report; owed if the FIFO is full (2.1.4 TW-1).
+    post_twin_reported();
 }
 
 // ---- Snapshot scheduler helpers (iothub_task context ONLY) ----------------
@@ -1613,7 +1615,9 @@ static void handle_c2d_command(const char *data, size_t data_len)
             // MQTT reconnect — an app polling the twin to confirm the write read the
             // OLD value and could not tell the command had worked. The snapshot
             // requested at the ack site covers data.rules; this covers the twin.
-            publish_twin_reported();
+            // Owed, not published here: iothub_task builds it and cloud_tx sends it,
+            // after this command's cmd_ack (2.1.4 TW-1, twin_request()).
+            twin_request();
         }
     }
     // ---- Sensor metadata ----
@@ -1685,7 +1689,7 @@ static void handle_c2d_command(const char *data, size_t data_len)
         } else {
             hub_identity_set_name(new_name);
             ESP_LOGI(IOTHUB_TAG, "Hub name set to: '%s'", hub_identity_get_name());
-            publish_twin_reported();
+            twin_request();   // reported after this command's cmd_ack (2.1.4 TW-1)
         }
         if (pl) cJSON_Delete(pl);
     }
@@ -1730,7 +1734,27 @@ static void handle_c2d_command(const char *data, size_t data_len)
 
 // ---------------------------------------------------------------------------
 // Device Twin — reported properties
+//
+// Every report is built on iothub_task, numbered in build order, and published by cloud_tx
+// (2.1.4 TW-1, the user's decision of 2026-10-02). Until then the esp-mqtt task published its
+// own reports at once (rules_config, set_hub_name, a desired-properties patch and the twin
+// GET's answer at every connect), while iothub_task's went through cloud_tx later, behind a
+// replay or a snapshot's line: an older report could then be written after a newer one and
+// stay until the next. Now the esp-mqtt task only asks (twin_request()), and cloud_tx never
+// publishes a report older than one esp-mqtt has already taken (cloud_tx_twin()), so the last
+// report written is the newest built.
 // ---------------------------------------------------------------------------
+
+// The esp-mqtt task's requests for a report, counted: twin_request() is the only writer.
+// iothub_task records the count its last posted report was built after: a report is owed while
+// the two differ.
+static volatile uint32_t s_twin_req      = 0;       // the esp-mqtt task only
+static uint32_t          s_twin_req_done = 0;       // iothub_task only
+// A device-set change's report not handed to cloud_tx (the FIFO full, or no memory for its
+// build): owed like a request. iothub_task only.
+static bool              s_twin_due      = false;
+// The build number of the last report built. iothub_task only.
+static uint16_t          s_twin_seq      = 0;
 
 // The twin report's build (2.1.4 WP2c: built apart from its send, like every message): the
 // reported-properties PATCH body, or NULL out of memory. Reads the provisioning state (its
@@ -1800,17 +1824,16 @@ static char *build_twin_reported(void)
     return json;
 }
 
-// The twin report's send: takes the report's $rid, prints it and publishes it. Does not free
-// json. gated: cloud_tx, which holds the publish gate (iothub_pub_begin()) and gets it back
-// here right after the publish. The msg_id.
-static int send_twin_reported(const char *json, bool gated)
+// The twin report's send, on cloud_tx, which holds the publish gate (iothub_pub_begin()) and
+// gets it back here right after the publish: takes the report's $rid, prints it and publishes
+// it. Does not free json. The msg_id.
+static int send_twin_reported(const char *json)
 {
     // The guard (2.1.4 WP2c): iothub_task builds the twin and hands it to cloud_tx. Should never
     // print; the report is dropped rather than wait on the network there.
     if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
         ESP_LOGE(IOTHUB_TAG, "%s called on iothub_task - refused", __func__);
-        if (gated)
-            iothub_pub_end(NULL, 0, 0);
+        iothub_pub_end(NULL, 0, 0);
         return -1;
     }
     char topic[128];
@@ -1821,31 +1844,66 @@ static int send_twin_reported(const char *json, bool gated)
     ESP_LOGI(IOTHUB_TAG, "Twin reported (%d): %s", rid, json);
     int64_t t0 = esp_timer_get_time();
     int msg_id = esp_mqtt_client_publish(mqtt_client, topic, json, 0, 1, 0);
-    if (gated)
-        iothub_pub_end("twin", msg_id, t0);
+    iothub_pub_end("twin", msg_id, t0);
     return msg_id;
 }
 
-static void publish_twin_reported(void)
+// The esp-mqtt task, in a session (rules_config, set_hub_name, apply_twin_desired()): a report
+// is owed, and iothub_task is woken to build it. Its command's cmd_ack still goes first: that is
+// published inside this same C2D handler, which esp-mqtt runs holding its API lock, and
+// cloud_tx's publish of the report needs that lock. A session that ends first is covered by the
+// next CONNECTED's report (post_session_twin()).
+static void twin_request(void)
 {
-    // mqtt_client is NULL until cloud_bringup() succeeds. Only while connected: nothing is
-    // lost, as a stopping client's outbox is deleted anyway, and every CONNECTED reports the
-    // twin again (iothub_task's session reset). The esp-mqtt task's callers run in a session.
+    s_twin_req++;                   // this task is its only writer
+    telemetry_v2_wake_snapshot();   // iothub_task's next pass, not its idle poll
+}
+
+// iothub_task: the one build of a twin report, numbered. *req: the requests it covers, read
+// before the build, so that what they asked to report is in it. NULL out of memory. The caller
+// hands the report to cloud_tx and, if that worked, calls twin_posted(*req).
+static char *twin_build(uint16_t *seq, uint32_t *req)
+{
+    *req = s_twin_req;
+    char *json = build_twin_reported();
+    if (json != NULL)
+        *seq = ++s_twin_seq;
+    return json;
+}
+
+// iothub_task: a report built after those requests is with cloud_tx: none is owed now.
+static void twin_posted(uint32_t req)
+{
+    s_twin_req_done = req;
+    s_twin_due      = false;
+}
+
+// iothub_task: a device-set change's report (apply_device_set_change()) or an owed one (the
+// loop), into the FIFO: cloud_tx sends it in order with the events. Only while connected: every
+// CONNECTED reports the twin again (post_session_twin(), which also covers whatever is owed),
+// and a session that ends before cloud_tx gets to it drops it. Not into a full FIFO, where it
+// would be lost: owed instead, and posted on a later pass (the loop polls at 2 s meanwhile).
+// Only this task posts to the FIFO, so room seen here is still there at the post.
+static void post_twin_reported(void)
+{
+    // mqtt_client is NULL until cloud_bringup() succeeds.
     if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
 
     uint32_t gen = telemetry_v2_session_gen();
-    char *json = build_twin_reported();
-    if (!json) return;
-    if (xTaskGetCurrentTaskHandle() == iothub_task_handle) {
-        // A device-set change (apply_device_set_change()): built here, sent by cloud_tx in order
-        // with the events (2.1.4 WP2c). iothub_task evaluates the leaks and never publishes. A
-        // session that ends before cloud_tx gets to it drops it: the next one reports the twin.
-        telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0 };
-        telemetry_v2_tx_post(&it, "twin");
+    uint16_t seq = 0;
+    uint32_t req = 0;
+    char *json = NULL;
+    if (telemetry_v2_tx_queued() < TELEM_TX_FIFO_LEN)
+        json = twin_build(&seq, &req);
+    if (json == NULL) {
+        s_twin_due = true;
         return;
     }
-    send_twin_reported(json, false);
-    free(json);
+    telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0, .seq = seq };
+    if (telemetry_v2_tx_post(&it, "twin"))
+        twin_posted(req);
+    else
+        s_twin_due = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,7 +1949,8 @@ static void apply_twin_desired(cJSON *obj)
 
     // Acknowledge: publish reported back so twin stays in sync. Always — including
     // after a rejected value, which is how the app learns what is actually in force.
-    publish_twin_reported();
+    // Owed, not published here: iothub_task builds it and cloud_tx sends it (2.1.4 TW-1).
+    twin_request();
 }
 
 static void handle_twin_desired(const char *data, int data_len)
@@ -1998,7 +2057,7 @@ static void handle_twin_get_response(const char *data, int data_len)
 // otherwise returns at once and is woken by cloud_tx as it gives the gate back
 // (iothub_pub_end()). Once a stop is asked cloud_tx starts no publish, so the stop runs at most
 // one publish later, no later than it used to wait for esp-mqtt's API lock. The esp-mqtt task's
-// own publishes (cmd_ack, the C2D twin reports) run on the task the stop ends.
+// own publishes (cmd_ack, the twin GET at its SUBACK) run on the task the stop ends.
 // ---------------------------------------------------------------------------
 static volatile uint32_t     s_mqtt_stop_req  = 0;      // stops asked; iothub_task only
 static volatile uint32_t     s_mqtt_stop_done = 0;      // the last one served; wifi_task only
@@ -3287,6 +3346,7 @@ static uint32_t s_tx_lc_taken_gen = 0;       // the session whose lifecycle esp-
 static int64_t  s_tx_replay_ms    = 0;       // next replay of events kept while connected
 static int64_t  s_tx_twin_get_ms  = 0;       // next twin GET while it is owed
 static bool     s_tx_stamped      = false;   // the clock sync's pre-sync stamp has run
+static uint16_t s_tx_twin_seq     = 0;       // the build number of the last twin report esp-mqtt took
 
 // iothub_task asks to be woken when TX goes idle (a held snapshot or health alert): it
 // increments the request, cloud_tx sets the answer equal and wakes it. One writer each.
@@ -3309,17 +3369,23 @@ static bool post_session_lifecycle(uint32_t gen)
     telem_msg_t m;
     if (!telemetry_v2_build_lifecycle(&m))
         return false;
-    telem_tx_item_t it = { .json = m.json, .tag = gen, .kind = TELEM_TX_LIFECYCLE, .flags = 0 };
+    telem_tx_item_t it = { .json = m.json, .tag = gen, .kind = TELEM_TX_LIFECYCLE, .flags = 0, .seq = 0 };
     return telemetry_v2_tx_post_session(&it);
 }
 
+// The twin's build covers every report owed so far (2.1.4 TW-1): twin_build(), twin_posted().
 static bool post_session_twin(uint32_t gen)
 {
-    char *json = build_twin_reported();
+    uint16_t seq = 0;
+    uint32_t req = 0;
+    char *json = twin_build(&seq, &req);
     if (!json)
         return false;
-    telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0 };
-    return telemetry_v2_tx_post_session(&it);
+    telem_tx_item_t it = { .json = json, .tag = gen, .kind = TELEM_TX_TWIN, .flags = 0, .seq = seq };
+    if (!telemetry_v2_tx_post_session(&it))
+        return false;
+    twin_posted(req);
+    return true;
 }
 
 // The publish gate, then the session read again: still `gen`, the one this message was built
@@ -3376,12 +3442,23 @@ static void cloud_tx_lifecycle(const telem_tx_item_t *it)
     }
 }
 
-// A twin report: a session's (the session queue, at its CONNECTED) or a device-set change's
-// (the FIFO). Not owed when it cannot go: every CONNECTED reports the twin again.
+// A twin report: a session's (the session queue, at its CONNECTED), or a device-set change's or
+// an owed one (the FIFO). Not owed when it cannot go: every CONNECTED reports the twin again.
+// Never one built before a report esp-mqtt has already taken (2.1.4 TW-1): the session queue is
+// served ahead of the FIFO, so a FIFO report can be older than a session report sent first.
+// Build numbers are compared modulo 2^16: far more builds than ever wait at once.
 static void cloud_tx_twin(const telem_tx_item_t *it)
 {
-    if (pub_begin_for(it->tag))
-        send_twin_reported(it->json, true);
+    if (!pub_begin_for(it->tag))
+        return;   // its session is not up: dropped, as before
+    if ((int16_t)(uint16_t)(it->seq - s_tx_twin_seq) <= 0) {
+        iothub_pub_end(NULL, 0, 0);
+        ESP_LOGI(IOTHUB_TAG, "Twin report %u not sent - report %u, built after it, went first",
+                 (unsigned)it->seq, (unsigned)s_tx_twin_seq);
+        return;
+    }
+    if (send_twin_reported(it->json) >= 0)
+        s_tx_twin_seq = it->seq;
 }
 
 // The session's work, before every FIFO item. *gen_out: the session the next item may go
@@ -3790,7 +3867,8 @@ void iothub_task(void *param)
             // flight that its result could matter to. An empty hub has no safety function, so
             // this task may wait for them, up to DECOM_TX_WAIT_MS.
             telemetry_v2_post_snapshot("decommission", 0, TELEM_TX_FINAL);
-            telem_tx_item_t clr = { .json = NULL, .tag = 0, .kind = TELEM_TX_DECOM_CLEAR, .flags = 0 };
+            telem_tx_item_t clr = { .json = NULL, .tag = 0, .kind = TELEM_TX_DECOM_CLEAR, .flags = 0,
+                                    .seq = 0 };
             bool clr_posted = false;
             for (int i = 0; i < DECOM_TX_WAIT_MS / 100 && !s_decom_done; i++) {
                 if (!clr_posted)
@@ -3957,10 +4035,12 @@ void iothub_task(void *param)
         // A pending RMLEAK auto-clear also polls at 2 s: the rules tick runs once per pass,
         // so at the 30 s idle cap the 10 s all-clear would land 10-40 s after the last dry
         // report instead of 10-12 s.
-        // A lifecycle or a twin owed to this session while connected (LIFECYCLE_RETRY_MS), or a
-        // health alert held for cloud_tx, also polls at 2 s. The replay and the twin GET are
-        // cloud_tx's to retry now (2.1.4 WP2c).
-        bool session_owed = mqtt_up && (s_iot_sess_owed != 0 || s_lifecycle_owed);
+        // A lifecycle or a twin owed to this session while connected (LIFECYCLE_RETRY_MS), a twin
+        // report owed while connected (2.1.4 TW-1: the FIFO was full), or a health alert held for
+        // cloud_tx, also polls at 2 s. The replay and the twin GET are cloud_tx's to retry now
+        // (2.1.4 WP2c).
+        bool session_owed = mqtt_up && (s_iot_sess_owed != 0 || s_lifecycle_owed ||
+                                        s_twin_due || s_twin_req != s_twin_req_done);
         // A report the rules mutex refused is evaluated again on the next pass, after its tick
         // (2.1.4 WP2d): 100 ms, so its close follows the mutex's release.
         int64_t base = rules_engine_has_kept_reports() ? 100 :
@@ -4213,6 +4293,13 @@ void iothub_task(void *param)
                 if ((s_iot_sess_owed & IOT_SESS_TWIN) && post_session_twin(gen))
                     s_iot_sess_owed &= (uint8_t)~IOT_SESS_TWIN;
             }
+            // A twin report owed (2.1.4 TW-1): one the esp-mqtt task asked for (rules_config,
+            // set_hub_name, a desired-properties patch, the twin GET's answer), or a device-set
+            // change's that met a full FIFO. Built now, after this session's own above, which
+            // covers it when it was built after the request. While offline it stays owed, and
+            // the next CONNECTED's report covers it.
+            if (connected && (s_twin_due || s_twin_req != s_twin_req_done))
+                post_twin_reported();
         }
 
         // NOTE: the rules-engine events (auto_close, rmleak_*) are held in

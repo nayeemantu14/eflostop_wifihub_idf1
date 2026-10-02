@@ -407,6 +407,7 @@ static __attribute__((noinline)) void post_event(cJSON *root, const char *type_h
         .tag   = 0,
         .kind  = TELEM_TX_EVENT,
         .flags = m.presync ? TELEM_TX_PRESYNC : 0,
+        .seq   = 0,
     };
     telemetry_v2_tx_post(&it, what);   // frees it if the FIFO is full
 }
@@ -1315,7 +1316,8 @@ bool telemetry_v2_post_snapshot(const char *trigger, uint32_t tag, uint8_t flags
 {
     telem_msg_t m;
     if (!build_snapshot(trigger, &m)) return false;
-    telem_tx_item_t it = { .json = m.json, .tag = tag, .kind = TELEM_TX_SNAPSHOT, .flags = flags };
+    telem_tx_item_t it = { .json = m.json, .tag = tag, .kind = TELEM_TX_SNAPSHOT, .flags = flags,
+                           .seq = 0 };
     return telemetry_v2_tx_post(&it, "snapshot");
 }
 

@@ -298,8 +298,9 @@ bool telemetry_v2_replay_owed(void);
 // cloud_tx (app_iothub.c), which makes every esp_mqtt_client_publish() for them, the offline
 // buffer's replay and every store into it. The hand-over never waits: a queue send with a 0
 // timeout, a flag, or a try-take. Static storage throughout, no heap at rest.
-//   - The FIFO (TELEM_TX_FIFO_LEN): events, the twin of a device-set change, the snapshot
-//     and the decommission's clear, in build order. It owns each item's json; cloud_tx frees it.
+//   - The FIFO (TELEM_TX_FIFO_LEN): events, twin reports (a device-set change's, or one the
+//     esp-mqtt task asked for), the snapshot and the decommission's clear, in build order. It
+//     owns each item's json; cloud_tx frees it.
 //   - The session queue (TELEM_TX_SESSION_LEN): a session's lifecycle and twin, built by
 //     iothub_task when it first sees the session connected, tagged with its generation
 //     (telemetry_v2_session_gen()); one for a session that has ended is dropped.
@@ -312,7 +313,8 @@ bool telemetry_v2_replay_owed(void);
 
 typedef enum {
     TELEM_TX_EVENT = 0,     // FIFO: an event (leak, valve, rules, health)
-    TELEM_TX_TWIN,          // FIFO (a device-set change) or session queue (a CONNECTED)
+    TELEM_TX_TWIN,          // FIFO (a device-set change, a report owed) or session queue
+                            // (a CONNECTED)
     TELEM_TX_LIFECYCLE,     // session queue only
     TELEM_TX_SNAPSHOT,      // FIFO: built only into an idle TX, at most one in flight
     TELEM_TX_DECOM_CLEAR,   // FIFO, no json: the decommission's clear of the offline buffer
@@ -329,6 +331,8 @@ typedef struct {
                       // snapshot its session, device-set sequence and ticket (app_iothub.c)
     uint8_t  kind;    // telem_tx_kind_t
     uint8_t  flags;   // TELEM_TX_PRESYNC, TELEM_TX_FINAL
+    uint16_t seq;     // TELEM_TX_TWIN: the report's build number, in build order (app_iothub.c,
+                      // 2.1.4 TW-1); 0 for the other kinds
 } telem_tx_item_t;
 
 /** iothub_task, once, right after it created cloud_tx: the task the hand-over wakes. */
