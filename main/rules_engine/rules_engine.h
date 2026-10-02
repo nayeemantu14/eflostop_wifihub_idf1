@@ -86,9 +86,11 @@ void rules_engine_init(void);
  * A lock timeout never drops a wet report (2.1.4 WP2d). Provisioning busy for 1 s: it is
  * decided on the last rules and device set read, for a sensor in that set only. Rules
  * mutex busy for 1 s: it is kept (sensors in that set, up to 4 reports) and evaluated
- * again, in arrival order, by the next tick and ahead of the next report. A dry report that
- * meets a busy rules mutex is kept too when its source's wet report is kept, so the pair is
- * replayed in order; any other is dropped as before (its source stays wet: fail-safe).
+ * again, in arrival order, on the next pass after its tick
+ * (rules_engine_retry_kept_reports()); a later report from the same source, or a later
+ * wet one, waits behind it. A dry report that meets a busy rules mutex is kept too when
+ * its source's wet report is kept, so the pair is replayed in order; any other is dropped
+ * as before (its source stays wet: fail-safe).
  *
  * iothub_task only.
  *
@@ -100,9 +102,25 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
 
 /**
  * @brief True while a report the rules mutex refused is kept for the next pass (WP2d).
- *        iothub_task polls at 100 ms meanwhile; the tick evaluates it. iothub_task only.
+ *        iothub_task polls at 100 ms meanwhile; rules_engine_retry_kept_reports()
+ *        evaluates it. iothub_task only.
  */
 bool rules_engine_has_kept_reports(void);
+
+/**
+ * @brief Evaluate the reports kept while the rules mutex was busy (WP2d), oldest first.
+ *
+ * Call once per pass, right after rules_engine_tick() and the take of the event it raised:
+ * the tick's valve-button check reads the valve before these reports, and an event raised
+ * by the tick or by a C2D command is published before theirs (one pending slot, F-08).
+ * Does nothing unless this pass's tick took the rules mutex. Stops, the rest kept in order,
+ * while the mutex stays busy for 1 s or holds an event not taken yet (taken next pass).
+ * A report whose sensor has left the device set the loop last applied is dropped.
+ *
+ * @return true if a report was evaluated: take and publish the pending event again.
+ *         iothub_task only.
+ */
+bool rules_engine_retry_kept_reports(void);
 
 /**
  * @brief Handle RULES_CONFIG: C2D JSON command.
@@ -183,6 +201,7 @@ void rules_engine_on_valve_connected(void);
  *        from an earlier boot, whose elapsed time is unknown). A real-epoch window
  *        restored after a power-on lost the clock expires, while the clock is still
  *        unsynced, once the full duration has passed since that power-on.
+ *        While reports are kept (WP2d) the auto-clear waits for them; the rest runs.
  */
 void rules_engine_tick(void);
 

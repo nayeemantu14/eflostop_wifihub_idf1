@@ -3955,7 +3955,7 @@ void iothub_task(void *param)
         // health alert held for cloud_tx, also polls at 2 s. The replay and the twin GET are
         // cloud_tx's to retry now (2.1.4 WP2c).
         bool session_owed = mqtt_up && (s_iot_sess_owed != 0 || s_lifecycle_owed);
-        // A wet report the rules mutex refused is evaluated again by the next pass's tick
+        // A report the rules mutex refused is evaluated again on the next pass, after its tick
         // (2.1.4 WP2d): 100 ms, so its close follows the mutex's release.
         int64_t base = rules_engine_has_kept_reports() ? 100 :
                        admit_pending ? 1000 :
@@ -3976,6 +3976,12 @@ void iothub_task(void *param)
         // (2.1.4 WP2c), so it costs Phase 2 nothing, on the (re)connect pass too: cloud_tx
         // sends a new session's replay and lifecycle before it (cloud_tx_session_work()).
         publish_rules_telemetry(rules_engine_take_pending_telemetry());
+
+        // Reports the rules mutex refused (2.1.4 WP2d) are judged here: after the tick, whose
+        // valve-button check reads the valve first, and after that take, so an event the tick
+        // or a C2D command raised is published before theirs (F-08). Then theirs.
+        if (rules_engine_retry_kept_reports())
+            publish_rules_telemetry(rules_engine_take_pending_telemetry());
 
         // =================================================================
         // Phase 1: RECEIVE (always -- regardless of connection state)
