@@ -83,11 +83,25 @@ void rules_engine_init(void);
  *        During a 24h override window, the incident is latched and leak events
  *        are reported to the cloud, but automatic valve closure is blocked.
  *
+ * A lock timeout never drops a wet report (2.1.4 WP2d). Provisioning busy for 1 s: it is
+ * decided on the last rules and device set read, for a sensor in that set only. Rules
+ * mutex busy for 1 s: it is kept (sensors in that set, up to 4) and evaluated again, in
+ * arrival order, by the next tick and ahead of the next report. A dry report that meets a
+ * busy rules mutex is dropped as before (its source stays wet: fail-safe).
+ *
+ * iothub_task only.
+ *
  * @param source Which sensor type triggered the leak
  * @param leak_active true = leak detected, false = leak cleared
  * @param source_id Human-readable ID (MAC string or "0xHEXID")
  */
 void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const char *source_id);
+
+/**
+ * @brief True while a wet report the rules mutex refused is kept for the next pass (WP2d).
+ *        iothub_task polls at 100 ms meanwhile; the tick evaluates it. iothub_task only.
+ */
+bool rules_engine_has_kept_reports(void);
 
 /**
  * @brief Handle RULES_CONFIG: C2D JSON command.
@@ -263,11 +277,14 @@ bool rules_engine_reset_all(void);
  * through the normal "leak cleared" path, so when the count reaches 0 a pending
  * auto-close is cancelled and, if an incident is latched, the all-clear timer starts.
  *
- * Call from iothub_task after a device-set change. Takes the provisioning mutex BEFORE
- * the rules mutex, never nested.
+ * It also refreshes the device set and rules that a leak report is decided on while
+ * provisioning is busy (WP2d).
  *
- * @return false if it could not run (provisioning or rules mutex unavailable) —
- *         the caller retries; true otherwise.
+ * Call from iothub_task after a device-set change. Reads the device set BEFORE the rules
+ * mutex, not nested; the rules are then read under it (g_mutex -> provisioning).
+ *
+ * @return false if it could not run, or could not read the rules (provisioning or rules
+ *         mutex unavailable) — the caller retries; true otherwise.
  */
 bool rules_engine_forget_unprovisioned(void);
 

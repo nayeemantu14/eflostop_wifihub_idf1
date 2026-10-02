@@ -1419,6 +1419,22 @@ bool provisioning_get_rules_config(rules_config_t *rules_out)
     return false;
 }
 
+bool provisioning_get_rules_and_state(bool *provisioned, rules_config_t *rules_out)
+{
+    if (!provisioned || !rules_out || !g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    // Silent on a timeout: the caller says what it does instead (once per busy episode).
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
+    }
+    *provisioned = (g_config.state == PROV_STATE_PROVISIONED);
+    *rules_out = g_config.rules;
+    xSemaphoreGive(g_prov_mutex);
+    return true;
+}
+
 // Persist just the rules keys to NVS. A false can leave the first key already written.
 static bool write_rules_keys(const rules_config_t *rules)
 {

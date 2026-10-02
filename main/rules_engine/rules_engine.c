@@ -86,6 +86,27 @@ static bool g_rmleak_clear_owed = false;
 static bool g_interlock_confirmed = false;
 static SemaphoreHandle_t g_mutex = NULL;
 
+/* 2.1.4 WP2d (D5). A lock a leak report needs can stay busy for 1 s; the report is then
+ * decided on these copies, or kept, never dropped: a BLE sensor's delta gate may not send
+ * the same wet payload again for up to 5 min.
+ *
+ * The last provisioning values read. The device set is written only on iothub_task (init
+ * and every device-set change, forget_unprovisioned()), so that task reads it unlocked.
+ * The rules are written under g_mutex, by every read in evaluate_leak(), every device-set
+ * change and a rules_config. */
+static prov_device_set_t g_last_set;            // ~376 B
+static bool g_last_set_ok = false;              // false until a device set was read
+static rules_config_t g_last_rules = { .auto_close_enabled = true, .trigger_mask = RULES_TRIGGER_ALL };
+static bool g_prov_busy_logged = false;         // one W line per busy episode
+
+/* Wet reports the rules lock refused, oldest first, evaluated again by the next tick and
+ * ahead of the next report. iothub_task only (the sole caller of evaluate_leak() and
+ * tick()), so no lock. */
+#define KEPT_WET_MAX 4
+static struct { leak_source_t source; char id[18]; } g_kept_wet[KEPT_WET_MAX];
+static uint8_t g_kept_wet_n = 0;
+static bool g_lock_busy_logged = false;         // one W line per busy episode
+
 // 24h override window state
 static override_state_t g_override_state = OVERRIDE_STATE_INACTIVE;
 static time_t g_override_window_expiry = 0;  // Unix epoch when window expires (0 = inactive)
@@ -586,6 +607,23 @@ static sensor_type_t source_to_sensor_type(leak_source_t source)
     }
 }
 
+// True when `id`, a tracking id (VALVE_SOURCE_ID, "0x%08lX" or a BLE MAC), is in `set`.
+static bool set_has_source(const prov_device_set_t *set, const char *id)
+{
+    if (strcmp(id, VALVE_SOURCE_ID) == 0) return set->has_valve;
+    if (id[0] == '0' && (id[1] == 'x' || id[1] == 'X')) {
+        uint32_t sid = (uint32_t)strtoul(id, NULL, 16);
+        for (int k = 0; k < set->lora_count; k++) {
+            if (set->lora_ids[k] == sid) return true;
+        }
+        return false;
+    }
+    for (int k = 0; k < set->ble_count; k++) {
+        if (strcasecmp(id, set->ble_macs[k]) == 0) return true;
+    }
+    return false;
+}
+
 // Must be called with g_mutex held
 static void track_leak_source(const char *source_id, bool leak_active)
 {
@@ -692,6 +730,7 @@ void rules_engine_init(void)
 
     rules_config_t rules;
     if (provisioning_get_rules_config(&rules)) {
+        g_last_rules = rules;
         ESP_LOGI(RULES_TAG, "Initialized: auto_close=%s triggers=0x%02X",
                  rules.auto_close_enabled ? "enabled" : "disabled",
                  rules.trigger_mask);
@@ -712,18 +751,17 @@ void rules_engine_init(void)
      * the first LED evaluation instead of waiting for the next latch transition. */
     health_set_interlock_held(g_leak_incident_active);
 
+    /* The devices a leak is decided on while provisioning is busy (WP2d). On iothub_task
+     * before its loop; a failed read leaves none, and the loop's first device-set change
+     * reads them again. */
+    g_last_set_ok = provisioning_get_device_set(&g_last_set);
+
     g_initialized = true;
 }
 
-void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const char *source_id)
+// The body of rules_engine_evaluate_leak(), entered with g_mutex held. Gives it on every path.
+static void evaluate_leak_locked(leak_source_t source, bool leak_active, const char *source_id)
 {
-    if (!g_initialized) return;
-
-    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(RULES_TAG, "Failed to take mutex");
-        return;
-    }
-
     // Track active leak sources for auto-clear timeout
     track_leak_source(source_id, leak_active);
 
@@ -733,15 +771,27 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
         return;
     }
 
-    // Check if device is provisioned
-    if (!provisioning_is_provisioned()) {
-        xSemaphoreGive(g_mutex);
-        return;
-    }
-
-    // Get current rules config
+    // Provisioned, and the rules: one read. If provisioning stays busy for 1 s the report is
+    // decided on the last values read, not dropped (WP2d), and only for a sensor in the last
+    // known device set: never a close for a sensor this hub does not own.
+    bool provisioned;
     rules_config_t rules;
-    if (!provisioning_get_rules_config(&rules)) {
+    bool live = provisioning_get_rules_and_state(&provisioned, &rules);
+    if (live) {
+        g_last_rules = rules;
+        g_prov_busy_logged = false;
+    } else {
+        rules = g_last_rules;
+        provisioned = g_last_set_ok && source_id && set_has_source(&g_last_set, source_id);
+        if (!g_prov_busy_logged) {
+            g_prov_busy_logged = true;
+            ESP_LOGW(RULES_TAG, "Provisioning busy for 1 s - leak from %s sensor %s decided on the last known devices and rules (%s)",
+                     leak_source_to_str(source), source_id ? source_id : "unknown",
+                     provisioned ? "provisioned here" :
+                     g_last_set_ok ? "not provisioned here, ignored" : "no device list yet, ignored");
+        }
+    }
+    if (!provisioned) {
         xSemaphoreGive(g_mutex);
         return;
     }
@@ -869,7 +919,8 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
     // Build telemetry before releasing mutex. Not on a hub with no provisioned valve:
     // there is nothing to auto-close, and the leak itself is still reported
     // (leak_detected). Only the event is skipped; the latch and the rest stay as above.
-    if (valve_provisioned_or_unknown()) {
+    // Provisioning busy: the copy, so no second 1 s wait comes before the close.
+    if (live ? valve_provisioned_or_unknown() : g_last_set.has_valve) {
         build_auto_close_telemetry(source, source_id, valve_reachable);
     } else {
         ESP_LOGI(RULES_TAG, "AUTO-CLOSE: no provisioned valve - auto_close event not published");
@@ -920,6 +971,77 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
         if (!ble_valve_connect())
             valve_cmd_not_sent("AUTO-CLOSE: connect", "no reconnect scan requested");
     }
+}
+
+// One report. False only when the rules lock stayed busy for 1 s: nothing was done.
+static bool evaluate_leak_once(leak_source_t source, bool leak_active, const char *source_id)
+{
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    evaluate_leak_locked(source, leak_active, source_id);
+    return true;
+}
+
+// Evaluates the kept wet reports, oldest first. False while the rules lock is still busy;
+// the rest stay kept, in order. One no longer in the device set (a removal since) is dropped.
+static bool kept_wet_retry(void)
+{
+    while (g_kept_wet_n > 0) {
+        if (set_has_source(&g_last_set, g_kept_wet[0].id) &&
+            !evaluate_leak_once(g_kept_wet[0].source, true, g_kept_wet[0].id))
+            return false;
+        g_kept_wet_n--;
+        memmove(&g_kept_wet[0], &g_kept_wet[1], g_kept_wet_n * sizeof(g_kept_wet[0]));
+    }
+    g_lock_busy_logged = false;   // a busy episode, if any, is over
+    return true;
+}
+
+// The rules lock refused a wet report: keep it for the next pass. Only one from a sensor in
+// the last known device set; any other is dropped, as before.
+static void keep_wet_report(leak_source_t source, const char *source_id)
+{
+    if (!source_id || !g_last_set_ok || !set_has_source(&g_last_set, source_id)) {
+        ESP_LOGW(RULES_TAG, "Failed to take mutex");
+        return;
+    }
+    for (int i = 0; i < g_kept_wet_n; i++) {
+        if (g_kept_wet[i].source == source && strcmp(g_kept_wet[i].id, source_id) == 0)
+            return;   // already kept: one evaluation covers both
+    }
+    if (g_kept_wet_n == KEPT_WET_MAX) {
+        ESP_LOGE(RULES_TAG, "Rules lock busy - %d wet reports already kept, the one from %s sensor %s is lost",
+                 KEPT_WET_MAX, leak_source_to_str(source), source_id);
+        return;
+    }
+    g_kept_wet[g_kept_wet_n].source = source;
+    snprintf(g_kept_wet[g_kept_wet_n].id, sizeof(g_kept_wet[0].id), "%s", source_id);
+    g_kept_wet_n++;
+    if (!g_lock_busy_logged) {
+        g_lock_busy_logged = true;
+        ESP_LOGW(RULES_TAG, "Rules lock busy for 1 s - wet report from %s sensor %s kept, evaluated again next pass",
+                 leak_source_to_str(source), source_id);
+    }
+}
+
+void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const char *source_id)
+{
+    if (!g_initialized) return;
+
+    // Kept reports go first, in arrival order; a new one waits behind any still kept.
+    if (kept_wet_retry() && evaluate_leak_once(source, leak_active, source_id)) return;
+
+    // The rules lock stayed busy for 1 s (WP2d). A wet report is kept, not dropped. A dry one
+    // is dropped as before: its source stays wet in the engine, which fails safe.
+    if (leak_active) {
+        keep_wet_report(source, source_id);
+    } else {
+        ESP_LOGW(RULES_TAG, "Failed to take mutex");
+    }
+}
+
+bool rules_engine_has_kept_reports(void)
+{
+    return g_kept_wet_n > 0;   // iothub_task's own state, read on iothub_task
 }
 
 bool rules_engine_handle_config_command(const char *json_str)
@@ -987,6 +1109,14 @@ bool rules_engine_handle_config_command(const char *json_str)
         ESP_LOGI(RULES_TAG, "Config updated: auto_close=%s triggers=0x%02X",
                  rules.auto_close_enabled ? "enabled" : "disabled",
                  rules.trigger_mask);
+        // The copy a leak is decided on while provisioning is busy (WP2d). Up to 5 s, as in
+        // rules_engine_reset_all(): no holder keeps the rules lock that long.
+        if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+            g_last_rules = rules;
+            xSemaphoreGive(g_mutex);
+        } else {
+            ESP_LOGW(RULES_TAG, "Rules lock busy - the copy used while provisioning is busy keeps the old rules");
+        }
     }
 
     return ok;
@@ -1572,6 +1702,14 @@ void rules_engine_tick(void)
 {
     if (!g_initialized) return;
 
+    // Wet reports the rules lock refused (WP2d) go first, and this tick's own work waits a
+    // pass: its auto-clear must not run ahead of them, and an event it raised would replace
+    // theirs in the one pending slot before the loop takes it (F-08).
+    if (g_kept_wet_n > 0) {
+        (void)kept_wet_retry();
+        return;
+    }
+
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
 
     // ── Override window expiry check ──────────────────────────────────────
@@ -1938,8 +2076,9 @@ bool rules_engine_forget_unprovisioned(void)
     // active-leak set is empty and there is nothing to forget.
     if (!g_initialized) return true;
 
-    // Provisioning FIRST and released before the rules mutex: no nesting, and a
-    // timeout here is "unknown" (retry), never "nothing is provisioned".
+    // The device set FIRST and released before the rules mutex, and a timeout here is
+    // "unknown" (retry), never "nothing is provisioned". Only the rules read below nests,
+    // in the engine's order (g_mutex -> provisioning).
     prov_device_set_t set;
     if (!provisioning_get_device_set(&set)) return false;
 
@@ -1948,23 +2087,21 @@ bool rules_engine_forget_unprovisioned(void)
         return false;
     }
 
+    // The copies a leak is decided on while provisioning is busy (WP2d). Every device-set
+    // change passes here, a provision's rules and an emptying removal's reset of them
+    // included. The rules are read under g_mutex, like evaluate_leak()'s, so a rules_config
+    // copied meanwhile is never overwritten by an older read. A busy read retries the change.
+    g_last_set = set;
+    g_last_set_ok = true;
+    bool provisioned;
+    rules_config_t rules;
+    bool rules_ok = provisioning_get_rules_and_state(&provisioned, &rules);
+    if (rules_ok) g_last_rules = rules;
+
     int i = 0;
     while (i < g_active_leak_count) {
         const char *id = g_active_leak_ids[i];
-        bool keep = false;
-
-        if (strcmp(id, VALVE_SOURCE_ID) == 0) {
-            keep = set.has_valve;
-        } else if (id[0] == '0' && (id[1] == 'x' || id[1] == 'X')) {
-            uint32_t sid = (uint32_t)strtoul(id, NULL, 16);
-            for (int k = 0; k < set.lora_count; k++) {
-                if (set.lora_ids[k] == sid) { keep = true; break; }
-            }
-        } else {
-            for (int k = 0; k < set.ble_count; k++) {
-                if (strcasecmp(id, set.ble_macs[k]) == 0) { keep = true; break; }
-            }
-        }
+        bool keep = set_has_source(&set, id);
 
         if (keep) {
             i++;
@@ -1982,7 +2119,7 @@ bool rules_engine_forget_unprovisioned(void)
     }
 
     xSemaphoreGive(g_mutex);
-    return true;
+    return rules_ok;   // false: the (idempotent) change is retried, and the rules read with it
 }
 
 void rules_engine_on_valve_replaced(void)

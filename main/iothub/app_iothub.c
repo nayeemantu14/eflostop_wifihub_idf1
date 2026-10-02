@@ -3955,7 +3955,10 @@ void iothub_task(void *param)
         // health alert held for cloud_tx, also polls at 2 s. The replay and the twin GET are
         // cloud_tx's to retry now (2.1.4 WP2c).
         bool session_owed = mqtt_up && (s_iot_sess_owed != 0 || s_lifecycle_owed);
-        int64_t base = admit_pending ? 1000 :
+        // A wet report the rules mutex refused is evaluated again by the next pass's tick
+        // (2.1.4 WP2d): 100 ms, so its close follows the mutex's release.
+        int64_t base = rules_engine_has_kept_reports() ? 100 :
+                       admit_pending ? 1000 :
                        (commission_pending || cloud_pending || s_ble_apply_owed ||
                         g_devset_changed || session_owed || s_alert_held ||
                         rules_engine_auto_clear_pending()) ? 2000 : 30000;

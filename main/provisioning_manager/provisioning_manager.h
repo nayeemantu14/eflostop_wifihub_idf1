@@ -294,6 +294,16 @@ prov_member_t provisioning_ble_sensor_membership(const char *mac);
 bool provisioning_get_rules_config(rules_config_t *rules_out);
 
 /**
+ * @brief Read the provisioned state and the rules config within ONE mutex hold.
+ *
+ * Returns false ONLY when an argument is NULL, the manager is not initialised or the
+ * mutex (1000 ms) timed out: that is "unknown", never "unprovisioned".
+ * provisioning_is_provisioned() answers false for both, which a leak decision must tell
+ * apart (the rules engine then decides on its last copy). Logs nothing on a timeout.
+ */
+bool provisioning_get_rules_and_state(bool *provisioned, rules_config_t *rules_out);
+
+/**
  * @brief Set rules engine configuration and persist to NVS. RAM takes the new rules
  *        only if the NVS write succeeded; false leaves the previous rules in force.
  */
