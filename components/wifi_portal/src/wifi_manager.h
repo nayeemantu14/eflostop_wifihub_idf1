@@ -584,6 +584,31 @@ BaseType_t wifi_manager_send_message_to_front(message_code_t code, void *param);
  */
 BaseType_t wifi_manager_send_message_wait(message_code_t code, void *param, TickType_t wait);
 
+/**
+ * @brief LOCAL PATCH (2.1.4 WP7, C11): the radio lab image's two Wi-Fi knobs, G1 data only (plan
+ * 4.9). Only with the app's CONFIG_APP_RADIO_LAB (main/Kconfig.projbuild, default n); without it
+ * the two macros below are empty and this component's objects are the same byte for byte.
+ *  - wifi_manager_lab_set_ap_11b_off(true): esp_wifi_config_11b_rate(WIFI_IF_AP, true) once, in the
+ *    task's Wi-Fi init between esp_wifi_init() and esp_wifi_start(), as the driver requires: only a
+ *    call before wifi_manager_start() counts (a plain store);
+ *  - wifi_manager_lab_set_coex_bg_scan(on): the network-list scan's coex_background_scan, from the
+ *    next scan (any task; a plain store).
+ * WIFI_MANAGER_LAB_PRE_START() and WIFI_MANAGER_LAB_SCAN_CONFIG() are the task's own hooks.
+ */
+#include "sdkconfig.h"
+#if CONFIG_APP_RADIO_LAB
+#include "esp_wifi_types.h"
+void wifi_manager_lab_set_ap_11b_off(bool off);
+void wifi_manager_lab_set_coex_bg_scan(bool on);
+void wifi_manager_lab_pre_start(void);
+wifi_scan_config_t *wifi_manager_lab_scan_config(wifi_scan_config_t *config);
+#define WIFI_MANAGER_LAB_PRE_START()		wifi_manager_lab_pre_start()
+#define WIFI_MANAGER_LAB_SCAN_CONFIG(c)		wifi_manager_lab_scan_config(c)
+#else
+#define WIFI_MANAGER_LAB_PRE_START()		do { } while (0)
+#define WIFI_MANAGER_LAB_SCAN_CONFIG(c)		(c)
+#endif
+
 #ifdef __cplusplus
 }
 #endif

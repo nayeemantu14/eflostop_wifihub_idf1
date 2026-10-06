@@ -16,6 +16,8 @@
 #include "nvs.h"
 #include "radio_policy.h"
 #include "ble_leak_scanner/app_ble_leak.h"
+#include "esp_netif.h"          // wifi_manager.h's types
+#include "wifi_manager.h"
 
 /* A lab image is a bench image: it must not build once WP10 turns the bench diagnostics off for a
  * release, so an APP_RADIO_LAB left on in a release sdkconfig stops that build. */
@@ -26,7 +28,7 @@
 #define LAB_TAG         "RADIO_LAB"
 #define LAB_NVS_NS      "rp_lab"     // the default NVS partition (a 10 s reset erases only Wi-Fi's keys)
 #define LAB_NVS_KEY     "cfg"
-#define LAB_CFG_VER     1
+#define LAB_CFG_VER     2            // 2: C11's two knobs added
 
 /* The settings, as NVS keeps them. A blob of another size or version reads as the defaults. */
 typedef struct __attribute__((packed)) {
@@ -35,6 +37,8 @@ typedef struct __attribute__((packed)) {
     uint8_t w06;        // 1: AP_IDLE's Wi-Fi slot 0.6 s
     uint8_t join;       // 1: the join assist on
     uint8_t k1;         // 1: contingency K1 on
+    uint8_t no11b;      // 1: the SoftAP without 11b rates (C11; from the next boot)
+    uint8_t coex;       // 1: coex_background_scan on the network-list scan (C11)
 } lab_cfg_t;
 
 /* The settings now: one writer (radio_lab_init() at boot, then lora_task's keys), read by any
@@ -43,6 +47,9 @@ static volatile uint8_t s_rung = RP_SERVE_RUNG;
 static volatile bool s_w06 = false;
 static volatile bool s_join = true;
 static volatile bool s_k1 = false;
+static volatile bool s_no11b = false;       // as saved: applies from the next boot
+static bool s_no11b_boot = false;           // as applied at this boot (radio_lab_init())
+static volatile bool s_coex = false;
 
 uint8_t radio_lab_rung(void)
 {
@@ -106,9 +113,11 @@ void radio_lab_log(const char *why, int k1_asked)
     if (k1_asked >= 0) {
         snprintf(k1n, sizeof(k1n), " (%d asked)", k1_asked);
     }
-    ESP_LOGI(LAB_TAG, "[LAB] %s - SERVE rung %s; AP_IDLE Coded 0.6 s / Wi-Fi %s s; join assist %s; K1 %s%s",
+    const char *next = (s_no11b == s_no11b_boot) ? "" : (s_no11b ? " (off from the next boot)" : " (on from the next boot)");
+    ESP_LOGI(LAB_TAG, "[LAB] %s - SERVE rung %s; AP_IDLE Coded 0.6 s / Wi-Fi %s s; join assist %s; K1 %s%s; "
+             "SoftAP 11b rates %s%s; list-scan coex_background_scan %s",
              why, radio_lab_rung_name(s_rung), s_w06 ? "0.6" : "0.3", s_join ? "on" : "off",
-             s_k1 ? "on" : "off", k1n);
+             s_k1 ? "on" : "off", k1n, s_no11b_boot ? "off" : "on", next, s_coex ? "on" : "off");
 }
 
 static void lab_defaults(void)
@@ -117,11 +126,14 @@ static void lab_defaults(void)
     s_w06 = false;
     s_join = true;
     s_k1 = false;
+    s_no11b = false;
+    s_coex = false;
 }
 
 static bool lab_valid(const lab_cfg_t *c)
 {
-    return c->ver == LAB_CFG_VER && c->rung < RP_RUNG_COUNT && c->w06 <= 1 && c->join <= 1 && c->k1 <= 1;
+    return c->ver == LAB_CFG_VER && c->rung < RP_RUNG_COUNT && c->w06 <= 1 && c->join <= 1 && c->k1 <= 1 &&
+           c->no11b <= 1 && c->coex <= 1;
 }
 
 static void lab_load(void)
@@ -151,12 +163,15 @@ static void lab_load(void)
     s_w06 = c.w06;
     s_join = c.join;
     s_k1 = c.k1;
+    s_no11b = c.no11b;
+    s_coex = c.coex;
 }
 
 static void lab_save(void)
 {
     lab_cfg_t c = {
         .ver = LAB_CFG_VER, .rung = s_rung, .w06 = s_w06, .join = s_join, .k1 = s_k1,
+        .no11b = s_no11b, .coex = s_coex,
     };
     nvs_handle_t h;
     esp_err_t err = nvs_open(LAB_NVS_NS, NVS_READWRITE, &h);
@@ -175,12 +190,18 @@ static void lab_save(void)
 static void lab_help(void)
 {
     ESP_LOGI(LAB_TAG, "[LAB] keys: 1 AP_IDLE density, 2 SERVE-A-thin, 3 SERVE-A, 4 SERVE-C, 5 SERVE-B; "
-             "i AP_IDLE Wi-Fi 0.3/0.6 s; j join assist; k K1; l settings; x production values; h keys");
+             "i AP_IDLE Wi-Fi 0.3/0.6 s; j join assist; k K1; b SoftAP 11b rates (from the next boot); "
+             "c list-scan coex_background_scan; l settings; x production values; h keys");
 }
 
 void radio_lab_init(void)
 {
     lab_load();
+    // C11's knobs to the Wi-Fi component: the 11b rates only before wifi_manager_start() (its task
+    // applies them before esp_wifi_start()), so a change waits for the next boot.
+    s_no11b_boot = s_no11b;
+    wifi_manager_lab_set_ap_11b_off(s_no11b_boot);
+    wifi_manager_lab_set_coex_bg_scan(s_coex);
     ESP_LOGW(LAB_TAG, "radio lab image (APP_RADIO_LAB, the G1 ladder) - not for release");
     radio_lab_log("settings at boot", -1);
     lab_help();
@@ -216,8 +237,18 @@ bool radio_lab_key(char c)
         s_k1 = !s_k1;
         snprintf(why, sizeof(why), "key k: K1");
         break;
+    case 'b':
+        s_no11b = !s_no11b;
+        snprintf(why, sizeof(why), "key b: SoftAP 11b rates (next boot)");
+        break;
+    case 'c':
+        s_coex = !s_coex;
+        wifi_manager_lab_set_coex_bg_scan(s_coex);
+        snprintf(why, sizeof(why), "key c: list-scan coex_background_scan");
+        break;
     case 'x':
         lab_defaults();
+        wifi_manager_lab_set_coex_bg_scan(s_coex);
         snprintf(why, sizeof(why), "key x: production values");
         break;
     case 'l':

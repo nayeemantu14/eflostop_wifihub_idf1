@@ -2211,7 +2211,7 @@ void wifi_manager( void * pvParameters ){
 	ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &ap_config));
 	ESP_ERROR_CHECK(esp_wifi_set_bandwidth(WIFI_IF_AP, wifi_settings.ap_bandwidth));
 	ESP_ERROR_CHECK(esp_wifi_set_ps(wifi_settings.sta_power_save));
-
+	WIFI_MANAGER_LAB_PRE_START();	/* LOCAL PATCH (2.1.4 WP7, C11): the lab image's 11b knob (wifi_manager.h) */
 
 	/* by default the mode is STA because wifi_manager will not start the access point unless it has to! */
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -2346,7 +2346,7 @@ void wifi_manager( void * pvParameters ){
 					/* LOCAL PATCH: scan can fail transiently with ESP_ERR_WIFI_STATE when
 					 * a connect/disconnect is in flight (captive-portal race). Do NOT abort —
 					 * clear the bit so a later scan request can retry. */
-					esp_err_t scan_err = esp_wifi_scan_start(&scan_config, false);
+					esp_err_t scan_err = esp_wifi_scan_start(WIFI_MANAGER_LAB_SCAN_CONFIG(&scan_config), false);	/* LOCAL PATCH (2.1.4 WP7, C11) */
 					if(scan_err != ESP_OK){
 						ESP_LOGW(TAG, "esp_wifi_scan_start failed (%s) — skipping scan", esp_err_to_name(scan_err));
 						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
@@ -2768,4 +2768,41 @@ void wifi_manager( void * pvParameters ){
 
 }
 
+
+#if CONFIG_APP_RADIO_LAB
+/* LOCAL PATCH (2.1.4 WP7, C11): the radio lab image's two Wi-Fi knobs (wifi_manager.h), G1 data only.
+ * Last in this file, so that no line above moves: the ESP_ERROR_CHECK lines carry their line
+ * numbers, and a production image is the same byte for byte. */
+static bool lab_ap_11b_off = false;				/* set before the task starts, read once by it */
+static volatile bool lab_coex_bg_scan = false;	/* any task writes, the task reads at each list scan */
+
+void wifi_manager_lab_set_ap_11b_off(bool off){
+	lab_ap_11b_off = off;
+}
+
+void wifi_manager_lab_set_coex_bg_scan(bool on){
+	lab_coex_bg_scan = on;
+}
+
+/* The wifi_manager task, after esp_wifi_init() and before esp_wifi_start() (the driver's rule for
+ * esp_wifi_config_11b_rate()), with the SoftAP's interface configured (APSTA). */
+void wifi_manager_lab_pre_start(void){
+	if(!lab_ap_11b_off){
+		return;
+	}
+	esp_err_t err = esp_wifi_config_11b_rate(WIFI_IF_AP, true);
+	if(err == ESP_OK){
+		ESP_LOGW(TAG, "radio lab: SoftAP 11b rates off (C11) - not for release");
+	}
+	else{
+		ESP_LOGW(TAG, "radio lab: SoftAP 11b rates not turned off (%s) - they stay on", esp_err_to_name(err));
+	}
+}
+
+/* The wifi_manager task, right before each network-list scan */
+wifi_scan_config_t *wifi_manager_lab_scan_config(wifi_scan_config_t *config){
+	config->coex_background_scan = lab_coex_bg_scan;
+	return config;
+}
+#endif
 
