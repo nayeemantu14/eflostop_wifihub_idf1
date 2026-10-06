@@ -35,11 +35,13 @@
   var finished = 0;
   var pollSeq = 0, lastSeq = 0, epoch = 0;
   var resultSsid = null;
-  // one request of each kind at a time
-  var statusBusy = false, listBusy = false, sending = false;
+  // one request of each kind at a time; undecided: no view yet from a status reply (the first
+  // may be lost: the next one decides, until the page leaves its first view)
+  var statusBusy = false, listBusy = false, sending = false, undecided = true;
 
   function showView(id) {
     currentView = id;
+    undecided = false;
     views.forEach(function (v) { $(v).style.display = v === id ? "" : "none"; });
     $(id).style.animation = "none";
     $(id).offsetHeight;
@@ -140,11 +142,21 @@
       if (d.urc === 3 && d.ssid) lostSeen = true;
       if (connecting) {
         connectProgress(d);
+      } else if (undecided) {
+        decide(d);
       } else if (!finished) {
         if (resultSsid && !d.pend && !(d.urc === 0 && d.ssid === resultSsid)) toScan();
         updateBanners(d);
       }
     }, statusDone);
+  }
+
+  // the view a status picks: a Connect under way, connected, or the list with its banners
+  function decide(d) {
+    undecided = false;
+    if (d.pend) startConnecting(d.pend, true);
+    else if (d.ssid && d.urc === 0) showSuccess(d.ssid);
+    else updateBanners(d);
   }
 
   // urc 3: the router lost; urc 1: the last Connect failed (maybe long ago: a banner, not a view)
@@ -411,7 +423,11 @@
       // 15 s on, the setup network still answers (its stop did not come): back to the page
       if (t - finished >= 15000 && t - lastStatusPoll >= POLL_MS) {
         lastStatusPoll = t;
-        getJSON("status.json?bg=1").then(function () { finished = 0; toScan(); }, function () {});
+        getJSON("status.json?bg=1").then(function (d) {
+          finished = 0;
+          if (d && d.urc === 0 && d.ssid) showSuccess(d.ssid);
+          else toScan();
+        }, function () {});
       }
       return;
     }
@@ -555,12 +571,8 @@
     on("btn-cancel-dc", "click", function () { show("modal-disconnect", false); });
     on("btn-confirm-dc", "click", function () { show("modal-disconnect", false); performDisconnect(); });
 
-    // the status first, then the view and the list
+    // the status first (its reply picks the view: decide()), then the list
     pollStatus(false).then(function () {
-      var d = lastStatus;
-      if (d.pend) startConnecting(d.pend, true);
-      else if (d.ssid && d.urc === 0) showSuccess(d.ssid);
-      else updateBanners(d);
       listSince = now();
       refreshList(false);
       setInterval(tick, 250);
