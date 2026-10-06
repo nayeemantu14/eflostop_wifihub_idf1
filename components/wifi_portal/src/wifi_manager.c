@@ -111,6 +111,7 @@ static volatile TickType_t ap_list_tick = 0;
 static volatile TickType_t scan_order_tick = 0;
 #define WIFI_MANAGER_SCAN_GAP_MS		20000
 #define WIFI_MANAGER_SCAN_RETRY_MS		10000
+#define WIFI_MANAGER_LIST_LOCK_MS		5000	/* a scan's rebuild waits this long for the list's lock */
 #define WIFI_MANAGER_LIST_STALE_MS		60000
 /* LOCAL PATCH (2.1.4 WP1): an allocation that can wait (the network list) is tried only while the
  * largest free block exceeds it by this much. One that fails is counted as a failed allocation
@@ -1112,8 +1113,11 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 		aps[j] = ap;
 	}
 
-	/* make sure the http server isn't trying to access the list while it gets refreshed */
-	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(1000) )){
+	/* make sure the http server isn't trying to access the list while it gets refreshed
+	 * LOCAL PATCH (2.1.4 C6): for up to WIFI_MANAGER_LIST_LOCK_MS, past the HTTP server's 4 s send
+	 * timeout: at low heap GET /ap.json sends the list under this lock, and a send stalled for
+	 * want of memory held it past the 1 s waited before, which dropped this scan's records */
+	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(WIFI_MANAGER_LIST_LOCK_MS) )){
 		unsigned left_out = wifi_manager_generate_acess_points_json(aps, count);
 		/* LOCAL PATCH (2.1.4 C10b): the list's age, for the page load's scan */
 		TickType_t now = xTaskGetTickCount();
@@ -1128,11 +1132,8 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 	}
 }
 
-/**
- * @brief LOCAL PATCH (2.1.4 WP1): the largest free block with the caps has room for size bytes
- * and WIFI_MANAGER_HEAP_MARGIN more (see there).
- */
-static bool wifi_manager_heap_has(uint32_t caps, size_t size){
+bool wifi_manager_heap_has(uint32_t caps, size_t size){
+	/* LOCAL PATCH (2.1.4 WP1): see wifi_manager.h */
 	return heap_caps_get_largest_free_block(caps) >= size + WIFI_MANAGER_HEAP_MARGIN;
 }
 

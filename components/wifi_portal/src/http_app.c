@@ -104,11 +104,6 @@ static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 #define HTTP_APP_SESSION_MIN_FREE	(12 * 1024)
 /* a refused session is logged at most once in this long (with the count since the server start) */
 #define HTTP_APP_REFUSE_LOG_MS		10000
-/* GET /ap.json copies the network list out only while the largest free block exceeds the copy by
- * this much, so its malloc() practically never fails (MONITOR counts each failed allocation in
- * allocfail, the figure G3 reads). Not WP1's 4 KB margin: the copy is held only while its send
- * runs, normally a few ms (the list fits the TCP send buffer at once) */
-#define HTTP_APP_COPY_SLACK			256
 
 /* LOCAL PATCH (2.1.4 C8): the room for an X-Custom-* credential header's value, terminator
  * included: a 64-byte password percent-encoded is 192 characters. A longer value gets 400. */
@@ -802,14 +797,14 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				}
 				/* LOCAL PATCH (2.1.4 C6): copied out, and sent with the lock given back: a send to a
 				 * slow phone (up to send_wait_timeout, 4 s) held it, and the wifi_manager task, which
-				 * waits 1 s for it, dropped a fresh scan. The copy (about 1.5 KB, freed at once) is
-				 * tried only with HTTP_APP_COPY_SLACK to spare, so a low heap (the E2 flood) sees no
-				 * failed allocation per poll. Below that (the largest block under about 1.8 KB,
-				 * where the Wi-Fi driver itself is short) the list is sent under the lock, as before
-				 * C6: the page still gets it, and only a scan ending during a stalled send is lost */
+				 * waited 1 s for it, dropped a fresh scan. The copy (about 1.5 KB, freed once sent)
+				 * is made only with WP1's margin to spare (wifi_manager_heap_has()): below it the
+				 * copy would take what this answer's own pbuf and the Wi-Fi driver's buffers need,
+				 * and their allocations would fail instead. There the list is sent under the lock,
+				 * as before C6: the page still gets it, and a scan's rebuild waits out a stalled send
+				 * (WIFI_MANAGER_LIST_LOCK_MS, 5 s) */
 				size_t ap_len = strlen(ap_buf);
-				char *copy = (heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT) >= ap_len + 1 + HTTP_APP_COPY_SLACK) ?
-						malloc(ap_len + 1) : NULL;
+				char *copy = wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ap_len + 1) ? malloc(ap_len + 1) : NULL;
 				if(copy != NULL){
 					memcpy(copy, ap_buf, ap_len + 1);
 					wifi_manager_unlock_json_buffer();
