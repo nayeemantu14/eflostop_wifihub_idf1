@@ -359,12 +359,14 @@ static bool list_scan_gate(void)
         return false;
     }
     rp_grant_t g = RP_GRANT_IDLE;
-    if (!radio_policy_join_settling())
+    bool joining = radio_policy_join_settling();
+    if (!joining)
     {
         radio_policy_pulse_request(RP_PULSE_LIST);
         g = radio_policy_pulse_wait(RP_PULSE_LIST, RP_GRANT_WAIT_MS);
+        joining = radio_policy_join_settling();   // a join during the wait
     }
-    if (radio_policy_join_settling())
+    if (joining)
     {
         radio_policy_pulse_end(RP_PULSE_LIST);   // its pulse, granted or pending, ends
         ESP_LOGI(WIFI_TAG, "Wi-Fi list scan not started: a station is joining the SoftAP - the page asks again later");
