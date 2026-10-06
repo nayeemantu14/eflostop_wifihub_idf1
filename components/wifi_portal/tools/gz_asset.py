@@ -14,7 +14,9 @@ A .js source loses its whole-line comments first (strip_js_comments()): they doc
 in the tree but cost the phone about 0.6 KB gzipped. Only lines that are nothing but a comment
 go; code is never touched. The pass is line-based, so it refuses (and fails the build on) what
 a line-based pass cannot be sure of: a template literal (a backtick), a line continued with a
-backslash, or a block comment that shares a line with code. Every other asset is gzipped as it is.
+backslash, a "/*" in a line that is kept (a block comment sharing a line with code, or one in a
+string), or a line break JavaScript sees that this pass does not (a lone CR, U+2028, U+2029).
+Lines are split on LF only. Every other asset is gzipped as it is.
 
 It fails loudly, never leaving a stale or partial output behind: the old output is removed
 first; the new one is written to "<output>.tmp", read back, decompressed and compared with what
@@ -42,12 +44,14 @@ def strip_js_comments(data):
     text = data.decode("utf-8")
     if "`" in text:
         raise ValueError("a backtick (template literal): the comment pass is line-based")
+    if "\u2028" in text or "\u2029" in text or "\r" in text.replace("\r\n", ""):
+        raise ValueError("a line break other than LF or CRLF (a lone CR, U+2028 or U+2029)")
     out = []
     dropped = 0
     in_block = False
-    for line in text.splitlines(True):
-        body = line.rstrip("\r\n")
-        stripped = body.strip()
+    for line in text.split("\n"):
+        body = line.rstrip("\r")
+        stripped = body.strip(" \t")
         if body.endswith("\\"):
             raise ValueError("a line continued with a backslash")
         if in_block:
@@ -68,10 +72,12 @@ def strip_js_comments(data):
             elif ends != 1 or not stripped.endswith("*/"):
                 raise ValueError("a block comment that shares its line with code")
             continue
+        if "/*" in body:
+            raise ValueError("a \"/*\" in a line of code (a block comment there, or in a string)")
         out.append(line)
     if in_block:
         raise ValueError("a block comment that never ends")
-    return "".join(out).encode("utf-8"), dropped
+    return "\n".join(out).encode("utf-8"), dropped
 
 
 def gzip_bytes(data):
