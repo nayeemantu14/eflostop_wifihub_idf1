@@ -10,10 +10,17 @@ The output is the same bytes on every build: gzip level 9, mtime 0 and no file n
 header (Python writes the OS byte as 255, "unknown"), so the image does not change with the
 time or the folder of a build.
 
+A .js source loses its whole-line comments first (strip_js_comments()): they document the page
+in the tree but cost the phone about 0.6 KB gzipped. Only lines that are nothing but a comment
+go; code is never touched. The pass is line-based, so it refuses (and fails the build on) what
+a line-based pass cannot be sure of: a template literal (a backtick), a line continued with a
+backslash, or a block comment that shares a line with code. Every other asset is gzipped as it is.
+
 It fails loudly, never leaving a stale or partial output behind: the old output is removed
-first; the new one is written to "<output>.tmp", read back, decompressed and compared with the
-source byte for byte, and only then renamed onto the output. Any failure (no source, an empty
-one, a write error, a mismatch) prints the reason and exits with 1, which stops the build.
+first; the new one is written to "<output>.tmp", read back, decompressed and compared with what
+was gzipped byte for byte, and only then renamed onto the output. Any failure (no source, an
+empty one, a refused .js, a write error, a mismatch) prints the reason and exits with 1, which
+stops the build.
 
 An asset of more than SEND_BUFFER_BYTES once gzipped no longer goes out in one TCP send buffer
 (plan 4.3): that prints a warning, and the build goes on.
@@ -26,6 +33,45 @@ import sys
 
 # The lwIP TCP send buffer of the ESP32-S3 build (CONFIG_LWIP_TCP_SND_BUF_DEFAULT, 5,760 B).
 SEND_BUFFER_BYTES = 5760
+
+
+def strip_js_comments(data):
+    """Leaves out the lines of a JavaScript source that hold only a comment: "// ..." lines, and
+    "/* ... */" blocks that start a line and end one. Returns (bytes, lines left out). Raises
+    ValueError for what a line-based pass cannot be sure of (see the module's docstring)."""
+    text = data.decode("utf-8")
+    if "`" in text:
+        raise ValueError("a backtick (template literal): the comment pass is line-based")
+    out = []
+    dropped = 0
+    in_block = False
+    for line in text.splitlines(True):
+        body = line.rstrip("\r\n")
+        stripped = body.strip()
+        if body.endswith("\\"):
+            raise ValueError("a line continued with a backslash")
+        if in_block:
+            dropped += 1
+            if "*/" in stripped:
+                if not stripped.endswith("*/") or stripped.count("*/") != 1:
+                    raise ValueError("a block comment that does not end its line")
+                in_block = False
+            continue
+        if stripped.startswith("//"):
+            dropped += 1
+            continue
+        if stripped.startswith("/*"):
+            dropped += 1
+            ends = stripped.count("*/")
+            if ends == 0:
+                in_block = True
+            elif ends != 1 or not stripped.endswith("*/"):
+                raise ValueError("a block comment that shares its line with code")
+            continue
+        out.append(line)
+    if in_block:
+        raise ValueError("a block comment that never ends")
+    return "".join(out).encode("utf-8"), dropped
 
 
 def gzip_bytes(data):
@@ -41,6 +87,7 @@ def main(argv):
         return 2
     src, out = argv[1], argv[2]
     tmp = out + ".tmp"
+    note = ""
     try:
         if os.path.exists(out):
             os.remove(out)
@@ -48,6 +95,9 @@ def main(argv):
             data = f.read()
         if not data:
             raise ValueError("the source is empty")
+        if src.lower().endswith(".js"):
+            data, dropped = strip_js_comments(data)
+            note = " (%d comment lines left out)" % dropped
         packed = gzip_bytes(data)
         if gzip.decompress(packed) != data:
             raise ValueError("the gzipped bytes do not decompress to the source")
@@ -65,8 +115,8 @@ def main(argv):
             except OSError:
                 pass
         return 1
-    print("gz_asset.py: %s %d B -> %s %d B" % (os.path.basename(src), len(data),
-                                              os.path.basename(out), len(packed)))
+    print("gz_asset.py: %s %d B -> %s %d B%s" % (os.path.basename(src), len(data),
+                                                os.path.basename(out), len(packed), note))
     if len(packed) > SEND_BUFFER_BYTES:
         print("gz_asset.py: warning: %s is %d B gzipped, more than one %d B TCP send buffer"
               % (os.path.basename(src), len(packed), SEND_BUFFER_BYTES))
