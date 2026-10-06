@@ -1135,6 +1135,28 @@ TickType_t radio_policy_exec_pulse_deadline(void)
     return s_x.pulse_deadline;
 }
 
+// When the executor must look at the running pulse again: its deadline, or for a join assist whose
+// station has its lease and its first page or 302, max(lease + 1.5 s, first 302 or page + 0.3 s)
+// when that is sooner (plan 4.4's end rule, radio_policy_exec_pulse_over()). Without it the assist
+// ran on to the executor's next poll, up to EXEC_POLL_MS (0.5 s) of blind time past its end.
+TickType_t radio_policy_exec_pulse_wake(void)
+{
+    TickType_t dl = s_x.pulse_deadline;
+    int8_t i = s_x.join_sta;
+    if (s_x.pulse != RP_PULSE_JOIN || i < 0 || i >= RP_STA_MAX)
+        return dl;
+    taskENTER_CRITICAL(&s_sta_lock);
+    TickType_t lease = s_sta[i].lease_at;
+    TickType_t probe = s_sta[i].probe_at;
+    taskEXIT_CRITICAL(&s_sta_lock);
+    if (lease == 0 || probe == 0)
+        return dl;
+    TickType_t a = lease + pdMS_TO_TICKS(RP_JOIN_LEASE_TAIL_MS);
+    TickType_t b = probe + pdMS_TO_TICKS(RP_JOIN_PROBE_TAIL_MS);
+    TickType_t end = ((int32_t)(a - b) > 0) ? a : b;
+    return ((int32_t)(end - dl) < 0) ? end : dl;
+}
+
 bool radio_policy_exec_pulse_over(TickType_t now)
 {
     rp_pulse_t k = (rp_pulse_t)s_x.pulse;

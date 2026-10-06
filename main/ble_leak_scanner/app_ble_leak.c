@@ -1523,14 +1523,15 @@ static TickType_t executor_pass(exec_t *x)
     x->want = (x->pulse == RP_PULSE_NONE && want_row != RP_ROW_NONE &&
                !(x->row != RP_ROW_NONE && x->kind == RP_K_W && !x->slot_done));
 
-    // The next wake: the pulse's deadline (I3: the executor expires every pause itself), the Wi-Fi
-    // slot's end, the next start, a young Coded scan covering an advert interval (a pending JOIN or
-    // SUBMIT waits for it), a lost scan's confirmation; at most EXEC_POLL_MS.
+    // The next wake: the pulse's deadline (I3: the executor expires every pause itself) or a join
+    // assist's own end, the Wi-Fi slot's end, the next start, a young Coded scan covering an advert
+    // interval (a pending JOIN or SUBMIT waits for it), a lost scan's confirmation; at most
+    // EXEC_POLL_MS.
     TickType_t wait = pdMS_TO_TICKS(EXEC_POLL_MS);
     TickType_t until = 0;
     bool timed = false;
     if (x->pulse != RP_PULSE_NONE) {
-        until = radio_policy_exec_pulse_deadline();
+        until = radio_policy_exec_pulse_wake();
         if (x->pulse == RP_PULSE_CONNECT && !x->overrun_asked) {
             until += pdMS_TO_TICKS(CLAIM_OVERRUN_MS);
         }
