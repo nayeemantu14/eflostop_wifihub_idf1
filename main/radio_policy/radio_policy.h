@@ -23,9 +23,10 @@ extern "C" {
  * writer (plan 4.1), and the mode is recomputed from them on every executor pass, at least twice a
  * second (I6). No task, timer or heap of its own (I10): it runs on its callers' tasks.
  *
- * Until the Wi-Fi side is wired (the next stage of WP8), nothing calls the Wi-Fi setters below:
- * the SoftAP then never reads as up, every mode is NORMAL's, and app_wifi.c's portal priority
- * window and Wi-Fi radio holds still pause BLE as before (radio_policy_legacy_*(), read here only).
+ * The Wi-Fi side (app_wifi.c) gives the SoftAP, the STA's IP and attempts, the setup page's Connect,
+ * the SoftAP's stations and the page's activity, and asks for its RETRY and LIST pulses. Until they
+ * are deleted, app_wifi.c's portal priority window and Wi-Fi radio holds still pause BLE as before
+ * (the HOLD mode; radio_policy_legacy_*(), read here only).
  * ================================================================================================= */
 
 /* ---- The sensor-firmware timings the profiles depend on (FW 1.1.0, unchanged in this release;
@@ -162,14 +163,13 @@ typedef enum {
 } rp_mode_t;
 
 /* =================================================================================================
- * Facts from the Wi-Fi side. NOT CALLED YET: the next stage of WP8 wires each one in app_wifi.c
- * (and deletes the legacy window and holds with the health hold, in one commit). One writer each;
- * every setter is a plain store or a short spinlock section, never blocks, and wakes the executor.
+ * Facts from the Wi-Fi side (app_wifi.c, 2.1.4 WP8). One writer each; every setter is a plain store
+ * or a short spinlock section, never blocks, and wakes the executor when the mode may change.
  * ================================================================================================= */
 
-/** The SoftAP is up / the STA has its IP. One writer (the wifi_manager task's START_AP, STOP_AP,
- *  GOT_IP and STA_DISCONNECTED callbacks are the natural one; wifi_task's per-pass cross-check of
- *  esp_wifi_get_mode() must then go through the same task, or be the only writer). */
+/** The SoftAP is up / the STA has its IP. One writer: the wifi_manager task's START_AP, STOP_AP,
+ *  GOT_IP and STA_DISCONNECTED callbacks. wifi_task cross-checks the SoftAP's against
+ *  esp_wifi_get_mode() on every pass and only logs a disagreement. */
 void radio_policy_note_wifi(bool ap_up, bool sta_ip);
 
 /** A STA connect attempt is in flight (wifi_manager task: CONNECT_STA started, ended at its
