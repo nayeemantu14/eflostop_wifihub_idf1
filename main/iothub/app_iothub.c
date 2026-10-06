@@ -2099,10 +2099,12 @@ static volatile uint32_t     s_mqtt_stop_done = 0;      // the last one served; 
 static volatile TaskHandle_t s_mqtt_stopper   = NULL;   // wifi_task's handle; wifi_task only
 static uint32_t              s_mqtt_stop_wait_logged = 0;   // wifi_task only
 // A stop esp-mqtt refuses is tried again this often, this far apart (iothub_mqtt_stop_service()):
-// up to 9 waits of 20 ms on wifi_task, with the publish gate held, so cloud_tx sends nothing
-// meanwhile (a stop is pending: its messages take the offline path). A retry that finds the
-// new client's task in its first connect waits for that connect under esp-mqtt's API lock, as
-// any stop during a connect does (about 10 s at most, app_iothub.h).
+// up to 9 waits of 20 ms on wifi_task, and one more after the stop that worked, with the publish
+// gate held, so cloud_tx sends nothing meanwhile (a stop is pending: its messages take the
+// offline path). Each refused try also prints esp-mqtt's own "Client asked to stop, but was
+// not started" W line, so a client whose start failed prints it 10 times per stop (review F5).
+// A retry that finds the new client's task in its first connect waits for that connect under
+// esp-mqtt's API lock, as any stop during a connect does (about 10 s at most, app_iothub.h).
 #define MQTT_STOP_TRIES     10
 #define MQTT_STOP_RETRY_MS  20
 // Created by initialize_iothub(), before any task can ask for or run a stop.
@@ -2201,11 +2203,13 @@ void iothub_mqtt_stop_service(void)
         err = esp_mqtt_client_stop(mqtt_client);
         tries++;
     }
-    if (err == ESP_OK && tries > 1) {
-        // A retry that met the new task between its `run = true` and its clear of STOPPED_BIT
+    if (err == ESP_OK) {
+        // A stop that met the new task between its `run = true` and its clear of STOPPED_BIT
         // returned at once, on the bit the last stop left set, before that task's teardown
-        // (transport close, outbox delete) ran. One more wait lets that end before iothub_task
-        // may start the client again, which would otherwise start a second task beside it.
+        // (transport close, outbox delete) ran. A retry can land there, and so can a first
+        // try (2.1.4 WP3 review RTOS-WP3-3), and the return looks like any other. So every
+        // stop waits once more, which lets that end before iothub_task may set the config or
+        // start the client again (a second task beside it). 20 ms on wifi_task per stop.
         vTaskDelay(pdMS_TO_TICKS(MQTT_STOP_RETRY_MS));
     }
     // A connect that ended as the stop was asked may have marked MQTT connected again
