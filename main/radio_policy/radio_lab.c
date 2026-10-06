@@ -86,7 +86,7 @@ const char *radio_lab_rung_text(uint8_t rung)
 {
     switch (rung) {
     case RP_RUNG_APIDLE:
-        return "no SERVE geometry: AP_IDLE's rows and discovery cadence";
+        return "no SERVE mode (D8 (c)): AP_IDLE runs while a page is in use, and claims are not deferred";
     case RP_RUNG_SERVE_A_THIN:
         return "Coded 0.6 s / Wi-Fi 0.6 s for 10 s after a page, user request or 302, else as AP_IDLE";
     case RP_RUNG_SERVE_A:

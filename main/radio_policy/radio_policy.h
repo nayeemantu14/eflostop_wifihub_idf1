@@ -93,9 +93,12 @@ typedef enum {
  *   RP_F_I1M     the same for 1M (rows that run while a sensor is known to be on 1M);
  *   RP_F_I8      I8: every BLE slot <= 600 ms and followed by a Wi-Fi slot, every Wi-Fi slot >= 300 ms;
  *   RP_F_DISC    a discovery row: it runs only in turn with its plain row, so the period rule is
- *                checked on that sequence (RP_SEQ_*), not on the row alone.
+ *                checked on that sequence (RP_SEQ_*), not on the row alone;
+ *   RP_F_LAB     a lab row (APP_RADIO_LAB only): I1 and I2 hold, I8 and the period rule are waived.
  * N_HUNT is B2's (the valve hunted in NORMAL, see radio_policy.c); RECOVERY follows every pulse (I2).
- * SERVE_B and SERVE_B_DISC are the council's rung, for SERVE_RUNG (G1 decides). */
+ * SERVE_B and SERVE_B_DISC are the council's rung, for SERVE_RUNG (G1 decides). SERVE_C and
+ * SERVE_C_DISC exist only in the G1 lab image (plan 4.3: its 2.0 s period is resonant with TCP's
+ * 1 s and 3 s retransmits, both in its Wi-Fi slot, and divides 8 s and 100 s). */
 #define RP_K__ 0
 #define RP_K_C 1
 #define RP_K_M 2
@@ -107,6 +110,15 @@ typedef enum {
 #define RP_F_I1M    0x04
 #define RP_F_I8     0x08
 #define RP_F_DISC   0x10
+
+#if CONFIG_APP_RADIO_LAB
+#define RP_F_LAB    0x20
+#define RP_ROWS_LAB(X) \
+    X(SERVE_C,      RP_F_I1 | RP_F_LAB,                          C,1000, W,1000, _,0,   _,0)   \
+    X(SERVE_C_DISC, RP_F_I1 | RP_F_DISC | RP_F_LAB,              C,1000, W,400,  M,300, W,300)
+#else
+#define RP_ROWS_LAB(X)
+#endif
 
 #define RP_ROWS(X) \
     /* name          flags                                       slots: kind,ms x 4 */ \
@@ -123,7 +135,8 @@ typedef enum {
     X(APIDLE_DISC,  RP_F_I1 | RP_F_I8 | RP_F_DISC,               C,600,  W,300,  M,300, W,300) \
     X(AP_K1M,       RP_F_I1 | RP_F_I1M | RP_F_I8,                C,600,  W,300,  M,600, W,300) \
     X(LR_AP_30,     RP_F_I1 | RP_F_I1M,                          M,1200, C,600,  _,0,   _,0)   \
-    X(LR_AP,        RP_F_I1 | RP_F_I1M | RP_F_I8,                M,600,  W,300,  C,600, W,300)
+    X(LR_AP,        RP_F_I1 | RP_F_I1M | RP_F_I8,                M,600,  W,300,  C,600, W,300) \
+    RP_ROWS_LAB(X)
 
 #define RP_ROW_ENUM(name, fl, k0, m0, k1, m1, k2, m2, k3, m3) RP_ROW_##name,
 typedef enum { RP_ROWS(RP_ROW_ENUM) RP_ROW_COUNT } rp_row_id_t;

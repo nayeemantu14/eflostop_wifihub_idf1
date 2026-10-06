@@ -14,6 +14,7 @@
 #include "esp_random.h"
 #include "sdkconfig.h"
 #include "ble_leak_scanner/app_ble_leak.h"
+#include "radio_lab.h"
 
 #define RP_TAG "RADIO"
 
@@ -42,6 +43,21 @@
 #define RP_DUTY_WARN_RUNS             2   // ... expected time in this many summaries in a row warns
 #define RP_REFUSE_LOG_MS          10000   // a refused pulse's line at most this often (the summary counts all)
 #define RP_STA_MAX   CONFIG_DEFAULT_AP_MAX_CONNECTIONS   // the SoftAP's stations (4, asserted in main.c)
+
+#if CONFIG_APP_RADIO_LAB
+/* The G1 lab image (radio_lab.h): the SERVE rung its console keys chose, a period rule that lets the
+ * lab's SERVE-C rows through (I1 and I2 hold for them), and contingency K1 (plan 4.4), built only
+ * here: G1 decides whether production needs it. */
+#define RP_RUNG_NOW              (radio_lab_rung())
+#define RP_PERIOD_EXEMPT         (RP_F_DITHER | RP_F_DISC | RP_F_LAB)
+#define RP_LAB_K1_MS               1500   // K1: a join assist of at most this ...
+#define RP_LAB_K1_EVERY_MS        60000   // ... at most once per station per this
+#define RP_LAB_DISC_EVERY_AP06_BO     7   // AP_IDLE at Wi-Fi 0.6 s, discovery backed off: every 7th
+                                          // period (8.7 s); every 6th (7.5 s) would divide 15 s
+#else
+#define RP_RUNG_NOW              RP_SERVE_RUNG
+#define RP_PERIOD_EXEMPT         (RP_F_DITHER | RP_F_DISC)
+#endif
 
 /* ---------------------------------------------------------
  * The profile table and its invariants, checked at compile time (plan 4.8; I1, I2, I8, the period
@@ -88,7 +104,7 @@
                    "I8: " #name "'s BLE runs are 600 ms at most, each followed by Wi-Fi");         \
     _Static_assert(!((fl) & RP_F_I8) || (RP_I8_WIFI(k0, m0) && RP_I8_WIFI(k1, m1) &&               \
                    RP_I8_WIFI(k2, m2) && RP_I8_WIFI(k3, m3)), "I8: " #name "'s Wi-Fi slots");      \
-    _Static_assert(((fl) & (RP_F_DITHER | RP_F_DISC)) || RP_PERIOD_OK((m0) + (m1) + (m2) + (m3)),  \
+    _Static_assert(((fl) & RP_PERIOD_EXEMPT) || RP_PERIOD_OK((m0) + (m1) + (m2) + (m3)),           \
                    "period rule: " #name "'s period divides none of 8, 15 and 100 s");             \
     _Static_assert(RP_MS4(RP_KC, k0, m0, k1, m1, k2, m2, k3, m3) == 0 || (m0) + (m1) + (m2) + (m3) - \
                    RP_MS4(RP_KC, k0, m0, k1, m1, k2, m2, k3, m3) + RP_JIT(fl, RP_N4(k0, k1, k2, k3)) \
@@ -107,6 +123,13 @@ _Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_A, SERVE_A_DISC, RP_DISC_EVERY_SERVE
 _Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_A, SERVE_A_DISC, RP_DISC_EVERY_SERVE_BO)), "period rule: SERVE-A backed off");
 _Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_B, SERVE_B_DISC, RP_DISC_EVERY_SERVE)), "period rule: SERVE-B with discovery");
 _Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_B, SERVE_B_DISC, RP_DISC_EVERY_SERVE_BO)), "period rule: SERVE-B backed off");
+#if CONFIG_APP_RADIO_LAB
+_Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_A, APIDLE_DISC, RP_DISC_EVERY_AP)), "period rule: the lab's AP_IDLE at Wi-Fi 0.6 s");
+_Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_A, APIDLE_DISC, RP_LAB_DISC_EVERY_AP06_BO)), "period rule: the lab's AP_IDLE at Wi-Fi 0.6 s backed off");
+_Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_C, SERVE_C_DISC, RP_DISC_EVERY_SERVE)), "period rule: the lab's SERVE-C with discovery");
+_Static_assert(RP_PERIOD_OK(RP_SEQ_MS(SERVE_C, SERVE_C_DISC, RP_DISC_EVERY_SERVE_BO)), "period rule: the lab's SERVE-C backed off");
+_Static_assert(RP_LAB_K1_MS >= RP_PULSE_MIN_MS && RP_LAB_K1_MS <= RP_BLIND_MAX_MS, "I2: K1's assist fits the blind budget");
+#endif
 
 // I2 and I2b on the pulses (plan 3).
 _Static_assert(RP_BLIND_MAX_MS + RP_RECOVERY_MS <= RP_BURST_EDGE_MS, "I2: a pulse and its recovery fit in an edge burst");
@@ -204,6 +227,9 @@ typedef struct {
     uint8_t state;        // rp_grant_t
     bool end;             // the requester ended its pulse
     int8_t sta;           // JOIN: the station's index
+#if CONFIG_APP_RADIO_LAB
+    bool k1;              // JOIN: asked by the lab's K1 (a station's first DNS query): RP_LAB_K1_MS at most
+#endif
     TickType_t at;        // when it was asked
 } rp_req_t;
 static rp_req_t s_req[RP_PULSE_COUNT];
@@ -263,6 +289,20 @@ typedef struct {
 } rp_exec_t;
 static rp_exec_t s_x;   // zeroed (.bss); radio_policy_init() sets the fields whose "none" is not 0
 
+#if CONFIG_APP_RADIO_LAB
+/* The lab's K1: per entry of the station table, the MAC it last ran for and when (once per station
+ * per RP_LAB_K1_EVERY_MS), and the assists asked since the summary. Under s_sta_lock. The lab's
+ * functions are at the end of this file. */
+static struct {
+    uint8_t mac[6];
+    TickType_t at;
+} s_lab_k1[RP_STA_MAX];
+static uint16_t s_lab_k1_n = 0;
+static const char *lab_seq_check(void);
+static bool lab_mode_line(uint8_t m);
+static void lab_k1_dns(uint32_t ip);
+#endif
+
 /* =========================================================
  * The boot self-test (plan 4.8): the asserts' checks on the table as built, and the sequences
  * ========================================================= */
@@ -309,7 +349,7 @@ static const char *row_check(const rp_row_t *r)
                 return "I8 (a Wi-Fi slot)";
         }
     }
-    if (!(r->flags & (RP_F_DITHER | RP_F_DISC)) && !RP_PERIOD_OK(period))
+    if (!(r->flags & RP_PERIOD_EXEMPT) && !RP_PERIOD_OK(period))
         return "the period rule";
     if (coded > 0 && period - coded + jit >= RP_BLIND_MAX_MS)
         return "I2 (its own gap)";
@@ -355,15 +395,26 @@ void radio_policy_init(void)
             !seq_ok(sp, sd, RP_DISC_EVERY_SERVE) || !seq_ok(sp, sd, RP_DISC_EVERY_SERVE_BO))
             why = "the period rule";
     }
+#if CONFIG_APP_RADIO_LAB
+    if (why == NULL) {
+        row = "the lab's row sets";
+        why = lab_seq_check();
+    }
+#endif
     if (why != NULL) {
         s_pinned = true;
         ESP_LOGE(RP_TAG, "Profile self-test FAILED (%s: %s) - pinned to NORMAL (N_CODED), no Wi-Fi pulses",
                  row, why);
     } else {
+#if CONFIG_APP_RADIO_LAB
+        ESP_LOGI(RP_TAG, "Profile self-test passed: %d rows hold I1 and I2, all but the lab's two SERVE-C rows I8 and the period rule (SERVE rung %s, the lab's)",
+                 (int)RP_ROW_COUNT, radio_lab_rung_name(radio_lab_rung()));
+#else
         ESP_LOGI(RP_TAG, "Profile self-test passed: %d rows hold I1, I2, I8 and the period rule (SERVE rung %s)",
                  (int)RP_ROW_COUNT,
                  RP_SERVE_RUNG == RP_RUNG_SERVE_B ? "SERVE-B" :
                  RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN ? "SERVE-A-thin" : "SERVE-A");
+#endif
     }
     s_live = true;   // last: requests from now on wait for the executor's answer
 }
@@ -414,6 +465,9 @@ static bool req_ask(rp_pulse_t kind, int8_t sta)
         s_req[kind].end = false;
         s_req[kind].sta = sta;
         s_req[kind].at = now;
+#if CONFIG_APP_RADIO_LAB
+        s_req[kind].k1 = false;
+#endif
     }
     taskEXIT_CRITICAL(&s_req_lock);
     if (!busy && live)
@@ -558,6 +612,9 @@ void radio_policy_station_joined(const uint8_t mac[6])
     if (s_joins < UINT16_MAX)
         s_joins++;
     taskEXIT_CRITICAL(&s_sta_lock);
+#if CONFIG_APP_RADIO_LAB
+    ask = ask && radio_lab_join_on();   // the lab's join-assist switch (G1)
+#endif
     if (ask)
         (void)req_ask(RP_PULSE_JOIN, (int8_t)i);   // one at a time: a second station's join waits its turn
     else
@@ -605,8 +662,13 @@ void radio_policy_station_leased(const uint8_t mac[6], uint32_t ip)
 
 void radio_policy_portal_activity(http_app_activity_t kind, uint32_t client_ip)
 {
-    if (kind == HTTP_APP_ACT_DNS || (unsigned)kind >= HTTP_APP_ACT_COUNT)
+    if (kind == HTTP_APP_ACT_DNS || (unsigned)kind >= HTTP_APP_ACT_COUNT) {
+#if CONFIG_APP_RADIO_LAB
+        if (kind == HTTP_APP_ACT_DNS)
+            lab_k1_dns(client_ip);   // the lab's contingency K1 (G1 decides whether production needs it)
+#endif
         return;   // the dns_server task: nothing here keys on DNS (contingency K1 is not built)
+    }
     TickType_t now = rp_nz(xTaskGetTickCount());
     // The executor is woken when the mode or the SERVE rung's row may change (the page in use
     // again: AP_IDLE -> SERVE; a hot event for SERVE-A-thin), not at every request.
@@ -616,7 +678,7 @@ void radio_policy_portal_activity(http_app_activity_t kind, uint32_t client_ip)
         s_page_tick = now;
     }
     if (kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_API_USER || kind == HTTP_APP_ACT_PROBE_302) {
-        wake = wake || (RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN && !rp_within(s_hot_tick, now, RP_HOT_MS));
+        wake = wake || (RP_RUNG_NOW == RP_RUNG_SERVE_A_THIN && !rp_within(s_hot_tick, now, RP_HOT_MS));
         s_hot_tick = now;
     }
     if (wake)
@@ -755,6 +817,10 @@ static void mode_line(uint8_t m)
     if (m == s_x.logged)
         return;
     s_x.logged = m;
+#if CONFIG_APP_RADIO_LAB
+    if (lab_mode_line(m))
+        return;   // the lab's SERVE and AP_IDLE lines (its rung, its AP_IDLE slot)
+#endif
     const char *serve_rung = RP_SERVE_RUNG == RP_RUNG_SERVE_B ? "Coded 0.6 s / Wi-Fi 1.2 s (rung SERVE-B)" :
                              RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN ? "Coded 0.6 s / Wi-Fi 0.6 s for 10 s after a page or user request, else as AP_IDLE (rung SERVE-A-thin)" :
                              "Coded 0.6 s / Wi-Fi 0.6 s (rung SERVE-A)";
@@ -825,8 +891,13 @@ rp_mode_t radio_policy_exec_mode(const rp_ble_facts_t *f, TickType_t now)
         m = windowed ? RP_MODE_LR_AP : RP_MODE_NORMAL_LR;
     else if (!windowed)
         m = RP_MODE_NORMAL;
+#if CONFIG_APP_RADIO_LAB
+    else if (serve_now(now) && RP_RUNG_NOW != RP_RUNG_APIDLE)
+        m = RP_MODE_SERVE;   // the lab's AP_IDLE-density rung has no SERVE mode (D8 (c))
+#else
     else if (serve_now(now))
         m = RP_MODE_SERVE;
+#endif
     else
         m = RP_MODE_AP_IDLE;
 
@@ -869,11 +940,23 @@ static uint8_t ap_row(TickType_t now, bool new_period, bool k1m)
     if (k1m)
         return RP_ROW_AP_K1M;
     bool serve = (s_x.mode == RP_MODE_SERVE);
-    if (serve && RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN && !rp_within(s_hot_tick, now, RP_HOT_MS))
+    if (serve && RP_RUNG_NOW == RP_RUNG_SERVE_A_THIN && !rp_within(s_hot_tick, now, RP_HOT_MS))
         serve = false;
-    bool b = (RP_SERVE_RUNG == RP_RUNG_SERVE_B);
+#if CONFIG_APP_RADIO_LAB
+    if (serve && RP_RUNG_NOW == RP_RUNG_APIDLE)
+        serve = false;   // a key just chose the lab's AP_IDLE-density rung: the mode follows next pass
+#endif
+    bool b = (RP_RUNG_NOW == RP_RUNG_SERVE_B);
     uint8_t plain = serve ? (b ? RP_ROW_SERVE_B : RP_ROW_SERVE_A) : RP_ROW_APIDLE;
     uint8_t disc = serve ? (b ? RP_ROW_SERVE_B_DISC : RP_ROW_SERVE_A_DISC) : RP_ROW_APIDLE_DISC;
+#if CONFIG_APP_RADIO_LAB
+    if (serve && RP_RUNG_NOW == RP_RUNG_SERVE_C) {
+        plain = RP_ROW_SERVE_C;   // the lab's SERVE-C: [C 1.0][W 1.0]
+        disc = RP_ROW_SERVE_C_DISC;
+    } else if (!serve && radio_lab_apidle_w06()) {
+        plain = RP_ROW_SERVE_A;   // the lab's AP_IDLE at [C 0.6][W 0.6]; its discovery row is the same
+    }
+#endif
     bool bo = disc_backoff(now);
     if (bo != s_x.backoff) {
         s_x.backoff = bo;
@@ -882,6 +965,10 @@ static uint8_t ap_row(TickType_t now, bool new_period, bool k1m)
     }
     unsigned every = serve ? (bo ? RP_DISC_EVERY_SERVE_BO : RP_DISC_EVERY_SERVE)
                            : (bo ? RP_DISC_EVERY_AP_BO : RP_DISC_EVERY_AP);
+#if CONFIG_APP_RADIO_LAB
+    if (!serve && bo && radio_lab_apidle_w06())
+        every = RP_LAB_DISC_EVERY_AP06_BO;   // the period rule with the lab's 1.2 s plain period
+#endif
     bool want_disc = s_x.f.any_unknown || s_x.f.valve_slot;
     if (s_x.period_row != plain && s_x.period_row != disc) {
         s_x.period_row = plain;   // a new row set: its plain row first
@@ -963,6 +1050,9 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         uint8_t st = s_req[k].state;
         TickType_t at = s_req[k].at;
         int8_t sta = s_req[k].sta;
+#if CONFIG_APP_RADIO_LAB
+        bool lab_k1 = s_req[k].k1;
+#endif
         taskEXIT_CRITICAL(&s_req_lock);
         if (st != RP_GRANT_PENDING)
             continue;
@@ -1019,6 +1109,17 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
                 req_set(k, RP_GRANT_IDLE);   // the station left before its assist
                 continue;
             }
+#if CONFIG_APP_RADIO_LAB
+            if (lab_k1) {
+                taskENTER_CRITICAL(&s_sta_lock);
+                bool served = (s_sta[sta].probe_at != 0);
+                taskEXIT_CRITICAL(&s_sta_lock);
+                if (served) {
+                    req_set(k, RP_GRANT_IDLE);   // the lab's K1: its station had its 302 or page meanwhile
+                    continue;
+                }
+            }
+#endif
             if (s_lr_on) {
                 TickType_t start = s_lr_start;
                 if (start != 0 && (now - start) < pdMS_TO_TICKS(RP_LR_JOIN_HOLDOFF_MS)) {
@@ -1032,6 +1133,10 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             }
             if (s_x.prof_ms >= s_x.space_ms && !coded_young)
                 len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);   // clipped to I2b's room
+#if CONFIG_APP_RADIO_LAB
+            if (lab_k1)
+                len = rp_min(len, RP_LAB_K1_MS);   // the lab's K1: 1.5 s at most (plan 4.4)
+#endif
             break;
         }
         case RP_PULSE_RETRY:
@@ -1338,6 +1443,14 @@ void radio_policy_exec_summary(const char *adverts, unsigned phy_flips)
     } else {
         s_x.low_duty = 0;
     }
+#if CONFIG_APP_RADIO_LAB
+    // The lab's settings with the summary, so every minute of a G1 log names its ladder step.
+    taskENTER_CRITICAL(&s_sta_lock);
+    int k1_asked = s_lab_k1_n;
+    s_lab_k1_n = 0;
+    taskEXIT_CRITICAL(&s_sta_lock);
+    radio_lab_log("60 s", k1_asked);
+#endif
 
     memset(s_x.mode_ms, 0, sizeof(s_x.mode_ms));
     s_x.blind_ms = 0;
@@ -1351,3 +1464,106 @@ void radio_policy_exec_summary(const char *adverts, unsigned phy_flips)
     s_x.gap_max = 0;
     s_x.gap_over = 0;
 }
+
+#if CONFIG_APP_RADIO_LAB
+/* =========================================================
+ * The G1 lab image (radio_lab.h): its row sets' self-test, its mode lines and contingency K1
+ * ========================================================= */
+
+// Every row set a lab setting can select holds the period rule (as the asserts say, on the table as
+// built), and only the two SERVE-C rows are lab rows. NULL when it holds, else what fails.
+static const char *lab_seq_check(void)
+{
+    if (!seq_ok(RP_ROW_SERVE_A, RP_ROW_APIDLE_DISC, RP_DISC_EVERY_AP) ||
+        !seq_ok(RP_ROW_SERVE_A, RP_ROW_APIDLE_DISC, RP_LAB_DISC_EVERY_AP06_BO) ||
+        !seq_ok(RP_ROW_SERVE_A, RP_ROW_SERVE_A_DISC, RP_DISC_EVERY_SERVE) ||
+        !seq_ok(RP_ROW_SERVE_A, RP_ROW_SERVE_A_DISC, RP_DISC_EVERY_SERVE_BO) ||
+        !seq_ok(RP_ROW_SERVE_B, RP_ROW_SERVE_B_DISC, RP_DISC_EVERY_SERVE) ||
+        !seq_ok(RP_ROW_SERVE_B, RP_ROW_SERVE_B_DISC, RP_DISC_EVERY_SERVE_BO) ||
+        !seq_ok(RP_ROW_SERVE_C, RP_ROW_SERVE_C_DISC, RP_DISC_EVERY_SERVE) ||
+        !seq_ok(RP_ROW_SERVE_C, RP_ROW_SERVE_C_DISC, RP_DISC_EVERY_SERVE_BO))
+        return "the period rule";
+    for (int i = 0; i < RP_ROW_COUNT; i++) {
+        bool lab = (i == RP_ROW_SERVE_C || i == RP_ROW_SERVE_C_DISC);
+        if (lab != ((k_rows[i].flags & RP_F_LAB) != 0))
+            return "a row's lab mark";
+    }
+    return NULL;
+}
+
+// The lab's SERVE and AP_IDLE mode lines: its rung and its AP_IDLE slot. True when printed (the
+// other modes print as in production).
+static bool lab_mode_line(uint8_t m)
+{
+    if (m == RP_MODE_AP_IDLE) {
+        ESP_LOGI(RP_TAG, "Mode AP_IDLE (SoftAP up, STA not connected): Coded 0.6 s / Wi-Fi %s s, discovery every %d periods (lab)",
+                 radio_lab_apidle_w06() ? "0.6" : "0.3", RP_DISC_EVERY_AP);
+        return true;
+    }
+    if (m == RP_MODE_SERVE) {
+        uint8_t r = radio_lab_rung();
+        ESP_LOGI(RP_TAG, "Mode SERVE (SoftAP up, STA not connected; a setup page in use, a Connect or a new lease): rung %s (lab): %s",
+                 radio_lab_rung_name(r), radio_lab_rung_text(r));
+        return true;
+    }
+    return false;
+}
+
+// Asks for station sta's JOIN pulse as K1's: req_ask() with the K1 mark set under the same lock, so
+// the executor never grants it as a full join assist. True when it asked.
+static bool lab_k1_ask(int8_t sta)
+{
+    TickType_t now = rp_nz(xTaskGetTickCount());
+    taskENTER_CRITICAL(&s_req_lock);
+    bool busy = (s_req[RP_PULSE_JOIN].state == RP_GRANT_PENDING || s_req[RP_PULSE_JOIN].state == RP_GRANT_ON);
+    if (!busy) {
+        s_req[RP_PULSE_JOIN].state = RP_GRANT_PENDING;
+        s_req[RP_PULSE_JOIN].end = false;
+        s_req[RP_PULSE_JOIN].sta = sta;
+        s_req[RP_PULSE_JOIN].at = now;
+        s_req[RP_PULSE_JOIN].k1 = true;
+    }
+    taskEXIT_CRITICAL(&s_req_lock);
+    if (!busy)
+        app_ble_leak_kick();
+    return !busy;
+}
+
+// Contingency K1 (plan 4.4), on the dns_server task: the first DNS query from a leased station
+// that has not yet been sent a 302 or a page asks for a join assist of at most RP_LAB_K1_MS, at
+// most once per station per RP_LAB_K1_EVERY_MS. In all else it is a JOIN pulse: within I2 and I2b
+// (the 6 s spacing included), held off under a leak response as a join assist is, ended by the
+// station's first 302 or page + 0.3 s, and it counts as that station's assist for the join
+// spacing. Not asked while another JOIN is asked or runs (a later query asks again).
+static void lab_k1_dns(uint32_t ip)
+{
+    if (!radio_lab_k1_on() || ip == 0 || !s_live)
+        return;
+    TickType_t now = rp_nz(xTaskGetTickCount());
+    int i = -1;
+    taskENTER_CRITICAL(&s_sta_lock);
+    for (int k = 0; k < RP_STA_MAX && i < 0; k++) {
+        if (s_sta[k].state == RP_STA_JOINED && s_sta[k].ip == ip && s_sta[k].probe_at == 0)
+            i = k;
+    }
+    if (i >= 0) {
+        if (memcmp(s_lab_k1[i].mac, s_sta[i].mac, 6) != 0) {
+            memcpy(s_lab_k1[i].mac, s_sta[i].mac, 6);   // another station in this entry
+            s_lab_k1[i].at = 0;
+        }
+        if (rp_within(s_lab_k1[i].at, now, RP_LAB_K1_EVERY_MS))
+            i = -1;
+    }
+    taskEXIT_CRITICAL(&s_sta_lock);
+    if (i < 0 || !lab_k1_ask((int8_t)i))
+        return;
+    taskENTER_CRITICAL(&s_sta_lock);
+    s_lab_k1[i].at = now;
+    if (s_lab_k1_n < UINT16_MAX)
+        s_lab_k1_n++;
+    taskEXIT_CRITICAL(&s_sta_lock);
+    ESP_LOGI(RP_TAG, "[LAB] K1: %u.%u.%u.%u's first DNS query before a 302 or a page - a JOIN pulse of at most %d ms asked",
+             (unsigned)(ip & 0xff), (unsigned)((ip >> 8) & 0xff), (unsigned)((ip >> 16) & 0xff),
+             (unsigned)(ip >> 24), RP_LAB_K1_MS);
+}
+#endif // CONFIG_APP_RADIO_LAB
