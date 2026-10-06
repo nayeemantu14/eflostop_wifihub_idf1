@@ -138,13 +138,18 @@ static volatile bool s_claim_req = false;
 // ---- The valve claim policy (2.1.4 WP6; plan §4.4 CONNECT, decision D5) -----------------------
 // Every claim is a CONNECT pulse: no BLE scan runs from its grant until its CONNECT event, at most
 // BLE_VALVE_CLAIM_MS (BLE_VALVE_CLAIM_LR_MS while a leak response is pending), and the executor
-// follows it with a Coded recovery window (I2). A claim fails when it gives no link held for
-// CLAIM_HELD_MS: no link within its pulse, a refused connect, or a link lost sooner. Failures in a
-// row back the next claim off by k_claim_backoff_s[]; a link held CLAIM_HELD_MS resets the count.
-// While a leak response is pending (s_lr_trigger) no back-off applies: claims are spaced by the
-// executor's recovery window only, so a pended RMLEAK / CLOSE reaches a valve as soon as it is
-// heard (D5: shutoff delayed, never dropped). A claim cancelled by this module (a hold, a
-// DISCONNECT command, a target change) and a link it drops itself are no failure.
+// follows it with a Coded recovery window (I2). The executor also spaces claims by its pulse-rate
+// limit (I2b: 6-7 s of scanning between pulses, at most 12 s of pulses in any 60 s).
+// A claim fails when it gives no link: no link within its pulse, or a connect refused or not
+// started. Failures in a row back the next claim off by k_claim_backoff_s[]; a link held
+// CLAIM_HELD_MS resets the count. A link that reached CONNECT and is lost sooner (a 0x3E, a valve
+// power-cycled, a failed pairing, or a link this module drops) neither counts nor resets: the next
+// claim may follow at once, within I2b, as 2.1.3 relinked at once (plan §12 G6b and D6: relink
+// within 10 s after a 0x3E, with no CLOSE pended).
+// While a leak response is pending (s_lr_trigger) no back-off applies: claims are spaced by I2b
+// only, so a pended RMLEAK / CLOSE reaches a valve within about 6-7 s of scanning once it is heard
+// (D5: shutoff delayed, never dropped). A claim cancelled by this module (a hold, a DISCONNECT
+// command, a target change) is no failure.
 // Under s_mac_lock: written on the executor's task (grant), the host task (CONNECT, link loss)
 // and the command task (link held).
 #define CLAIM_HELD_MS  60000
@@ -1762,7 +1767,6 @@ static void reset_link_cache(void)
 // it came, with nothing to the hub or the health engine. Rescans when a link is wanted.
 static void link_closed(void)
 {
-    bool dropped_here = s_link_dropping;   // a link this module dropped is no claim failure
     s_link_dropping = false;   // the dropped link is gone (drop_link_after_failed_write())
     s_term_failed = false;
 
@@ -1832,19 +1836,19 @@ static void link_closed(void)
     if (discovery_timeout_timer) xTimerStop(discovery_timeout_timer, 0);
     if (security_retry_timer) xTimerStop(security_retry_timer, 0);
 
-    // The claim (WP6): a link lost before it was held CLAIM_HELD_MS is a failed claim, unless
-    // this module dropped it (failed writes, BLE_CMD_DISCONNECT, a target change). Nothing once
-    // the link was held (claim_held_poll() closed the claim).
-    claim_end(g_connect_requested && !dropped_here, "link lost before it was held 60 s");
+    // The claim (WP6): a link that reached CONNECT is no failed claim, however soon it is lost (see
+    // s_claim_fails), and resets no back-off either: only a link held CLAIM_HELD_MS does, and then
+    // claim_held_poll() has closed the claim already.
+    claim_end(false, NULL);
 
     if (g_connect_requested)
         request_hunt();
 }
 
 // ---- The claim policy's bookkeeping (WP6, see s_claim_open) ------------------------------------
-// A granted claim ended without a link held CLAIM_HELD_MS: `failed` counts it as one more failure
-// in a row and backs the next claim off; otherwise (cancelled by this module, a link it dropped)
-// it ends with no count. Nothing when no claim is open. Any task.
+// A granted claim ended without a link held CLAIM_HELD_MS: `failed` (no link at all) counts it as
+// one more failure in a row and backs the next claim off; otherwise (cancelled by this module, or a
+// link that reached CONNECT) it ends with no count. Nothing when no claim is open. Any task.
 static void claim_end(bool failed, const char *why)
 {
     TickType_t now = xTaskGetTickCount();
@@ -1861,7 +1865,7 @@ static void claim_end(bool failed, const char *why)
     }
     taskEXIT_CRITICAL(&s_mac_lock);
     if (counted)
-        ESP_LOGW(BLE_TAG, "[CLAIM] Valve claim failed (%s), %u in a row - next claim in %u s (at once while a leak response is pending)",
+        ESP_LOGW(BLE_TAG, "[CLAIM] Valve claim failed (%s), %u in a row - next claim in %u s (no back-off while a leak response is pending)",
                  why, (unsigned)n, (unsigned)k_claim_backoff_s[n - 1]);
 }
 
