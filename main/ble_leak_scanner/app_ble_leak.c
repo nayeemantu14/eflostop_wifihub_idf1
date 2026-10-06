@@ -1359,10 +1359,13 @@ static __attribute__((noinline)) void exec_summary(exec_t *x)
                        (unsigned)cnt[i], phy[i] == PHY_CODED ? 'C' : (phy[i] == PHY_1M ? 'M' : '?'));
     }
 
+    // No stack figure: uxTaskGetStackHighWaterMark() is linked nowhere else, and with
+    // CONFIG_FREERTOS_IN_IRAM it would land in IRAM (I10: DIRAM .text stays as it is). The bench's
+    // task dump (T6-11) measures this task's stack.
     unsigned duty = x->want_ms ? (unsigned)((uint64_t)x->on_ms * 100u / x->want_ms) : 100u;
     ESP_LOGI(BLE_LEAK_TAG, "[SUMMARY] modes N_CODED %lu s, N_MIXED %lu s, NORMAL_LR %lu s, hold hunt %lu s, paused %lu s; "
              "BLE scanning %lu.%lu of %lu.%lu s (%u %%); claims %u: pulses %lu.%lu s, recovery %lu.%lu s; "
-             "PHY changes %u; adverts %s; stack free %u B",
+             "PHY changes %u; adverts %s",
              (unsigned long)(x->mode_ms[MODE_N_CODED] / 1000), (unsigned long)(x->mode_ms[MODE_N_MIXED] / 1000),
              (unsigned long)(x->mode_ms[MODE_NORMAL_LR] / 1000), (unsigned long)(x->mode_ms[MODE_HOLD_HUNT] / 1000),
              (unsigned long)(x->mode_ms[MODE_PAUSED] / 1000),
@@ -1371,7 +1374,7 @@ static __attribute__((noinline)) void exec_summary(exec_t *x)
              (unsigned)x->claims,
              (unsigned long)(x->mode_ms[MODE_CLAIM] / 1000), (unsigned long)(x->mode_ms[MODE_CLAIM] % 1000 / 100),
              (unsigned long)(x->mode_ms[MODE_RECOVERY] / 1000), (unsigned long)(x->mode_ms[MODE_RECOVERY] % 1000 / 100),
-             (unsigned)flips, k ? adv : "none heard yet", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+             (unsigned)flips, k ? adv : "none heard yet");
 
     // The duty watchdog: judged on minutes with at least half of them meant for scanning.
     if (x->want_ms >= SUMMARY_MS / 2 && duty < DUTY_WARN_PCT) {
@@ -1514,7 +1517,7 @@ void app_ble_leak_init(void)
     // milliseconds. Its passes are short; whitelist reloads and log lines are as before. Stack
     // unchanged: the deepest frames are still the whitelist read and the log calls, and a NimBLE
     // connect (the claim) costs about what the scan start beside it does. The PHY table's NVS
-    // read and write run from a shallow frame; the summary line prints the stack left.
+    // read and write run from a shallow frame (about 1.5-2 KB deep with NVS's own frames).
     xTaskCreate(ble_leak_scan_task, "ble_leak_scan", 3072, NULL, 6, &ble_leak_task_handle);
 }
 
