@@ -1151,19 +1151,33 @@ static void scan_ended(exec_t *x, TickType_t now, TickType_t at, bool lost)
 }
 
 // The lines for a scanning row, when its first scan starts. The leak scan's start line is the one it
-// always printed (after a pause, at boot); NORMAL's rows print their own once per change. The
-// transient RECOVERY prints nothing; the AP modes' rows print nothing either (the radio policy
-// prints each mode, and their discovery rows alternate every period).
+// always printed (after a pause, at boot); NORMAL's rows print their own once per change, and its
+// backed-off valve hunt (N_CODED and N_HUNT in turn) one line for both. The transient RECOVERY
+// prints nothing; the AP modes' rows print nothing either (the radio policy prints each mode, and
+// their discovery rows alternate every period).
+#define ANNOUNCE_HUNT_BO 0xFE   // x->announced: NORMAL's backed-off valve hunt (no row has this id)
+_Static_assert(RP_ROW_COUNT < ANNOUNCE_HUNT_BO, "the backed-off hunt's announce key is no row's");
 static void exec_announce(exec_t *x)
 {
     uint8_t row = x->row;
-    if (row == x->announced || row == RP_ROW_RECOVERY) {
+    if (row == RP_ROW_RECOVERY) {
+        return;
+    }
+    uint8_t key = row;
+    if ((row == RP_ROW_N_CODED || row == RP_ROW_N_HUNT) && radio_policy_exec_hunt_backed_off()) {
+        key = ANNOUNCE_HUNT_BO;
+    }
+    if (key == x->announced) {
         return;
     }
     if (x->announced == RP_ROW_NONE) {
         ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
     }
-    if (row == RP_ROW_N_CODED) {
+    if (key == ANNOUNCE_HUNT_BO) {
+        unsigned m = radio_policy_row(RP_ROW_N_HUNT)->ms[1];
+        ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED with a valve hunt, backed off (valve unlinked 10 min or more): 1 s of 1M 20 %% + Coded 80 %%, and every %d periods %u.%02u s more on 1M, each next after 0-%d ms",
+                 RP_HUNT_EVERY_BO, m / 1000, (m % 1000) / 10, RP_JITTER_MS);
+    } else if (row == RP_ROW_N_CODED) {
         ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED: 1M 20 %% + Coded 80 %%, 1 s scans, each next after 0-%d ms",
                  RP_JITTER_MS);
     } else if (row == RP_ROW_N_HUNT) {
@@ -1176,7 +1190,7 @@ static void exec_announce(exec_t *x)
         ESP_LOGI(BLE_LEAK_TAG, "Scan mode NORMAL_LR (leak response, valve not linked): 1 s on 1M and 0.6 s on Coded in turn, each next after 0-%d ms",
                  RP_JITTER_MS);
     }
-    x->announced = row;
+    x->announced = key;
 }
 
 // I2's budget left now: RP_BLIND_MAX_MS from the end of the last Coded window. A Coded scan running

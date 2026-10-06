@@ -325,6 +325,13 @@ rp_mode_t radio_policy_exec_mode(const rp_ble_facts_t *f, TickType_t now);
  *  slot): the mode's sequence advances (discovery every Nth period). Call after exec_mode(). */
 uint8_t radio_policy_exec_row(TickType_t now, bool new_period);
 
+#define RP_HUNT_EVERY_BO 6   // NORMAL: B2's valve hunt (N_HUNT) every 6th period once backed off
+                             // (plan 4.2's discovery back-off), N_CODED in between
+
+/** NORMAL's valve hunt is backed off: its rows N_CODED and N_HUNT run in turn (the last
+ *  radio_policy_exec_row()'s answer; for the executor's scan-mode line). */
+bool radio_policy_exec_hunt_backed_off(void);
+
 /** A Wi-Fi pulse to grant now, or RP_PULSE_NONE. kinds: RP_PULSE_* bits (1u << kind) to consider.
  *  at_coded_end: right after a Coded window's own end (aligned kinds need it). budget_ms: I2's
  *  blind budget left now (RP_BLIND_MAX_MS minus the time since the last Coded window). coded_young:

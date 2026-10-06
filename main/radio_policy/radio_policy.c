@@ -267,6 +267,7 @@ typedef struct {
     uint8_t period_row;         // AP modes: the row of the current period
     uint16_t period_n;          // ... and the periods run with that row set (discovery cadence)
     bool backoff;               // discovery is backed off (for its line)
+    bool hunt_bo;               // NORMAL's valve hunt is backed off (N_CODED and N_HUNT in turn)
     bool i2b_noted;             // a claim waits for I2b: printed once per wait
     uint8_t pulse;              // the pulse running (rp_pulse_t)
     uint8_t last_pulse;         // the last pulse begun (rp_pulse_t): under a leak response one Wi-Fi
@@ -956,15 +957,23 @@ rp_mode_t radio_policy_exec_mode(const rp_ble_facts_t *f, TickType_t now)
 
 // Discovery backs off (every 6th / 7th period) once each of its reasons is 10 min old: a sensor's
 // PHY unknown since it was listed, the valve hunted unlinked. Never while an incident is latched.
+// With its line when it changes.
 static bool disc_backoff(TickType_t now)
 {
     const rp_ble_facts_t *f = &s_x.f;
-    if (s_lr_incident || (!f->any_unknown && !f->valve_hunt))
-        return false;
-    bool unknown_old = !f->any_unknown || f->listed_ms >= RP_DISC_BACKOFF_MS;
-    bool valve_old = !f->valve_hunt ||
-                     (s_x.hunt_since != 0 && (now - s_x.hunt_since) >= pdMS_TO_TICKS(RP_DISC_BACKOFF_MS));
-    return unknown_old && valve_old;
+    bool bo = false;
+    if (!s_lr_incident && (f->any_unknown || f->valve_hunt)) {
+        bool unknown_old = !f->any_unknown || f->listed_ms >= RP_DISC_BACKOFF_MS;
+        bool valve_old = !f->valve_hunt ||
+                         (s_x.hunt_since != 0 && (now - s_x.hunt_since) >= pdMS_TO_TICKS(RP_DISC_BACKOFF_MS));
+        bo = unknown_old && valve_old;
+    }
+    if (bo != s_x.backoff) {
+        s_x.backoff = bo;
+        ESP_LOGI(RP_TAG, "Discovery %s", bo ? "backed off: its reasons are 10 min old (a PHY unknown, the valve unlinked)"
+                                            : "at its full rate again");
+    }
+    return bo;
 }
 
 // An AP mode's row: the guard's, AP_K1M with a 1M share, or the plain row with its discovery row
@@ -994,11 +1003,6 @@ static uint8_t ap_row(TickType_t now, bool new_period, bool k1m)
     }
 #endif
     bool bo = disc_backoff(now);
-    if (bo != s_x.backoff) {
-        s_x.backoff = bo;
-        ESP_LOGI(RP_TAG, "Discovery %s", bo ? "backed off: its reasons are 10 min old (a PHY unknown, the valve unlinked)"
-                                            : "at its full rate again");
-    }
     unsigned every = serve ? (bo ? RP_DISC_EVERY_SERVE_BO : RP_DISC_EVERY_SERVE)
                            : (bo ? RP_DISC_EVERY_AP_BO : RP_DISC_EVERY_AP);
 #if CONFIG_APP_RADIO_LAB
@@ -1012,6 +1016,30 @@ static uint8_t ap_row(TickType_t now, bool new_period, bool k1m)
     } else if (new_period) {
         s_x.period_n++;
         s_x.period_row = (want_disc && (s_x.period_n % every) == 0) ? disc : plain;
+    }
+    return s_x.period_row;
+}
+
+// NORMAL's row with no 1M share: N_CODED, or N_HUNT while B2's valve hunt can find the valve, which
+// backs off as discovery does (plan 4.2): once the valve has been hunted unlinked for 10 min, and
+// no incident is latched, N_HUNT runs every RP_HUNT_EVERY_BO-th period only, N_CODED in between
+// (whose 1M share still hears a valve that comes back). Held for good, in the field's E3/E4 state
+// (a flat valve battery), the hunt's 1M time cost the other sensors (review M2, at p_loss 0.3:
+// p99.9 15.5 s against 4.0 s with the back-off; a 1 s wetting .82 against .89).
+static uint8_t normal_row(TickType_t now, bool new_period)
+{
+    s_x.hunt_bo = false;
+    if (!s_x.f.valve_slot)
+        return RP_ROW_N_CODED;
+    if (!disc_backoff(now))
+        return RP_ROW_N_HUNT;
+    s_x.hunt_bo = true;
+    if (s_x.period_row != RP_ROW_N_CODED && s_x.period_row != RP_ROW_N_HUNT) {
+        s_x.period_row = RP_ROW_N_CODED;
+        s_x.period_n = 0;
+    } else if (new_period) {
+        s_x.period_n++;
+        s_x.period_row = (s_x.period_n % RP_HUNT_EVERY_BO == 0) ? RP_ROW_N_HUNT : RP_ROW_N_CODED;
     }
     return s_x.period_row;
 }
@@ -1032,16 +1060,22 @@ uint8_t radio_policy_exec_row(TickType_t now, bool new_period)
     case RP_MODE_NORMAL:
         // B2: while the valve is wanted and unlinked outside the LR overlay, a 1M slot finds it in
         // about 1-3 s (N_MIXED's 1M slots do the same); not once it was heard, while its claim is
-        // due or backed off (ble_valve_hunt_slot_wanted()).
+        // due or backed off (ble_valve_hunt_slot_wanted()), and every 6th period only once the
+        // valve has been hunted 10 min (normal_row()).
         if (s_pinned)
             return RP_ROW_N_CODED;
-        return k1m ? RP_ROW_N_MIXED : (f->valve_slot ? RP_ROW_N_HUNT : RP_ROW_N_CODED);
+        return k1m ? RP_ROW_N_MIXED : normal_row(now, new_period);
     case RP_MODE_SERVE:
     case RP_MODE_AP_IDLE:
         return ap_row(now, new_period, k1m);
     default:
         return RP_ROW_NONE;   // PAUSED, BLE_IDLE
     }
+}
+
+bool radio_policy_exec_hunt_backed_off(void)
+{
+    return s_x.hunt_bo;
 }
 
 // A request the executor settles at once: its line and its count.
