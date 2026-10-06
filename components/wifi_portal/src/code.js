@@ -3,6 +3,9 @@
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
+  // monotonic (the phone's clock may be set back while the page is open), and far from 0, which
+  // the stamps below use for "long ago"
+  var now = window.performance && performance.now ? function () { return 1e9 + performance.now(); } : Date.now;
   function show(id, on) { $(id).style.display = on ? "" : "none"; }
 
   // Polls (?bg=1): status 950 ms while a Connect is decided, else 3.8 s in use; list 3.8 s in use
@@ -17,17 +20,21 @@
   var views = ["view-scan", "view-password", "view-manual", "view-connecting", "view-details"];
   var currentView = "view-scan";
   var networks = [];
-  var selected = null;      // {ssid, raw, chan, auth}; auth -1: typed in
-  var connecting = null;    // {ssid, since, seenPend, timedOut}
+  // selected: {ssid, raw, chan, auth}, auth -1 typed in; connecting: {ssid, since, seenPend, timedOut}
+  var selected = null;
+  var connecting = null;
   var lastStatus = {};
   var lostSeen = false;
   var lastListText = null;
-  var listSince = Date.now();
-  var lastActivity = Date.now();
+  var listSince = now();
+  var lastActivity = now();
   var idle = false;
   var lastStatusPoll = 0, lastListPoll = 0, pointerDownAt = 0, rescanUntil = 0;
-  var finished = 0;           // when Finish was answered
-  var resultSsid = null;      // the success view's network
+  // finished: when Finish was answered; a reply to a poll sent before epoch decides nothing;
+  // resultSsid: the success view's network
+  var finished = 0;
+  var pollSeq = 0, lastSeq = 0, epoch = 0;
+  var resultSsid = null;
 
   function showView(id) {
     currentView = id;
@@ -78,13 +85,14 @@
     var enc = pctUtf8(pwd);
     if (enc === null) return CONNECT_ERRORS.enc;
     var n = byteLen(enc);
-    if (auth === 1) return n <= 64 ? null : "The password is too long";   // WEP
+    // WEP
+    if (auth === 1) return n <= 64 ? null : "The password is too long";
     if (n === 64 && /^[0-9A-Fa-f]{64}$/.test(pwd)) return null;
     if (n < 8 || n > 63) return "Wi-Fi passwords have 8 to 63 characters (or 64 hex digits)";
     return null;
   }
 
-  // every request gives up after 8 s: a lost one must not hang the page
+  // every request, its body included, gives up after 8 s: a lost one must not hang the page
   function req(url, opts) {
     opts = opts || {};
     opts.cache = "no-store";
@@ -92,29 +100,37 @@
     if (ctl) opts.signal = ctl.signal;
     return new Promise(function (ok, fail) {
       var t = setTimeout(function () { if (ctl) ctl.abort(); fail(); }, 8000);
-      fetch(url, opts).then(function (r) { clearTimeout(t); ok(r); }, function () { clearTimeout(t); fail(); });
+      fetch(url, opts).then(function (r) {
+        return r.text().then(function (body) { clearTimeout(t); ok({ ok: r.ok, status: r.status, body: body }); });
+      }).then(null, function () { clearTimeout(t); fail(); });
     });
+  }
+
+  function parse(r) {
+    try { return JSON.parse(r.body); } catch (e) { return null; }
   }
 
   function getJSON(url) {
     return req(url).then(function (r) {
       if (!r.ok) throw 0;
-      return r.json();
+      return parse(r);
     });
   }
 
   function pageHidden() { return document.visibilityState === "hidden"; }
 
   // Status
-  // a reply to a poll sent before a Connect does not decide it
+  // replies older than the newest one, or than a Connect or its result, are dropped
   function pollStatus(bg) {
-    var sent = lastStatusPoll = Date.now();
+    var mine = ++pollSeq;
+    lastStatusPoll = now();
     return getJSON(bg ? "status.json?bg=1" : "status.json").then(function (d) {
-      if (!d || typeof d !== "object") return;
+      if (!d || typeof d !== "object" || mine <= epoch || mine < lastSeq) return;
+      lastSeq = mine;
       lastStatus = d;
       if (d.urc === 3 && d.ssid) lostSeen = true;
       if (connecting) {
-        if (sent >= connecting.since) connectProgress(d);
+        connectProgress(d);
       } else if (!finished) {
         if (resultSsid && !d.pend && !(d.urc === 0 && d.ssid === resultSsid)) toScan();
         updateBanners(d);
@@ -166,7 +182,7 @@
   function renderNetworks(list) {
     networks = list;
     if (!list.length) {
-      if (Date.now() - listSince >= EMPTY_LIST_MS) {
+      if (now() - listSince >= EMPTY_LIST_MS) {
         $("network-list").innerHTML = '<div class="scan-placeholder"><span>No networks found. ' +
           'Tap Rescan, or connect to a hidden network.</span></div>';
       }
@@ -186,11 +202,11 @@
 
   // Not redrawn just after a touch: a tap never lands on a moved row.
   function refreshList(bg) {
-    lastListPoll = Date.now();
+    lastListPoll = now();
     return getJSON(bg ? "ap.json?bg=1" : "ap.json").then(function (data) {
       if (!Array.isArray(data)) return;
       var text = JSON.stringify(data);
-      if ((text === lastListText && data.length) || Date.now() - pointerDownAt < 700) return;
+      if ((text === lastListText && data.length) || now() - pointerDownAt < 700) return;
       lastListText = text;
       data.sort(function (a, b) { return b.rssi - a.rssi; });
       renderNetworks(data);
@@ -198,9 +214,9 @@
   }
 
   function holdRescan(ms) {
-    rescanUntil = Date.now() + ms;
+    rescanUntil = now() + ms;
     (function count() {
-      var left = Math.ceil((rescanUntil - Date.now()) / 1000);
+      var left = Math.ceil((rescanUntil - now()) / 1000);
       $("btn-rescan").disabled = left > 0;
       $("rescan-label").textContent = left > 0 ? "Rescan (" + left + " s)" : "Rescan";
       if (left > 0) setTimeout(count, 1000);
@@ -208,13 +224,13 @@
   }
 
   function rescan() {
-    if (Date.now() < rescanUntil) return;
+    if (now() < rescanUntil) return;
     $("btn-rescan").disabled = true;
     req("scan.json", { method: "POST" }).then(function (r) {
-      return r.ok ? r.json() : null;
+      return r.ok ? parse(r) : null;
     }).then(function (j) {
       if (j && j.scan === 1) {
-        listSince = Date.now();
+        listSince = now();
         setTimeout(function () { refreshList(false); }, 3000);
         setTimeout(function () { refreshList(false); }, 6500);
         holdRescan(RESCAN_GAP_MS);
@@ -234,8 +250,8 @@
     return req("connect.json", { method: "POST", headers: h }).then(function (r) {
       if (r.ok) return { ok: true };
       if (r.status !== 400) return { err: "busy" };
-      return r.json().then(function (j) { return { err: (j && j.err) || "enc" }; },
-        function () { return { err: "enc" }; });
+      var j = parse(r);
+      return { err: (j && j.err) || "enc" };
     }, function () { return { lost: true }; });
   }
 
@@ -270,7 +286,8 @@
   }
 
   function startConnecting(ssid, resumed) {
-    connecting = { ssid: ssid, since: Date.now(), seenPend: resumed, timedOut: false };
+    connecting = { ssid: ssid, since: now(), seenPend: resumed, timedOut: false };
+    epoch = pollSeq;
     $("connecting-ssid").textContent = ssid;
     showState("loading");
     lastStatusPoll = 0;
@@ -300,6 +317,7 @@
   function showSuccess(ssid) {
     connecting = null;
     $("success-ssid").textContent = resultSsid = ssid;
+    epoch = pollSeq;
     showState("success");
   }
 
@@ -338,7 +356,7 @@
   }
 
   function finishedView() {
-    finished = Date.now();
+    finished = now();
     connecting = null;
     showState("finished");
     show("btn-done", false);
@@ -358,7 +376,7 @@
 
   function noteActivity() {
     if (pageHidden()) return;
-    lastActivity = Date.now();
+    lastActivity = now();
     if (idle) {
       idle = false;
       $("idle-hint").style.display = "none";
@@ -367,24 +385,28 @@
   }
 
   function tick() {
-    var now = Date.now();
-    if (pageHidden() || now - finished < 15000) return;
-    if (finished) {   // the setup network is still up: back to the page
-      finished = 0;
-      toScan();
+    var t = now();
+    if (pageHidden()) return;
+    if (finished) {
+      // 15 s on, the setup network still answers (its stop did not come): back to the page
+      if (t - finished >= 15000 && t - lastStatusPoll >= POLL_MS) {
+        lastStatusPoll = t;
+        getJSON("status.json?bg=1").then(function () { finished = 0; toScan(); }, function () {});
+      }
+      return;
     }
-    if (!idle && now - lastActivity >= IDLE_MS) {
+    if (!idle && t - lastActivity >= IDLE_MS) {
       idle = true;
       $("idle-hint").style.display = "";
     }
     if (connecting) {
-      if (!connecting.timedOut && now - connecting.since >= CONNECT_TIMEOUT_MS) connectTimeout();
-      if (now - lastStatusPoll >= (connecting.timedOut ? POLL_MS : POLL_CONNECT_MS)) pollStatus(true);
+      if (!connecting.timedOut && t - connecting.since >= CONNECT_TIMEOUT_MS) connectTimeout();
+      if (t - lastStatusPoll >= (connecting.timedOut ? POLL_MS : POLL_CONNECT_MS)) pollStatus(true);
       return;
     }
     if (idle) return;
-    if (now - lastStatusPoll >= POLL_MS) pollStatus(true);
-    if (now - lastListPoll >= POLL_MS) refreshList(true);
+    if (t - lastStatusPoll >= POLL_MS) pollStatus(true);
+    if (t - lastListPoll >= POLL_MS) refreshList(true);
   }
 
   function clearErr(input, errEl) {
@@ -414,7 +436,8 @@
   function chooseNetwork(ap) {
     var sel = { ssid: ap.ssid, raw: ap.raw === 1, chan: ap.chan | 0, auth: ap.auth | 0 };
     if (sel.auth !== 0) return openPassword(sel);
-    performConnect(sel, "", null, function (msg) {   // open
+    // an open network: no password
+    performConnect(sel, "", null, function (msg) {
       selected = sel;
       $("fail-title").textContent = "Connection failed";
       $("fail-text").textContent = msg;
@@ -454,7 +477,7 @@
     ["pointerdown", "touchstart", "mousedown", "keydown", "input", "wheel", "scroll", "focusin"]
       .forEach(function (type, i) {
         document.addEventListener(type, function () {
-          if (i < 3) pointerDownAt = Date.now();
+          if (i < 3) pointerDownAt = now();
           noteActivity();
         }, { capture: true, passive: true });
       });
@@ -518,7 +541,7 @@
       if (d.pend) startConnecting(d.pend, true);
       else if (d.ssid && d.urc === 0) showSuccess(d.ssid);
       else updateBanners(d);
-      listSince = Date.now();
+      listSince = now();
       refreshList(false);
       setInterval(tick, 250);
     });
