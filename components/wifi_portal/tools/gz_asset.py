@@ -12,11 +12,15 @@ time or the folder of a build.
 
 A .js source loses its whole-line comments first (strip_js_comments()): they document the page
 in the tree but cost the phone about 0.6 KB gzipped. Only lines that are nothing but a comment
-go; code is never touched. The pass is line-based, so it refuses (and fails the build on) what
-a line-based pass cannot be sure of: a template literal (a backtick), a line continued with a
-backslash, a "/*" in a line that is kept (a block comment sharing a line with code, or one in a
-string), or a line break JavaScript sees that this pass does not (a lone CR, U+2028, U+2029).
-Lines are split on LF only. Every other asset is gzipped as it is.
+go; code is never touched. Its blank lines go too, and the lines it keeps lose their
+indentation, their trailing spaces and the CR of a CRLF (about 0.2 KB gzipped, and a code.js
+checked out with CRLF embeds the same bytes as one with LF): with the refusals below no token
+spans two lines, so none of it is significant, and every line break between two tokens stays
+(automatic semicolon insertion reads them). The pass is line-based, so it refuses (and fails the build on) what a line-based
+pass cannot be sure of: a template literal (a backtick), a line continued with a backslash, a
+"/*" in a line that is kept (a block comment sharing a line with code, or one in a string), or
+a line break JavaScript sees that this pass does not (a lone CR, U+2028, U+2029). Lines are
+split on LF only. Every other asset is gzipped as it is.
 
 It fails loudly, never leaving a stale or partial output behind: the old output is removed
 first; the new one is written to "<output>.tmp", read back, decompressed and compared with what
@@ -39,8 +43,10 @@ SEND_BUFFER_BYTES = 5760
 
 def strip_js_comments(data):
     """Leaves out the lines of a JavaScript source that hold only a comment: "// ..." lines, and
-    "/* ... */" blocks that start a line and end one. Returns (bytes, lines left out). Raises
-    ValueError for what a line-based pass cannot be sure of (see the module's docstring)."""
+    "/* ... */" blocks that start a line and end one; then its blank lines, and the spaces, tabs
+    and CR at either end of the lines it keeps. Returns (bytes, comment lines left out, blank lines
+    left out). Raises ValueError for what a line-based pass cannot be sure of (see the module's
+    docstring)."""
     text = data.decode("utf-8")
     if "`" in text:
         raise ValueError("a backtick (template literal): the comment pass is line-based")
@@ -48,6 +54,7 @@ def strip_js_comments(data):
         raise ValueError("a line break other than LF or CRLF (a lone CR, U+2028 or U+2029)")
     out = []
     dropped = 0
+    blank = 0
     in_block = False
     for line in text.split("\n"):
         body = line.rstrip("\r")
@@ -74,10 +81,13 @@ def strip_js_comments(data):
             continue
         if "/*" in body:
             raise ValueError("a \"/*\" in a line of code (a block comment there, or in a string)")
-        out.append(line)
+        if not stripped:
+            blank += 1
+            continue
+        out.append(stripped)
     if in_block:
         raise ValueError("a block comment that never ends")
-    return "\n".join(out).encode("utf-8"), dropped
+    return "\n".join(out).encode("utf-8"), dropped, blank
 
 
 def gzip_bytes(data):
@@ -102,8 +112,8 @@ def main(argv):
         if not data:
             raise ValueError("the source is empty")
         if src.lower().endswith(".js"):
-            data, dropped = strip_js_comments(data)
-            note = " (%d comment lines left out)" % dropped
+            data, dropped, blank = strip_js_comments(data)
+            note = " (%d comment lines left out, %d blank lines, the others trimmed)" % (dropped, blank)
         packed = gzip_bytes(data)
         if gzip.decompress(packed) != data:
             raise ValueError("the gzipped bytes do not decompress to the source")
