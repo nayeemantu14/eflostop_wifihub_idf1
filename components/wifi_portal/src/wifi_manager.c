@@ -2598,15 +2598,20 @@ void wifi_manager( void * pvParameters ){
 				retries = 0;
 
 				/* LOCAL PATCH (2.1.4 C8): an IP not to keep is left now, unless a candidate waits
-				 * (it leaves this link for its own, below) or a disconnect of ours is under way */
-				bool left = leave && abort_tick == 0 && wifi_manager_cand_state() != WM_CAND_WAITING &&
-						wifi_manager_leave_link();
+				 * (it leaves this link for its own, below) or a disconnect of ours is under way (it
+				 * ends this link): the link is being left either way, unless even our leave could
+				 * not start */
+				bool leaving = false;
+				if(leave){
+					leaving = abort_tick != 0 || wifi_manager_cand_state() == WM_CAND_WAITING ||
+							wifi_manager_leave_link();
+				}
 
 				/* refresh the status with the new IP (LOCAL PATCH 2.1.4 C8: and the candidate whose
 				 * attempt got it ends, in the same lock; on a network not committed, its own SSID).
 				 * Not for a link being left: the result decided before it (a forget, a failure)
 				 * stands, and the page never reads this IP's network as connected */
-				if(!left){
+				if(!leaving){
 					wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_ACTIVE);
 					if(on_uncommitted){
 						wifi_manager_status_driver_ssid();
@@ -2622,7 +2627,7 @@ void wifi_manager( void * pvParameters ){
 				 * We check first that it's actually running because in case of a boot and restore connection
 				 * the AP is not even started to begin with.
 				 */
-				if((uxBits & WIFI_MANAGER_AP_STARTED_BIT) && !left){	/* LOCAL PATCH (2.1.4 C8): not for a link being left */
+				if((uxBits & WIFI_MANAGER_AP_STARTED_BIT) && !leaving){	/* LOCAL PATCH (2.1.4 C8): not for a link being left */
 					TickType_t t = pdMS_TO_TICKS( WIFI_MANAGER_SHUTDOWN_AP_TIMER );
 
 					/* if for whatever reason user configured the shutdown timer to be less than 1 tick, the AP is stopped straight away */
