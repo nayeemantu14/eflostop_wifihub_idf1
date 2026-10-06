@@ -857,8 +857,14 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * The GAP handler only stores and notifies (DISC_COMPLETE). The task is woken by it, by the valve
  * module (app_ble_leak_kick()) and at least every EXEC_POLL_MS. A start that fails is retried
  * SCAN_RETRY_MS later. Priority 6 (was 4), so the next scan starts within milliseconds of an
- * edge; its slow chores (whitelist reload, PHY save, summary) run right after a scan starts, while
- * the controller scans on, so they do not lengthen the gaps between scans.
+ * edge. Its slow chores (whitelist reload, PHY save, summary) run right after a scan of at least
+ * CHORES_MIN_SCAN_MS starts, while the controller scans on: never after NORMAL_LR's 0.6 s Coded
+ * scan. They take milliseconds. One that waits longer than the scan runs (the whitelist's
+ * provisioning read waits up to 1 s while that mutex is held; an NVS write can meet a flash erase)
+ * still starts the next scan late, which widens that one gap (I1 for N_MIXED and NORMAL_LR, whose
+ * slots leave about 0.2 s of slack); a timed provisioning read would remove it. No claim is granted
+ * after such a late pass: the claim's freshness counts from the scan's end that the GAP handler
+ * stamped, so the pulse still follows its Coded scan at once (I2).
  * --------------------------------------------------------- */
 
 /* The sensor-firmware timings the profiles depend on (FW 1.1.0, unchanged in this release; plan
@@ -904,6 +910,7 @@ _Static_assert(BLE_VALVE_CLAIM_LR_MS <= I2B_BLIND_MAX_MS, "I2b: a pulse fits the
 #define SCAN_EARLY_MS       100     // an end this much before a scan's duration is a stopped scan's late end
 #define SCAN_OVERDUE_MS     1000    // a scan with no end this long after its duration is stopped and restarted
 #define CHORES_LATE_MS      5000    // the executor's slow chores run at least this often
+#define CHORES_MIN_SCAN_MS  1000    // ... and otherwise only right after a scan this long starts
 #define SUMMARY_MS          60000   // the summary line's period
 #define DUTY_WARN_PCT       80      // the duty watchdog: BLE scanning below this share of the
 #define DUTY_WARN_RUNS      2       // ... expected time in this many summaries in a row warns
@@ -985,7 +992,7 @@ typedef struct {
     bool coded_last;            // the last scan that ended covered Coded
     bool recovery;              // a claim pulse ended: RECOVERY is due
     bool claim_inflight;        // a granted claim's connect may still be in flight
-    bool just_started;          // this pass started a timed scan: time for the slow chores
+    bool just_started;          // this pass started a scan of CHORES_MIN_SCAN_MS or more: chores
     bool paused;                // the window or a radio hold has the radio
     bool portal_paused;         // ... the window itself, for its log lines
     bool i2b_noted;             // a claim waits for I2b: logged once per wait
@@ -1415,7 +1422,7 @@ static TickType_t executor_pass(exec_t *x)
             x->slot = slot;
             x->slot_mode = mode;
             x->slot_ended = false;
-            x->just_started = (k_scan_geo[geo].dur != 0);
+            x->just_started = ((uint32_t)k_scan_geo[geo].dur * 10u >= CHORES_MIN_SCAN_MS);
             if (x->start_fails > 0) {
                 ESP_LOGI(BLE_LEAK_TAG, "Scan started after %u failed attempt(s)", (unsigned)x->start_fails);
                 x->start_fails = 0;
@@ -1589,10 +1596,10 @@ static void ble_leak_scan_task(void *param)
     for (;;) {
         TickType_t wait = executor_pass(&x);
 
-        // The slow chores: right after a timed scan starts (the controller scans on meanwhile,
-        // so a provisioning read that waits, or a flash write, does not widen the gap to the next
-        // scan), while the mode scans nothing, or once they are CHORES_LATE_MS overdue (scan
-        // starts that keep failing). Never in the dither between two scans.
+        // The slow chores: right after a scan of CHORES_MIN_SCAN_MS or more starts (the controller
+        // scans on meanwhile; see the executor's notes for a chore that outlasts it), while the
+        // mode scans nothing, or once they are CHORES_LATE_MS overdue (scan starts that keep
+        // failing). Never in the dither between two scans.
         TickType_t tnow = xTaskGetTickCount();
         if (x.just_started || k_prof[x.mode].n == 0 ||
             (tnow - last_chores) >= pdMS_TO_TICKS(CHORES_LATE_MS)) {
