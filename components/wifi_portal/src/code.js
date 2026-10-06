@@ -35,6 +35,8 @@
   var finished = 0;
   var pollSeq = 0, lastSeq = 0, epoch = 0;
   var resultSsid = null;
+  // one request of each kind at a time
+  var statusBusy = false, listBusy = false, sending = false;
 
   function showView(id) {
     currentView = id;
@@ -121,10 +123,17 @@
 
   // Status
   // replies older than the newest one, or than a Connect or its result, are dropped
+  // the next poll is timed from the reply, unless something asked for one at once (stamp 0)
+  function statusDone() {
+    statusBusy = false;
+    if (lastStatusPoll) lastStatusPoll = now();
+  }
   function pollStatus(bg) {
     var mine = ++pollSeq;
+    statusBusy = true;
     lastStatusPoll = now();
     return getJSON(bg ? "status.json?bg=1" : "status.json").then(function (d) {
+      statusDone();
       if (!d || typeof d !== "object" || mine <= epoch || mine < lastSeq) return;
       lastSeq = mine;
       lastStatus = d;
@@ -135,7 +144,7 @@
         if (resultSsid && !d.pend && !(d.urc === 0 && d.ssid === resultSsid)) toScan();
         updateBanners(d);
       }
-    }, function () {});
+    }, statusDone);
   }
 
   // urc 3: the router lost; urc 1: the last Connect failed (maybe long ago: a banner, not a view)
@@ -201,16 +210,23 @@
   }
 
   // Not redrawn just after a touch: a tap never lands on a moved row.
+  function listDone() {
+    listBusy = false;
+    if (lastListPoll) lastListPoll = now();
+  }
   function refreshList(bg) {
+    if (listBusy) return;
+    listBusy = true;
     lastListPoll = now();
-    return getJSON(bg ? "ap.json?bg=1" : "ap.json").then(function (data) {
+    getJSON(bg ? "ap.json?bg=1" : "ap.json").then(function (data) {
+      listDone();
       if (!Array.isArray(data)) return;
       var text = JSON.stringify(data);
       if ((text === lastListText && data.length) || now() - pointerDownAt < 700) return;
       lastListText = text;
       data.sort(function (a, b) { return b.rssi - a.rssi; });
       renderNetworks(data);
-    }, function () {});
+    }, listDone);
   }
 
   function holdRescan(ms) {
@@ -262,9 +278,13 @@
     enc: "A character cannot be sent"
   };
 
+  // one at a time: a second tap (an open network's row has no button to disable) sends nothing
   function performConnect(sel, pwd, button, onError) {
+    if (sending) return;
+    sending = true;
     if (button) button.disabled = true;
     sendConnect(sel, pwd).then(function (res) {
+      sending = false;
       if (button) button.disabled = false;
       if (res.ok || res.lost) {
         selected = sel;
@@ -401,11 +421,11 @@
     }
     if (connecting) {
       if (!connecting.timedOut && t - connecting.since >= CONNECT_TIMEOUT_MS) connectTimeout();
-      if (t - lastStatusPoll >= (connecting.timedOut ? POLL_MS : POLL_CONNECT_MS)) pollStatus(true);
+      if (!statusBusy && t - lastStatusPoll >= (connecting.timedOut ? POLL_MS : POLL_CONNECT_MS)) pollStatus(true);
       return;
     }
     if (idle) return;
-    if (t - lastStatusPoll >= POLL_MS) pollStatus(true);
+    if (!statusBusy && t - lastStatusPoll >= POLL_MS) pollStatus(true);
     if (t - lastListPoll >= POLL_MS) refreshList(true);
   }
 
