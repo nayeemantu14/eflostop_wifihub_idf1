@@ -1,0 +1,29 @@
+# 2.1.4 WP9 line W7 (plan section 8, D14): mbedTLS frees its configuration data during the handshake.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w7_mbedtls_free_config_data.defaults" build
+# Never put this line in the project's sdkconfig. After the gate passes it moves to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# The row's other half, BT_NIMBLE_LOG_LEVEL_WARNING=y, shipped in 29f400b (decision B4) and
+#   is in sdkconfig.defaults already.
+# Frees, on this hub: nothing measurable. With it, MBEDTLS_DYNAMIC_FREE_CA_CERT turns on too
+#   (default y), and the dynamic-buffer port frees the CA chain after the server's certificate and
+#   the client key, certificate and DHM data after CertificateVerify. But the IoT Hub and DPS
+#   clients both verify with the certificate bundle (esp_crt_bundle_attach), whose static dummy CA
+#   esp_mbedtls_free_cacert() leaves alone, there is no client certificate (SAS keys), and DHM is
+#   compiled out (MBEDTLS_DHM_C off).
+# Estimate: 0 B of heap; flash at most about +160 B (code +214 B, .rodata -57 B over the 24
+#   mbedTLS, port and esp-tls sources, scratch-compiled). Plan section 8 ships a line only if it
+#   pays: this one is expected not to. Recommendation: do not ship; bench it only to confirm the 0.
+# Gate (G-M), if benched: TLS and DPS regression (first commissioning with DPS, the router pulled
+#   mid-DPS; 10 MQTT reconnects; a SAS renewal; a full snapshot), no esp-tls or mbedTLS error, and
+#   the heap delta recorded. The global CA store would now refuse to work (esp_tls_mbedtls.c line
+#   1159); the hub does not use it.
+# Verified in ESP-IDF 5.5.1: bool, depends on MBEDTLS_DYNAMIC_BUFFER, which sdkconfig.defaults
+#   sets (components/mbedtls/Kconfig line 117); kconfgen adds MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+#   with it and gives no warning; the 24 sources compile with no warning, and the project's 32
+#   objects are byte-identical.
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y

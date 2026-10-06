@@ -1,0 +1,13 @@
+diff --git a/main/iothub/app_iothub.c b/main/iothub/app_iothub.c
+index 32c56cb..bdde4d5 100644
+--- a/main/iothub/app_iothub.c
++++ b/main/iothub/app_iothub.c
+@@ -3419,7 +3419,7 @@ static __attribute__((noinline)) void qset_add_member(QueueSetHandle_t set, Queu
+ // any live message goes into that session. Woken by every post (a task notification), and at
+ // least every CLOUD_TX_POLL_MS.
+ // ---------------------------------------------------------------------------
+-#define CLOUD_TX_STACK_BYTES        5120
++#define CLOUD_TX_STACK_BYTES        4096
+ #define CLOUD_TX_PRIORITY           3
+ #define CLOUD_TX_POLL_MS            5000
+ // How long live messages wait, after a session's replay, for the lifecycle iothub_task builds
