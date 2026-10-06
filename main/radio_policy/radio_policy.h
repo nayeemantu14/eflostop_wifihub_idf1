@@ -73,6 +73,9 @@ typedef enum {
                                        // budget (B2); exactly this while a leak response is pending
                                        // (plan 4.4)
 #define RP_PULSE_MIN_MS          300   // a SUBMIT or JOIN with less budget left than this is not run
+#define RP_UNALIGNED_MIN_MS     1500   // PROVISIONAL: a SUBMIT or JOIN goes into a Coded scan that
+                                       // has not covered RP_L_MS yet only with this much budget
+                                       // left; with less it waits for the scan to cover it (0.55 s)
 #define RP_GRANT_WAIT_MS        2000   // a RETRY or LIST not granted this soon is refused: its
                                        // requester goes on without a pulse (plan 4.4's grant
                                        // protocol); a JOIN, which has no requester, waits
@@ -339,8 +342,9 @@ bool radio_policy_exec_hunt_backed_off(void);
 /** A Wi-Fi pulse to grant now, or RP_PULSE_NONE. kinds: RP_PULSE_* bits (1u << kind) to consider.
  *  at_coded_end: right after a Coded window's own end (aligned kinds need it). budget_ms: I2's
  *  blind budget left now (RP_BLIND_MAX_MS minus the time since the last Coded window). coded_young:
- *  a Coded scan runs that has not yet covered RP_L_MS (unaligned kinds wait for it). claim_due: the
- *  valve's claim is due (ble_valve_claim_wanted()); under a leak response it goes first. */
+ *  a Coded scan runs that has not yet covered RP_L_MS (it does not count; unaligned kinds wait for
+ *  it when budget_ms is under RP_UNALIGNED_MIN_MS). claim_due: the valve's claim is due
+ *  (ble_valve_claim_wanted()); under a leak response it goes first. */
 rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
                                         uint32_t budget_ms, bool coded_young, bool claim_due,
                                         uint32_t *len_ms);

@@ -870,8 +870,10 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * Pulses (radio_policy_exec_wifi_grant(), radio_policy_exec_connect_len()): each is at most the
  * blind budget, 2.8 s from the end of the last Coded window (I2), and the policy's I2b spacing and
  * per-minute budget hold every kind (SUBMIT is exempt from the spacing only). A SUBMIT or a JOIN
- * stops the running scan at once, once a Coded scan has covered RP_L_MS (its window then counts);
- * a RETRY or LIST is granted only right after a Coded window's own end, and a CONNECT only right
+ * stops the running scan at once (a Coded scan that has not covered RP_L_MS does not count, and the
+ * pulse is clipped to the budget from the last one that did; with less than RP_UNALIGNED_MIN_MS of
+ * it left the scan covers its interval first); a RETRY or LIST is granted only right after a Coded
+ * window's own end, and a CONNECT only right
  * after a scan's own end, each when its whole length fits the budget. While a leak response is
  * pending the valve's claim goes first (its RMLEAK / CLOSE), then SUBMIT, JOIN, RETRY, LIST, and a
  * claim that is due holds them back until it has run (one Wi-Fi pulse may go between two claims);
@@ -1089,8 +1091,9 @@ static int scan_start(uint8_t kind, uint16_t ms, uint8_t gen)
 // Stops our scan before its end (executor task only): the row then starts again at its Coded
 // window, and nothing starts before SCAN_SETTLE_MS (its own end may already be queued, see the
 // executor's notes). A Coded scan that covered an advert interval counts as a Coded window ending
-// now (the blind budget, I2). A cancel the controller refuses leaves it marked running, and the next
-// pass tries again.
+// now (the blind budget, I2); one that did not counts for nothing, and the I2 monitor times the
+// blind span from the last one that did. A cancel the controller refuses leaves it marked running,
+// and the next pass tries again.
 static void scan_stop(exec_t *x, TickType_t now)
 {
     if (!x->scan_on) {
@@ -1101,8 +1104,10 @@ static void scan_stop(exec_t *x, TickType_t now)
         ESP_LOGW(BLE_LEAK_TAG, "Scan cancel failed: %d, will retry", rc);
         return;
     }
-    if (kind_coded(x->kind) && (now - x->started_at) >= L_TICKS) {
-        x->coded_end_at = now ? now : 1;
+    if (kind_coded(x->kind)) {
+        if ((now - x->started_at) >= L_TICKS) {
+            x->coded_end_at = now ? now : 1;
+        }
         x->gap_from = x->coded_end_at;
     }
     x->scan_on = false;

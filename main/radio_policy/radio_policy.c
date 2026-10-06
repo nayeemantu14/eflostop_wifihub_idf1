@@ -1174,6 +1174,12 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
     // and I7's join_settling() is not held true for nothing. Then the first in the order that may
     // run now is granted, or waits; nothing of a lower priority goes ahead of it.
     rp_pulse_t waiting = RP_PULSE_NONE;
+    // SUBMIT and JOIN are unaligned (plan 4.4: the lead-in is one executor wake): granted also into
+    // a Coded scan that has not yet covered RP_L_MS (the executor does not count it, and budget_ms
+    // runs from the last window that did), so the phone's first frames after its join or the
+    // router's after a Connect are not lost in up to 0.55 s of Coded scan. Only with less than
+    // RP_UNALIGNED_MIN_MS of budget left does the scan cover its interval first (then 2.8 s).
+    bool unaligned = !coded_young || budget_ms >= RP_UNALIGNED_MIN_MS;
     for (size_t o = 0; o < sizeof(k_order); o++) {
         rp_pulse_t k = (rp_pulse_t)k_order[o];
         if (!(kinds & (1u << k)))
@@ -1267,11 +1273,11 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             // rather than being refused, and under a leak response for the valve's claim (above):
             // Connects, a stranger's included, delay its RMLEAK / CLOSE by at most one pulse and
             // the claim's own spacing each time, and never hold it off.
-            if (!coded_young && !claim_first)
+            if (unaligned && !claim_first)
                 len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
             break;
         case RP_PULSE_JOIN:
-            if (s_x.prof_ms >= s_x.space_ms && !coded_young && !claim_first)
+            if (s_x.prof_ms >= s_x.space_ms && unaligned && !claim_first)
                 len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);   // clipped to I2b's room
 #if CONFIG_APP_RADIO_LAB
             if (lab_k1)
