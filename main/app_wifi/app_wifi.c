@@ -329,6 +329,9 @@ static bool portal_finish(void)
  * task (wifi_manager_set_scan_gate()). It holds no lock there. The gate:
  *   - refuses the scan below LIST_DMA_MIN_FREE of internal DMA-capable heap (a scan's records and
  *     the driver's buffers come from it; plan 4.4), with a W line at most once a minute;
+ *   - refuses it while a STA connect attempt is in flight (the router retry's, a Connect's): the
+ *     driver refuses a scan while the STA connects (ESP_ERR_WIFI_STATE), and a pulse asked for one
+ *     that cannot start would only make this task wait and restart the pulse spacing;
  *   - refuses it while a station joins the SoftAP (plan I7: one joined less than 10 s ago with no
  *     lease yet, or its join assist), before it asks and again after the wait (a join meanwhile),
  *     so the SoftAP stays on its channel for that station's DHCP;
@@ -357,6 +360,11 @@ static bool list_scan_gate(void)
             ESP_LOGW(WIFI_TAG, "Wi-Fi list scan not started: internal DMA free %u B (needs %u) - the page asks again later",
                      (unsigned)dma, (unsigned)LIST_DMA_MIN_FREE);
         }
+        return false;
+    }
+    if (s_attempt_in_flight)
+    {
+        ESP_LOGI(WIFI_TAG, "Wi-Fi list scan not started: a connect attempt is in flight - the page asks again later");
         return false;
     }
     rp_grant_t g = RP_GRANT_IDLE;
