@@ -36,7 +36,9 @@ WP2b, WP2c, WP2d and WP2e are built and benched together as Build checkpoint 6, 
 §15h-§15p). WP3 puts the seven build settings the release depends on into the tracked defaults with compile
 checks, and closes the busy-lock and twin items left from WP2d and WP2e; WP4 rebuilds the setup page and its
 server; WP5 and WP6 give BLE scanning one owner and a de-locked normal scan, and bound the valve's claims
-(HANDOFF §15q-§15s). They are built and benched as Build checkpoint 7 (HANDOFF §15t).
+(HANDOFF §15q-§15s). WP7 adds the G1 lab image, and WP8 puts the radio policy in production: BLE leak scanning
+keeps running in the setup portal, and every Wi-Fi need gets a short, bounded BLE pause (HANDOFF §15u). They are
+all built and benched as Build checkpoint 7, of `52ef6a2` (HANDOFF §15t), then G1 on the lab image (§15v).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -405,9 +407,10 @@ server; WP5 and WP6 give BLE scanning one owner and a de-locked normal scan, and
     connect), at most 4 stations on the setup SoftAP (unchanged) and the setup SoftAP on channel 11
     (`CONFIG_DEFAULT_AP_CHANNEL`, 1 before, D7: clear of the BLE advertising channels 37 and 38).
   - `main.c` stops the build with an `#error` when the local `sdkconfig` (untracked) disagrees. **An existing
-    `sdkconfig` must be regenerated once** (delete the eight affected lines, `idf.py reconfigure`; HANDOFF §15t),
-    or six of the guards stop the build. Do not delete `sdkconfig` itself: `sdkconfig.defaults` does not hold the
-    target, the flash size, the partition table or the BT settings.
+    `sdkconfig` must be regenerated once** (delete the affected lines, fourteen since WP8's NimBLE line,
+    `idf.py reconfigure`; HANDOFF §15t), or the guards stop the build (seven since WP8). Do not delete
+    `sdkconfig` itself: `sdkconfig.defaults` does not hold the target, the flash size, the partition table or the
+    BT settings.
   - Channel 11 applies to every hub at its next boot, commissioned or not (the Wi-Fi manager configures the
     SoftAP before it reads its stored settings). Memory: the re-attempt tables, 2,008 B of static RAM, are gone;
     flash about −1.8 KB; while connected, about 4 KB more free heap without the stored certificate (the plan's
@@ -483,7 +486,7 @@ server; WP5 and WP6 give BLE scanning one owner and a de-locked normal scan, and
     no IRAM, no new task, timer or queue.
   - **Known (HANDOFF §15r):** "Other Network" after a success can start a switch late in the SoftAP's 60 s tail
     (PH-7, the user's decision); Enterprise and OWE networks are not marked in the list; a switch during the
-    first-setup tail resumes BLE scanning (by design until WP8).
+    first-setup tail resumes BLE scanning (by design until WP8; since WP8 BLE scans throughout the portal).
 - **One BLE scan owner, a de-locked normal scan, bounded valve claims and remembered sensor PHYs (WP3's valve
   items, WP5, WP6).** Commits `4e22719` … `2be0d4f` and review fixes `3c65297` … `cc2a09b`
   (`main/ble_leak_scanner`, `main/ble_valve`); details in HANDOFF §15s. Reviewed, fixed, and voted 3/3 SHIP by the
@@ -511,15 +514,81 @@ server; WP5 and WP6 give BLE scanning one owner and a de-locked normal scan, and
     NimBLE's own log is capped at WARN (one INFO line per scan start otherwise). `BLE_VALVE: [HOST] NimBLE host
     task started`, which the production tool matches, is unchanged.
   - Memory (objects): `.bss` +79 B, `.data` +2 B, flash about +10.6 KB; no IRAM, no new task. Heap at rest:
-    NimBLE's log-level entry and the `ble_phy` namespace, about 60 B (an I10 exception for the user).
+    NimBLE's log-level entry and the `ble_phy` namespace, about 60 B (an I10 exception for the user; WP8's B4
+    removed the log-level entry, so about 30 B remain).
   - **For the user (HANDOFF §15s):** a powered valve may take longer to find than the plan's 1-3 s under
-    `N_CODED` (a change needs approval); keep or drop the back-off exemption during a leak response.
+    `N_CODED` (a change needs approval); keep or drop the back-off exemption during a leak response. (Phase 2,
+    HANDOFF §15u: the orchestrator took both, as B2's hunt slot and B1, for the user's review.)
+- **Leak protection keeps running in the setup portal, and the radio has one policy (WP8, D2; B2-B4).** Commits
+  `29f400b` … `183d361` (core), `e831f3e` … `ca019fd` (the Wi-Fi side) and review fixes `2f70ad8` … `52ef6a2`
+  (`main/radio_policy`, `main/ble_leak_scanner`, `main/ble_valve`, `main/app_wifi`, `main/health_engine`,
+  `components/wifi_portal`, `sdkconfig.defaults`); details in HANDOFF §15u. Reviewed by six adversarial lenses,
+  fixed, and voted 5/5 SHIP by the council (leak safety, phones, RTOS, coexistence, memory and build).
+  - **The setup portal no longer pauses BLE (D2).** After a 10 s reset with sensors or a valve provisioned, the
+    hub keeps scanning beside the setup SoftAP (`AP_IDLE`: Coded 0.6 s / Wi-Fi 0.3 s; `SERVE` while the page is
+    in use: Coded 0.6 s / Wi-Fi 0.6 s, provisional until bench gate G1), so a leak during setup is detected and
+    closes the valve as in normal operation; the valve is hunted and linked in the portal too. The portal priority
+    window, every Wi-Fi radio hold, the page chain and the BLE-sensor health hold are deleted (`dd19d6b`, one
+    commit).
+  - **`radio_policy` is the single source of the radio mode.** Modes `NORMAL` (also the tail after the Wi-Fi
+    IP), `NORMAL_LR` / `LR_AP` (a leak response with the valve unlinked, at most 10 min per incident),
+    `AP_IDLE`, `SERVE`, `BLE_IDLE`. Each scan pattern is a row of a table checked at compile time and by a boot
+    self-test (each Coded window covers a whole advert interval and no Coded gap is longer than 1.4 s; the AP
+    rows leave Wi-Fi a slot of at least 0.3 s after at most 0.6 s of BLE); a failed check pins the safe normal
+    scan with no Wi-Fi pulse.
+  - **Wi-Fi needs get bounded pulses:** a phone joining the SoftAP (JOIN), the page's Connect (SUBMIT, always
+    honoured), the router retry while the SoftAP is up (RETRY) and the hub's network-list scan (LIST). Every pulse
+    stops BLE for at most 2.8 s, is followed by 1.2 s of Coded scanning, and counts toward at most 12 s of pulses
+    in any 60 s; all but SUBMIT need 6-7 s of scanning since the last. While a leak response is pending the
+    valve's claim goes before any Wi-Fi pulse. A router retry or list scan not granted within 2 s goes on
+    beside BLE.
+  - **A powered valve is found again in about 2 s, typically (B2).** While it is provisioned and unlinked
+    outside a leak response, normal scanning adds a 0.45 s 1M slot after each 1 s scan (every 6th scan once it
+    has been hunted 10 min, unless a leak incident is latched); a claim backs off only after two empty claims
+    in a row. A claim lasts 1.5 s in `AP_IDLE`, 1.5-2.5 s in normal scanning and 2.5 s during a leak response;
+    none while a phone is joining the SoftAP (outside a leak response). A connect still running 2 s past its
+    claim resets the BLE host.
+  - **Sensors whose PHY is not known yet** get a 1M share for at most 10 min after boot or after the sensor list
+    grows (`N_MIXED`, or `AP_K1M` beside the SoftAP; B3), so a 1M sensor is found after the upgrade.
+  - **NimBLE's log cap is a build setting (B4):** `CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y` in
+    `sdkconfig.defaults` with a compile guard; the run-time cap and its heap entry are gone. **The one-time
+    `sdkconfig` regeneration now deletes fourteen lines** (HANDOFF §15t); a stale `sdkconfig` stops the build at
+    seven `#error`s.
+  - Log lines: a new `RADIO` tag (the self-test line, one line per mode change, pulse lines, refusals at most
+    once per 10 s, and two `[SUMMARY]` lines every 60 s with the scanning duty, the pulses, the blind time and the
+    longest Coded gap; they replace `BLE_LEAK: [SUMMARY]`); new `BLE_LEAK` scan-mode lines for the valve hunt;
+    new `APP_WIFI` lines for the setup portal and the list scan's gate. Gone: `portal priority …`, `Wi-Fi radio
+    hold …`, `Scan paused/resumed - Wi-Fi setup portal …`, `[PORTAL] …`, `HEALTH_ENGINE: BLE scanning
+    paused/resumed`. NimBLE's INFO lines are compiled out, except its `hci_err` line for a failed HCI command.
+    None prints a credential; the production tool's boot-log markers are unchanged.
+  - Memory (objects against `1057ee1`): code +8.6 KB, `.rodata` +2.2 KB, `.bss` +453 B, `.data` +16 B; NimBLE
+    code −2.5 KB and `.rodata` −1.6 KB (B4); about 32 B more heap at rest. No IRAM (DIRAM `.text` stays
+    113,387 B), no new task, timer or queue.
+  - **Provisional until the bench** (G0, G1, the valve power cycles): the SERVE rung, `AP_IDLE`'s slot, the
+    join assist's end rule, the hunt's 0.45 s slot, the list scan's 24 KB heap floor and the other constants
+    listed in HANDOFF §15u.
+  - **For the user (HANDOFF §15u):** the orchestrator took B1-B5 and the SUBMIT rule under the user's "finish
+    everything" instruction; each needs ratifying. Also: the valve power-cycle gate's wording (statistical), the
+    1.5-2.5 s claim in normal scanning, the tail (normal scanning while the phone finishes setup), and a Connect
+    flood on the open SoftAP that can delay other sensors' detection past 60 s (a spacing rule is recommended
+    before release).
+- **The G1 lab image (WP7).** Commits `434bda1`, `e67e876`, `71398db` (`main/radio_policy/radio_lab.{c,h}`,
+  `main/Kconfig.projbuild`, `components/wifi_portal`); details in HANDOFF §15u and §15v (the bench procedure).
+  - `CONFIG_APP_RADIO_LAB` (default off; never set in the project's `sdkconfig`) builds a bench image whose
+    console keys switch the SERVE rung (AP_IDLE density, SERVE-A-thin, SERVE-A, SERVE-C, SERVE-B), `AP_IDLE`'s
+    Wi-Fi slot, the join assist, contingency K1 and C11's two Wi-Fi knobs (SoftAP 11b rates, the list scan's
+    `coex_background_scan`), kept in NVS (`rp_lab`). It needs `APP_BENCH_DIAG` and warns at boot that it is not
+    for release.
+  - With the option off nothing of it is compiled in: every production object is the same byte for byte. The
+    regenerated `sdkconfig` gains `# CONFIG_APP_RADIO_LAB is not set`.
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and
   its `limit` line, which is gone, and, since WP2, the SoftAP stopping about 60 s after the IP address, the
   safety net at about 75-80 s in the portal window only, and MQTT restarting at the IP address (*Fixed*'s router
-  retry, *Safety*'s portal window, *Upgrade notes*' serial-log lines); WP10 rewrites them.
+  retry, *Safety*'s portal window, *Upgrade notes*' serial-log lines); WP10 rewrites them. Since WP8 the portal
+  window, its health hold and the Wi-Fi radio holds those sections describe are gone: the radio policy above
+  replaces them.
 
 ### Fixed (2.1.3 field defects)
 
