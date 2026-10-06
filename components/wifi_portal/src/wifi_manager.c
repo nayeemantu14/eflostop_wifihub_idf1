@@ -100,7 +100,11 @@ static bool ap_list_logged = false;
  * task writes it, the httpd task reads it); scan_order_tick: the last scan ordered for the page,
  * 0 = none (the httpd task sets it; the wifi_manager task clears it when that scan did not start
  * or ended failed, so a Rescan is not refused for 20 s after a scan that never ran, with an empty
- * list). A stale read of either costs one scan too many, or one refused. */
+ * list; not for a scan that succeeded with no list allocated, low heap, which keeps the 20 s
+ * gap). STOP_AP clears both once the HTTP server is stopped: the next AP session's page is a new
+ * one, and a list that cannot be allocated at its START_AP must not read as fresh, or the page's
+ * load would order no scan, and no SCAN_DONE would retry the allocation. A stale read of either
+ * costs one scan too many, or one refused. */
 static volatile TickType_t ap_list_tick = 0;
 static volatile TickType_t scan_order_tick = 0;
 #define WIFI_MANAGER_SCAN_GAP_MS		20000
@@ -2149,7 +2153,11 @@ void wifi_manager( void * pvParameters ){
 				else{
 					/* a failed scan, or no list: free whatever the driver keeps of it */
 					esp_wifi_clear_ap_list();
-					scan_order_tick = 0;	/* LOCAL PATCH (2.1.4 C10b): the page may order another */
+					/* LOCAL PATCH (2.1.4 C10b): after a failed scan the page may order another;
+					 * a scan that succeeded with no list (low heap) keeps the 20 s gap */
+					if(scan_status != 0){
+						scan_order_tick = 0;
+					}
 				}
 
 				/* callback */
@@ -2368,13 +2376,17 @@ void wifi_manager( void * pvParameters ){
 					 * it runs only while the AP is up, and the next START_AP starts it */
 					http_app_stop();
 
-					/* LOCAL PATCH (2.1.4 C2b): the network list goes with the AP (+1,489 B of heap) */
+					/* LOCAL PATCH (2.1.4 C2b): the network list goes with the AP (+1,489 B of heap).
+					 * LOCAL PATCH (2.1.4 C10b): and its ticks (see ap_list_tick), with the HTTP
+					 * server, their other user, stopped above */
 					ap_list_wanted = false;
 					if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
 						free(accessp_json);
 						accessp_json = NULL;
+						ap_list_tick = 0;
 						wifi_manager_unlock_json_buffer();
 					}
+					scan_order_tick = 0;
 
 					/* LOCAL PATCH (2.1.4 WP2): the stop has finished (wifi_manager_ap_stop_done()) */
 					TickType_t stop_done = xTaskGetTickCount();
