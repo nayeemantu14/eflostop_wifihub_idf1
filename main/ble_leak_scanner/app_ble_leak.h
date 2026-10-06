@@ -45,16 +45,14 @@ void app_ble_leak_signal_start(void);
 void app_ble_leak_reset_tracking(void);
 
 /**
- * @brief Process a BLE advertisement for possible leak sensor data.
- * Can be called from any scan callback (e.g. the valve module's GAP
- * handler) so leak sensors are detected even while the valve module
- * owns the active scan.
- * prim_phy: the report's primary PHY, BLE_HCI_LE_PHY_1M or
- * BLE_HCI_LE_PHY_CODED (ext_disc.prim_phy; BLE_HCI_LE_PHY_1M for a
- * legacy report), for the per-sensor burst log only.
+ * @brief Wake the BLE scan executor (the leak scanner's task) now, rather than at its next
+ * poll. The valve module calls it when what it wants from the executor changes (a hunt, a
+ * claim, a link up or down). Any task, not an ISR. Ignored before the task exists.
+ *
+ * Since 2.1.4 (WP5) this task is the only code that starts or stops a BLE scan: the valve
+ * hunt runs on its scans (ble_valve_hunt_wanted(), ble_valve_note_adv()).
  */
-void app_ble_leak_process_adv(const void *addr, int8_t rssi,
-                              const uint8_t *data, uint8_t data_len, uint8_t prim_phy);
+void app_ble_leak_kick(void);
 
 #ifdef __cplusplus
 }

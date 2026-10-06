@@ -1,10 +1,13 @@
 /****************************************************
- *  MODULE:   BLE Leak Sensor Scanner
+ *  MODULE:   BLE Leak Sensor Scanner and the BLE scan executor
  *  PURPOSE:  Passive BLE scanner for "eleak" leak sensors.
  *            Uses extended scanning (ble_gap_ext_disc) to receive
  *            both legacy 1M and Coded PHY advertisements, enabling
  *            support for STM32WB (legacy) and STM32WBA (long range)
  *            leak sensors simultaneously.
+ *            Since 2.1.4 (WP5) its task is the only code that starts
+ *            or stops a BLE scan; the valve module's hunt for its
+ *            valve runs on these scans (see "The BLE scan executor").
  *            Parses manufacturer-specific advertising data
  *            (company ID 0x0030) for leak status and battery.
  *            Commissioned sensors are whitelisted by MAC from
@@ -35,7 +38,13 @@
 #define ELEAK_DEVICE_NAME       "eleak"
 #define ELEAK_DEVICE_NAME_LEN   5
 #define MAX_TRACKED_SENSORS     MAX_BLE_LEAK_SENSORS
-#define SCAN_RESTART_DELAY_MS   500
+#define SCAN_RESTART_DELAY_MS   500         // a scan that ended by itself is started again this
+                                            // long after (none ends by itself in WP5's geometries)
+#define EXEC_POLL_MS            500         // the executor's longest wait: the portal window and
+                                            // the Wi-Fi radio holds are polled at least this often,
+                                            // as the old 500 ms loop did
+#define SCAN_RETRY_MS           50          // a scan start that failed is retried this soon
+#define SCAN_FAIL_LOG_EVERY     200         // ... and logged again every this many failures (10 s)
 #define WHITELIST_RELOAD_MS     10000       // Re-check provisioning every 10s
 #define BLE_LEAK_HEARTBEAT_MS   (5 * 60 * 1000)  // 5-min TELEMETRY heartbeat: how often an
                                                  // unchanged sensor still produces a D2C event.
@@ -94,7 +103,11 @@ _Static_assert(BURST_LOG_SLOTS <= MAX_TRACKED_SENSORS, "burst log slots are trac
 QueueHandle_t ble_leak_rx_queue = NULL;
 
 static TaskHandle_t ble_leak_task_handle = NULL;
-static volatile bool s_scan_restart_needed = false;
+
+// The executor's cross-task flags (the rest of its state lives on its own stack, exec_t).
+static volatile bool s_nimble_ready = false;   // app_ble_leak_signal_start() ran
+static volatile bool s_scan_ended = false;     // DISC_COMPLETE: the GAP handler stores it...
+static volatile int s_scan_end_reason = 0;     // ... with its reason; the executor takes both
 
 // Cached whitelist from provisioning manager
 static uint8_t s_whitelist[MAX_TRACKED_SENSORS][6];
@@ -563,18 +576,80 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
 }
 
 /* ---------------------------------------------------------
- * GAP event callback for extended scanning.
- * Handles both legacy (1M PHY) and extended (Coded PHY)
- * advertising reports from a single ble_gap_ext_disc() session.
+ * The BLE scan executor (2.1.4 WP5; plan §4.7, invariants I3 and I5)
+ *
+ * This task is the ONLY code that starts or stops a BLE scan (ble_gap_ext_disc,
+ * ble_gap_disc_cancel). Until WP5 the valve module ran a scan of its own to hunt for its valve,
+ * and the two owners raced: each cancelled the other's scan, and a start could find the other's
+ * already running (BLE_HS_EALREADY, "[SCAN] ble_gap_disc rc=2"), which left the hunt dead. Now
+ * the valve module only says what it wants, and this task decides:
+ *   - a claim (ble_valve_claim_wanted(): its valve was heard) is granted at once: the scan is
+ *     stopped and ble_valve_claim_start() issues the connect on this task, so no scan can start
+ *     between the grant and the connect;
+ *   - no scan starts while a connect is in flight (it would fail with BLE_HS_EBUSY);
+ *   - the valve hunt's geometry while a hunt is wanted (ble_valve_hunt_wanted()), the leak scan
+ *     otherwise, and none while the portal priority window or a Wi-Fi radio hold has the radio,
+ *     exactly as before WP5 (a hunt still runs in them while a leak response is pended);
+ *   - every advert of every scan goes to the leak sensors (process_leak_adv()) and to the
+ *     valve's MAC hook (ble_valve_note_adv()), so the hunt is passive and costs the sensors
+ *     nothing: its scan covers them as the leak scan does.
+ * The GAP handler only stores and notifies (DISC_COMPLETE). The task is woken by it, by the valve
+ * module (app_ble_leak_kick()) and at least every EXEC_POLL_MS. A start that fails is retried
+ * SCAN_RETRY_MS later. Priority 6 (was 4), so its starts land within milliseconds of an edge.
+ * --------------------------------------------------------- */
+
+// A scan geometry. Interval and window in 0.625 ms units (both 0: that PHY is not scanned);
+// duration in 10 ms units (0: until cancelled). Every scan is passive with filter_duplicates
+// off (scan_start()).
+typedef struct {
+    uint16_t itvl_1m, win_1m;
+    uint16_t itvl_c, win_c;
+    uint16_t dur;
+} scan_geo_t;
+
+enum { SCAN_GEO_NONE = 0, SCAN_GEO_LEAK, SCAN_GEO_HUNT, SCAN_GEO_COUNT };
+
+static const scan_geo_t k_scan_geo[SCAN_GEO_COUNT] = {
+    [SCAN_GEO_NONE] = { 0, 0, 0, 0, 0 },
+    // The leak scan: 1M (WB sensors, WBA sensors in 1M mode, the valve) and Coded (WBA long
+    // range), each 100 ms interval / 50 ms window.
+    [SCAN_GEO_LEAK] = { 160, 80, 160, 80, 0 },
+    // The valve hunt (the valve module's own scan until WP5): 110 ms / 55 ms on each PHY.
+    // Deliberately NOT 100 ms: the valve advertises every 500-700 ms, and 100 ms against
+    // 500 ms is a 5:1 harmonic lock in which escape depends solely on the 0-10 ms per-event
+    // advDelay drifting the phase; 110 ms breaks the lock at the same duty (50 %). Passive now
+    // (it was active on 1M): the valve is matched by its MAC alone, so no scan request is
+    // needed, and the leak sensors are covered as by the leak scan.
+    [SCAN_GEO_HUNT] = { 176, 88, 176, 88, 0 },
+};
+
+// The executor's own state, on its stack: only its task reads or writes it.
+typedef struct {
+    bool scan_on;               // our scan runs (started, no DISC_COMPLETE or cancel since)
+    uint8_t geo;                // ... with this geometry
+    bool paused;                // the window or a radio hold has the radio (leak scan held)
+    bool portal_paused;         // ... the window itself, for its log lines
+    uint16_t start_fails;       // scan starts failed in a row
+    TickType_t retry_at;        // no scan start before this tick
+    TickType_t paused_since;    // when the pause began, for the heartbeat line
+} exec_t;
+
+/* ---------------------------------------------------------
+ * GAP event callback of every scan the executor starts.
+ * Handles both legacy (1M PHY) and extended (Coded PHY) advertising reports from a single
+ * ble_gap_ext_disc() session, and the session's end. Stores and notifies only: the adverts go to
+ * the leak sensors' state and the valve's MAC hook, and the end is left to the executor.
  * --------------------------------------------------------- */
 static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
 {
+    (void)arg;
     switch (event->type) {
 
     case BLE_GAP_EVENT_DISC:
         // Legacy advertisement received (fallback path): always on the 1M PHY
         process_leak_adv(&event->disc.addr, event->disc.rssi,
                          event->disc.data, event->disc.length_data, BLE_HCI_LE_PHY_1M);
+        ble_valve_note_adv(&event->disc.addr);
         break;
 
 #if MYNEWT_VAL(BLE_EXT_ADV)
@@ -587,14 +662,20 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
         }
 
         process_leak_adv(&ext->addr, ext->rssi, ext->data, ext->length_data, ext->prim_phy);
+        ble_valve_note_adv(&ext->addr);
         break;
     }
 #endif
 
-    case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGW(BLE_LEAK_TAG, "Scan complete (reason=%d) — will restart", event->disc_complete.reason);
-        s_scan_restart_needed = true;
+    case BLE_GAP_EVENT_DISC_COMPLETE: {
+        s_scan_end_reason = event->disc_complete.reason;
+        s_scan_ended = true;
+        TaskHandle_t t = ble_leak_task_handle;
+        if (t != NULL) {
+            xTaskNotifyGive(t);
+        }
         break;
+    }
 
     default:
         break;
@@ -604,78 +685,187 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
 }
 
 /* ---------------------------------------------------------
- * Start passive BLE scan using extended scanning API.
- * Scans on both 1M PHY (legacy WB leak sensors) and
- * Coded PHY (long-range WBA leak sensors) simultaneously.
+ * Start a scan of geometry `geo` (executor task only): 0, or the NimBLE error.
+ *
+ * filter_duplicates is DISABLED, and that is a safety fix, not a latency one. The controller's
+ * duplicate cache keys on ADDRESS ONLY and never refreshes (CONFIG_BT_CTRL_SCAN_DUPL_TYPE=0,
+ * CONFIG_BT_CTRL_DUPL_SCAN_CACHE_REFRESH_PERIOD=0), so with the filter on, a leak sensor whose
+ * payload changes from dry to WET is suppressed: the address has already been seen. Until 2.1.x
+ * the valve hunt ran with the filter on, and the hub was deaf to its leak sensors for as long as
+ * it hunted a dead valve. The cost of turning it off: duplicate valve reports, which the valve
+ * module's claim guard absorbs (ble_valve_note_adv()).
  * --------------------------------------------------------- */
-static void start_passive_scan(void)
+static int scan_start(uint8_t geo)
 {
-    // Portal priority window or a Wi-Fi radio hold (app_wifi.c): Wi-Fi has the radio. Checked at
-    // every start, since at boot the window can open before or after BLE comes up. The scan
-    // task's loop starts the scan again when both are over.
-    if (app_wifi_portal_priority_active() || app_wifi_radio_hold_active())
-        return;
-
+    const scan_geo_t *g = &k_scan_geo[geo];
 #if MYNEWT_VAL(BLE_EXT_ADV)
-    // 1M PHY params — catches legacy WB leak sensors
-    struct ble_gap_ext_disc_params uncoded_params = {0};
-    uncoded_params.itvl = 160;      // 100ms interval
-    uncoded_params.window = 80;     // 50ms window (50% duty)
-    uncoded_params.passive = 1;
-
-    // Coded PHY params — catches long-range WBA leak sensors
-    struct ble_gap_ext_disc_params coded_params = {0};
-    coded_params.itvl = 160;        // 100ms interval
-    coded_params.window = 80;       // 50ms window (50% duty)
-    coded_params.passive = 1;
-
-    int rc = ble_gap_ext_disc(
+    struct ble_gap_ext_disc_params p1m = {0};
+    struct ble_gap_ext_disc_params pcoded = {0};
+    p1m.itvl = g->itvl_1m;
+    p1m.window = g->win_1m;
+    p1m.passive = 1;
+    pcoded.itvl = g->itvl_c;
+    pcoded.window = g->win_c;
+    pcoded.passive = 1;
+    return ble_gap_ext_disc(
         BLE_OWN_ADDR_PUBLIC,
-        0,                          // duration: 0 = continuous
-        0,                          // period: 0 = no periodic restart
-        0,                          // filter_duplicates: disabled for fast change detection
-        0,                          // filter_policy: accept all
-        0,                          // limited: disabled
-        &uncoded_params,            // 1M PHY scan params
-        &coded_params,              // Coded PHY scan params
+        g->dur,                         // duration, 10 ms units: 0 = until cancelled
+        0,                              // period: 0 = no periodic restart
+        0,                              // filter_duplicates: DISABLED, see above
+        0,                              // filter_policy: accept all
+        0,                              // limited: disabled
+        g->win_1m ? &p1m : NULL,        // 1M PHY scan params
+        g->win_c ? &pcoded : NULL,      // Coded PHY scan params
         ble_leak_gap_event,
         NULL
     );
-
-    if (rc == 0) {
-        ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
-    } else if (rc == BLE_HS_EALREADY) {
-        ESP_LOGD(BLE_LEAK_TAG, "Scan already active (valve scanning?), will retry");
-        s_scan_restart_needed = true;
-    } else {
-        ESP_LOGW(BLE_LEAK_TAG, "Failed to start ext scan: %d, will retry", rc);
-        s_scan_restart_needed = true;
-    }
 #else
     // Fallback: legacy scanning (1M PHY only)
     struct ble_gap_disc_params disc_params = {0};
     disc_params.passive = 1;
     disc_params.filter_duplicates = 0;
-    disc_params.itvl = 160;
-    disc_params.window = 80;
-
-    int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER,
-                          &disc_params, ble_leak_gap_event, NULL);
-    if (rc == 0) {
-        ESP_LOGI(BLE_LEAK_TAG, "Passive scan started (1M only, ext_adv disabled)");
-    } else if (rc == BLE_HS_EALREADY) {
-        ESP_LOGD(BLE_LEAK_TAG, "Scan already active (valve scanning?), will retry");
-        s_scan_restart_needed = true;
-    } else {
-        ESP_LOGW(BLE_LEAK_TAG, "Failed to start scan: %d, will retry", rc);
-        s_scan_restart_needed = true;
-    }
+    disc_params.itvl = g->itvl_1m ? g->itvl_1m : g->itvl_c;
+    disc_params.window = g->win_1m ? g->win_1m : g->win_c;
+    return ble_gap_disc(BLE_OWN_ADDR_PUBLIC, g->dur ? (int32_t)g->dur * 10 : BLE_HS_FOREVER,
+                        &disc_params, ble_leak_gap_event, NULL);
 #endif
 }
 
-// The scan-alive heartbeat line. While our scan is paused it says so, for how long and for what
+// Stops our scan (executor task only). A cancel the controller refuses leaves it marked running,
+// and the next pass tries again.
+static void scan_stop(exec_t *x)
+{
+    if (!x->scan_on) {
+        return;
+    }
+    int rc = ble_gap_disc_cancel();
+    if (rc != 0 && rc != BLE_HS_EALREADY) {
+        ESP_LOGW(BLE_LEAK_TAG, "Scan cancel failed: %d, will retry", rc);
+        return;
+    }
+    x->scan_on = false;
+}
+
+// The line for a scan start: the leak scan's is the line it always printed.
+static void scan_started_log(uint8_t geo)
+{
+    if (geo == SCAN_GEO_HUNT) {
+        ESP_LOGI(BLE_LEAK_TAG, "Valve hunt scan started (1M + Coded PHY, passive)");
+    } else {
+        ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
+    }
+}
+
+/* ---------------------------------------------------------
+ * One pass of the executor: every fact is read again (I6), so a missed edge costs at most one
+ * pass. Returns how long it may sleep before the next one.
+ * --------------------------------------------------------- */
+static TickType_t executor_pass(exec_t *x)
+{
+    TickType_t now = xTaskGetTickCount();
+
+    // A scan that ended by itself (DISC_COMPLETE). WP5's geometries run until cancelled, so this
+    // is not expected: logged, and started again SCAN_RESTART_DELAY_MS later as before.
+    if (s_scan_ended) {
+        s_scan_ended = false;
+        if (x->scan_on) {
+            x->scan_on = false;
+            ESP_LOGW(BLE_LEAK_TAG, "Scan complete (reason=%d) — will restart", s_scan_end_reason);
+            x->retry_at = now + pdMS_TO_TICKS(SCAN_RESTART_DELAY_MS);
+        }
+    }
+    // Self-healing: our scan is gone with no DISC_COMPLETE (a NimBLE host reset ends it so).
+    if (x->scan_on && !ble_gap_disc_active()) {
+        x->scan_on = false;
+        ESP_LOGW(BLE_LEAK_TAG, "Scan not active (external cancel?), restarting");
+    }
+
+    // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no leak scan while either is on,
+    // as before WP5. A hold (a few seconds around a Wi-Fi scan or connect attempt, up to 20 s
+    // while a setup page is in use) logs nothing here: app_wifi.c prints its start and end.
+    bool portal = app_wifi_portal_priority_active();
+    bool hold = portal || app_wifi_radio_hold_active();
+    if (hold) {
+        if (portal && !x->portal_paused) {
+            x->portal_paused = true;
+            ESP_LOGI(BLE_LEAK_TAG, "Scan paused - Wi-Fi setup portal has the radio");
+        }
+        if (!x->paused) {
+            x->paused_since = now;
+        }
+        x->paused = true;
+    } else if (x->paused) {
+        x->paused = false;
+        if (x->portal_paused) {
+            x->portal_paused = false;
+            ESP_LOGI(BLE_LEAK_TAG, "Scan resumed - Wi-Fi setup portal closed");
+        }
+    }
+
+    // The valve module's claim: granted at once, as before WP5, when the connect was issued
+    // from the report itself. Its connect then holds every scan off until its CONNECT event,
+    // which wakes this task.
+    if (ble_valve_claim_wanted()) {
+        scan_stop(x);
+        if (!x->scan_on) {
+            ble_valve_claim_start();
+        }
+    }
+
+    uint8_t want = SCAN_GEO_NONE;
+    if (!ble_hs_synced() || ble_gap_conn_active()) {
+        want = SCAN_GEO_NONE;           // not synced yet, or a connect in flight
+    } else if (ble_valve_hunt_wanted()) {
+        want = SCAN_GEO_HUNT;           // also in a hold, while a leak response is pended
+    } else if (!hold) {
+        want = SCAN_GEO_LEAK;
+    }
+
+    if (x->scan_on && x->geo != want) {
+        scan_stop(x);
+    }
+    if (!x->scan_on && want != SCAN_GEO_NONE && (int32_t)(now - x->retry_at) >= 0) {
+        int rc = scan_start(want);
+        if (rc == 0) {
+            x->scan_on = true;
+            x->geo = want;
+            if (x->start_fails > 0) {
+                ESP_LOGI(BLE_LEAK_TAG, "Scan started after %u failed attempt(s)", (unsigned)x->start_fails);
+                x->start_fails = 0;
+            }
+            scan_started_log(want);
+        } else {
+            // BLE_HS_EALREADY: a scan runs that this task does not count as its own (it is the
+            // only owner, so its count is wrong): stop it and start ours.
+            if (rc == BLE_HS_EALREADY) {
+                (void)ble_gap_disc_cancel();
+            }
+            if (x->start_fails % SCAN_FAIL_LOG_EVERY == 0) {
+                ESP_LOGW(BLE_LEAK_TAG, "Failed to start ext scan: %d, will retry", rc);
+            }
+            if (x->start_fails < UINT16_MAX) {
+                x->start_fails++;
+            }
+            x->retry_at = now + pdMS_TO_TICKS(SCAN_RETRY_MS);
+        }
+    }
+
+    TickType_t wait = pdMS_TO_TICKS(EXEC_POLL_MS);
+    if (!x->scan_on && want != SCAN_GEO_NONE) {
+        int32_t until = (int32_t)(x->retry_at - now);
+        if (until < 1) {
+            until = 1;
+        }
+        if ((TickType_t)until < wait) {
+            wait = (TickType_t)until;
+        }
+    }
+    return wait;
+}
+
+// The scan-alive heartbeat line. While the leak scan is held it says so, for how long and for what
 // (2.1.4 WP1: until WP8 the no-credential portal's pause has no time cap); otherwise it is as it
-// always was. In a frame of its own, so the scan task's loop frame does not carry its arguments.
+// always was. In a frame of its own, so the task's loop frame does not carry its arguments.
 static __attribute__((noinline)) void heartbeat_log(bool paused, bool portal, TickType_t paused_since)
 {
     if (paused) {
@@ -689,87 +879,37 @@ static __attribute__((noinline)) void heartbeat_log(bool paused, bool portal, Ti
 }
 
 /* ---------------------------------------------------------
- * Main scanner task
+ * Main scanner task: the BLE scan executor
  * --------------------------------------------------------- */
 static void ble_leak_scan_task(void *param)
 {
     (void)param;
     ESP_LOGI(BLE_LEAK_TAG, "Task started, waiting for NimBLE...");
 
-    // Block until NimBLE is initialized
-    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    // Block until NimBLE is initialized. A wake from app_ble_leak_kick() before then is not it.
+    while (!s_nimble_ready) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    }
     ESP_LOGI(BLE_LEAK_TAG, "NimBLE ready, initializing scanner");
 
     // Load whitelist
     reload_whitelist();
-    // Under the lock: the valve module's GAP handler can already be feeding
-    // app_ble_leak_process_adv() now that the whitelist is populated.
+    // Under the lock: the GAP handler can already be feeding process_leak_adv() now that the
+    // whitelist is populated.
     taskENTER_CRITICAL(&s_wl_lock);
     memset(s_sensors, 0, sizeof(s_sensors));
     taskEXIT_CRITICAL(&s_wl_lock);
 
-    // Initial scan start (with small delay to let valve module connect first)
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    start_passive_scan();
-
+    // The first scan starts on the first pass, once NimBLE is synced: no delay any more. The 2 s
+    // the old loop waited let the valve module's own scan start first, so that the two did not
+    // race; the hunt is now this task's own scan.
+    exec_t x = {0};
     TickType_t last_whitelist_reload = xTaskGetTickCount();
-    TickType_t last_heartbeat_log = xTaskGetTickCount();
-    bool paused = false;          // this task's view of the window or a Wi-Fi radio hold
-    bool portal_paused = false;   // the window's own pause, for its log lines
-    TickType_t paused_since = 0;  // when that pause began, for the heartbeat line
+    TickType_t last_heartbeat_log = last_whitelist_reload;
+    x.retry_at = last_whitelist_reload;
 
     for (;;) {
-        // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no scan of ours while
-        // either is on. Only OUR scan is cancelled: a valve hunt belongs to the valve module,
-        // which stops it on its own task, and cancelling it here would leave that module
-        // believing it still scans (its is_scanning would then block every later hunt).
-        // A hold (a few seconds around a Wi-Fi scan or connect attempt, up to 20 s while a
-        // setup page is in use) logs nothing here: app_wifi.c prints its start and end, and the
-        // restart below "Extended passive scan started".
-        bool portal = app_wifi_portal_priority_active();
-        if (portal || app_wifi_radio_hold_active()) {
-            if (portal && !portal_paused) {
-                portal_paused = true;
-                ESP_LOGI(BLE_LEAK_TAG, "Scan paused - Wi-Fi setup portal has the radio");
-            }
-            if (!paused) {
-                paused_since = xTaskGetTickCount();
-            }
-            paused = true;
-            s_scan_restart_needed = false;
-            if (ble_gap_disc_active() && !ble_valve_hunt_scanning()) {
-                int rc = ble_gap_disc_cancel();
-                if (rc != 0 && rc != BLE_HS_EALREADY) {
-                    ESP_LOGW(BLE_LEAK_TAG, "Scan cancel failed: %d, will retry", rc);
-                }
-            }
-        }
-        else if (paused) {
-            paused = false;
-            s_scan_restart_needed = false;
-            if (portal_paused) {
-                portal_paused = false;
-                ESP_LOGI(BLE_LEAK_TAG, "Scan resumed - Wi-Fi setup portal closed");
-            }
-            // A valve hunt already running forwards our advertisements (the valve module's
-            // GAP handler), and the self-heal below starts our scan once it ends.
-            if (!ble_gap_disc_active()) {
-                start_passive_scan();
-            }
-        }
-        // Handle scan restart if needed
-        else if (s_scan_restart_needed) {
-            s_scan_restart_needed = false;
-            vTaskDelay(pdMS_TO_TICKS(SCAN_RESTART_DELAY_MS));
-            start_passive_scan();
-        }
-        // Self-healing: detect when our scan was cancelled externally
-        // (e.g., valve module's scan/connect sequence) without a
-        // BLE_GAP_EVENT_DISC_COMPLETE reaching our callback.
-        else if (!ble_gap_disc_active()) {
-            ESP_LOGW(BLE_LEAK_TAG, "Scan not active (external cancel?), restarting");
-            start_passive_scan();
-        }
+        TickType_t wait = executor_pass(&x);
 
         // Periodically reload whitelist (handles runtime commissioning)
         if ((xTaskGetTickCount() - last_whitelist_reload) >= pdMS_TO_TICKS(WHITELIST_RELOAD_MS)) {
@@ -780,13 +920,13 @@ static void ble_leak_scan_task(void *param)
         // The burst log: a line for each sensor's burst that is over (paused or not).
         burst_log();
 
-        // Periodic scan-alive heartbeat (every 60s), with the pause if our scan is paused
+        // Periodic scan-alive heartbeat (every 60s), with the pause if the leak scan is held
         if ((xTaskGetTickCount() - last_heartbeat_log) >= pdMS_TO_TICKS(60000)) {
-            heartbeat_log(paused, portal, paused_since);
+            heartbeat_log(x.paused, x.portal_paused, x.paused_since);
             last_heartbeat_log = xTaskGetTickCount();
         }
 
-        vTaskDelay(pdMS_TO_TICKS(500));
+        ulTaskNotifyTake(pdTRUE, wait);
     }
 }
 
@@ -803,13 +943,26 @@ void app_ble_leak_init(void)
         return;
     }
 
-    xTaskCreate(ble_leak_scan_task, "ble_leak_scan", 3072, NULL, 4, &ble_leak_task_handle);
+    // Priority 6 (was 4, plan §4.7): the executor's scan starts and claim grants land within
+    // milliseconds. Its passes are short; whitelist reloads and log lines are as before. Stack
+    // unchanged: the deepest frames are still the whitelist read and the log calls, and a NimBLE
+    // connect (the claim) costs about what the scan start beside it does.
+    xTaskCreate(ble_leak_scan_task, "ble_leak_scan", 3072, NULL, 6, &ble_leak_task_handle);
 }
 
 void app_ble_leak_signal_start(void)
 {
+    s_nimble_ready = true;
     if (ble_leak_task_handle != NULL) {
         xTaskNotifyGive(ble_leak_task_handle);
+    }
+}
+
+void app_ble_leak_kick(void)
+{
+    TaskHandle_t t = ble_leak_task_handle;
+    if (t != NULL) {
+        xTaskNotifyGive(t);
     }
 }
 
@@ -826,13 +979,4 @@ void app_ble_leak_reset_tracking(void)
     }
     taskEXIT_CRITICAL(&s_wl_lock);
     ESP_LOGI(BLE_LEAK_TAG, "Sensor tracking reset");
-}
-
-void app_ble_leak_process_adv(const void *addr, int8_t rssi,
-                              const uint8_t *data, uint8_t data_len, uint8_t prim_phy)
-{
-    if (ble_leak_rx_queue == NULL || s_whitelist_count == 0) {
-        return;
-    }
-    process_leak_adv((const ble_addr_t *)addr, rssi, data, data_len, prim_phy);
 }

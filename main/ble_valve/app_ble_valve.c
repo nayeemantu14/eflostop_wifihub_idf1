@@ -39,7 +39,7 @@
  * used for matching (2.1.4, P0-a): EVERY eFloStop valve advertises this name and answers
  * the same fixed passkey, so a hub with no (or a different) provisioned valve linked a
  * neighbour's valve by name and then auto-close / C2D / the rules tick drove it. Discovery
- * now matches the provisioned valve's MAC only (handle_valve_disc). Kept for reference. */
+ * now matches the provisioned valve's MAC only (ble_valve_note_adv). Kept for reference. */
 #define VALVE_DEVICE_NAME "eFloStopV2"
 
 // -----------------------------------------------------------------------------
@@ -120,12 +120,25 @@ static EventGroupHandle_t ble_state_event_group = NULL;
 static SemaphoreHandle_t gatt_mutex = NULL;
 
 static uint16_t valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-static bool is_scanning = false;
+
+// ---- The valve hunt and its claims (2.1.4 WP5) -----------------------------------------------
+// The module runs no scan of its own any more: the leak scanner's task is the only BLE scan
+// executor (app_ble_leak.c). The hunt is a demand the executor reads from the facts on every pass
+// (ble_valve_hunt_wanted()); every advert of the executor's scans reaches ble_valve_note_adv() on
+// the NimBLE host task, which stores a claim request when it is the provisioned valve and wakes
+// the executor; the executor stops its scan and grants the claim (ble_valve_claim_start(), on its
+// own task), which issues the connect. request_hunt() keeps the old start_scan()'s checks and
+// lines and wakes the executor.
+// True from a hunt's "[SCAN] Starting scan for provisioned valve" until its claim, its link, its
+// end by BLE_CMD_DISCONNECT or a hold that stops it: the old is_scanning, for those lines only.
+static volatile bool s_hunt_announced = false;
+// The valve was heard while the hunt wants it: a claim is due (host task sets, executor clears).
+static volatile bool s_claim_req = false;
 
 // True between issuing ble_gap_connect() and the BLE_GAP_EVENT_CONNECT that
-// resolves it. Guards handle_valve_disc() against duplicate advertisement reports
-// queued in the host before ble_gap_disc_cancel() took effect — see the guard
-// there for why this became load-bearing when filter_duplicates was turned off.
+// resolves it. Guards the claim (ble_valve_note_adv(), ble_valve_claim_start()) against
+// duplicate advertisement reports — see the guard there for why this became load-bearing
+// when filter_duplicates was turned off.
 // Set BEFORE the connect is issued, so a connect in flight with it false is not this module's
 // (link_poll()). Volatile: the command task reads it against ble_gap_conn_active().
 static volatile bool g_connecting = false;
@@ -136,6 +149,9 @@ static uint8_t g_own_addr_type = BLE_OWN_ADDR_PUBLIC;
 
 static char g_valve_mac[18] = {0};
 
+// The valve's address: the advert a claim is for (ble_valve_note_adv(), host task; read by
+// ble_valve_claim_start() on the executor's task), then the link's identity address (GAP
+// CONNECT). Under s_mac_lock.
 static ble_addr_t g_peer_addr;
 static bool g_peer_addr_valid = false;
 
@@ -403,10 +419,10 @@ static void relink_count_reset(void)
 }
 
 // ---- Portal priority window and Wi-Fi radio holds (app_wifi.c) --------------
-// True from a hunt the window or a radio hold held (start_scan()) or cancelled
-// (portal_priority_poll()) until the command task restarts it, once neither holds it, whichever
-// edge it saw.
-// Written on the host and command tasks: a lost race costs one extra start_scan(), which
+// True from a hunt the window or a radio hold held (request_hunt()) or stopped
+// (portal_priority_poll()) until the command task asks for it again, once neither holds it,
+// whichever edge it saw.
+// Written on the host and command tasks: a lost race costs one extra request_hunt(), which
 // returns at once while a hunt runs or is held again.
 static volatile bool s_hunt_held = false;
 
@@ -430,7 +446,7 @@ static bool leak_response_pending(void)
 // portal waits out the incident. Once the valve links and the pended commands are written, the
 // window holds again and the link stays up. In the window the hub is looking for the valve then,
 // so the health engine counts its timeouts from the first such hunt since the pause began or the
-// valve last linked (health_note_valve_leak_hunt(), called where start_scan() lets the hunt run
+// valve last linked (health_note_valve_leak_hunt(), called where request_hunt() lets the hunt run
 // and on every portal_priority_poll() pass while one runs). A radio hold stamps nothing and logs
 // no [PORTAL] line: it lasts about 20 s at most, with BLE on between, far below the valve's
 // minutes-long timeouts, and the health engine does not pause for it.
@@ -442,7 +458,7 @@ static bool portal_holds_valve(void)
 
 // Forward declarations
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
-static void start_scan(void);
+static void request_hunt(void);
 static void start_discovery_chain(void);
 static void sec_timeout_cb(TimerHandle_t xTimer);
 static void discovery_timeout_cb(TimerHandle_t xTimer);
@@ -1683,7 +1699,7 @@ static void start_discovery_chain(void)
 // GAP EVENTS
 // -----------------------------------------------------------------------------
 
-// Forward-declare so handle_valve_disc can reference it via ble_gap_connect callback
+// Forward-declare so ble_valve_claim_start() can pass it as ble_gap_connect()'s callback
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 
 // Forget everything the last link told us. 0xFF battery = unknown (not 0 %), and RMLEAK
@@ -1730,7 +1746,7 @@ static void link_closed(void)
         if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);   // the terminate backstop
         ESP_LOGI(BLE_TAG, "[DISCONNECT] Rejected link closed");
         if (g_connect_requested && ble_valve_has_target_mac())
-            start_scan();
+            request_hunt();
         return;
     }
 
@@ -1782,14 +1798,45 @@ static void link_closed(void)
     if (security_retry_timer) xTimerStop(security_retry_timer, 0);
 
     if (g_connect_requested)
-        start_scan();
+        request_hunt();
 }
 
-// Common handler for valve discovery from both legacy and extended scan events.
-// Matches the PROVISIONED valve's MAC only; with no provisioned valve nothing is ever
-// linked (P0-a). The advertised name is no longer consulted, so the payload is not parsed.
-static void handle_valve_disc(const ble_addr_t *addr)
+// ---- The valve hunt, as the BLE scan executor sees it (WP5) -----------------------------------
+// The hunt is wanted while the provisioned valve is wanted (g_connect_requested), not linked and
+// no connect is in flight, and neither the portal priority window nor a Wi-Fi radio hold holds it
+// (portal_holds_valve(): they do not while a leak response is pended). Recomputed from those facts
+// on every call, so no lost edge can leave the valve unhunted. The executor (app_ble_leak.c) runs
+// a scan that covers the valve's 1M adverts while this is true; any task may call it.
+bool ble_valve_hunt_wanted(void)
 {
+    return g_ble_synced && g_connect_requested && !g_connecting &&
+           valve_conn_handle == BLE_HS_CONN_HANDLE_NONE &&
+           ble_valve_has_target_mac() && !portal_holds_valve();
+}
+
+// Every complete advertising report of the executor's scans, from its GAP handler (NimBLE host
+// task): it only stores and notifies. Matches the PROVISIONED valve's MAC only; with no
+// provisioned valve nothing is ever linked (P0-a). The advertised name is no longer consulted,
+// so the payload is not parsed. The checks that need no lock come first: this runs for every
+// advert in range, and while the valve is linked it returns at the first.
+void ble_valve_note_adv(const void *adv_addr)
+{
+    const ble_addr_t *addr = (const ble_addr_t *)adv_addr;
+
+    // Re-entrancy guard. The scan is stopped only when the executor grants the claim, and
+    // advertisement reports already queued in the host still arrive after that, so further
+    // reports for the same valve reach this function while the claim's ble_gap_connect() is in
+    // flight. Before WP5 a second connect then failed, and the old code responded by rescanning,
+    // cancelling the connection attempt that was about to succeed.
+    //
+    // This was survivable while the scan ran with filter_duplicates=1, which capped the valve at
+    // one report per session. That filter is now off (it was making the hub deaf to leak
+    // sensors, see the executor's scan start in app_ble_leak.c), so duplicate reports are the
+    // normal case and this guard is load-bearing. A claim already requested waits for its grant.
+    if (s_claim_req || g_connecting || valve_conn_handle != BLE_HS_CONN_HANDLE_NONE ||
+        !g_connect_requested)
+        return;
+
     char target[18];
     if (!target_copy(target))
         return;
@@ -1798,58 +1845,72 @@ static void handle_valve_disc(const ble_addr_t *addr)
     snprintf(discovered_mac, sizeof(discovered_mac), "%02X:%02X:%02X:%02X:%02X:%02X",
              addr->val[5], addr->val[4], addr->val[3],
              addr->val[2], addr->val[1], addr->val[0]);
+    if (strcasecmp(discovered_mac, target) != 0)
+        return;
 
-    if (strcasecmp(discovered_mac, target) == 0)
+    // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no new connect initiator,
+    // whose default scan (10 ms every 10 ms) would take the radio back from Wi-Fi, unless a leak
+    // response is pended (portal_holds_valve()). A report queued in the host before the hunt was
+    // stopped can still land here. The hunt resumes when neither holds it (portal_priority_poll()).
+    if (portal_holds_valve())
+        return;
+
+    ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched - connecting to provisioned valve: %s",
+             discovered_mac);
+
+    taskENTER_CRITICAL(&s_mac_lock);
+    memcpy(&g_peer_addr, addr, sizeof(ble_addr_t));
+    g_peer_addr_valid = true;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    s_claim_req = true;
+    app_ble_leak_kick();   // the executor grants the claim (ble_valve_claim_start())
+}
+
+// The executor's question before it grants a claim: the valve was heard and the hunt still
+// wants it. A request the hunt no longer wants (linked meanwhile, held, the target gone, the
+// connect request withdrawn) is dropped here. Executor task.
+bool ble_valve_claim_wanted(void)
+{
+    if (!s_claim_req)
+        return false;
+    if (ble_valve_hunt_wanted())
+        return true;
+    s_claim_req = false;
+    return false;
+}
+
+// The executor's grant (its task, its scan stopped): connect to the valve heard. g_connecting is
+// set BEFORE the connect is issued (link_poll() reads it against ble_gap_conn_active()). The
+// connect's own initiator runs until its CONNECT event; the executor starts no scan meanwhile.
+void ble_valve_claim_start(void)
+{
+    s_claim_req = false;
+    if (!ble_valve_hunt_wanted())
+        return;   // re-checked: linked, held, unprovisioned or no longer wanted since the report
+
+    ble_addr_t peer;
+    taskENTER_CRITICAL(&s_mac_lock);
+    memcpy(&peer, &g_peer_addr, sizeof(peer));
+    taskEXIT_CRITICAL(&s_mac_lock);
+
+    s_hunt_announced = false;   // the hunt ends with its claim
+    g_connecting = true;
+    int rc = ble_gap_connect(g_own_addr_type, &peer, 30000, NULL, ble_gap_event, NULL);
+    if (rc != 0)
     {
-        // Re-entrancy guard. ble_gap_disc_cancel() stops the scan but does NOT
-        // flush advertisement reports already queued in the host, so a second
-        // report for the same valve can reach this function while the first
-        // ble_gap_connect() is still in flight. That second call fails, and the
-        // old code responded by calling start_scan() — cancelling the connection
-        // attempt that was about to succeed.
-        //
-        // This was survivable while the scan ran with filter_duplicates=1, which
-        // capped the valve at one report per session. That filter is now off (it
-        // was making the hub deaf to leak sensors, see start_scan), so duplicate
-        // reports are the normal case and this guard is load-bearing.
-        if (g_connecting)
-            return;
-
-        // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no new connect initiator,
-        // whose default scan (10 ms every 10 ms) would take the radio back from Wi-Fi, unless a
-        // leak response is pended (portal_holds_valve()). A report queued in the host before
-        // the hunt was cancelled can still land here. The hunt restarts when neither holds it
-        // (portal_priority_poll()).
-        if (portal_holds_valve())
-            return;
-
-        ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched - connecting to provisioned valve: %s",
-                 discovered_mac);
-
-        memcpy(&g_peer_addr, addr, sizeof(ble_addr_t));
-        g_peer_addr_valid = true;
-
-        ble_gap_disc_cancel();
-        is_scanning = false;
-        g_connecting = true;
-
-        int rc = ble_gap_connect(g_own_addr_type, addr, 30000, NULL, ble_gap_event, NULL);
-        if (rc != 0)
-        {
-            ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
-            g_connecting = false;
-            start_scan();
-        }
-        else if (portal_holds_valve())
-        {
-            // The window opened or a radio hold started (or the leak response was written or
-            // withdrawn) while this connect was being issued, possibly after the command task's
-            // poll looked for one to cancel: cancel it here. Its CONNECT (status BLE_HS_EAPP)
-            // clears g_connecting, and its rescan is held. Logged for the window only.
-            int crc = ble_gap_conn_cancel();
-            if (app_wifi_portal_priority_active())
-                ESP_LOGI(BLE_TAG, "[PORTAL] Valve connect cancelled - Wi-Fi setup portal opened (rc=%d)", crc);
-        }
+        ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
+        g_connecting = false;
+        request_hunt();
+    }
+    else if (portal_holds_valve())
+    {
+        // The window opened or a radio hold started (or the leak response was written or
+        // withdrawn) while this connect was being issued, possibly after the command task's
+        // poll looked for one to cancel: cancel it here. Its CONNECT (status BLE_HS_EAPP)
+        // clears g_connecting, and its rescan is held. Logged for the window only.
+        int crc = ble_gap_conn_cancel();
+        if (app_wifi_portal_priority_active())
+            ESP_LOGI(BLE_TAG, "[PORTAL] Valve connect cancelled - Wi-Fi setup portal opened (rc=%d)", crc);
     }
 }
 
@@ -1859,27 +1920,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     struct ble_gap_conn_desc desc;
     int rc;
 
+    // No advertising report reaches this handler any more: the module runs no scan (WP5).
+    // It handles its connections only; the executor's GAP handler (app_ble_leak.c) gets the
+    // reports and passes each to ble_valve_note_adv().
     switch (event->type)
     {
-    case BLE_GAP_EVENT_DISC:
-        // Forward to leak scanner so leak sensors are detected during valve scan
-        app_ble_leak_process_adv(&event->disc.addr, event->disc.rssi,
-                                 event->disc.data, event->disc.length_data, BLE_HCI_LE_PHY_1M);
-        handle_valve_disc(&event->disc.addr);
-        return 0;
-
-#if MYNEWT_VAL(BLE_EXT_ADV)
-    case BLE_GAP_EVENT_EXT_DISC:
-        if (event->ext_disc.data_status == BLE_GAP_EXT_ADV_DATA_STATUS_COMPLETE) {
-            // Forward to leak scanner so leak sensors are detected during valve scan
-            app_ble_leak_process_adv(&event->ext_disc.addr, event->ext_disc.rssi,
-                                     event->ext_disc.data, event->ext_disc.length_data,
-                                     event->ext_disc.prim_phy);
-            handle_valve_disc(&event->ext_disc.addr);
-        }
-        return 0;
-#endif
-
     case BLE_GAP_EVENT_CONNECT:
         ESP_LOGI(BLE_TAG, "╔══════════════════════════════════════════════════════════════╗");
         ESP_LOGI(BLE_TAG, "║            GAP CONNECT EVENT                                 ║");
@@ -1887,16 +1932,18 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "[CONNECT] status=%d", event->connect.status);
 
         // The connect attempt is resolved either way — release the re-entrancy
-        // guard before branching, so a failure path that calls start_scan() can
-        // legitimately attempt the next connection.
+        // guard before branching, so a failure path that asks for a hunt (request_hunt()) can
+        // legitimately attempt the next connection. The executor, which starts no scan while a
+        // connect is in flight, is woken to resume scanning.
         g_connecting = false;
         s_link_dropping = false;   // a new link (or none): see drop_link_after_failed_write()
         s_term_failed = false;
+        app_ble_leak_kick();
 
         if (event->connect.status == 0)
         {
             valve_conn_handle = event->connect.conn_handle;
-            is_scanning = false;
+            s_hunt_announced = false;
             s_rejecting_conn = false;
 
             clear_all_state_bits();
@@ -1913,8 +1960,10 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
                          desc.peer_id_addr.val[2], desc.peer_id_addr.val[1], desc.peer_id_addr.val[0]);
                 ESP_LOGI(BLE_TAG, "[CONNECT] MAC=%s, handle=%u", peer_mac, valve_conn_handle);
 
+                taskENTER_CRITICAL(&s_mac_lock);
                 memcpy(&g_peer_addr, &desc.peer_id_addr, sizeof(ble_addr_t));
                 g_peer_addr_valid = true;
+                taskEXIT_CRITICAL(&s_mac_lock);
             }
             taskENTER_CRITICAL(&s_mac_lock);
             memcpy(g_valve_mac, peer_mac, sizeof(g_valve_mac));
@@ -1962,7 +2011,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             // Not after BLE_CMD_DISCONNECT cancelled this connect (status BLE_HS_EAPP):
             // rescanning would undo the disconnect (N8).
             if (g_connect_requested)
-                start_scan();
+                request_hunt();
         }
         return 0;
 
@@ -2020,11 +2069,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_L2CAP_UPDATE_REQ:
         ESP_LOGI(BLE_TAG, "[GAP] L2CAP update request");
-        return 0;
-
-    case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGI(BLE_TAG, "[GAP] Scan complete: reason=%d", event->disc_complete.reason);
-        is_scanning = false;
         return 0;
 
     case BLE_GAP_EVENT_PHY_UPDATE_COMPLETE:
@@ -2204,9 +2248,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 }
 
 // -----------------------------------------------------------------------------
-// SCANNING
+// THE VALVE HUNT
 // -----------------------------------------------------------------------------
-static void start_scan(void)
+// Asks the BLE scan executor (app_ble_leak.c) for the valve hunt: the scan itself is the
+// executor's, which runs one that covers the valve while ble_valve_hunt_wanted() holds, and its
+// adverts reach ble_valve_note_adv(). Every caller has set g_connect_requested; this keeps the
+// checks and lines of the old start_scan() and wakes the executor. The one choke point for every
+// hunt: CONNECT, a failed connect, a disconnect, the stack sync and a pended command's link
+// request. Any task.
+static void request_hunt(void)
 {
     if (!g_ble_synced)
     {
@@ -2214,8 +2264,7 @@ static void start_scan(void)
         return;
     }
 
-    // Nothing to look for: this scan exists to find the provisioned valve (P0-a). The leak
-    // scanner runs its own scan.
+    // Nothing to look for: the hunt exists to find the provisioned valve (P0-a).
     char target[18];
     if (!target_copy(target))
     {
@@ -2230,11 +2279,10 @@ static void start_scan(void)
     }
 
     // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no valve hunt while Wi-Fi has
-    // the radio, unless a leak response is pended (portal_holds_valve()). The one choke point
-    // for every hunt: CONNECT, a failed connect, a disconnect, the stack sync and a pended
-    // command's link request. g_connect_requested is left as it is, and s_hunt_held has the
-    // command task restart the hunt once neither holds it (portal_priority_poll()). Only the
-    // window logs here, and only it stamps the leak-response hunt below.
+    // the radio, unless a leak response is pended (portal_holds_valve(), which the executor's
+    // ble_valve_hunt_wanted() applies too). g_connect_requested is left as it is, and s_hunt_held
+    // has the command task ask for the hunt again once neither holds it (portal_priority_poll()).
+    // Only the window logs here, and only it stamps the leak-response hunt below.
     bool portal = app_wifi_portal_priority_active();
     if ((portal || app_wifi_radio_hold_active()) && !leak_response_pending())
     {
@@ -2244,8 +2292,8 @@ static void start_scan(void)
         return;
     }
 
-    if (is_scanning)
-        return;
+    if (s_hunt_announced)
+        return;   // this hunt was asked for already; the executor runs it
 
     if (portal)
     {
@@ -2253,98 +2301,9 @@ static void start_scan(void)
         health_note_valve_leak_hunt();   // valve timeouts count from here (portal_holds_valve())
     }
 
-    // Cancel any active scan (e.g. BLE leak scanner) before starting valve scan
-    ble_gap_disc_cancel();
-
-    // filter_duplicates is DISABLED below, and that is a safety fix, not a
-    // latency one.
-    //
-    // This scan and the leak scanner's share one controller. The controller's
-    // duplicate cache keys on ADDRESS ONLY and never refreshes
-    // (CONFIG_BT_CTRL_SCAN_DUPL_TYPE=0, CONFIG_BT_CTRL_DUPL_SCAN_CACHE_REFRESH_PERIOD=0),
-    // so with the filter on, a leak sensor whose payload changes from dry to WET
-    // is suppressed — the address has already been seen. The leak scanner runs
-    // with the filter off for exactly this reason (app_ble_leak.c), but its
-    // self-heal is gated on !ble_gap_disc_active(), which is false while THIS
-    // scan owns the radio.
-    //
-    // The result: while the hub is hunting for a lost valve, it can be deaf to
-    // the leak sensors. Worst case — valve truly dead, so it never advertises and
-    // no connect attempt ever flushes the cache — one continuous duration-0
-    // session spans the entire outage. The exact condition in which we cannot
-    // close the valve is the condition in which we are least likely to learn
-    // there is water on the floor.
-    //
-    // Cost of turning it off: duplicate valve advertisement reports, which
-    // handle_valve_disc()'s g_connecting guard absorbs.
     ESP_LOGI(BLE_TAG, "[SCAN] Starting scan for provisioned valve %s...", target);
-
-    // Marked BEFORE the scan starts, and not again after: no other task may see this scan
-    // running while is_scanning reads false, since in the portal window the leak scanner
-    // cancels every scan not marked as the valve hunt (ble_valve_hunt_scanning()). Set after
-    // the start, it could also overwrite the false that handle_valve_disc() on the host task
-    // writes when this scan's first report already started the connect.
-    is_scanning = true;
-
-#if MYNEWT_VAL(BLE_EXT_ADV)
-    // Extended scan: 1M PHY (valve + legacy leak sensors) + Coded PHY (long-range leak sensors)
-    // itvl 176 = 110 ms, window 88 = 55 ms. Deliberately NOT 160/80 (100/50 ms):
-    // the valve advertises at 500-700 ms, and 100 ms against 500 ms is a 5:1
-    // harmonic lock in which escape depends solely on the 0-10 ms per-event
-    // advDelay drifting the phase. 110 ms breaks the lock at an identical radio
-    // duty cycle (50 %), so it costs nothing.
-    struct ble_gap_ext_disc_params uncoded_params = {0};
-    uncoded_params.itvl = 176;      // 110ms interval — de-harmonised, see above
-    uncoded_params.window = 88;     // 55ms window
-    uncoded_params.passive = 0;     // Active scan for valve name resolution
-
-    struct ble_gap_ext_disc_params coded_params = {0};
-    coded_params.itvl = 176;
-    coded_params.window = 88;
-    coded_params.passive = 1;       // Passive for Coded PHY (leak sensors only)
-
-    int rc = ble_gap_ext_disc(
-        g_own_addr_type,
-        0,                          // duration: 0 = continuous
-        0,                          // period: 0 = no periodic restart
-        0,                          // filter_duplicates: DISABLED — see below
-        0,                          // filter_policy: accept all
-        0,                          // limited: disabled
-        &uncoded_params,            // 1M PHY scan params
-        &coded_params,              // Coded PHY scan params
-        ble_gap_event,
-        NULL
-    );
-#else
-    struct ble_gap_disc_params disc_params = {
-        .filter_duplicates = 0,     // see below
-        .passive = 0,
-        .itvl = 176,
-        .window = 88,
-    };
-    int rc = ble_gap_disc(g_own_addr_type, BLE_HS_FOREVER, &disc_params, ble_gap_event, NULL);
-#endif
-
-    if (rc == 0)
-    {
-        // The window or a radio hold started holding after the check above (it opened or
-        // started, or the leak response was written or withdrawn), possibly after the command
-        // task's poll looked for a hunt to cancel (this can run on the NimBLE host task):
-        // cancel it here. Logged for the window only.
-        if (portal_holds_valve())
-        {
-            ble_gap_disc_cancel();
-            is_scanning = false;
-            s_hunt_held = true;
-            if (app_wifi_portal_priority_active())
-                ESP_LOGI(BLE_TAG, "[PORTAL] Valve scan cancelled - Wi-Fi setup portal opened");
-        }
-    }
-    else
-    {
-        is_scanning = false;
-        ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_disc rc=%d", rc);
-    }
+    s_hunt_announced = true;
+    app_ble_leak_kick();
 }
 
 // -----------------------------------------------------------------------------
@@ -2524,7 +2483,7 @@ static void request_valve_link(void)
     g_connect_requested = true;
     (void)link_stale_check();
     if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
-        start_scan();
+        request_hunt();
 }
 
 // Every attempt at a hub write failed on a live link, and the command is pended: drop that
@@ -2554,7 +2513,7 @@ static void drop_link_after_failed_write(int rc, uint16_t conn, const char *what
     {
         ESP_LOGE(BLE_TAG, "[CMD] valve write failed %d times (rc=%d) - reconnecting to re-apply (%s=%u)",
                  CMD_WRITE_ATTEMPTS, rc, what, val);
-        start_scan();
+        request_hunt();
         return;
     }
 
@@ -2890,7 +2849,7 @@ static void on_stack_sync(void)
     g_ble_synced = true;
 
     if (g_connect_requested)
-        start_scan();
+        request_hunt();
 }
 
 // -----------------------------------------------------------------------------
@@ -2901,17 +2860,18 @@ static void on_stack_sync(void)
 
 // The command task's side of the portal priority window and the Wi-Fi radio holds
 // (app_wifi.c), run on every pass of its loop, so at least every PORTAL_POLL_MS: their owners
-// (the wifi_manager task and wifi_task) only set a flag and deadlines, and the NimBLE cancels
-// are issued here, on the task that already issues the module's other cancels
-// (BLE_CMD_DISCONNECT).
+// (the wifi_manager task and wifi_task) only set a flag and deadlines, and the NimBLE connect
+// cancels are issued here, on the task that already issues the module's other cancels
+// (BLE_CMD_DISCONNECT). The hunt's scan is the executor's (app_ble_leak.c), which stops it by
+// itself while ble_valve_hunt_wanted() is false; this only logs that and wakes it.
 //   While either holds the valve (portal_holds_valve()), on every pass: cancel a connect
-//   in flight and the valve hunt. Every pass, not only when the window opens, so a hunt the
+//   in flight, and end the valve hunt. Every pass, not only when the window opens, so a hunt the
 //   leak-response exception started stops once that response is written or withdrawn, and
 //   NimBLE's own connect re-attempt after a link failed to be established (0x3E,
-//   CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT), which bypasses start_scan() and
-//   handle_valve_disc() and leaves g_connecting false, is cancelled too
-//   (ble_gap_conn_active(): only this module connects; link_poll() cancels that one in any
-//   case). A link already up stays up, and its commands still run.
+//   CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT), which bypasses request_hunt() and the claim and
+//   leaves g_connecting false, is cancelled too (ble_gap_conn_active(): only this module
+//   connects; link_poll() cancels that one in any case). A link already up stays up, and its
+//   commands still run.
 //   Once neither holds it (both over, or a leak response was pended): restart a hunt they
 //   held (s_hunt_held), whichever edge this poll saw, and when the pause ends any hunt that
 //   is wanted with no link up or being made.
@@ -2920,8 +2880,9 @@ static void on_stack_sync(void)
 //   Not for a radio hold, which lasts about 20 s at most and pauses no health timeout.
 // Only the window's edges and cancels are logged: app_wifi.c prints each radio hold's start
 // and end, and the hunt's restart prints its own "[SCAN] Starting scan" line.
-// g_connect_requested is never touched. start_scan() and handle_valve_disc() check the
-// window and the holds themselves, so nothing new starts in between.
+// g_connect_requested is never touched. request_hunt(), ble_valve_note_adv() and the
+// executor's ble_valve_hunt_wanted() check the window and the holds themselves, so nothing new
+// starts in between.
 static void portal_priority_poll(void)
 {
     static bool s_paused = false;   // command task only: the window as last seen here
@@ -2948,14 +2909,14 @@ static void portal_priority_poll(void)
     }
 
     // A hunt or a connect that a leak response lets run in the window: the valve's timeouts
-    // count from it (portal_holds_valve()). On every pass, not only where start_scan() lets a
+    // count from it (portal_holds_valve()). On every pass, not only where request_hunt() lets a
     // hunt run: a hunt already running when the window opens never gets there, nor does one
     // that runs on across a window closed and reopened between two passes, and a CONNECTED
     // applied just as the link drops can clear the stamp after the drop's hunt found it set.
     // The health engine stamps only while it holds no stamp, and logs only then, so a repeat
     // costs two loads.
     if (on && !hold && valve_conn_handle == BLE_HS_CONN_HANDLE_NONE &&
-        (is_scanning || g_connecting || ble_gap_conn_active()))
+        (ble_valve_hunt_wanted() || g_connecting || ble_gap_conn_active()))
         health_note_valve_leak_hunt();
 
     if (hold)
@@ -2969,11 +2930,12 @@ static void portal_priority_poll(void)
                 ESP_LOGI(BLE_TAG, "[PORTAL] Valve connect in flight cancelled (rc=%d)", crc);
             s_hunt_held = true;
         }
-        if (is_scanning)
+        if (s_hunt_announced)
         {
-            ble_gap_disc_cancel();
-            is_scanning = false;
+            // The executor stops the hunt's scan itself (ble_valve_hunt_wanted() is false now).
+            s_hunt_announced = false;
             s_hunt_held = true;
+            app_ble_leak_kick();
             if (on)
                 ESP_LOGI(BLE_TAG, "[PORTAL] Valve hunt stopped - Wi-Fi setup portal has the radio");
         }
@@ -2984,7 +2946,7 @@ static void portal_priority_poll(void)
     {
         s_hunt_held = false;
         if (g_connect_requested && !g_connecting && valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
-            start_scan();
+            request_hunt();
     }
 }
 
@@ -3084,7 +3046,7 @@ static void ble_valve_task(void *pvParameters)
             }
             g_connect_requested = true;
             (void)link_stale_check();   // a stale handle would stop the rescan at "Already connected"
-            start_scan();
+            request_hunt();
             break;
 
         case BLE_CMD_OPEN_VALVE:
@@ -3101,21 +3063,19 @@ static void ble_valve_task(void *pvParameters)
             ESP_LOGI(BLE_TAG, "[TASK] CMD: DISCONNECT");
             g_connect_requested = false;
             // Stop every stage, not only an established link (N8): a connect still in
-            // flight would otherwise complete and link the valve anyway, and a valve scan
+            // flight would otherwise complete and link the valve anyway, and a valve hunt
             // would keep running. The cancelled connect reports status BLE_HS_EAPP, which
-            // the CONNECT handler does not rescan on. The leak scanner restarts its own
-            // scan once ours is gone.
+            // the CONNECT handler does not rescan on. With g_connect_requested false the hunt
+            // is no longer wanted, and the executor, woken here, drops it.
             if (g_connecting)
             {
                 int crc = ble_gap_conn_cancel();
                 ESP_LOGI(BLE_TAG, "[TASK] Connect in flight cancelled (rc=%d)", crc);
                 g_connecting = false;
             }
-            if (is_scanning)
-            {
-                ble_gap_disc_cancel();
-                is_scanning = false;
-            }
+            s_hunt_announced = false;
+            s_claim_req = false;
+            app_ble_leak_kick();
             if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
                 ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM) == BLE_HS_ENOTCONN)
                 (void)link_stale_check();   // no such link: closed here once confirmed
@@ -3479,6 +3439,7 @@ void ble_valve_set_target_mac(const char *mac_str)
     if (!mac_str)
     {
         g_connect_requested = false;
+        s_hunt_announced = false;   // no hunt without a valve (ble_valve_hunt_wanted())
         ESP_LOGI(BLE_TAG, "[API] Target MAC cleared");
     }
     else
@@ -3489,6 +3450,11 @@ void ble_valve_set_target_mac(const char *mac_str)
     // Same valve again (every provision re-applies it): keep its queued commands.
     if (!changed)
         return;
+
+    // A claim requested for the previous valve's advert is not granted: the executor would
+    // connect to that valve's address (WP5).
+    s_claim_req = false;
+    app_ble_leak_kick();
 
     report_valve_cmd_flush(!mac_str ? "valve decommissioned"
                                     : (had_target ? "valve target changed" : "valve target set"),
@@ -3549,11 +3515,6 @@ bool ble_valve_get_rmleak_state(void)
 bool ble_valve_is_connected(void)
 {
     return valve_conn_handle != BLE_HS_CONN_HANDLE_NONE;
-}
-
-bool ble_valve_hunt_scanning(void)
-{
-    return is_scanning;
 }
 
 void ble_valve_cancel_pending_close(void)

@@ -79,7 +79,7 @@ extern "C"
     // armed - when no valve is provisioned, and also when the command queue is full.
     // A queued command is pended while the provisioned valve is not linked and ready, and
     // replayed on its link only. ble_valve_disconnect() is never gated: it also cancels a
-    // connect in flight and a valve scan.
+    // connect in flight and ends the valve hunt.
     bool ble_valve_open(void);
     bool ble_valve_close(void);
     bool ble_valve_connect(void);
@@ -150,12 +150,38 @@ extern "C"
      */
     bool ble_valve_is_connected(void);
 
+    // -------------------------------------------------------------------------
+    // BLE scan executor interface (2.1.4 WP5). For the ble_leak_scan task (app_ble_leak.c),
+    // the only code that starts or stops a BLE scan; nothing else calls these.
+    // -------------------------------------------------------------------------
     /**
-     * @brief True while the valve module's own scan (the hunt for the provisioned valve) is
-     * running. The leak scanner reads it so that, in the portal priority window, it cancels
-     * only its own scan and never the hunt, which the valve module stops itself.
+     * @brief The valve module wants its valve found: the provisioned valve is wanted
+     * (connect requested), not linked and no connect is in flight, NimBLE is synced, and
+     * neither the portal priority window nor a Wi-Fi radio hold holds the hunt (they do not
+     * while a leak response is pended). Recomputed from those facts on every call.
      */
-    bool ble_valve_hunt_scanning(void);
+    bool ble_valve_hunt_wanted(void);
+
+    /**
+     * @brief The provisioned valve was heard while the hunt is wanted: a claim (connect) is
+     * due. The executor stops its scan and calls ble_valve_claim_start(). Clears a claim
+     * request the hunt no longer wants.
+     */
+    bool ble_valve_claim_wanted(void);
+
+    /**
+     * @brief The executor's grant: issue the connect to the valve heard, on the executor's
+     * task, with its scan stopped. Re-checks the hunt first; a refused connect rescans.
+     */
+    void ble_valve_claim_start(void);
+
+    /**
+     * @brief Every complete advertising report of the executor's scans (NimBLE host task).
+     * @param addr The advertiser's address, a `const ble_addr_t *`.
+     * Stores a claim request when it is the provisioned valve and the hunt wants it, and wakes
+     * the executor. Nothing else: no NimBLE call.
+     */
+    void ble_valve_note_adv(const void *addr);
 
     /**
      * @brief True while a hub-issued valve command has been queued but the
