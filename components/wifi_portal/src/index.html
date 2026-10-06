@@ -55,6 +55,12 @@
 			</div>
 		</button>
 
+		<!-- The hub lost its router (status urc 3): until it reconnects or a network is chosen -->
+		<div id="fallback-banner" class="card card-warn" style="display:none" role="status">
+			<div class="banner-label">Connection lost</div>
+			<div id="fallback-text" class="banner-text"></div>
+		</div>
+
 		<h1 class="view-title">Select Wi-Fi Network</h1>
 		<p class="view-sub">Choose your home network to connect the WiFiHub</p>
 
@@ -66,6 +72,9 @@
 			</div>
 		</div>
 
+		<!-- Shown while the page polls nothing (60 s with no touch) -->
+		<p id="idle-hint" class="hint-text" style="display:none">Tap anywhere to refresh the list</p>
+
 		<!-- Hidden network link -->
 		<button id="btn-hidden" class="btn-link" type="button">
 			<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
@@ -73,6 +82,14 @@
 				<path d="M10 6v8M6 10h8" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
 			</svg>
 			Connect to hidden network
+		</button>
+
+		<!-- Rescan: the hub scans at most every 20 s for the page -->
+		<button id="btn-rescan" class="btn-link" type="button">
+			<svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+				<path d="M16 10a6 6 0 1 1-1.8-4.3M16 3v4h-4" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+			</svg>
+			<span id="rescan-label">Rescan</span>
 		</button>
 	</div>
 
@@ -167,7 +184,7 @@
 					</svg>
 				</div>
 				<h1 class="view-title clr-success">Connected!</h1>
-				<p class="view-sub">Your WiFiHub is now on your home network</p>
+				<p class="view-sub">WiFiHub is connected to <strong id="success-ssid"></strong></p>
 				<div class="card next-step-card">
 					<!-- Watts Home "dissolving-W" mark (derived from the Watts Home app loading screen) -->
 					<svg class="vplus-icon" viewBox="0 0 62 62" role="img" aria-label="Watts Home logo">
@@ -203,8 +220,8 @@
 						<path d="M20 20l16 16M36 20l-16 16" stroke="#dc2626" stroke-width="3" fill="none" stroke-linecap="round"/>
 					</svg>
 				</div>
-				<h1 class="view-title clr-danger">Connection Failed</h1>
-				<p class="view-sub">Unable to connect to the network</p>
+				<h1 id="fail-title" class="view-title clr-danger">Connection Failed</h1>
+				<p id="fail-text" class="view-sub">Unable to connect to the network</p>
 				<div class="card hint-card">
 					<ul class="hint-list">
 						<li>Double-check the Wi-Fi password</li>
@@ -213,12 +230,20 @@
 					</ul>
 				</div>
 			</div>
+
+			<!-- Finished: the hub's setup network closes about 2 s after Finish -->
+			<div id="state-finished" class="state-panel" style="display:none">
+				<h1 class="view-title clr-success">Setup complete</h1>
+				<p class="view-sub">WiFiHub's setup network closes now, and your phone goes back to its own Wi-Fi. You can close this page.</p>
+			</div>
 		</div>
 
 		<div class="btn-row">
 			<button id="btn-retry" class="btn btn-secondary" type="button" style="display:none">Try Again</button>
-			<button id="btn-done" class="btn btn-primary" type="button" disabled>Done</button>
+			<button id="btn-done" class="btn btn-secondary" type="button" style="display:none">Other Network</button>
+			<button id="btn-finish" class="btn btn-primary" type="button" style="display:none">Finish</button>
 		</div>
+		<p id="finish-note" class="hint-text" role="status"></p>
 	</div>
 
 	<!-- ════════════════════════════════════════ -->
@@ -250,6 +275,7 @@
 
 		<div class="btn-row">
 			<button id="btn-disconnect" class="btn btn-danger-outline" type="button">Disconnect</button>
+			<button id="btn-finish-details" class="btn btn-primary" type="button">Finish</button>
 		</div>
 	</div>
 

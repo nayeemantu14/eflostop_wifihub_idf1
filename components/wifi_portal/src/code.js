@@ -1,499 +1,496 @@
-/* ── WiFiHub Captive Portal ─────────────────────────────
- * Vanilla JS – no dependencies
- * Endpoints: GET ap.json, POST/DELETE connect.json, GET status.json
- * ────────────────────────────────────────────────────── */
-
+/* WiFiHub setup page (hub FW 2.1.4). Sent gzipped with its comments: keep them short. */
 (function () {
   "use strict";
 
-  // ── Helpers ──────────────────────────────────────────
   var $ = function (id) { return document.getElementById(id); };
+  function show(id, on) { $(id).style.display = on ? "" : "none"; }
 
-  var selectedSSID = "";
-  var refreshTimer = null;
-  var statusTimer = null;
-  var currentView = "view-scan";
+  // Polls (?bg=1): status 950 ms while a Connect is decided, else 3.8 s in use; list 3.8 s in use
+  var IDLE_MS = 60000, POLL_MS = 3800, POLL_CONNECT_MS = 950;
+  var CONNECT_TIMEOUT_MS = 30000, EMPTY_LIST_MS = 8000, RESCAN_GAP_MS = 20000;
 
-  // ── Page Activity ───────────────────────────────────
-  // The hub sees this page only through GET ap.json. Each request also asks it for a
-  // Wi-Fi scan, which pauses its BLE leak-sensor scanning, and keeps it from starting a
-  // connect attempt of its own, which a Connect sent from here must never meet (the hub
-  // restarts). So ap.json is polled, in every view, only while someone uses the page:
-  // visible, with a touch, key, scroll or focus in the last IDLE_MS. Idle or hidden, the
-  // polling stops and the list stays as it is; the next activity refreshes it at once.
-  var IDLE_MS = 60000;
-  // A Connect waits until the polling has run this long: longer than a connect attempt
-  // the hub may have started just before the page was opened or used again.
-  var RESUME_GUARD_MS = 8000;
-  var lastActivity = Date.now();
-  var pollingSince = Date.now();
-  var idle = false;
+  // status.json "reason": ESP-IDF disconnect reasons; 250: no IP
+  var WRONG_PASSWORD = [2, 14, 15, 23, 202, 204];
+  var NOT_FOUND = [201, 210, 211, 212];
+  var NO_IP = 250;
 
-  // ── View Management ─────────────────────────────────
   var views = ["view-scan", "view-password", "view-manual", "view-connecting", "view-details"];
+  var currentView = "view-scan";
+  var networks = [];
+  var selected = null;      // {ssid, raw, chan, auth}; auth -1: typed in
+  var connecting = null;    // {ssid, since, seenPend, timedOut}
+  var lastStatus = {};
+  var lostSeen = false;
+  var lastListText = null;
+  var listSince = Date.now();
+  var lastActivity = Date.now();
+  var idle = false;
+  var lastStatusPoll = 0, lastListPoll = 0, pointerDownAt = 0, rescanUntil = 0;
+  var finished = false;
 
   function showView(id) {
     currentView = id;
-    views.forEach(function (v) {
-      $(v).style.display = v === id ? "" : "none";
-    });
-    // Re-trigger entry animation
+    views.forEach(function (v) { $(v).style.display = v === id ? "" : "none"; });
     $(id).style.animation = "none";
-    $(id).offsetHeight; // force reflow
+    $(id).offsetHeight;
     $(id).style.animation = "";
   }
 
-  // ── Step Indicator ──────────────────────────────────
   function setStep(num) {
-    var steps = document.querySelectorAll("#steps .step");
-    var lines = document.querySelectorAll("#steps .step-line-fill");
-    steps.forEach(function (s, i) {
-      var idx = i + 1;
+    document.querySelectorAll("#steps .step").forEach(function (s, i) {
       s.classList.remove("active", "done");
-      if (idx < num) s.classList.add("done");
-      else if (idx === num) s.classList.add("active");
+      if (i + 1 < num) s.classList.add("done");
+      else if (i + 1 === num) s.classList.add("active");
     });
-    lines.forEach(function (l, i) {
+    document.querySelectorAll("#steps .step-line-fill").forEach(function (l, i) {
       l.style.width = (i + 1 < num) ? "100%" : "0";
     });
   }
 
-  // ── Timers ──────────────────────────────────────────
-  function stopStatus() {
-    if (statusTimer) { clearInterval(statusTimer); statusTimer = null; }
-  }
-  function stopRefresh() {
-    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-  }
-  function startStatus() {
-    stopStatus();
-    statusTimer = setInterval(statusTick, 950);
-  }
-  function startRefresh() {
-    stopRefresh();
-    refreshTimer = setInterval(refreshTick, 3800);
+  function toScan() {
+    connecting = null;
+    setStep(1);
+    showView("view-scan");
+    updateBanners(lastStatus);
+    lastListPoll = 0;
   }
 
-  function pageHidden() {
-    return document.visibilityState === "hidden";
+  // X-Custom-enc: pct. A "raw" SSID (not UTF-8): each code point is one of its bytes.
+  function pctUtf8(s) {
+    try { return encodeURIComponent(s); } catch (e) { return null; }
   }
-
-  // Every 3.8 s: the next network list, or the end of the polling once the page is idle.
-  function refreshTick() {
-    if (pageHidden() || Date.now() - lastActivity >= IDLE_MS) {
-      pauseRefresh();
-      return;
+  function pctRaw(s) {
+    var out = "";
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i), ch = s.charAt(i);
+      if (c > 0xFF) return null;
+      out += /[A-Za-z0-9\-_.~]/.test(ch) ? ch : "%" + (c < 16 ? "0" : "") + c.toString(16).toUpperCase();
     }
-    refreshAP();
+    return out;
+  }
+  function byteLen(pct) { return pct.replace(/%[0-9A-Fa-f]{2}/g, "x").length; }
+
+  // auth -1 (typed in): empty = open
+  function passwordError(pwd, auth) {
+    if (auth === 0) return null;
+    if (pwd === "") return auth > 0 ? "Password is required" : null;
+    var enc = pctUtf8(pwd);
+    if (enc === null) return CONNECT_ERRORS.enc;
+    var n = byteLen(enc);
+    if (auth === 1) return n <= 64 ? null : "The password is too long";   // WEP
+    if (n === 64 && /^[0-9A-Fa-f]{64}$/.test(pwd)) return null;
+    if (n < 8 || n > 63) return "Wi-Fi passwords have 8 to 63 characters (or 64 hex digits)";
+    return null;
   }
 
-  function pauseRefresh() {
-    stopRefresh();
-    idle = true;
-    $("idle-hint").style.display = "";
-  }
-
-  // A touch, key, scroll or focus, or the page shown again: an idle page polls again at once.
-  function noteActivity() {
-    lastActivity = Date.now();
-    if (!idle || pageHidden()) return;
-    idle = false;
-    $("idle-hint").style.display = "none";
-    pollingSince = Date.now();
-    refreshAP();
-    startRefresh();
-  }
-
-  function onVisibility() {
-    if (pageHidden()) pauseRefresh();
-    else noteActivity();
-  }
-
-  // status.json asks the hub for nothing. It is read while a Connect's result or the
-  // connection details are on screen, which may be watched without a touch, and for the
-  // connected banner while the page is in use.
-  function statusTick() {
-    if (pageHidden()) return;
-    if (idle && currentView !== "view-connecting" && currentView !== "view-details") return;
-    checkStatus();
-  }
-
-  // ── Signal Helpers ──────────────────────────────────
-  function rssiBars(rssi) {
-    if (rssi >= -55) return 4;
-    if (rssi >= -67) return 3;
-    if (rssi >= -75) return 2;
-    return 1;
-  }
-  function rssiLabel(bars) {
-    return ["", "Weak", "Fair", "Good", "Strong"][bars] || "";
-  }
-
-  // Lock icon SVG (inline, tiny)
-  var lockSVG = '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">'
-    + '<path d="M8 1a3 3 0 0 0-3 3v2H4.5A1.5 1.5 0 0 0 3 7.5v5A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5v-5A1.5 1.5 0 0 0 11.5 6H11V4a3 3 0 0 0-3-3zm-1.5 3a1.5 1.5 0 1 1 3 0v2h-3V4z" fill="currentColor"/>'
-    + '</svg>';
-
-  // ── Build Network List HTML ─────────────────────────
-  function renderNetworks(list) {
-    if (!list || list.length === 0) return;
-
-    var html = "";
-    list.forEach(function (ap) {
-      var bars = rssiBars(ap.rssi);
-      var secured = ap.auth !== 0;
-      var label = rssiLabel(bars);
-      var meta = (secured ? lockSVG + " Secured" : "Open")
-        + " &middot; " + label;
-
-      html += '<div class="network" role="listitem" tabindex="0"'
-        + ' data-ssid="' + escAttr(ap.ssid) + '"'
-        + ' data-auth="' + ap.auth + '">'
-        + '<div class="signal" data-bars="' + bars + '"><i></i><i></i><i></i><i></i></div>'
-        + '<div class="net-info">'
-        + '<div class="net-name">' + esc(ap.ssid) + '</div>'
-        + '<div class="net-meta">' + meta + '</div>'
-        + '</div></div>';
+  function getJSON(url) {
+    return fetch(url, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) throw new Error(r.status);
+      return r.json();
     });
-
-    $("network-list").innerHTML = html;
   }
 
-  // ── Escape Helpers ──────────────────────────────────
+  function pageHidden() { return document.visibilityState === "hidden"; }
+
+  // Status
+  function pollStatus(bg) {
+    lastStatusPoll = Date.now();
+    return getJSON(bg ? "status.json?bg=1" : "status.json").then(onStatus, function () {});
+  }
+
+  function onStatus(d) {
+    if (!d || typeof d !== "object") return;
+    lastStatus = d;
+    if (d.urc === 3 && d.ssid) lostSeen = true;
+    if (connecting) connectProgress(d);
+    else if (!finished) updateBanners(d);
+  }
+
+  function updateBanners(d) {
+    var lost = d.urc === 3 && d.ssid && !d.pend;
+    var ok = d.urc === 0 && d.ssid && !d.pend;
+    show("fallback-banner", !!lost);
+    if (lost) {
+      $("fallback-text").textContent = "WiFiHub lost its connection to «" + d.ssid +
+        "». It keeps retrying. Choose a network to change it.";
+    }
+    show("connected-banner", !!ok);
+    if (ok) {
+      document.querySelector("#connected-banner .banner-label").textContent =
+        lostSeen ? "WiFiHub reconnected to" : "Connected to";
+      $("connected-ssid").textContent = d.ssid;
+      $("details-ssid-label").textContent = d.ssid;
+      $("detail-ip").textContent = d.ip || "—";
+      $("detail-netmask").textContent = d.netmask || "—";
+      $("detail-gw").textContent = d.gw || "—";
+    }
+  }
+
+  // Network list
+  function rssiBars(rssi) {
+    return rssi >= -55 ? 4 : rssi >= -67 ? 3 : rssi >= -75 ? 2 : 1;
+  }
+
+  var lockSVG = '<svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">'
+    + '<path d="M4 7h8v7H4zM5.5 7V5a2.5 2.5 0 0 1 5 0v2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>';
+
   function esc(s) {
     var d = document.createElement("div");
     d.textContent = s;
     return d.innerHTML;
   }
-  function escAttr(s) {
-    return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;")
-      .replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
 
-  // ── Fetch AP List ───────────────────────────────────
-  async function refreshAP() {
-    try {
-      var res = await fetch("ap.json");
-      var data = await res.json();
-      if (data.length > 0) {
-        data.sort(function (a, b) { return b.rssi - a.rssi; });
-        renderNetworks(data);
+  function renderNetworks(list) {
+    networks = list;
+    if (!list.length) {
+      if (Date.now() - listSince >= EMPTY_LIST_MS) {
+        $("network-list").innerHTML = '<div class="scan-placeholder"><span>No networks found. ' +
+          'Tap Rescan, or connect to a hidden network.</span></div>';
       }
-    } catch (e) {
-      console.info("ap.json fetch failed");
+      return;
     }
+    var html = "";
+    list.forEach(function (ap, i) {
+      var bars = rssiBars(ap.rssi);
+      html += '<div class="network" role="listitem" tabindex="0" data-i="' + i + '">'
+        + '<div class="signal" data-bars="' + bars + '"><i></i><i></i><i></i><i></i></div>'
+        + '<div class="net-info"><div class="net-name">' + esc(ap.ssid) + '</div>'
+        + '<div class="net-meta">' + (ap.auth !== 0 ? lockSVG + " Secured" : "Open") + " &middot; "
+        + ["", "Weak", "Fair", "Good", "Strong"][bars] + '</div></div></div>';
+    });
+    $("network-list").innerHTML = html;
   }
 
-  // ── Check Connection Status ─────────────────────────
-  async function checkStatus() {
-    try {
-      var res = await fetch("status.json");
-      var d = await res.json();
-      if (!d || !d.ssid) {
-        // No SSID — check for manual disconnect
-        if (d && d.urc === 2) {
-          $("connected-banner").style.display = "none";
-        }
-        return;
+  // Not redrawn just after a touch: a tap never lands on a moved row.
+  function refreshList(bg) {
+    lastListPoll = Date.now();
+    return getJSON(bg ? "ap.json?bg=1" : "ap.json").then(function (data) {
+      if (!Array.isArray(data)) return;
+      var text = JSON.stringify(data);
+      if ((text === lastListText && data.length) || Date.now() - pointerDownAt < 700) return;
+      lastListText = text;
+      data.sort(function (a, b) { return b.rssi - a.rssi; });
+      renderNetworks(data);
+    }, function () {});
+  }
+
+  function holdRescan(ms) {
+    rescanUntil = Date.now() + ms;
+    (function count() {
+      var left = Math.ceil((rescanUntil - Date.now()) / 1000);
+      $("btn-rescan").disabled = left > 0;
+      $("rescan-label").textContent = left > 0 ? "Rescan (" + left + " s)" : "Rescan";
+      if (left > 0) setTimeout(count, 1000);
+    })();
+  }
+
+  function rescan() {
+    if (Date.now() < rescanUntil) return;
+    $("btn-rescan").disabled = true;
+    fetch("scan.json", { method: "POST", cache: "no-store" }).then(function (r) {
+      return r.ok ? r.json() : null;
+    }).then(function (j) {
+      if (j && j.scan === 1) {
+        listSince = Date.now();
+        setTimeout(function () { refreshList(false); }, 3000);
+        setTimeout(function () { refreshList(false); }, 6500);
+        holdRescan(RESCAN_GAP_MS);
+      } else {
+        holdRescan(j && j["in"] > 0 ? j["in"] * 1000 : 5000);
       }
+    }, function () { holdRescan(5000); });
+  }
 
-      if (d.ssid === selectedSSID) {
-        // We initiated this connection — update result screen
-        switch (d.urc) {
-          case 0: // connected
-            showConnectResult(true, d);
-            break;
-          case 1: // failed
-            showConnectResult(false, d);
-            break;
-        }
-      } else if (d.urc === 0 && d.ssid) {
-        // Already connected (not user-initiated this session)
-        updateConnectedState(d);
+  // {lost}: no answer, the status decides
+  function sendConnect(sel, pwd) {
+    var s = sel.raw ? pctRaw(sel.ssid) : pctUtf8(sel.ssid), p = pctUtf8(pwd);
+    if (s === null) return Promise.resolve({ err: "ssid" });
+    if (p === null) return Promise.resolve({ err: "pwd" });
+    var h = { "X-Custom-enc": "pct", "X-Custom-ssid": s, "X-Custom-pwd": p };
+    if (sel.chan > 0) h["X-Custom-chan"] = String(sel.chan);
+    return fetch("connect.json", { method: "POST", headers: h, cache: "no-store" }).then(function (r) {
+      if (r.ok) return { ok: true };
+      if (r.status !== 400) return { err: "busy" };
+      return r.json().then(function (j) { return { err: (j && j.err) || "enc" }; },
+        function () { return { err: "enc" }; });
+    }, function () { return { lost: true }; });
+  }
+
+  var CONNECT_ERRORS = {
+    busy: "WiFiHub is busy - try again",
+    ssid: "Network name too long (32 bytes at most)",
+    pwd: "Password too long",
+    enc: "A character cannot be sent"
+  };
+
+  function performConnect(sel, pwd, button, onError) {
+    if (button) button.disabled = true;
+    sendConnect(sel, pwd).then(function (res) {
+      if (button) button.disabled = false;
+      if (res.ok || res.lost) {
+        selected = sel;
+        startConnecting(sel.ssid, false);
+      } else {
+        onError(CONNECT_ERRORS[res.err] || CONNECT_ERRORS.enc);
       }
-    } catch (e) {
-      console.info("status.json fetch failed");
-    }
+    });
   }
 
-  function showConnectResult(success, d) {
-    $("state-loading").style.display = "none";
-    $("btn-done").disabled = false;
-
-    if (success) {
-      $("state-success").style.display = "";
-      $("state-fail").style.display = "none";
-      $("btn-retry").style.display = "none";
-      updateConnectedState(d);
-      setStep(3);
-    } else {
-      $("state-fail").style.display = "";
-      $("state-success").style.display = "none";
-      $("btn-retry").style.display = "";
-      $("connected-banner").style.display = "none";
-    }
-  }
-
-  function updateConnectedState(d) {
-    $("connected-ssid").textContent = d.ssid;
-    $("connected-banner").style.display = "";
-    $("details-ssid-label").textContent = d.ssid;
-    $("detail-ip").textContent = d.ip || "—";
-    $("detail-netmask").textContent = d.netmask || "—";
-    $("detail-gw").textContent = d.gw || "—";
-  }
-
-  // ── Perform Connect ─────────────────────────────────
-  async function performConnect(ssid, pwd) {
-    selectedSSID = ssid;
-    stopStatus();
-
-    // Reset connecting view
-    $("state-loading").style.display = "";
-    $("state-success").style.display = "none";
-    $("state-fail").style.display = "none";
-    $("btn-done").disabled = true;
-    $("btn-retry").style.display = "none";
-    $("connecting-ssid").textContent = ssid;
-
+  function showState(state) {
+    ["loading", "success", "fail", "finished"].forEach(function (s) { show("state-" + s, s === state); });
+    show("btn-retry", state === "fail");
+    show("btn-done", state === "fail" || state === "success");
+    show("btn-finish", state === "success");
+    $("finish-note").textContent = "";
     setStep(3);
     showView("view-connecting");
-
-    // The hub starts no connect attempt of its own while this page polls, but may have
-    // started one just before the polling (re)started: let it end first (Page Activity).
-    var wait = RESUME_GUARD_MS - (Date.now() - pollingSince);
-    if (wait > 0) {
-      await new Promise(function (resolve) { setTimeout(resolve, wait); });
-    }
-    stopRefresh();
-
-    try {
-      await fetch("connect.json", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Custom-ssid": ssid,
-          "X-Custom-pwd": pwd
-        },
-        body: JSON.stringify({ timestamp: Date.now() })
-      });
-    } catch (e) {
-      console.info("connect.json POST failed");
-    }
-
-    startStatus();
-    if (!idle) startRefresh();
   }
 
-  // ── Disconnect ──────────────────────────────────────
-  async function performDisconnect() {
-    stopStatus();
-    selectedSSID = "";
-
-    try {
-      await fetch("connect.json", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ timestamp: Date.now() })
-      });
-    } catch (e) {
-      console.info("connect.json DELETE failed");
-    }
-
-    $("connected-banner").style.display = "none";
-    startStatus();
-    setStep(1);
-    showView("view-scan");
+  function startConnecting(ssid, resumed) {
+    connecting = { ssid: ssid, since: Date.now(), seenPend: resumed, timedOut: false };
+    $("connecting-ssid").textContent = ssid;
+    showState("loading");
+    lastStatusPoll = 0;
   }
 
-  // ── Password Show/Hide Toggle ───────────────────────
-  function initEyeToggles() {
+  // "pend" until decided, then "ssid" with urc 0 or 1 and "reason"
+  function connectProgress(d) {
+    var c = connecting;
+    if (d.pend) {
+      if (d.pend === c.ssid) c.seenPend = true;
+    } else if (d.ssid === c.ssid && d.urc === 0) {
+      showSuccess(d.ssid);
+    } else if (d.ssid === c.ssid && d.urc === 1) {
+      showFailure(d.ssid, d.reason);
+    } else if (c.seenPend) {
+      showFailure(c.ssid, -1);
+    }
+  }
+
+  function connectTimeout() {
+    connecting.timedOut = true;
+    show("btn-retry", true);
+    show("btn-done", true);
+    $("finish-note").textContent = "Still connecting to «" + connecting.ssid + "»: wait, or try again.";
+  }
+
+  function showSuccess(ssid) {
+    connecting = null;
+    $("success-ssid").textContent = ssid;
+    showState("success");
+  }
+
+  function showFailure(ssid, reason) {
+    var q = "«" + ssid + "»";
+    var t = WRONG_PASSWORD.indexOf(reason) >= 0 ?
+      ["Wrong password", "The password for " + q + " was not accepted."] :
+      NOT_FOUND.indexOf(reason) >= 0 ?
+      ["Network not found", q + " not found - is it 2.4 GHz and in range?"] :
+      reason === NO_IP ?
+      ["No IP address", q + " gave WiFiHub no IP address."] :
+      ["Connection failed", "WiFiHub could not connect to " + q + "."];
+    connecting = null;
+    $("fail-title").textContent = t[0];
+    $("fail-text").textContent = t[1];
+    if (!selected || selected.ssid !== ssid) selected = { ssid: ssid, raw: false, chan: 0, auth: -1 };
+    showState("fail");
+  }
+
+  // the setup network stops ~2 s after Finish; no answer: it may have already
+  function doFinish(button) {
+    button.disabled = true;
+    fetch("finish.json", { method: "POST", cache: "no-store" }).then(function (r) {
+      button.disabled = false;
+      if (r.ok) return finishedView();
+      if (currentView !== "view-connecting") return toScan();
+      $("finish-note").textContent = r.status === 409 ? "WiFiHub is not connected yet." : "Please try again.";
+    }, function () {
+      button.disabled = false;
+      finishedView();
+    });
+  }
+
+  function finishedView() {
+    finished = true;
+    connecting = null;
+    showState("finished");
+    show("btn-done", false);
+  }
+
+  // Disconnect: the hub forgets its Wi-Fi
+  function performDisconnect() {
+    selected = null;
+    fetch("connect.json", { method: "DELETE", cache: "no-store" }).then(function () {}, function () {});
+    show("connected-banner", false);
+    toScan();
+    lastStatusPoll = 0;
+  }
+
+  function noteActivity() {
+    if (pageHidden()) return;
+    lastActivity = Date.now();
+    if (idle) {
+      idle = false;
+      $("idle-hint").style.display = "none";
+      lastStatusPoll = lastListPoll = 0;
+    }
+  }
+
+  function tick() {
+    if (pageHidden() || finished) return;
+    var now = Date.now();
+    if (!idle && now - lastActivity >= IDLE_MS) {
+      idle = true;
+      $("idle-hint").style.display = "";
+    }
+    if (connecting) {
+      if (!connecting.timedOut && now - connecting.since >= CONNECT_TIMEOUT_MS) connectTimeout();
+      if (now - lastStatusPoll >= (connecting.timedOut ? POLL_MS : POLL_CONNECT_MS)) pollStatus(true);
+      return;
+    }
+    if (idle) return;
+    if (now - lastStatusPoll >= POLL_MS) pollStatus(true);
+    if (currentView === "view-scan" && now - lastListPoll >= POLL_MS) refreshList(true);
+  }
+
+  function clearErr(input, errEl) {
+    $(errEl).textContent = "";
+    $(input).classList.remove("field-err");
+  }
+
+  function openPassword(sel) {
+    selected = sel;
+    $("pwd-net-name").textContent = sel.ssid;
+    $("input-pwd").value = "";
+    clearErr("input-pwd", "pwd-error");
+    setStep(2);
+    showView("view-password");
+    setTimeout(function () { $("input-pwd").focus(); }, 100);
+  }
+
+  function openManual(ssid) {
+    $("input-manual-ssid").value = ssid;
+    $("input-manual-pwd").value = "";
+    clearErr("input-manual-ssid", "ssid-error");
+    setStep(2);
+    showView("view-manual");
+    setTimeout(function () { $(ssid ? "input-manual-pwd" : "input-manual-ssid").focus(); }, 100);
+  }
+
+  function chooseNetwork(ap) {
+    var sel = { ssid: ap.ssid, raw: ap.raw === 1, chan: ap.chan | 0, auth: ap.auth | 0 };
+    if (sel.auth !== 0) return openPassword(sel);
+    performConnect(sel, "", null, function (msg) {   // open
+      selected = sel;
+      $("fail-title").textContent = "Connection failed";
+      $("fail-text").textContent = msg;
+      showState("fail");
+    });
+  }
+
+  function retry() {
+    var sel = selected;
+    connecting = null;
+    if (!sel) return toScan();
+    for (var i = 0; i < networks.length; i++) {
+      if (networks[i].ssid === sel.ssid) return chooseNetwork(networks[i]);
+    }
+    if (sel.auth >= 0) openPassword(sel);
+    else openManual(sel.ssid);
+  }
+
+  function fieldError(input, errEl, msg) {
+    $(errEl).textContent = msg;
+    $(input).classList.add("field-err");
+    $(input).focus();
+  }
+
+  function on(id, type, fn) { $(id).addEventListener(type, fn); }
+
+  function init() {
     document.querySelectorAll("[data-toggle-pwd]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        var inputId = btn.getAttribute("data-toggle-pwd");
-        var input = $(inputId);
-        var revealed = btn.classList.toggle("revealed");
-        input.type = revealed ? "text" : "password";
+        $(btn.getAttribute("data-toggle-pwd")).type = btn.classList.toggle("revealed") ? "text" : "password";
       });
     });
-  }
-
-  // ── Back Buttons ────────────────────────────────────
-  function initBackButtons() {
     document.querySelectorAll("[data-back]").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        selectedSSID = "";
-        setStep(1);
-        showView("view-" + btn.getAttribute("data-back"));
-      });
+      btn.addEventListener("click", function () { selected = null; toScan(); });
     });
-  }
-
-  // ── Activity Tracking ───────────────────────────────
-  function initActivity() {
-    // Shown under the list while the polling is paused (Page Activity)
-    var hint = document.createElement("p");
-    hint.id = "idle-hint";
-    hint.className = "hint-text";
-    hint.style.display = "none";
-    hint.textContent = "Tap anywhere to refresh the list";
-    $("view-scan").insertBefore(hint, $("btn-hidden"));
 
     ["pointerdown", "touchstart", "mousedown", "keydown", "input", "wheel", "scroll", "focusin"]
-      .forEach(function (type) {
-        document.addEventListener(type, noteActivity, { capture: true, passive: true });
+      .forEach(function (type, i) {
+        document.addEventListener(type, function () {
+          if (i < 3) pointerDownAt = Date.now();
+          noteActivity();
+        }, { capture: true, passive: true });
       });
     window.addEventListener("focus", noteActivity);
     window.addEventListener("pageshow", noteActivity);
-    document.addEventListener("visibilitychange", onVisibility);
-  }
+    document.addEventListener("visibilitychange", function () { idle = true; noteActivity(); });
 
-  // ── Initialization ──────────────────────────────────
-  function init() {
-    initEyeToggles();
-    initBackButtons();
-    initActivity();
-
-    // ── Network list click (event delegation) ─────
-    $("network-list").addEventListener("click", function (e) {
+    on("network-list", "click", function (e) {
       var row = e.target.closest(".network");
-      if (!row) return;
-      var ssid = row.getAttribute("data-ssid");
-      var auth = parseInt(row.getAttribute("data-auth"), 10);
-
-      if (auth === 0) {
-        // Open network — connect directly
-        performConnect(ssid, "");
-      } else {
-        // Secured — show password view
-        selectedSSID = ssid;
-        $("pwd-net-name").textContent = ssid;
-        $("input-pwd").value = "";
-        $("pwd-error").textContent = "";
-        $("input-pwd").classList.remove("field-err");
-        setStep(2);
-        showView("view-password");
-        setTimeout(function () { $("input-pwd").focus(); }, 100);
-      }
+      var ap = row && networks[parseInt(row.getAttribute("data-i"), 10)];
+      if (ap) chooseNetwork(ap);
     });
-
-    // ── Keyboard activation for network items ─────
-    $("network-list").addEventListener("keydown", function (e) {
-      if (e.key === "Enter" || e.key === " ") {
-        var row = e.target.closest(".network");
-        if (row) { e.preventDefault(); row.click(); }
-      }
+    on("network-list", "keydown", function (e) {
+      var row = e.target.closest(".network");
+      if (row && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); row.click(); }
     });
+    on("btn-hidden", "click", function () { openManual(""); });
+    on("btn-rescan", "click", rescan);
 
-    // ── Hidden network button ─────────────────────
-    $("btn-hidden").addEventListener("click", function () {
-      $("input-manual-ssid").value = "";
-      $("input-manual-pwd").value = "";
-      $("ssid-error").textContent = "";
-      $("input-manual-ssid").classList.remove("field-err");
-      setStep(2);
-      showView("view-manual");
-      setTimeout(function () { $("input-manual-ssid").focus(); }, 100);
-    });
-
-    // ── Password view: Connect button ─────────────
-    $("btn-connect").addEventListener("click", function () {
+    on("btn-connect", "click", function () {
       var pwd = $("input-pwd").value;
-      if (!pwd.trim()) {
-        $("pwd-error").textContent = "Password is required";
-        $("input-pwd").classList.add("field-err");
-        $("input-pwd").focus();
-        return;
-      }
-      $("pwd-error").textContent = "";
-      $("input-pwd").classList.remove("field-err");
-      performConnect(selectedSSID, pwd);
+      var err = passwordError(pwd, selected ? selected.auth : 3);
+      if (err) return fieldError("input-pwd", "pwd-error", err);
+      clearErr("input-pwd", "pwd-error");
+      performConnect(selected, pwd, $("btn-connect"), function (msg) { $("pwd-error").textContent = msg; });
     });
+    on("input-pwd", "input", function () { clearErr("input-pwd", "pwd-error"); });
+    on("input-pwd", "keydown", function (e) { if (e.key === "Enter") $("btn-connect").click(); });
 
-    // Clear error on input
-    $("input-pwd").addEventListener("input", function () {
-      $("pwd-error").textContent = "";
-      $("input-pwd").classList.remove("field-err");
+    // sent as typed: spaces at either end belong to an SSID
+    on("btn-manual-connect", "click", function () {
+      var ssid = $("input-manual-ssid").value, pwd = $("input-manual-pwd").value;
+      var enc = pctUtf8(ssid);
+      var err = ssid === "" ? "Network name is required" :
+        enc === null ? CONNECT_ERRORS.enc :
+        byteLen(enc) > 32 ? "The network name is too long (32 bytes at most)" : null;
+      if (err) return fieldError("input-manual-ssid", "ssid-error", err);
+      err = passwordError(pwd, -1);
+      if (err) return fieldError("input-manual-pwd", "ssid-error", err);
+      clearErr("input-manual-ssid", "ssid-error");
+      performConnect({ ssid: ssid, raw: false, chan: 0, auth: -1 }, pwd, $("btn-manual-connect"),
+        function (msg) { $("ssid-error").textContent = msg; });
     });
+    on("input-manual-ssid", "input", function () { clearErr("input-manual-ssid", "ssid-error"); });
+    on("input-manual-ssid", "keydown", function (e) { if (e.key === "Enter") $("input-manual-pwd").focus(); });
+    on("input-manual-pwd", "keydown", function (e) { if (e.key === "Enter") $("btn-manual-connect").click(); });
 
-    // Enter key submits password
-    $("input-pwd").addEventListener("keydown", function (e) {
-      if (e.key === "Enter") $("btn-connect").click();
-    });
+    on("btn-done", "click", function () { selected = null; toScan(); });
+    on("btn-retry", "click", retry);
+    on("btn-finish", "click", function () { doFinish($("btn-finish")); });
+    on("btn-finish-details", "click", function () { doFinish($("btn-finish-details")); });
+    on("connected-banner", "click", function () { showView("view-details"); });
 
-    // ── Manual view: Connect button ───────────────
-    $("btn-manual-connect").addEventListener("click", function () {
-      var ssid = $("input-manual-ssid").value.trim();
-      if (!ssid) {
-        $("ssid-error").textContent = "Network name is required";
-        $("input-manual-ssid").classList.add("field-err");
-        $("input-manual-ssid").focus();
-        return;
-      }
-      $("ssid-error").textContent = "";
-      $("input-manual-ssid").classList.remove("field-err");
-      performConnect(ssid, $("input-manual-pwd").value);
-    });
+    on("btn-disconnect", "click", function () { show("modal-disconnect", true); });
+    on("btn-cancel-dc", "click", function () { show("modal-disconnect", false); });
+    on("btn-confirm-dc", "click", function () { show("modal-disconnect", false); performDisconnect(); });
 
-    $("input-manual-ssid").addEventListener("input", function () {
-      $("ssid-error").textContent = "";
-      $("input-manual-ssid").classList.remove("field-err");
+    // the status first, then the view and the list
+    pollStatus(false).then(function () {
+      var d = lastStatus;
+      if (d.pend) startConnecting(d.pend, true);
+      else if (d.ssid && d.urc === 0) showSuccess(d.ssid);
+      else if (d.ssid && d.urc === 1) showFailure(d.ssid, d.reason);
+      else updateBanners(d);
+      listSince = Date.now();
+      refreshList(false);
+      setInterval(tick, 250);
     });
-
-    $("input-manual-ssid").addEventListener("keydown", function (e) {
-      if (e.key === "Enter") $("input-manual-pwd").focus();
-    });
-    $("input-manual-pwd").addEventListener("keydown", function (e) {
-      if (e.key === "Enter") $("btn-manual-connect").click();
-    });
-
-    // ── Done button (connecting view) ─────────────
-    $("btn-done").addEventListener("click", function () {
-      setStep(1);
-      showView("view-scan");
-    });
-
-    // ── Retry button (failure) ────────────────────
-    $("btn-retry").addEventListener("click", function () {
-      setStep(2);
-      if (selectedSSID) {
-        $("pwd-net-name").textContent = selectedSSID;
-        $("input-pwd").value = "";
-        showView("view-password");
-        setTimeout(function () { $("input-pwd").focus(); }, 100);
-      } else {
-        showView("view-scan");
-        setStep(1);
-      }
-    });
-
-    // ── Connected banner → details ────────────────
-    $("connected-banner").addEventListener("click", function () {
-      showView("view-details");
-    });
-
-    // ── Disconnect flow ───────────────────────────
-    $("btn-disconnect").addEventListener("click", function () {
-      $("modal-disconnect").style.display = "";
-    });
-    $("btn-cancel-dc").addEventListener("click", function () {
-      $("modal-disconnect").style.display = "none";
-    });
-    $("btn-confirm-dc").addEventListener("click", function () {
-      $("modal-disconnect").style.display = "none";
-      performDisconnect();
-    });
-
-    // ── Start polling ─────────────────────────────
-    refreshAP();
-    startStatus();
-    startRefresh();
   }
 
-  // ── Boot ────────────────────────────────────────────
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
-  } else {
-    init();
-  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
 })();
