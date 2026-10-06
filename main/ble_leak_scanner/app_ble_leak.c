@@ -889,6 +889,7 @@ _Static_assert(LR_CODED_MS >= W_MIN_MS && LR_1M_MS + 2 * JITTER_MS <= GAP_MAX_MS
 #define SCAN_GONE_MS        1000    // a scan NimBLE dropped with no DISC_COMPLETE is restarted after this
 #define SCAN_SETTLE_MS      50      // nothing starts this soon after a cancel (a queued end is delivered first)
 #define SCAN_EARLY_MS       100     // an end this much before a scan's duration is a stopped scan's late end
+#define SCAN_OVERDUE_MS     1000    // a scan with no end this long after its duration is stopped and restarted
 #define CHORES_LATE_MS      5000    // the executor's slow chores run at least this often
 #define SUMMARY_MS          60000   // the summary line's period
 #define DUTY_WARN_PCT       80      // the duty watchdog: BLE scanning below this share of the
@@ -1237,6 +1238,17 @@ static TickType_t executor_pass(exec_t *x)
         }
     } else {
         x->gone_at = 0;
+    }
+    // ... and the reverse: NimBLE still runs our scan SCAN_OVERDUE_MS past its duration, with no
+    // DISC_COMPLETE (a lost LE Scan Timeout). Every scan ends by its controller timeout, about
+    // 86,000 a day; without this a lost one would leave the hub deaf to every BLE sensor with
+    // NimBLE's state, and the duty figures (which count this task's view), saying it scans.
+    if (x->scan_on && k_scan_geo[x->geo].dur != 0 &&
+        (now - x->started_at) >= pdMS_TO_TICKS((uint32_t)k_scan_geo[x->geo].dur * 10u + SCAN_OVERDUE_MS)) {
+        ESP_LOGW(BLE_LEAK_TAG, "Scan overdue: no end %d ms after its %u ms - stopping and restarting it",
+                 SCAN_OVERDUE_MS, (unsigned)k_scan_geo[x->geo].dur * 10u);
+        (void)ble_gap_disc_cancel();
+        scan_ended(x, now, now, true);
     }
 
     // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no leak scan while either is on,
