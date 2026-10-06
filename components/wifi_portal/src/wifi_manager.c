@@ -97,8 +97,8 @@ static TickType_t ap_list_try_tick = 0;
 /* LOCAL PATCH (2.1.4 C10b): the network list is a cache. GET /ap.json only reads it (it ordered an
  * all-channel scan at every 3.8 s poll); a scan is ordered by the page's load when the list is
  * empty or older than WIFI_MANAGER_LIST_STALE_MS, and by the page's Rescan (POST /scan.json), at
- * least WIFI_MANAGER_SCAN_GAP_MS apart (wifi_manager_scan_request()). In WP8 both become the radio
- * policy's LIST pulse requests.
+ * least WIFI_MANAGER_SCAN_GAP_MS apart (wifi_manager_scan_request()). Since WP8 each of them passes
+ * the app's gate first (wifi_manager_set_scan_gate(): the radio policy's LIST pulse).
  * ap_list_tick: the list's last rebuild from a scan, 0 = none since it was allocated (wifi_manager
  * task writes it, the httpd task reads it); scan_order_tick: the last scan ordered for the page,
  * 0 = none (the httpd task sets it, and puts the one before back when its post does not fit;
@@ -150,6 +150,9 @@ static volatile TickType_t ap_stop_done_tick = 0;
  * follows: were a SCAN_DONE ever lost, this would stay set until the next scan's, so it errs
  * towards "in flight", never away from it. wifi_manager task only. */
 static bool scan_in_flight = false;
+/* LOCAL PATCH (2.1.4 WP8): the app's gate before each scan (wifi_manager_set_scan_gate()), NULL =
+ * none. Set once before the task starts; read by the wifi_manager task. */
+static wifi_manager_scan_gate_t volatile scan_gate = NULL;
 /* LOCAL PATCH (2.1.4 C6): a START_AP the task owes itself. It posted START_AP to its own queue
  * with portMAX_DELAY (after its retries, after a forget), and with the queue full it waited on
  * itself for good. Set instead, and run at the top of the loop, right after the message that set
@@ -1329,6 +1332,10 @@ bool wifi_manager_scan_in_flight(){
 	return scan_in_flight;
 }
 
+void wifi_manager_set_scan_gate(wifi_manager_scan_gate_t gate){
+	scan_gate = gate;	/* LOCAL PATCH (2.1.4 WP8): see wifi_manager.h */
+}
+
 bool wifi_manager_ap_list_built(){
 	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. Unlocked reads: a stale one costs one order
 	 * too many, or one a poll late */
@@ -2327,7 +2334,14 @@ void wifi_manager( void * pvParameters ){
 
 				/* if a scan is already in progress this message is simply ignored thanks to the WIFI_MANAGER_SCAN_BIT uxBit */
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
-				if(! (uxBits & WIFI_MANAGER_SCAN_BIT) ){
+				/* LOCAL PATCH (2.1.4 WP8): the app's gate first (wifi_manager_set_scan_gate()): its
+				 * radio policy pauses the BLE scan for the list's scan (the LIST pulse), or refuses
+				 * it (low internal heap, a station joining the AP). A refusal counts as a scan that
+				 * did not start, and the bit stays clear */
+				if(! (uxBits & WIFI_MANAGER_SCAN_BIT) && scan_gate != NULL && !scan_gate()){
+					wifi_manager_scan_failed();
+				}
+				else if(! (uxBits & WIFI_MANAGER_SCAN_BIT) ){
 					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
 					/* LOCAL PATCH: scan can fail transiently with ESP_ERR_WIFI_STATE when
 					 * a connect/disconnect is in flight (captive-portal race). Do NOT abort —

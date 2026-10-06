@@ -406,6 +406,19 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
 bool wifi_manager_ap_list_built();
 
 /**
+ * @brief LOCAL PATCH (2.1.4 WP8): the app's gate for a network-list scan. Called on the
+ * wifi_manager task right before each esp_wifi_scan_start() (WM_ORDER_START_WIFI_SCAN, the only
+ * scan this component orders: the page's load and its Rescan, wifi_manager_scan_request()). It
+ * may wait, about 2 s at most (the app's radio policy grants the scan a pause of the BLE scan,
+ * its LIST pulse), and must hold no lock of this component. false: no scan this time, counted
+ * as one that did not start (the page may order another WIFI_MANAGER_SCAN_RETRY_MS later), and
+ * the WM_ORDER_START_WIFI_SCAN callback runs as for any order. NULL, the default: every scan
+ * starts. Set it once, before wifi_manager_start() (a plain store).
+ */
+typedef bool (*wifi_manager_scan_gate_t)(void);
+void wifi_manager_set_scan_gate(wifi_manager_scan_gate_t gate);
+
+/**
  * @brief LOCAL PATCH (2.1.4 WP1): the largest free block with the caps has room for size bytes
  * and WIFI_MANAGER_HEAP_MARGIN (4 KB) more: the one test for an allocation that can do without
  * (the network list, a server's restart, the HTTP server's copy of the list), so a low heap sees
