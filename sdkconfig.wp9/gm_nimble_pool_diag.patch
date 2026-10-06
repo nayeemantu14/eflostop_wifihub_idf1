@@ -1,0 +1,56 @@
+diff --git a/main/systemservices/monitoring.c b/main/systemservices/monitoring.c
+index 29a3cde..d658c75 100644
+--- a/main/systemservices/monitoring.c
++++ b/main/systemservices/monitoring.c
+@@ -7,6 +7,9 @@
+ #include "esp_heap_caps.h"
+ #include "esp_log.h"
+ #include "esp_timer.h"
++#include <string.h>
++#include "host/ble_hs.h"
++#include "os/os_mempool.h"
+ 
+ static const char *TAG = "MONITOR";
+ 
+@@ -100,6 +103,33 @@ static void idma_report(idma_stats_t *st, uint32_t *fails_reported)
+     st->min_largest = st->largest_now;
+ }
+ 
++// WP9 G-M bench diagnostic, never shipped: each NimBLE HCI transport and msys pool as
++// "<name> <lowest free since boot>/<blocks>". Read only once the host has synced, so the
++// pool list is complete; the line is static, so the monitor task's stack does not grow.
++static void wp9_pool_report(void)
++{
++    static char line[160];
++    struct os_mempool_info omi;
++    struct os_mempool *mp = NULL;
++    size_t n = 0;
++    if (!ble_hs_synced())
++        return;
++    line[0] = 0;
++    while ((mp = os_mempool_info_get_next(mp, &omi)) != NULL) {
++        const char *name = omi.omi_name;
++        if (strncmp(name, "transport_pool_", 15) == 0)
++            name += 15;
++        else if (strncmp(name, "msys_", 5) != 0)
++            continue;
++        int k = snprintf(line + n, sizeof(line) - n, " %s %d/%d", name, omi.omi_min_free,
++                         omi.omi_num_blocks);
++        if (k < 0 || (size_t)k >= sizeof(line) - n)
++            break;
++        n += (size_t)k;
++    }
++    ESP_LOGI(TAG, "WP9 nimble pools, lowest free/blocks:%s", line);
++}
++
+ static void monitoring_task(void *pvParameter)
+ {
+     (void)pvParameter;
+@@ -123,6 +153,7 @@ static void monitoring_task(void *pvParameter)
+                  (unsigned long)largest_block,
+                  (unsigned long)uptime_s);
+         idma_report(&idma, &fails_reported);
++        wp9_pool_report();
+ 
+         // Warn if heap is getting low
+         if (free_heap < HEAP_LOW_WATERMARK && !low_heap_warned) {
