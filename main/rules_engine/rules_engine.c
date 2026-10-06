@@ -1066,8 +1066,9 @@ bool rules_engine_retry_kept_reports(void)
     bool evaluated = false;
     while (g_kept_n > 0) {
         // One whose sensor has left the device set is dropped: a removal the loop has applied.
-        // One landing just before this is judged on the hub's state, like a report evaluated
-        // just before it.
+        // One landing just before this, not applied yet, is ignored by the evaluation's own
+        // membership read (2.1.4 WP3, WP2D-C4), like a report evaluated just before it; on
+        // the busy fallback it is judged on this copy.
         if (set_has_source(&g_last_set, g_kept[0].id)) {
             if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return evaluated;
             valve_purge_if_owed();
