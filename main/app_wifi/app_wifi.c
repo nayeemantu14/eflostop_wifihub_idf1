@@ -679,7 +679,7 @@ static void cb_scan_start(void *pvParameter)
     {
         s_chain_start = 0;
         if (radio_hold_near(now))
-            return;   // not right behind another hold: the page asks again in about 3.8 s
+            return;   // not right behind another hold: this scan runs with BLE on (2.1.4 C10b: no retry)
         s_chain_start = (now != 0) ? now : 1;
         s_page_stops = 0;
     }

@@ -98,9 +98,11 @@ static bool ap_list_logged = false;
  * policy's LIST pulse requests.
  * ap_list_tick: the list's last rebuild from a scan, 0 = none since it was allocated (wifi_manager
  * task writes it, the httpd task reads it); scan_order_tick: the last scan ordered for the page,
- * 0 = none (httpd task only). */
+ * 0 = none (the httpd task sets it; the wifi_manager task clears it when that scan did not start
+ * or ended failed, so a Rescan is not refused for 20 s after a scan that never ran, with an empty
+ * list). A stale read of either costs one scan too many, or one refused. */
 static volatile TickType_t ap_list_tick = 0;
-static TickType_t scan_order_tick = 0;
+static volatile TickType_t scan_order_tick = 0;
 #define WIFI_MANAGER_SCAN_GAP_MS		20000
 #define WIFI_MANAGER_LIST_STALE_MS		60000
 /* LOCAL PATCH (2.1.4 WP1): an allocation that can wait (the network list) is tried only while the
@@ -220,10 +222,13 @@ static bool user_due = false;				/* a waiting candidate may go on, after the mes
  *   and a phone on it follows the announcement instead of dropping. PROVISIONAL: G0 reads the
  *   driver's "csa_count" line and decides 3 or 5 (plan 2.4).
  * - DTIM period 1 (it was left 0), set explicitly.
- * - Station scans dwell WIFI_MANAGER_SCAN_ACTIVE_MAX_MS at most on each channel (the default is
- *   120 ms) and go back to the home channel for WIFI_MANAGER_SCAN_HOME_DWELL_MS between channels
- *   (30 ms), so the SoftAP and its phone keep air time during a scan; set once after
- *   esp_wifi_start() (the driver takes them only with the station started).
+ * - Station scans dwell WIFI_MANAGER_SCAN_ACTIVE_MAX_MS at most on each channel (the driver's
+ *   default is 120 ms) and go back to the home channel for WIFI_MANAGER_SCAN_HOME_DWELL_MS between
+ *   channels (its default is 30 ms), so the SoftAP and its phone keep air time during a scan; set
+ *   once after esp_wifi_start() (the driver takes them only with the station started). They are
+ *   the driver's defaults for every station scan, the scan of a connect attempt included (plan
+ *   4.5 sets them once); G7 (list completeness, rejoin) checks that 60 ms still finds a weak
+ *   router.
  * - At each IP the router's channel goes into the network in use's config (RAM only, never saved:
  *   NVS keeps the SSID and password blobs only), so a later attempt scans it first. */
 #define WIFI_MANAGER_AP_CSA_COUNT			3
@@ -233,7 +238,10 @@ static bool user_due = false;				/* a waiting candidate may go on, after the mes
 
 #define WIFI_MANAGER_USER_WAIT_MS		8000	/* a Connect waits this long for a running attempt (plan C8) */
 #define WIFI_MANAGER_USER_ATTEMPT_MS	25000	/* a user's attempt with no IP this long is ended (the page waits 30 s) */
-#define WIFI_MANAGER_ABORT_WAIT_MS		2000	/* our esp_wifi_disconnect()'s STA_DISCONNECTED, awaited this long */
+#define WIFI_MANAGER_ABORT_WAIT_MS		3000	/* our esp_wifi_disconnect()'s STA_DISCONNECTED, awaited this long */
+#define WIFI_MANAGER_STALE_LEAVE_MS		5000	/* after one never came: a late one is ignored this long */
+static TickType_t stale_leave_until = 0;	/* wifi_manager task only; 0 = none */
+static bool save_owed = false;				/* a committed network's NVS save failed; wifi_manager task only */
 _Static_assert(WIFI_MANAGER_STATUS_JSON_SIZE >= JSON_IP_INFO_SIZE + 21 + JSON_SSID_STR_MAX,
 		"status.json: the status of before, \",\"reason\":255,\"pend\":\" and the candidate's SSID");
 
@@ -1830,6 +1838,12 @@ static void wifi_manager_abort_expired(uint8_t *retries){
 	}
 
 	ESP_LOGW(TAG, "no STA_DISCONNECTED %d ms after esp_wifi_disconnect() - the attempt counts as ended", WIFI_MANAGER_ABORT_WAIT_MS);
+	/* should it come late after all, it is not charged to the attempt that may start next */
+	TickType_t now = xTaskGetTickCount();
+	stale_leave_until = now + pdMS_TO_TICKS(WIFI_MANAGER_STALE_LEAVE_MS);
+	if(stale_leave_until == 0){
+		stale_leave_until = 1;
+	}
 	uint8_t kind = attempt_kind;
 	attempt_kind = CONNECTION_REQUEST_NONE;
 	wifi_manager_attempt_ended(kind, why ? why : (uint8_t)WIFI_REASON_ASSOC_LEAVE, uxBits, retries);
@@ -1850,6 +1864,11 @@ static TickType_t wifi_manager_connect_deadlines(uint8_t *retries){
 	if(abort_tick != 0){
 		TickType_t since = now - abort_tick;
 		if(since >= pdMS_TO_TICKS(WIFI_MANAGER_ABORT_WAIT_MS)){
+			/* the event may be queued already, behind this task's own work (an NVS save, a
+			 * server's stop): the queue first, the expiry only with it empty */
+			if(uxQueueMessagesWaiting(wifi_manager_queue) != 0){
+				return 0;
+			}
 			wifi_manager_abort_expired(retries);
 			return 0;
 		}
@@ -1912,9 +1931,20 @@ static __attribute__((noinline)) void wifi_manager_commit_driver_config(){
 		memcpy(wifi_manager_config_sta->sta.password, drv.sta.password, MAX_PASSWORD_SIZE);
 		wifi_manager_config_sta->sta.channel = 0;	/* the old network's hint is not this one's */
 		ESP_LOGI(TAG, "user connect: the candidate got its IP - it is the network in use now, saved");
-		wifi_manager_save_sta_config();
+		save_owed = true;
 	}
 	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
+
+	/* the save, now or owed from an earlier IP whose save failed (NVS full, say): the network in use
+	 * works, and only a reboot before a save succeeds would lose it */
+	if(save_owed){
+		esp_err_t save_err = wifi_manager_save_sta_config();
+		save_owed = (save_err != ESP_OK);
+		if(save_owed){
+			ESP_LOGE(TAG, "the network in use is not saved (%s) - tried again at the next IP; a reboot before then loses it",
+					esp_err_to_name(save_err));
+		}
+	}
 }
 
 /**
@@ -2088,6 +2118,7 @@ void wifi_manager( void * pvParameters ){
 				else{
 					/* a failed scan, or no list: free whatever the driver keeps of it */
 					esp_wifi_clear_ap_list();
+					scan_order_tick = 0;	/* LOCAL PATCH (2.1.4 C10b): the page may order another */
 				}
 
 				/* callback */
@@ -2109,6 +2140,7 @@ void wifi_manager( void * pvParameters ){
 					if(scan_err != ESP_OK){
 						ESP_LOGW(TAG, "esp_wifi_scan_start failed (%s) — skipping scan", esp_err_to_name(scan_err));
 						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
+						scan_order_tick = 0;	/* LOCAL PATCH (2.1.4 C10b): the page may order another */
 					}
 					else{
 						scan_in_flight = true;	/* LOCAL PATCH (2.1.4 WP1) */
@@ -2208,6 +2240,20 @@ void wifi_manager( void * pvParameters ){
 				 *  204		HANDSHAKE_TIMEOUT
 				 *
 				 * */
+
+				/* LOCAL PATCH (2.1.4 C8): the late event of an attempt the loop already ended (its
+				 * esp_wifi_disconnect() got no event in time, wifi_manager_abort_expired()): ignored,
+				 * callback included (the app had its own then), with the STA not connected */
+				if(stale_leave_until != 0){
+					bool stale = disconnect_reason == WIFI_REASON_ASSOC_LEAVE && abort_tick == 0 &&
+							(int32_t)(stale_leave_until - xTaskGetTickCount()) > 0 &&
+							!(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT);
+					stale_leave_until = 0;
+					if(stale){
+						ESP_LOGW(TAG, "a late STA_DISCONNECTED of an attempt already ended - ignored");
+						break;
+					}
+				}
 
 				/* reset saved sta IP */
 				wifi_manager_safe_update_sta_ip_string((uint32_t)0);
@@ -2316,18 +2362,30 @@ void wifi_manager( void * pvParameters ){
 
 				/* LOCAL PATCH (2.1.4 C8): the attempt is over. An esp_wifi_disconnect() of ours that
 				 * crossed this IP still has its STA_DISCONNECTED to come (abort_tick stays). */
-				attempt_kind = CONNECTION_REQUEST_NONE;
+				{
+					uint8_t kind = attempt_kind;
+					attempt_kind = CONNECTION_REQUEST_NONE;
+					stale_leave_until = 0;
 
-				/* save IP as a string for the HTTP server host */
-				wifi_manager_safe_update_sta_ip_string(got_ip);
+					/* save IP as a string for the HTTP server host */
+					wifi_manager_safe_update_sta_ip_string(got_ip);
 
-				/* LOCAL PATCH (2.1.4 C8): the config that got this IP is the network in use from now
-				 * on, saved if it is new (a user's candidate): before, every IP but the boot
-				 * restore's saved the RAM config, which a Connect had already overwritten */
-				wifi_manager_commit_driver_config();
-
-				/* LOCAL PATCH (2.1.4 C13): the router's channel, as the next attempt's hint (RAM only) */
-				wifi_manager_channel_hint();
+					/* LOCAL PATCH (2.1.4 C8): the config that got this IP is the network in use from
+					 * now on, saved if it is new (a user's candidate): before, every IP but the boot
+					 * restore's saved the RAM config, which a Connect had already overwritten. Not a
+					 * candidate a newer Connect replaced while it connected: the user left it, so it
+					 * is not saved, and the newer one leaves it next (user_due, below); the network in
+					 * use stays the one before. A save that failed is tried again at the next IP. */
+					uint8_t state = wifi_manager_cand_state();
+					if(kind == CONNECTION_REQUEST_USER && (state == WM_CAND_POSTED || state == WM_CAND_WAITING)){
+						ESP_LOGW(TAG, "user connect: a candidate a newer Connect replaced got its IP - not saved, left next");
+					}
+					else{
+						wifi_manager_commit_driver_config();
+						/* LOCAL PATCH (2.1.4 C13): the router's channel, as the next attempt's hint (RAM only) */
+						wifi_manager_channel_hint();
+					}
+				}
 
 				/* reset number of retries */
 				retries = 0;

@@ -411,9 +411,10 @@ wifi_config_t* wifi_manager_get_wifi_sta_config();
  * bytes, password_len 0-64, 0 for an open network; channel: the page's hint, 0 for none) and
  * queues a USER order, waiting WIFI_MANAGER_POST_WAIT_MS at most. The network in use and NVS
  * change only when the candidate gets an IP; a candidate that fails is reported in status.json
- * and dropped, and the network in use stays. A newer call replaces a candidate whose attempt has
- * not started. False for bad lengths, or when the order did not fit in the queue (the candidate is
- * taken back then). Any task; the bytes are copied.
+ * and dropped, and the network in use stays. A newer call replaces any earlier candidate: one
+ * that waits is dropped; one that is connecting is ended (after at most 8 s), and is not saved
+ * even if it gets its IP. False for bad lengths, or when the order did not fit in the queue (the
+ * candidate is taken back then). Any task; the bytes are copied.
  */
 bool wifi_manager_connect_user_async(const uint8_t *ssid, size_t ssid_len, const uint8_t *password, size_t password_len, uint8_t channel);
 
