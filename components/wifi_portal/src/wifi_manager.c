@@ -242,6 +242,8 @@ static bool user_due = false;				/* a waiting candidate may go on, after the mes
 #define WIFI_MANAGER_STALE_LEAVE_MS		5000	/* after one never came: a late one is ignored this long */
 static TickType_t stale_leave_until = 0;	/* wifi_manager task only; 0 = none */
 static bool save_owed = false;				/* a committed network's NVS save failed; wifi_manager task only */
+static bool on_uncommitted = false;			/* connected to a network not committed (a replaced candidate's,
+											 * or one a forget is under way for); wifi_manager task only */
 _Static_assert(WIFI_MANAGER_STATUS_JSON_SIZE >= JSON_IP_INFO_SIZE + 21 + JSON_SSID_STR_MAX,
 		"status.json: the status of before, \",\"reason\":255,\"pend\":\" and the candidate's SSID");
 
@@ -439,10 +441,14 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms){
 		}
 		return 0;
 	}
+	/* stamped before the post: the wifi_manager task clears it if the scan does not start, and
+	 * may do so before this task would run again */
+	TickType_t before = scan_order_tick;
+	scan_order_tick = (now != 0) ? now : 1;
 	if(!wifi_manager_scan_async()){
+		scan_order_tick = before;
 		return -1;
 	}
-	scan_order_tick = (now != 0) ? now : 1;
 	return 1;
 }
 
@@ -1703,7 +1709,9 @@ static void wifi_manager_user_next(uint8_t *retries){
 
 	EventBits_t uxBits = xEventGroupGetBits(wifi_manager_event_group);
 	if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
-		if(wifi_manager_cand_is_live()){
+		/* "the network in use already" only when the STA is on it: not on a replaced candidate's
+		 * network, which the newer candidate always leaves */
+		if(!on_uncommitted && wifi_manager_cand_is_live()){
 			ESP_LOGI(TAG, "user connect: the network in use already");
 			wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_WAITING);
 			wifi_manager_connect_cb((uint32_t)CONNECTION_REQUEST_USER | WIFI_MANAGER_CONNECT_NOT_STARTED);
@@ -2255,6 +2263,8 @@ void wifi_manager( void * pvParameters ){
 					}
 				}
 
+				on_uncommitted = false;	/* LOCAL PATCH (2.1.4 C8) */
+
 				/* reset saved sta IP */
 				wifi_manager_safe_update_sta_ip_string((uint32_t)0);
 
@@ -2379,6 +2389,15 @@ void wifi_manager( void * pvParameters ){
 					uint8_t state = wifi_manager_cand_state();
 					if(kind == CONNECTION_REQUEST_USER && (state == WM_CAND_POSTED || state == WM_CAND_WAITING)){
 						ESP_LOGW(TAG, "user connect: a candidate a newer Connect replaced got its IP - not saved, left next");
+						on_uncommitted = true;
+					}
+					else if(uxBits & WIFI_MANAGER_REQUEST_DISCONNECT_BIT){
+						/* a forget is under way: what this IP's attempt used is not saved */
+						ESP_LOGW(TAG, "an IP while a forget is under way - nothing saved");
+						on_uncommitted = true;
+					}
+					else if(on_uncommitted){
+						/* a new IP (a DHCP renewal) on a network that was not committed: still not */
 					}
 					else{
 						wifi_manager_commit_driver_config();
