@@ -1459,6 +1459,13 @@ static TickType_t executor_pass(exec_t *x)
     bool synced = ble_hs_synced();
     bool conn = ble_gap_conn_active();
 
+    // The facts and the mode (I6), before a pulse's end: the recovery after it is decided on the row
+    // the mode runs now, not on the last pass's (a mode that changed in between, a hold that just
+    // ended, would otherwise resume with no recovery).
+    rp_ble_facts_t f;
+    exec_facts(&f, synced, now);
+    (void)radio_policy_exec_mode(&f, now);
+
     // The running pulse's end. A claim's ends at its CONNECT event; one that NimBLE has not ended
     // CLAIM_OVERRUN_MS past its pulse goes to the valve module (HANDOFF 15s residual 3).
     if (x->pulse != RP_PULSE_NONE) {
@@ -1499,11 +1506,6 @@ static TickType_t executor_pass(exec_t *x)
         x->pulse = RP_PULSE_CONNECT;
         x->overrun_asked = false;
     }
-
-    // The facts and the mode (I6).
-    rp_ble_facts_t f;
-    exec_facts(&f, synced, now);
-    (void)radio_policy_exec_mode(&f, now);
 
     // Grants, between pulses, after their recovery: SUBMIT first, then CONNECT while a leak
     // response is pending, then JOIN, RETRY and LIST, then CONNECT otherwise. In a legacy hold the
