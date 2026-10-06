@@ -1262,10 +1262,11 @@ static void row_begin(exec_t *x, uint8_t row, TickType_t now)
               ticks_ms(now - x->coded_end_at) + RP_I8_WIFI_MIN_MS + RP_JITTER_MS <= RP_GAP_MAX_MS;
 }
 
-// Starts the current slot of the current row: a scan, or a Wi-Fi slot (timed from the end of the
-// slot before it, so a late pass shortens it). A scan that fails to start restarts the row at its
-// Coded window SCAN_RETRY_MS later, so a geometry the controller refuses never stalls the row's
-// Coded windows.
+// Starts the current slot of the current row: a scan, or a Wi-Fi slot, timed from the end of the
+// slot before it, however late this pass is: the lateness is Wi-Fi time already, so it shortens
+// the slot (one whose end has passed is over on the next pass) and never widens the Coded gap
+// after it. A scan that fails to start restarts the row at its Coded window SCAN_RETRY_MS later,
+// so a geometry the controller refuses never stalls the row's Coded windows.
 static void slot_start(exec_t *x, TickType_t now)
 {
     const rp_row_t *r = radio_policy_row(x->row);
@@ -1275,7 +1276,7 @@ static void slot_start(exec_t *x, TickType_t now)
     x->kind = k;
     x->slot_ms = ms;
     if (k == RP_K_W) {
-        TickType_t from = (x->ended_at != 0 && (now - x->ended_at) < pdMS_TO_TICKS(ms)) ? x->ended_at : now;
+        TickType_t from = (x->ended_at != 0) ? x->ended_at : now;
         x->started_at = from;
         x->w_end_at = from + pdMS_TO_TICKS(ms);
         x->coded_last = false;
