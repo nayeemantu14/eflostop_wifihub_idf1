@@ -49,7 +49,8 @@ builds of 2026-09-29 and 2026-09-30, and each now says so.
 - **Wi-Fi setup works on iPhones and Android phones:** the setup page opens by itself after joining the hub's
   network, lists the nearby networks (with Rescan), says why a Connect failed (for example a wrong password), keeps
   the hub's working network when a Connect fails, and ends with **Finish**, which closes the setup network so the
-  phone returns to its own Wi-Fi. Nothing a phone or the setup page sends can reboot the hub any more.
+  phone returns to its own Wi-Fi. The setup portal's code has no reboot path left (the bench's fault tests,
+  G-FAULT, confirm it).
 - **After a router outage the hub rejoins by itself**, within about 40 s of the router's Wi-Fi coming back (2.1.3
   could stay offline until it was power-cycled).
 
@@ -63,8 +64,8 @@ builds of 2026-09-29 and 2026-09-30, and each now says so.
   1-3 s after the setup network closes.
 - **The setup page may take a moment longer than on 2.1.3** to list networks or to finish a Connect, because the hub
   keeps listening to its leak sensors between the phone's turns (provisional timings, measured by G1 and G-CNA). A
-  second Connect, or a Connect soon after the phone joined, is given its radio time a little later (up to a few
-  seconds; HANDOFF §15w). If a Connect fails with the right password, try it once more.
+  second Connect, or a Connect soon after the phone joined, is given its radio time a little later (in the model half
+  the time within about 0.7 s, nine times in ten within about 4 s; HANDOFF §15w). If a Connect fails with the right password, try it once more.
 - **First boot after the upgrade:** the hub learns which radio mode (Coded or 1M) each BLE leak sensor uses and
   remembers it. Until every sensor has been heard once, and for at most 10 min, it scans both modes in turn. Sensors
   set to 1M mode are supported (some field sensors are).
@@ -96,11 +97,12 @@ builds of 2026-09-29 and 2026-09-30, and each now says so.
   Valve control." The app should hide "Open with 24h Override" once one of those has arrived.
 - **Control characters** (tab, line break) in a sensor label, the hub name or the valve's firmware string are sent
   as spaces in telemetry; twin reported `hub_name` keeps the exact value. The app should not send them.
-- **Snapshots** stay under about 10 KB on a full hub, and a full hub's snapshot always builds now.
+- **Snapshots** are printed into one block sized for the hub's device count, at most about 10 KB on a full hub
+  (model figures; a full hub's snapshot has not been built on the bench yet, HANDOFF §15q residual 8).
 - **The setup network** can close 5 s after the hub joined (Finish), and the hub reaches the cloud only after it
   closes.
-- Unchanged and verified at the release candidate: all 27 `cmd_ack` error texts, the RMLEAK auto-clear (10 s), the
-  trigger mask, the event shapes, the health-event rules and the offline buffer.
+- Unchanged, read in the code at the release candidate: all 27 `cmd_ack` error texts, the RMLEAK auto-clear (10 s),
+  the trigger mask, the event shapes, the health-event rules and the offline buffer.
 
 **For the field (support and service)**
 - **The serial log has a new tag, `RADIO`,** with two `[SUMMARY]` lines every 60 s: the time spent in each radio
