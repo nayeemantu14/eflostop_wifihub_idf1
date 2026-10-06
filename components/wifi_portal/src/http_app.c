@@ -104,6 +104,12 @@ static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 #define HTTP_APP_SESSION_MIN_FREE	(12 * 1024)
 /* a refused session is logged at most once in this long (with the count since the server start) */
 #define HTTP_APP_REFUSE_LOG_MS		10000
+/* LOCAL PATCH (2.1.4 C10b): a background read of GET /ap.json orders the list's scan (while no
+ * list is built, wifi_manager_ap_list_built()) at most this often: a scan that fails (a connect
+ * attempt in flight) clears wifi_manager's 20 s gap, and the polls come every 3.8 s */
+#define HTTP_APP_BG_SCAN_MS			10000
+/* the last such order (forced non-zero), 0 = none since the server start; httpd task only */
+static TickType_t http_app_bg_scan_tick = 0;
 
 /* LOCAL PATCH (2.1.4 C8): the room for an X-Custom-* credential header's value, terminator
  * included: a 64-byte password percent-encoded is 192 characters. A longer value gets 400. */
@@ -780,8 +786,15 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 			 * nothing else would order it again (wifi_manager_ap_list_built()) */
 			bool bg = http_app_query_has(req->uri, "bg=1");
 			http_app_note_activity(bg ? HTTP_APP_ACT_API_BG : HTTP_APP_ACT_API_USER, client_ip);
-			if(req->method == HTTP_GET && (!bg || !wifi_manager_ap_list_built())){
+			if(req->method == HTTP_GET && !bg){
 				wifi_manager_scan_request(false, NULL);
+			}
+			else if(req->method == HTTP_GET && !wifi_manager_ap_list_built()){
+				TickType_t now = xTaskGetTickCount();
+				if(http_app_bg_scan_tick == 0 || now - http_app_bg_scan_tick >= pdMS_TO_TICKS(HTTP_APP_BG_SCAN_MS)){
+					http_app_bg_scan_tick = (now != 0) ? now : 1;
+					wifi_manager_scan_request(false, NULL);
+				}
 			}
 
 			/* if we can get the mutex, write the last version of the AP list */
@@ -962,6 +975,7 @@ bool http_app_start(bool lru_purge_enable){
 		config.recv_wait_timeout = 4;
 		config.send_wait_timeout = 4;
 		http_app_refused = 0;
+		http_app_bg_scan_tick = 0;
 
 		err = httpd_start(&httpd_handle, &config);
 
