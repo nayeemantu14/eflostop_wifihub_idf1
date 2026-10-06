@@ -1121,31 +1121,53 @@ static bool keepable(const char *source_id)
 // The rules lock refused a report: keep it for the next pass. A wet one, or any report of the
 // valve's flood probe, can start the episode; a sensor's dry one is kept only behind its
 // source's kept report (the caller's test).
+//
+// A source holds at most two kept reports, a state and then the other one (2.1.4 WP3 review
+// RTOS-WP3-2, WP3S-1). Only two things in a source's replay matter: whether it holds a wet
+// report, which latches the incident and closes, and its last state. A wet report after the
+// first changes nothing (the source is tracked, the incident latched, and the close is
+// skipped as done or in its cooldown), and a dry one between two wet ones only untracks the
+// source for an instant of the replay. So a third report replaces one of the two, never the
+// wet one: [W, D] + W drops the D (the replay ends wet, as the source is), and [D, W] + D
+// (the valve, which can start dry) drops the first D and follows the W (it still latches and
+// closes, and the replay ends dry). A source flapping inside one busy hold so never fills
+// the slots with repeats of one fact, and a wet report meeting a full list is lost only
+// with 4 different sources wet.
 static void keep_report(leak_source_t source, bool leak_active, const char *source_id)
 {
     if (!keepable(source_id)) {
         ESP_LOGW(RULES_TAG, "Failed to take mutex");
         return;
     }
-    int last = -1;   // this source's last kept report
-    for (int i = g_kept_n - 1; i >= 0; i--) {
-        if (g_kept[i].source == source && strcmp(g_kept[i].id, source_id) == 0) {
-            if (g_kept[i].leak == leak_active) return;   // same as its last kept: one evaluation covers both
+    int last = -1;   // this source's last kept report: the other state
+    int prev = -1;   // and the one before it: this state
+    for (int i = g_kept_n - 1; i >= 0 && prev < 0; i--) {
+        if (g_kept[i].source != source || strcmp(g_kept[i].id, source_id) != 0) continue;
+        if (last >= 0) {
+            prev = i;
+        } else if (g_kept[i].leak == leak_active) {
+            return;   // same as its last kept: one evaluation covers both
+        } else {
             last = i;
-            break;
         }
     }
-    if (g_kept_n == KEPT_MAX) {
-        // Full, the new report wet, and this source's last kept one dry (2.1.4 WP3, 15o
-        // residual 2): the wet one replaces it, so the replay ends wet, as the source is. A
-        // source flapping inside one busy hold (W, D, W, D, then W) otherwise lost its last
-        // wet report and ended dry in the engine while wet: the all-clear then cleared RMLEAK
-        // 10 s later, and the valve's flood source does not report again. Only the dry state
-        // between the two is not replayed, and every wet report kept stays. Never the other
-        // way round: a dry report never replaces a kept wet one, which may be the only report
-        // left to latch and close (a wetting that dried inside the hold would then close
-        // nothing). That dry one is lost as before, and its source stays wet in the engine:
-        // fail-safe, until its next report.
+    if (prev >= 0) {
+        // Its dry one goes. A wet report then ends at the kept wet one; a dry one follows it,
+        // in the slot just freed.
+        int dry = leak_active ? last : prev;
+        g_kept_n--;
+        memmove(&g_kept[dry], &g_kept[dry + 1], (g_kept_n - dry) * sizeof(g_kept[0]));
+        if (leak_active) return;
+    } else if (g_kept_n == KEPT_MAX) {
+        // Full, the new report wet, and this source's only kept one dry (2.1.4 WP3, 15o
+        // residual 2): the wet one replaces it, so the replay ends wet, as the source is.
+        // Otherwise a source flapping inside one busy hold lost its last wet report and ended
+        // dry in the engine while wet: the all-clear then cleared RMLEAK 10 s later, and the
+        // valve's flood source does not report again. Never the other way round: a dry report
+        // never replaces a kept wet one, which may be the only report left to latch and close
+        // (a wetting that dried inside the hold would then close nothing). That dry one is
+        // lost as before, and its source stays wet in the engine: fail-safe, until its next
+        // report.
         if (last >= 0 && leak_active) {
             g_kept[last].leak = true;
             ESP_LOGW(RULES_TAG, "Rules lock busy - %d leak reports already kept, the wet one from %s sensor %s replaces its last kept dry one",
@@ -1158,8 +1180,8 @@ static void keep_report(leak_source_t source, bool leak_active, const char *sour
         // never repeats a steady state. Its source then stays wet in the engine until its next
         // report, which fails safe; for the valve that is how a dry report on a busy lock fared
         // before WP3 kept them. Without this, the valve's dry reports, kept since WP3 whether
-        // or not a wet one is (a flapping flood probe fills the 4 slots), could cost a sensor's
-        // first wet report, which its scanner does not send again.
+        // or not a wet one is, could cost a sensor's first wet report, which its scanner does
+        // not send again.
         int dry = -1;
         for (int pass = 0; leak_active && dry < 0 && pass < 2; pass++) {
             for (int i = g_kept_n - 1; i >= 0; i--) {
@@ -1179,6 +1201,8 @@ static void keep_report(leak_source_t source, bool leak_active, const char *sour
                  leak_source_to_str(source), source_id);
         g_kept_n--;
         memmove(&g_kept[dry], &g_kept[dry + 1], (g_kept_n - dry) * sizeof(g_kept[0]));
+        // A source keeps at most one report of each state (above), so this leaves no two
+        // reports of one state from one source.
     }
     g_kept[g_kept_n].source = source;
     g_kept[g_kept_n].leak = leak_active;

@@ -98,10 +98,13 @@ bool rules_engine_init(void);
  * wet one, waits behind it. A report of the valve's flood probe is kept like a wet one,
  * dry ones included (2.1.4 WP3). A sensor's dry report that meets a busy rules mutex is
  * kept too when its source has a report kept, so the pair is replayed in order; any other
- * is dropped as before (its source stays wet: fail-safe). With the 4 slots full (2.1.4
- * WP3) a wet report replaces its source's last kept dry one, or else the newest kept dry
- * one of another source (which then stays wet: fail-safe); it is lost only when all 4 kept
- * reports are wet. A dry report meeting a full list is lost (its source stays wet).
+ * is dropped as before (its source stays wet: fail-safe). A source keeps at most two
+ * reports, one of each state (2.1.4 WP3 review): a third one drops its dry one, so a wet
+ * report still latches and closes and the replay ends in the source's last state. With the
+ * 4 slots full a wet report replaces its source's only kept one if that is dry, or else the
+ * newest kept dry one of a sensor, and the valve's dry one last (which then stays wet:
+ * fail-safe); it is lost only with 4 different sources wet. A dry report meeting a full
+ * list is lost (its source stays wet).
  *
  * iothub_task only.
  *
