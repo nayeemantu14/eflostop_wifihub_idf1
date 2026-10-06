@@ -1820,9 +1820,42 @@ static void wifi_manager_order_connect(connection_request_made_by_code_t kind, u
 }
 
 /**
+ * @brief a forget whose save failed: the saved SSID's key, then the password's, are erased.
+ * nvs_erase_key() needs no free space, where a write does (NVS writes a new entry before it drops
+ * the old one), and a missing "ssid" reads as "nothing saved" (wifi_manager_fetch_wifi_sta_config();
+ * the 10 s reset's erase_wifi_credentials() falls back the same way). The SSID decides: the
+ * password's erase is best effort. "settings" is kept.
+ */
+static esp_err_t wifi_manager_erase_saved_network(){
+
+	nvs_handle handle;
+	if(!nvs_sync_lock( portMAX_DELAY )){
+		return ESP_ERR_TIMEOUT;
+	}
+	esp_err_t err = nvs_open(wifi_manager_nvs_namespace, NVS_READWRITE, &handle);
+	if(err == ESP_OK){
+		err = nvs_erase_key(handle, "ssid");
+		if(err == ESP_ERR_NVS_NOT_FOUND){
+			err = ESP_OK;
+		}
+		if(err == ESP_OK){
+			(void)nvs_erase_key(handle, "password");
+			err = nvs_commit(handle);
+		}
+		nvs_close(handle);
+	}
+	nvs_sync_unlock();
+	return err;
+}
+
+/**
  * @brief the forget (the page's Disconnect, D9, or the 10 s reset): the network in use is zeroed
  * and saved (zero SSID and password blobs: "nothing saved"), any candidate dropped, status.json
  * reads UPDATE_USER_DISCONNECT, and a START_AP is owed (it opens the portal window).
+ * LOCAL PATCH (2.1.4 C8): a save that fails (NVS full, say) is followed by the erase of the saved
+ * network's keys, or a reboot would rejoin the network the user forgot; a forget that reaches
+ * NVS neither way prints an E line, and its save is owed (save_owed). Any save owed from an
+ * earlier IP is void once the forget is in NVS.
  */
 static void wifi_manager_forget_now(){
 
@@ -1832,7 +1865,19 @@ static void wifi_manager_forget_now(){
 	taskEXIT_CRITICAL(&wm_lock);
 	user_due = false;
 	wifi_manager_status_set(UPDATE_USER_DISCONNECT, WM_CAND_NONE);
-	wifi_manager_save_sta_config();
+	esp_err_t err = wifi_manager_save_sta_config();
+	save_owed = false;
+	if(err != ESP_OK){
+		esp_err_t erase_err = wifi_manager_erase_saved_network();
+		if(erase_err == ESP_OK){
+			ESP_LOGW(TAG, "forget: the zeroed network not saved (%s) - its keys erased instead", esp_err_to_name(err));
+		}
+		else{
+			save_owed = true;
+			ESP_LOGE(TAG, "forget: not saved (%s), not erased (%s) - a reboot may rejoin the network forgotten",
+					esp_err_to_name(err), esp_err_to_name(erase_err));
+		}
+	}
 	start_ap_due = true;
 }
 
@@ -2003,7 +2048,8 @@ static __attribute__((noinline)) bool wifi_manager_commit_driver_config(bool ado
 		esp_err_t save_err = wifi_manager_save_sta_config();
 		save_owed = (save_err != ESP_OK);
 		if(save_owed){
-			ESP_LOGE(TAG, "the network in use is not saved (%s) - tried again at the next IP; a reboot before then loses it",
+			/* the SSID and password are two writes: one can fail, or power can go, between them */
+			ESP_LOGE(TAG, "the network in use is not saved (%s) - tried again at the next IP; a reboot before then loads the old network, or the new SSID with the old password",
 					esp_err_to_name(save_err));
 		}
 	}
