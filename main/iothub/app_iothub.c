@@ -4167,6 +4167,12 @@ void iothub_task(void *param)
                         g_devset_changed || session_owed || s_alert_held ||
                         rules_engine_auto_clear_pending()) ? 2000 : 30000;
         int64_t wake = (delta < base) ? delta : base;
+        // A snapshot held for a device-set change's twin (s_twin_snap_hold, review F3): wake as
+        // its back-off ends, when the owed post builds the twin, not up to one 2 s poll later.
+        // Only while that end is still ahead, so a passed one never shortens the wait.
+        if (s_twin_snap_hold == TWIN_HOLD_ON && s_twin_retry_ms > now_ms &&
+            s_twin_retry_ms - now_ms < wake)
+            wake = s_twin_retry_ms - now_ms;
         TickType_t evt_wait = pdMS_TO_TICKS((uint32_t)wake) + 1;  // +1 tick: deadline strictly past on wake
         active_queue = xQueueSelectFromSet(evt_queue_set, evt_wait);
 
