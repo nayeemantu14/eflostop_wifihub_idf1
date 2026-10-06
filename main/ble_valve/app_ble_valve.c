@@ -144,7 +144,8 @@ static volatile TickType_t s_valve_heard_at = 0;
 // ---- The valve claim policy (2.1.4 WP6; plan §4.4 CONNECT, decision D5) -----------------------
 // Every claim is a CONNECT pulse: no BLE scan runs from its grant until its CONNECT event, for the
 // length the radio policy grants (RP_CONNECT_LR_MS while a leak response is pending, otherwise
-// RP_CONNECT_MS to RP_CONNECT_LR_MS within the blind budget, B2), and the executor follows it with a
+// RP_CONNECT_MS in AP_IDLE and RP_CONNECT_MS to RP_CONNECT_LR_MS in NORMAL within the blind budget,
+// B2; none in SERVE or while a station joins the SoftAP), and the executor follows it with a
 // Coded recovery window (I2). The radio policy also spaces claims by its pulse-rate limit (I2b: 6-7 s
 // of scanning between pulses, at most 12 s of pulses in any 60 s).
 // A claim fails when it gives no link: no link within its pulse, or a connect refused or not

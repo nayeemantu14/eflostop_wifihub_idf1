@@ -67,9 +67,11 @@ typedef enum {
                                        // or the station leaving
 #define RP_RETRY_MS             1500   // the router retry's pulse
 #define RP_LIST_MAX_MS          2500   // a list scan's pulse: its SCAN_DONE, at most this
-#define RP_CONNECT_MS           1500   // a valve claim's connect outside a leak response: at least this ...
-#define RP_CONNECT_LR_MS        2500   // ... and at most this, clipped to the blind budget (B2); exactly
-                                       // this while a leak response is pending (plan 4.4)
+#define RP_CONNECT_MS           1500   // a valve claim's connect outside a leak response: at least
+                                       // this (exactly this in AP_IDLE, plan 4.4) ...
+#define RP_CONNECT_LR_MS        2500   // ... and in NORMAL at most this, clipped to the blind
+                                       // budget (B2); exactly this while a leak response is pending
+                                       // (plan 4.4)
 #define RP_PULSE_MIN_MS          300   // a SUBMIT or JOIN with less budget left than this is not run
 #define RP_GRANT_WAIT_MS        2000   // a RETRY or LIST not granted this soon is refused: its
                                        // requester goes on without a pulse (plan 4.4's grant
@@ -344,7 +346,9 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
                                         uint32_t *len_ms);
 
 /** The claim's connect length if a CONNECT may be granted now, else 0: the mode, I2b, and I2's
- *  budget (RP_CONNECT_LR_MS under a leak response; otherwise RP_CONNECT_MS to RP_CONNECT_LR_MS). */
+ *  budget (RP_CONNECT_LR_MS under a leak response; otherwise RP_CONNECT_MS in AP_IDLE and
+ *  RP_CONNECT_MS to RP_CONNECT_LR_MS in NORMAL, none in SERVE or while a station joins the
+ *  SoftAP). */
 uint32_t radio_policy_exec_connect_len(TickType_t now, uint32_t budget_ms);
 
 void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len_ms);

@@ -199,8 +199,9 @@ extern "C"
     /**
      * @brief The executor's grant: issue the connect to the valve heard, on the executor's
      * task, with its scan stopped, for pulse_ms (the CONNECT pulse the radio policy granted:
-     * RP_CONNECT_LR_MS under a leak response, else RP_CONNECT_MS to RP_CONNECT_LR_MS within
-     * the blind budget). Re-checks the hunt first; a refused connect rescans.
+     * RP_CONNECT_LR_MS under a leak response, else RP_CONNECT_MS in AP_IDLE and RP_CONNECT_MS
+     * to RP_CONNECT_LR_MS in NORMAL within the blind budget). Re-checks the hunt first; a
+     * refused connect rescans.
      */
     void ble_valve_claim_start(uint32_t pulse_ms);
 

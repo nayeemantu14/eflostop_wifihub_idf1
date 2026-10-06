@@ -1314,9 +1314,20 @@ uint32_t radio_policy_exec_connect_len(TickType_t now, uint32_t budget_ms)
         return 0;
     if (m == RP_MODE_SERVE && !lr)
         return 0;   // claims wait while a setup page is served, unless a leak response is pending
+    // ... and while a station joins the SoftAP (I7's window: unleased less than 10 s after its
+    // join, or its JOIN asked or running; provisional SERVE starts only at the lease). A claim's
+    // connect is NimBLE's continuous 1M initiator: with its recovery, a Wi-Fi blackout of 2.7 s
+    // or more over the station's association and DHCP, whose JOIN its pulse spacing would also
+    // hold back.
+    if (!lr && radio_policy_join_settling())
+        return 0;
     uint32_t len;
     if (lr)
         len = (budget_ms >= RP_CONNECT_LR_MS) ? RP_CONNECT_LR_MS : 0;
+    else if (m == RP_MODE_AP_IDLE)
+        len = (budget_ms >= RP_CONNECT_MS) ? RP_CONNECT_MS : 0;   // the plan's 1.5 s where the SoftAP
+                                                                   // serves (I8); B2's longer claim
+                                                                   // only in NORMAL
     else
         len = (budget_ms >= RP_CONNECT_MS) ? rp_min(RP_CONNECT_LR_MS, budget_ms) : 0;
     if (len == 0)
