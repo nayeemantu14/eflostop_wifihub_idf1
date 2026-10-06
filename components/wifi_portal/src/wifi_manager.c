@@ -1742,8 +1742,11 @@ static void wifi_manager_user_next(uint8_t *retries){
 	if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
 		/* "the network in use already" only when the STA is on it: not on a replaced candidate's
 		 * network, which the newer candidate always leaves */
+		/* LOCAL PATCH (2.1.4 C8): this line, the leave's below and the commit's
+		 * (wifi_manager_commit_driver_config()) are W: main.c caps this tag at WARN, and the bench
+		 * reads a Connect's outcome from them. One each per Connect at most, never periodic */
 		if(!on_uncommitted && wifi_manager_cand_is_live()){
-			ESP_LOGI(TAG, "user connect: the network in use already");
+			ESP_LOGW(TAG, "user connect: the network in use already");
 			wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_WAITING);
 			wifi_manager_connect_cb((uint32_t)CONNECTION_REQUEST_USER | WIFI_MANAGER_CONNECT_NOT_STARTED);
 			return;
@@ -1762,7 +1765,7 @@ static void wifi_manager_user_next(uint8_t *retries){
 			wifi_manager_connect_cb((uint32_t)CONNECTION_REQUEST_USER | WIFI_MANAGER_CONNECT_NOT_STARTED);
 			return;
 		}
-		ESP_LOGI(TAG, "user connect: leaving the network in use for the candidate");
+		ESP_LOGW(TAG, "user connect: leaving the network in use for the candidate");
 		wifi_manager_abort_mark(0);
 		return;
 	}
@@ -1970,7 +1973,7 @@ static __attribute__((noinline)) void wifi_manager_commit_driver_config(){
 		memcpy(wifi_manager_config_sta->sta.ssid, drv.sta.ssid, MAX_SSID_SIZE);
 		memcpy(wifi_manager_config_sta->sta.password, drv.sta.password, MAX_PASSWORD_SIZE);
 		wifi_manager_config_sta->sta.channel = 0;	/* the old network's hint is not this one's */
-		ESP_LOGI(TAG, "user connect: the candidate got its IP - it is the network in use now, saved");
+		ESP_LOGW(TAG, "user connect: the candidate got its IP - it is the network in use now, saved");
 		save_owed = true;
 	}
 	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
