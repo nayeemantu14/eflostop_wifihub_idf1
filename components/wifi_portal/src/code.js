@@ -26,7 +26,8 @@
   var lastActivity = Date.now();
   var idle = false;
   var lastStatusPoll = 0, lastListPoll = 0, pointerDownAt = 0, rescanUntil = 0;
-  var finished = false;
+  var finished = 0;           // when Finish was answered
+  var resultSsid = null;      // the success view's network
 
   function showView(id) {
     currentView = id;
@@ -48,7 +49,7 @@
   }
 
   function toScan() {
-    connecting = null;
+    connecting = resultSsid = null;
     setStep(1);
     showView("view-scan");
     updateBanners(lastStatus);
@@ -83,9 +84,21 @@
     return null;
   }
 
+  // every request gives up after 8 s: a lost one must not hang the page
+  function req(url, opts) {
+    opts = opts || {};
+    opts.cache = "no-store";
+    var ctl = window.AbortController ? new AbortController() : null;
+    if (ctl) opts.signal = ctl.signal;
+    return new Promise(function (ok, fail) {
+      var t = setTimeout(function () { if (ctl) ctl.abort(); fail(); }, 8000);
+      fetch(url, opts).then(function (r) { clearTimeout(t); ok(r); }, function () { clearTimeout(t); fail(); });
+    });
+  }
+
   function getJSON(url) {
-    return fetch(url, { cache: "no-store" }).then(function (r) {
-      if (!r.ok) throw new Error(r.status);
+    return req(url).then(function (r) {
+      if (!r.ok) throw 0;
       return r.json();
     });
   }
@@ -93,26 +106,36 @@
   function pageHidden() { return document.visibilityState === "hidden"; }
 
   // Status
+  // a reply to a poll sent before a Connect does not decide it
   function pollStatus(bg) {
-    lastStatusPoll = Date.now();
-    return getJSON(bg ? "status.json?bg=1" : "status.json").then(onStatus, function () {});
+    var sent = lastStatusPoll = Date.now();
+    return getJSON(bg ? "status.json?bg=1" : "status.json").then(function (d) {
+      if (!d || typeof d !== "object") return;
+      lastStatus = d;
+      if (d.urc === 3 && d.ssid) lostSeen = true;
+      if (connecting) {
+        if (sent >= connecting.since) connectProgress(d);
+      } else if (!finished) {
+        if (resultSsid && !d.pend && !(d.urc === 0 && d.ssid === resultSsid)) toScan();
+        updateBanners(d);
+      }
+    }, function () {});
   }
 
-  function onStatus(d) {
-    if (!d || typeof d !== "object") return;
-    lastStatus = d;
-    if (d.urc === 3 && d.ssid) lostSeen = true;
-    if (connecting) connectProgress(d);
-    else if (!finished) updateBanners(d);
-  }
-
+  // urc 3: the router lost; urc 1: the last Connect failed (maybe long ago: a banner, not a view)
   function updateBanners(d) {
     var lost = d.urc === 3 && d.ssid && !d.pend;
+    var failed = d.urc === 1 && d.ssid && !d.pend;
     var ok = d.urc === 0 && d.ssid && !d.pend;
-    show("fallback-banner", !!lost);
+    show("fallback-banner", !!(lost || failed));
     if (lost) {
+      $("fallback-label").textContent = "Connection lost";
       $("fallback-text").textContent = "WiFiHub lost its connection to «" + d.ssid +
         "». It keeps retrying. Choose a network to change it.";
+    } else if (failed) {
+      var t = failText(d.ssid, d.reason);
+      $("fallback-label").textContent = t[0];
+      $("fallback-text").textContent = t[1];
     }
     show("connected-banner", !!ok);
     if (ok) {
@@ -187,7 +210,7 @@
   function rescan() {
     if (Date.now() < rescanUntil) return;
     $("btn-rescan").disabled = true;
-    fetch("scan.json", { method: "POST", cache: "no-store" }).then(function (r) {
+    req("scan.json", { method: "POST" }).then(function (r) {
       return r.ok ? r.json() : null;
     }).then(function (j) {
       if (j && j.scan === 1) {
@@ -208,7 +231,7 @@
     if (p === null) return Promise.resolve({ err: "pwd" });
     var h = { "X-Custom-enc": "pct", "X-Custom-ssid": s, "X-Custom-pwd": p };
     if (sel.chan > 0) h["X-Custom-chan"] = String(sel.chan);
-    return fetch("connect.json", { method: "POST", headers: h, cache: "no-store" }).then(function (r) {
+    return req("connect.json", { method: "POST", headers: h }).then(function (r) {
       if (r.ok) return { ok: true };
       if (r.status !== 400) return { err: "busy" };
       return r.json().then(function (j) { return { err: (j && j.err) || "enc" }; },
@@ -276,19 +299,23 @@
 
   function showSuccess(ssid) {
     connecting = null;
-    $("success-ssid").textContent = ssid;
+    $("success-ssid").textContent = resultSsid = ssid;
     showState("success");
   }
 
-  function showFailure(ssid, reason) {
+  function failText(ssid, reason) {
     var q = "«" + ssid + "»";
-    var t = WRONG_PASSWORD.indexOf(reason) >= 0 ?
+    return WRONG_PASSWORD.indexOf(reason) >= 0 ?
       ["Wrong password", "The password for " + q + " was not accepted."] :
       NOT_FOUND.indexOf(reason) >= 0 ?
       ["Network not found", q + " not found - is it 2.4 GHz and in range?"] :
       reason === NO_IP ?
       ["No IP address", q + " gave WiFiHub no IP address."] :
       ["Connection failed", "WiFiHub could not connect to " + q + "."];
+  }
+
+  function showFailure(ssid, reason) {
+    var t = failText(ssid, reason);
     connecting = null;
     $("fail-title").textContent = t[0];
     $("fail-text").textContent = t[1];
@@ -299,7 +326,7 @@
   // the setup network stops ~2 s after Finish; no answer: it may have already
   function doFinish(button) {
     button.disabled = true;
-    fetch("finish.json", { method: "POST", cache: "no-store" }).then(function (r) {
+    req("finish.json", { method: "POST" }).then(function (r) {
       button.disabled = false;
       if (r.ok) return finishedView();
       if (currentView !== "view-connecting") return toScan();
@@ -311,7 +338,7 @@
   }
 
   function finishedView() {
-    finished = true;
+    finished = Date.now();
     connecting = null;
     showState("finished");
     show("btn-done", false);
@@ -319,11 +346,14 @@
 
   // Disconnect: the hub forgets its Wi-Fi
   function performDisconnect() {
-    selected = null;
-    fetch("connect.json", { method: "DELETE", cache: "no-store" }).then(function () {}, function () {});
-    show("connected-banner", false);
-    toScan();
-    lastStatusPoll = 0;
+    var busy = function () { $("dc-note").textContent = "WiFiHub is busy - try again."; };
+    req("connect.json", { method: "DELETE" }).then(function (r) {
+      if (!r.ok) return busy();
+      selected = null;
+      lastStatus = {};
+      toScan();
+      lastStatusPoll = 0;
+    }, busy);
   }
 
   function noteActivity() {
@@ -337,8 +367,12 @@
   }
 
   function tick() {
-    if (pageHidden() || finished) return;
     var now = Date.now();
+    if (pageHidden() || now - finished < 15000) return;
+    if (finished) {   // the setup network is still up: back to the page
+      finished = 0;
+      toScan();
+    }
     if (!idle && now - lastActivity >= IDLE_MS) {
       idle = true;
       $("idle-hint").style.display = "";
@@ -350,7 +384,7 @@
     }
     if (idle) return;
     if (now - lastStatusPoll >= POLL_MS) pollStatus(true);
-    if (currentView === "view-scan" && now - lastListPoll >= POLL_MS) refreshList(true);
+    if (now - lastListPoll >= POLL_MS) refreshList(true);
   }
 
   function clearErr(input, errEl) {
@@ -472,7 +506,7 @@
     on("btn-retry", "click", retry);
     on("btn-finish", "click", function () { doFinish($("btn-finish")); });
     on("btn-finish-details", "click", function () { doFinish($("btn-finish-details")); });
-    on("connected-banner", "click", function () { showView("view-details"); });
+    on("connected-banner", "click", function () { $("dc-note").textContent = ""; showView("view-details"); });
 
     on("btn-disconnect", "click", function () { show("modal-disconnect", true); });
     on("btn-cancel-dc", "click", function () { show("modal-disconnect", false); });
@@ -483,7 +517,6 @@
       var d = lastStatus;
       if (d.pend) startConnecting(d.pend, true);
       else if (d.ssid && d.urc === 0) showSuccess(d.ssid);
-      else if (d.ssid && d.urc === 1) showFailure(d.ssid, d.reason);
       else updateBanners(d);
       listSince = Date.now();
       refreshList(false);

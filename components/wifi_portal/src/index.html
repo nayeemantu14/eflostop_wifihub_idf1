@@ -57,7 +57,7 @@
 
 		<!-- The hub lost its router (status urc 3): until it reconnects or a network is chosen -->
 		<div id="fallback-banner" class="card card-warn" style="display:none" role="status">
-			<div class="banner-label">Connection lost</div>
+			<div id="fallback-label" class="banner-label">Connection lost</div>
 			<div id="fallback-text" class="banner-text"></div>
 		</div>
 
@@ -277,6 +277,7 @@
 			<button id="btn-disconnect" class="btn btn-danger-outline" type="button">Disconnect</button>
 			<button id="btn-finish-details" class="btn btn-primary" type="button">Finish</button>
 		</div>
+		<p id="dc-note" class="hint-text" role="status"></p>
 	</div>
 
 	<!-- Disconnect Confirmation Modal -->
