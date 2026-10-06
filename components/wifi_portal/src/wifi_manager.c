@@ -1616,13 +1616,34 @@ static void wifi_manager_abort_mark(uint8_t reason){
 	abort_reason = reason;
 }
 
-/* the candidate is the network in use already: the same SSID and password */
-static bool wifi_manager_cand_is_live(){
+/* the candidate is what the STA is connected with: the driver's config (not the network in use's,
+ * which differs on a network not committed), the same SSID and password. In a frame of its own
+ * (the config, about 0.15 KB, wiped) */
+static __attribute__((noinline)) bool wifi_manager_cand_is_live(){
+	wifi_config_t drv;
+	memset(&drv, 0x00, sizeof(drv));
+	if(esp_wifi_get_config(WIFI_IF_STA, &drv) != ESP_OK){
+		return false;
+	}
 	taskENTER_CRITICAL(&wm_lock);
-	bool same = memcmp(wm_shared->cand_ssid, wifi_manager_config_sta->sta.ssid, MAX_SSID_SIZE) == 0 &&
-			memcmp(wm_shared->cand_pwd, wifi_manager_config_sta->sta.password, MAX_PASSWORD_SIZE) == 0;
+	bool same = memcmp(wm_shared->cand_ssid, drv.sta.ssid, MAX_SSID_SIZE) == 0 &&
+			memcmp(wm_shared->cand_pwd, drv.sta.password, MAX_PASSWORD_SIZE) == 0;
 	taskEXIT_CRITICAL(&wm_lock);
+	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
 	return same;
+}
+
+/* status.json's network while on a network not committed: the driver's SSID (the network in use's
+ * is another). In a frame of its own, as above */
+static __attribute__((noinline)) void wifi_manager_status_driver_ssid(){
+	wifi_config_t drv;
+	memset(&drv, 0x00, sizeof(drv));
+	if(esp_wifi_get_config(WIFI_IF_STA, &drv) == ESP_OK){
+		taskENTER_CRITICAL(&wm_lock);
+		memcpy(wm_shared->ssid, drv.sta.ssid, MAX_SSID_SIZE);
+		taskEXIT_CRITICAL(&wm_lock);
+	}
+	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
 }
 
 /**
@@ -1676,6 +1697,7 @@ static __attribute__((noinline)) void wifi_manager_start_attempt(connection_requ
 		TickType_t now = xTaskGetTickCount();
 		attempt_kind = (uint8_t)kind;
 		attempt_tick = (now != 0) ? now : 1;
+		on_uncommitted = false;		/* no link left: whatever it was */
 		wifi_manager_connect_cb((uint32_t)kind);
 		return;
 	}
@@ -1846,6 +1868,7 @@ static void wifi_manager_abort_expired(uint8_t *retries){
 	}
 
 	ESP_LOGW(TAG, "no STA_DISCONNECTED %d ms after esp_wifi_disconnect() - the attempt counts as ended", WIFI_MANAGER_ABORT_WAIT_MS);
+	on_uncommitted = false;		/* not connected: no link left */
 	/* should it come late after all, it is not charged to the attempt that may start next */
 	TickType_t now = xTaskGetTickCount();
 	stale_leave_until = now + pdMS_TO_TICKS(WIFI_MANAGER_STALE_LEAVE_MS);
@@ -2410,8 +2433,11 @@ void wifi_manager( void * pvParameters ){
 				retries = 0;
 
 				/* refresh the status with the new IP (LOCAL PATCH 2.1.4 C8: and the candidate whose
-				 * attempt got it ends, in the same lock) */
+				 * attempt got it ends, in the same lock; on a network not committed, its own SSID) */
 				wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_ACTIVE);
+				if(on_uncommitted){
+					wifi_manager_status_driver_ssid();
+				}
 
 				/* LOCAL PATCH (2.1.4 C4): the DNS hijack is no longer brought down here. It stays up with
 				 * the AP until STOP_AP, so a phone that joins or re-joins the AP in its tail (the setup
