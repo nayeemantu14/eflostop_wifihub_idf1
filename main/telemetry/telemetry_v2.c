@@ -115,6 +115,20 @@ const char *telemetry_v2_fw_version(void)
 // Minimum epoch to consider time synced (2024-01-01 00:00:00 UTC)
 #define EPOCH_VALID_THRESHOLD_TELEM  1704067200
 
+// A user-supplied string as every message prints it (2.1.4 WP3): a sensor label, the hub
+// name, a valve's firmware string. A control character (below 0x20) becomes a space. cJSON
+// writes each one as a six-byte \u00XX escape, so 31 of them in a label took 186 B: a full
+// hub's snapshot could pass the MQTT outbox limit and be refused for ever (13.9 KB against
+// 12,288 B), and an event pass the offline buffer's 512 B entry. A quote or a backslash costs
+// 2 B and stays. In place, on the caller's copy.
+static void printable_in_place(char *s)
+{
+    for (; *s != '\0'; s++) {
+        if ((unsigned char)*s < 0x20)
+            *s = ' ';
+    }
+}
+
 // Out of memory part-way through building a message: frees it and says so. Nothing of it
 // is published or buffered.
 static void drop_unbuilt(cJSON *root, const char *what)
@@ -166,7 +180,9 @@ static cJSON *build_envelope(const char *type)
     }
     cJSON_AddStringToObject(gw, "id", s_gateway_id);
     cJSON_AddStringToObject(gw, "short_id", hub_identity_get_short_id());
-    const char *hub_name = hub_identity_get_name();
+    char hub_name[HUB_NAME_MAX_LEN + 1];
+    snprintf(hub_name, sizeof(hub_name), "%s", hub_identity_get_name());
+    printable_in_place(hub_name);
     if (hub_name[0])
         cJSON_AddStringToObject(gw, "name", hub_name);
     cJSON_AddStringToObject(gw, "fw", telemetry_v2_fw_version());
@@ -458,6 +474,8 @@ static bool add_location_obj(cJSON *parent, sensor_type_t type,
 {
     sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
     bool have_meta = sensor_meta_get(type, sensor_id, &meta);
+    if (have_meta)
+        printable_in_place(meta.label);   // 2.1.4 WP3: the copy, as every label is printed
     cJSON *loc = cJSON_AddObjectToObject(parent, "location");   // created + attached, or NULL
     if (!loc) return false;
     if (!cJSON_AddStringToObject(loc, "code",
@@ -544,6 +562,7 @@ static void leak_label_for(const health_device_status_t *d, char *out, size_t ou
         out[i] = (src[i] == ',') ? ';' : src[i];
     }
     out[i] = '\0';
+    printable_in_place(out);   // as every label is printed (2.1.4 WP3)
 }
 
 static void build_system_health_reason(const health_device_status_t *health,
@@ -1097,10 +1116,12 @@ static bool build_snapshot(const char *trigger, telem_msg_t *out)
             SNAP_ADD(cJSON_AddBoolToObject(valve, "connected", true));
 
             char valve_fw[32];
-            if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
+            if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw))) {
+                printable_in_place(valve_fw);   // 2.1.4 WP3: the valve's own string
                 SNAP_ADD(cJSON_AddStringToObject(valve, "fw_version", valve_fw));
-            else
+            } else {
                 SNAP_ADD(cJSON_AddNullToObject(valve, "fw_version"));
+            }
         } else {
             SNAP_ADD(cJSON_AddStringToObject(valve, "state", "disconnected"));
             SNAP_ADD(cJSON_AddBoolToObject(valve, "connected", false));
@@ -1321,6 +1342,16 @@ bool telemetry_v2_post_snapshot(const char *trigger, uint32_t tag, uint8_t flags
 {
     telem_msg_t m;
     if (!build_snapshot(trigger, &m)) return false;
+    // Its size against what the MQTT outbox is sized for (app_iothub.h; 2.1.4 WP3). Over the
+    // limit, esp-mqtt refuses it whatever else is queued, so it is refused for ever, and the
+    // heartbeat is never re-armed: posted anyway, so the refusal and its 5 s retry show.
+    if (m.len > MQTT_OUTBOX_LIMIT_BYTES) {
+        ESP_LOGE(TELEM_TAG, "Snapshot is %u B, over the %u B MQTT outbox limit - it will be refused",
+                 (unsigned)m.len, (unsigned)MQTT_OUTBOX_LIMIT_BYTES);
+    } else if (m.len > MQTT_TX_MAX_MESSAGE) {
+        ESP_LOGW(TELEM_TAG, "Snapshot is %u B, over the %u B the MQTT outbox is sized for - less room for events behind it",
+                 (unsigned)m.len, (unsigned)MQTT_TX_MAX_MESSAGE);
+    }
     telem_tx_item_t it = { .json = m.json, .tag = tag, .kind = TELEM_TX_SNAPSHOT, .flags = flags,
                            .seq = 0 };
     return telemetry_v2_tx_post(&it, "snapshot");
@@ -1371,8 +1402,10 @@ void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_
     cJSON_AddBoolToObject(data, "rmleak", ble_valve_get_rmleak_state());
 
     char valve_fw[32];
-    if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw)))
+    if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw))) {
+        printable_in_place(valve_fw);   // 2.1.4 WP3: the valve's own string
         cJSON_AddStringToObject(data, "fw_version", valve_fw);
+    }
 
     publish_json(root, "event");
 }
@@ -1410,8 +1443,12 @@ void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev)
         cJSON_AddStringToObject(data, "valve_state",
             ev->valve_state ? ev->valve_state : "unknown");
         cJSON_AddBoolToObject(data, "rmleak", ev->rmleak);
-        if (ev->fw_version && ev->fw_version[0])
-            cJSON_AddStringToObject(data, "fw_version", ev->fw_version);
+        if (ev->fw_version && ev->fw_version[0]) {
+            char fw[32];   // the valve's string (ble_valve_get_firmware_rev(), 32 B)
+            snprintf(fw, sizeof(fw), "%s", ev->fw_version);
+            printable_in_place(fw);   // 2.1.4 WP3
+            cJSON_AddStringToObject(data, "fw_version", fw);
+        }
     }
 
     publish_json(root, "event");

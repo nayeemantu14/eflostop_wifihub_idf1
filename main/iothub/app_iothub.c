@@ -2267,23 +2267,11 @@ void iothub_on_wifi_lost(void)
 #define MQTT_RX_BUFFER_BYTES   4096   // esp_mqtt_client_config_t buffer.size
 #define MQTT_TX_BUFFER_BYTES   1024   // buffer.out_size — see build_mqtt_cfg()
 
-// The outbox ceiling (esp_mqtt_client_config_t outbox.limit; 2.1.4 WP2, plan section 4.6).
-// esp-mqtt keeps every QoS 1 message whole in its outbox from the publish to its PUBACK, or
-// for 30 s (OUTBOX_EXPIRED_TIMEOUT_MS) when none comes - also one whose session broke (E4:
-// the lifecycle sat there through two failed handshakes and expired 5 s before the next
-// connect). Unbounded, a stalled session piles up a snapshot every few seconds in internal
-// heap. With a limit, esp-mqtt refuses (-2) a publish that, with the queue, would pass it,
-// and refuses every SUBSCRIBE while the queue is over it.
-// The plan asked for about 4 KB. That alone would refuse a big hub's snapshot for ever: about
-// 0.2-0.25 KB per device with its label (2.1.3 log: 1,436 B for a valve and 4 BLE sensors),
-// so 7.5-8 KB for 16 BLE + 16 LoRa sensors and the valve. So the ceiling is about 4 KB of
-// backlog over the largest message the hub sends. What a refusal costs: an event is kept in
-// the offline buffer and replayed while connected (telemetry_v2.c), the rest of a drain
-// waits likewise, a snapshot retries 5 s later (SNAP_RETRY_FLOOR_MS), and refused SUBSCRIBEs
-// at a connect reconnect (MQTT_EVENT_CONNECTED).
-#define MQTT_TX_MAX_MESSAGE        8192   // the largest message the hub publishes (a full hub's snapshot)
-#define MQTT_OUTBOX_BACKLOG_BYTES  4096
-#define MQTT_OUTBOX_LIMIT_BYTES    (MQTT_TX_MAX_MESSAGE + MQTT_OUTBOX_BACKLOG_BYTES)
+// The outbox ceiling, MQTT_OUTBOX_LIMIT_BYTES (esp_mqtt_client_config_t outbox.limit; 2.1.4
+// WP2, plan section 4.6), and the largest message, MQTT_TX_MAX_MESSAGE: app_iothub.h, where the
+// snapshot's build checks against them (telemetry_v2.c). WP3 split the same ceiling anew, so
+// the internal heap a stalled session can hold is WP2's.
+_Static_assert(MQTT_OUTBOX_LIMIT_BYTES == 12288, "WP3: the outbox limit stays WP2's 12,288 B (heap)");
 
 // How often iothub_task replays events kept in the offline buffer while connected
 // (telemetry_v2_replay_owed()).

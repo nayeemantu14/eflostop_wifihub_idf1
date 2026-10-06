@@ -38,6 +38,34 @@ extern "C"
 // expired in 1971 and is rejected with a 401 that no amount of retrying fixes.
 #define SNTP_EPOCH_VALID  1704067200
 
+// The MQTT outbox ceiling (esp_mqtt_client_config_t outbox.limit; 2.1.4 WP2, plan section 4.6;
+// set in build_mqtt_cfg(), app_iothub.c) and the largest message it is sized for.
+// esp-mqtt keeps every QoS 1 message whole in its outbox from the publish to its PUBACK, or
+// for 30 s (OUTBOX_EXPIRED_TIMEOUT_MS) when none comes - also one whose session broke (E4:
+// the lifecycle sat there through two failed handshakes and expired 5 s before the next
+// connect). Unbounded, a stalled session piles up a snapshot every few seconds in internal
+// heap. With a limit, esp-mqtt refuses (-2) a publish that, with the queue, would pass it
+// (its payload length plus the outbox's), and refuses every SUBSCRIBE while the queue is over
+// it. So a message longer than the limit is refused for ever, even with an empty outbox.
+// The plan asked for about 4 KB, which would refuse a big hub's snapshot for ever.
+// The largest message is a full hub's snapshot (16 BLE + 16 LoRa sensors and the valve).
+// 2.1.4 WP3 computed it from build_snapshot() with every field at its longest (the model is
+// in the WP3 report): 7,475 B for realistic labels and values; 8,490 B with every label, the
+// hub name and the valve's firmware string at their 31-character maximum; 9,575 B when every
+// one of those characters is a quote or a backslash (2 B each once escaped). A control
+// character would cost 6 B (\u00XX), up to 13,915 B, over the 12,288 B limit; the snapshot
+// now prints those as spaces (telemetry_v2.c), so 9,575 B is the ceiling. The limit stays
+// 12,288 B, the WP2 figure, so the internal heap a stalled session can hold does not change:
+// 10 KB for the largest message and 2 KB of backlog behind it (about 4.7 KB behind a
+// realistic full hub's snapshot). What a refusal costs: an event is kept in the offline
+// buffer and replayed while connected (telemetry_v2.c), the rest of a drain waits likewise,
+// a snapshot retries 5 s later (SNAP_RETRY_FLOOR_MS), and refused SUBSCRIBEs at a connect
+// reconnect (MQTT_EVENT_CONNECTED). A snapshot built over MQTT_TX_MAX_MESSAGE logs a W line,
+// one over the limit an E line (telemetry_v2_post_snapshot()).
+#define MQTT_TX_MAX_MESSAGE        10240  // the largest message the hub publishes (see above)
+#define MQTT_OUTBOX_BACKLOG_BYTES  2048
+#define MQTT_OUTBOX_LIMIT_BYTES    (MQTT_TX_MAX_MESSAGE + MQTT_OUTBOX_BACKLOG_BYTES)
+
 // SAS token helpers (used by dps_client)
 void url_encode(const char *src, char *dst, size_t dst_len);
 char *generate_sas_token(const char *resource_uri, const char *key, long expiry_seconds);

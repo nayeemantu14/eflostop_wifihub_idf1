@@ -725,6 +725,13 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
     if (source_id && source != LEAK_SOURCE_VALVE) {
         sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
         if (sensor_meta_get(source_to_sensor_type(source), source_id, &meta)) {
+            // A control character prints as a space, as in every message telemetry_v2.c
+            // builds (2.1.4 WP3, printable_in_place()): cJSON writes it as a six-byte escape,
+            // and this event must stay within the offline buffer's 512 B entry.
+            for (char *c = meta.label; *c != '\0'; c++) {
+                if ((unsigned char)*c < 0x20)
+                    *c = ' ';
+            }
             // Created attached: cJSON_AddItemToObject() neither attaches nor frees the
             // child when its key copy fails, so a detached object leaked at low heap.
             cJSON *loc = cJSON_AddObjectToObject(root, "location");
