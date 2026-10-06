@@ -1766,10 +1766,26 @@ static uint32_t          s_twin_refused_seen = 0;   // iothub_task only
 static int64_t           s_twin_retry_ms     = 0;   // iothub_task only
 
 // The twin report's build (2.1.4 WP2c: built apart from its send, like every message): the
-// reported-properties PATCH body, or NULL out of memory. Reads the provisioning state (its
-// mutex). The caller frees it.
+// reported-properties PATCH body, or NULL out of memory or with provisioning busy. Reads the
+// provisioning state in one hold of its mutex (2.1.4 WP3, HANDOFF 15p W2: five reads, each
+// with its own 1 s timeout, could hold iothub_task about 5 s, and a busy read went out as
+// provisioned false, valve_id null, counts 0). A busy read builds nothing: both callers
+// leave the report owed and build it again (post_twin_reported(), post_session_twin()).
+// iothub_task only. The caller frees it.
+static bool s_twin_prov_busy_logged = false;   // iothub_task only: one W line per busy episode
+
 static char *build_twin_reported(void)
 {
+    prov_summary_t prov;
+    if (!provisioning_get_summary(&prov)) {
+        if (!s_twin_prov_busy_logged) {
+            s_twin_prov_busy_logged = true;
+            ESP_LOGW(IOTHUB_TAG, "Twin report not built - provisioning busy for 1 s, built again later");
+        }
+        return NULL;
+    }
+    s_twin_prov_busy_logged = false;
+
     cJSON *root = cJSON_CreateObject();
     if (!root) return NULL;
 
@@ -1777,7 +1793,7 @@ static char *build_twin_reported(void)
     cJSON_AddStringToObject(root, "gateway_id", hub_identity_get_gateway_id());
     cJSON_AddStringToObject(root, "short_id", hub_identity_get_short_id());
     cJSON_AddStringToObject(root, "hub_name", hub_identity_get_name());
-    cJSON_AddBoolToObject(root, "provisioned", provisioning_is_provisioned());
+    cJSON_AddBoolToObject(root, "provisioned", prov.provisioned);
 
     // Same identity key as the lifecycle message and the snapshot valve object —
     // twin reported is hub->cloud like telemetry, so it uses the D2C vocabulary.
@@ -1794,27 +1810,16 @@ static char *build_twin_reported(void)
     // Null rather than omitted when no valve is provisioned, for the same reason:
     // omitting it after a decommission would leave the twin claiming a valve that
     // no longer exists.
-    char valve_mac[18];
-    if (provisioning_get_valve_mac(valve_mac))
-        cJSON_AddStringToObject(root, "valve_id", valve_mac);
+    if (prov.valve_mac[0] != '\0')
+        cJSON_AddStringToObject(root, "valve_id", prov.valve_mac);
     else
         cJSON_AddNullToObject(root, "valve_id");
 
-    uint32_t ids[MAX_LORA_SENSORS];
-    uint8_t cnt = 0;
-    provisioning_get_lora_sensors(ids, &cnt);
-    cJSON_AddNumberToObject(root, "lora_sensor_count", cnt);
+    cJSON_AddNumberToObject(root, "lora_sensor_count", prov.lora_count);
+    cJSON_AddNumberToObject(root, "ble_leak_sensor_count", prov.ble_count);
 
-    char macs[MAX_BLE_LEAK_SENSORS][18];
-    uint8_t bcnt = 0;
-    provisioning_get_ble_leak_sensors(macs, &bcnt);
-    cJSON_AddNumberToObject(root, "ble_leak_sensor_count", bcnt);
-
-    rules_config_t rules;
-    if (provisioning_get_rules_config(&rules)) {
-        cJSON_AddBoolToObject(root, "auto_close_enabled", rules.auto_close_enabled);
-        cJSON_AddNumberToObject(root, "trigger_mask", rules.trigger_mask);
-    }
+    cJSON_AddBoolToObject(root, "auto_close_enabled", prov.rules.auto_close_enabled);
+    cJSON_AddNumberToObject(root, "trigger_mask", prov.rules.trigger_mask);
 
     cJSON_AddNumberToObject(root, "uptime_s",
                             (double)(esp_timer_get_time() / 1000000));
@@ -4338,16 +4343,8 @@ void iothub_task(void *param)
                 if ((s_iot_sess_owed & IOT_SESS_TWIN) && post_session_twin(gen))
                     s_iot_sess_owed &= (uint8_t)~IOT_SESS_TWIN;
             }
-            // A twin report owed (2.1.4 TW-1): one the esp-mqtt task asked for (rules_config,
-            // set_hub_name, a desired-properties patch, the twin GET's answer), a device-set
-            // change's that met 8 or more items in the FIFO, or one esp-mqtt refused. Built now if
-            // fewer wait (post_twin_reported()), after this session's own above, which covers it
-            // when it was built after the request; within TWIN_REPORT_RETRY_MS of a refusal, at
-            // its end (a request then meets the same outbox). While offline it stays owed, and
-            // the next CONNECTED's report covers it.
-            if (connected && (s_twin_due || s_twin_req != s_twin_req_done) &&
-                snap_now_ms() >= s_twin_retry_ms)
-                post_twin_reported();
+            // A twin report owed is posted after this pass's events (2.1.4 WP3, HANDOFF 15p W3),
+            // below the rules events.
         }
 
         // NOTE: the rules-engine events (auto_close, rmleak_*) are held in
@@ -4582,6 +4579,22 @@ void iothub_task(void *param)
         // is issued there — only the telemetry is held back, so this reorders the
         // wire, never the safety action.
         publish_rules_telemetry(auto_close_json);
+
+        // ---- A twin report owed (2.1.4 TW-1) ----
+        // One the esp-mqtt task asked for (rules_config, set_hub_name, a desired-properties patch,
+        // the twin GET's answer), a device-set change's that met 8 or more items in the FIFO, one
+        // esp-mqtt refused, or one not built while provisioning was busy. Built now if fewer than
+        // 8 items wait (post_twin_reported()), after this session's own (the session block
+        // above), which covers it when it was built after the request; within
+        // TWIN_REPORT_RETRY_MS of a refusal, at its end (a request then meets the same outbox).
+        // While offline it stays owed, and the next CONNECTED's report covers it.
+        // After this pass's device and rules events (2.1.4 WP3, HANDOFF 15p W3): posted in the
+        // session block, it went out ahead of a leak_detected built on the same pass, and took
+        // FIFO room first. The snapshot is still built after it (only into an idle TX), so a
+        // command's order on the wire stays cmd_ack, twin, snapshot.
+        if (telemetry_v2_is_connected() && (s_twin_due || s_twin_req != s_twin_req_done) &&
+            snap_now_ms() >= s_twin_retry_ms)
+            post_twin_reported();
 
         // ---- The result of the snapshot in flight (2.1.4 WP2c) ----
         // Its bookkeeping first, so the arming below re-arms BOOT/FAST/COMMISSION from the

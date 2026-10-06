@@ -248,6 +248,31 @@ bool provisioning_get_ble_leak_sensors(char macs_out[][18], uint8_t *count_out);
  */
 bool provisioning_get_device_set(prov_device_set_t *out);
 
+// What the twin report and the lifecycle message state about provisioning (provisioning_get_summary()).
+typedef struct {
+    bool           provisioned;     // the hub's state is PROVISIONED
+    char           valve_mac[18];   // upper case; "" when no valve is provisioned
+    uint8_t        lora_count;      // 0 when not provisioned
+    uint8_t        ble_count;       // 0 when not provisioned
+    rules_config_t rules;
+} prov_summary_t;
+
+/**
+ * @brief The hub's provisioning summary in ONE mutex hold: the same values as
+ *        provisioning_is_provisioned(), provisioning_get_valve_mac(),
+ *        provisioning_get_lora_sensors()' and provisioning_get_ble_leak_sensors()' counts
+ *        and provisioning_get_rules_config() give when the mutex is free.
+ *
+ * 2.1.4 WP3 (HANDOFF 15p W2): a twin report made those five reads, each with its own 1 s
+ * timeout, so a busy mutex could hold iothub_task about 5 s in one build, and the report
+ * then went out with defaults (provisioned false, valve_id null, counts 0). One read waits
+ * 1 s at most, and a caller can leave the report owed instead.
+ *
+ * @return false (out zeroed) when out is NULL, the manager is not initialised or the
+ *         mutex (1000 ms) timed out: "unknown", never "unprovisioned". Logs nothing.
+ */
+bool provisioning_get_summary(prov_summary_t *out);
+
 /**
  * @brief Callback for provisioning_with_valve_target(). It runs with the provisioning
  *        mutex HELD: keep it short and non-blocking, never call back into this module

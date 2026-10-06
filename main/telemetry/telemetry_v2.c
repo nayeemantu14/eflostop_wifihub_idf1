@@ -918,6 +918,16 @@ void telemetry_v2_clear_settings(void)
 
 bool telemetry_v2_build_lifecycle(telem_msg_t *out)
 {
+    // The provisioning summary in one hold of its mutex (2.1.4 WP3, as the twin report:
+    // HANDOFF 15p W2). Five reads with a 1 s timeout each could hold iothub_task about 5 s,
+    // and a busy read went out as provisioned false with counts 0. Busy: not built, and the
+    // caller builds it again (LIFECYCLE_RETRY_MS, app_iothub.c).
+    prov_summary_t prov;
+    if (!provisioning_get_summary(&prov)) {
+        ESP_LOGW(TELEM_TAG, "Lifecycle not built - provisioning busy for 1 s, built again later");
+        return false;
+    }
+
     cJSON *root = build_envelope("lifecycle");
     if (!root) return false;
 
@@ -930,29 +940,18 @@ bool telemetry_v2_build_lifecycle(telem_msg_t *out)
     }
     cJSON_AddStringToObject(data, "event", "online");
     cJSON_AddStringToObject(data, "reset_reason", reset_reason_str());
-    cJSON_AddBoolToObject(data, "provisioned", provisioning_is_provisioned());
+    cJSON_AddBoolToObject(data, "provisioned", prov.provisioned);
 
-    char valve_mac[18];
-    if (provisioning_get_valve_mac(valve_mac))
-        cJSON_AddStringToObject(data, "valve_id", valve_mac);
+    if (prov.valve_mac[0] != '\0')
+        cJSON_AddStringToObject(data, "valve_id", prov.valve_mac);
 
-    uint32_t ids[MAX_LORA_SENSORS];
-    uint8_t cnt = 0;
-    provisioning_get_lora_sensors(ids, &cnt);
-    cJSON_AddNumberToObject(data, "lora_sensor_count", cnt);
+    cJSON_AddNumberToObject(data, "lora_sensor_count", prov.lora_count);
+    cJSON_AddNumberToObject(data, "ble_leak_sensor_count", prov.ble_count);
 
-    char macs[MAX_BLE_LEAK_SENSORS][18];
-    uint8_t bcnt = 0;
-    provisioning_get_ble_leak_sensors(macs, &bcnt);
-    cJSON_AddNumberToObject(data, "ble_leak_sensor_count", bcnt);
-
-    rules_config_t rules;
-    if (provisioning_get_rules_config(&rules)) {
-        cJSON *r = cJSON_AddObjectToObject(data, "rules");
-        if (r) {
-            cJSON_AddBoolToObject(r, "auto_close_enabled", rules.auto_close_enabled);
-            cJSON_AddNumberToObject(r, "trigger_mask", rules.trigger_mask);
-        }
+    cJSON *r = cJSON_AddObjectToObject(data, "rules");
+    if (r) {
+        cJSON_AddBoolToObject(r, "auto_close_enabled", prov.rules.auto_close_enabled);
+        cJSON_AddNumberToObject(r, "trigger_mask", prov.rules.trigger_mask);
     }
 
     return build_str(root, out);

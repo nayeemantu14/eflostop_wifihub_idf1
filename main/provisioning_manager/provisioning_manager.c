@@ -953,6 +953,40 @@ bool provisioning_get_device_set(prov_device_set_t *out)
     return true;
 }
 
+bool provisioning_get_summary(prov_summary_t *out)
+{
+    if (!out) {
+        return false;
+    }
+    memset(out, 0, sizeof(*out));
+    if (!g_initialized || g_prov_mutex == NULL) {
+        return false;
+    }
+
+    // Silent on a timeout: the caller says what it does instead.
+    if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
+    }
+    // Each value as its own getter reads it (provisioning_get_valve_mac(),
+    // provisioning_get_lora_sensors(), provisioning_get_ble_leak_sensors(),
+    // provisioning_get_rules_config()), counts clamped as provisioning_get_device_set() does.
+    out->provisioned = (g_config.state == PROV_STATE_PROVISIONED);
+    if (out->provisioned) {
+        if (g_config.valve_mac[0] != '\0') {
+            memcpy(out->valve_mac, g_config.valve_mac, sizeof(out->valve_mac));
+            out->valve_mac[sizeof(out->valve_mac) - 1] = '\0';
+            mac_normalize_upper(out->valve_mac);
+        }
+        out->lora_count = (g_config.lora_sensor_count > MAX_LORA_SENSORS)
+                          ? MAX_LORA_SENSORS : g_config.lora_sensor_count;
+        out->ble_count  = (g_config.ble_leak_sensor_count > MAX_BLE_LEAK_SENSORS)
+                          ? MAX_BLE_LEAK_SENSORS : g_config.ble_leak_sensor_count;
+    }
+    out->rules = g_config.rules;
+    xSemaphoreGive(g_prov_mutex);
+    return true;
+}
+
 bool provisioning_with_valve_target(prov_valve_target_cb_t cb, void *ctx)
 {
     if (!cb || !g_initialized || g_prov_mutex == NULL) {

@@ -139,9 +139,10 @@ typedef struct {
 
 /**
  * @brief The type="lifecycle" birth message (online, reset_reason, config), built: reads the
- *        provisioning state (its mutex) and prints the message into *out (2.1.4 WP2c).
- *        false = not built (before the first clock sync, or out of memory), and *out is not
- *        set. iothub_task builds it once per CONNECTED and hands it to cloud_tx
+ *        provisioning state (one hold of its mutex, 2.1.4 WP3) and prints the message into
+ *        *out (2.1.4 WP2c). false = not built (provisioning busy for 1 s, before the first
+ *        clock sync, or out of memory), and *out is not set. iothub_task builds it once per
+ *        CONNECTED and hands it to cloud_tx
  *        (telemetry_v2_tx_post_session()), again every 5 s while esp-mqtt has not taken it.
  */
 bool telemetry_v2_build_lifecycle(telem_msg_t *out);
