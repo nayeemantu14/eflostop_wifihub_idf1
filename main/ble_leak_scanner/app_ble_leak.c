@@ -861,7 +861,8 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * radio holds are gone, and the no-credential setup portal keeps scanning in the AP modes (D2).
  * A row changes only at a slot boundary (a pulse excepted), and a new row starts at its
  * Coded window, or right after it when the slot that just ended was a Coded window, so no switch
- * widens a Coded gap beyond a row's own (I1). NORMAL's rows start each scan U(0, 100 ms) after the
+ * widens a Coded gap beyond a row's own (I1); a row that holds I8 starts with a 0.3 s Wi-Fi slot
+ * when a 1M slot just ended, if I1 allows it. NORMAL's rows start each scan U(0, 100 ms) after the
  * last one ended (the 1 s dither: before WP6 one continuous scan could stay phase-locked to a
  * sensor's heartbeat bursts, plan §5.1). A Wi-Fi slot is timed from the end of the slot before it,
  * so a late pass shortens it rather than widening the Coded gap after it.
@@ -959,6 +960,7 @@ typedef struct {
     bool idle;                  // nothing is to scan (BLE_IDLE, not synced): chores any time
     bool want;                  // the accounting: a scan slot is due or runs
     bool overrun_asked;         // the running claim's overrun went to the valve module
+    bool lead;                  // a Wi-Fi slot runs before the row's Coded window (I8, row_begin())
     uint8_t pulse;              // the pulse running (rp_pulse_t)
     uint8_t row;                // the row running (RP_ROW_NONE: none)
     uint8_t slot;               // ... its slot ...
@@ -1243,14 +1245,21 @@ static void exec_facts(rp_ble_facts_t *f, bool synced, TickType_t now)
 }
 
 // Starts a row (a switch, a restart, or the first): at its Coded window, or right after it when
-// the slot that just ended was a Coded window (I1).
+// the slot that just ended was a Coded window (I1). In a row that holds I8, a 1M slot that just
+// ended would run straight into that Coded window: a switch after a discovery row's, AP_K1M's or
+// LR_AP's M slot (the page back in use, B3's end, the guard, the LR overlay's end) gave BLE runs
+// of 0.9-1.2 s while a phone may wait for its reply. A Wi-Fi slot of RP_I8_WIFI_MIN_MS then leads
+// the row (x->lead), when the Coded gap keeps I1 with it; I1 comes first.
 static void row_begin(exec_t *x, uint8_t row, TickType_t now)
 {
     const rp_row_t *r = radio_policy_row(row);
-    bool fresh = x->coded_last && (now - x->ended_at) <= pdMS_TO_TICKS(RP_JITTER_MS) + 1;
+    bool just = (now - x->ended_at) <= pdMS_TO_TICKS(RP_JITTER_MS) + 1;
+    bool fresh = x->coded_last && just;
     x->row = row;
     x->slot = fresh ? (uint8_t)((r->coded + 1) % r->n) : r->coded;
     x->left = r->n;
+    x->lead = !fresh && just && x->kind == RP_K_M && (r->flags & RP_F_I8) && x->coded_end_at != 0 &&
+              ticks_ms(now - x->coded_end_at) + RP_I8_WIFI_MIN_MS + RP_JITTER_MS <= RP_GAP_MAX_MS;
 }
 
 // Starts the current slot of the current row: a scan, or a Wi-Fi slot (timed from the end of the
@@ -1260,8 +1269,8 @@ static void row_begin(exec_t *x, uint8_t row, TickType_t now)
 static void slot_start(exec_t *x, TickType_t now)
 {
     const rp_row_t *r = radio_policy_row(x->row);
-    uint8_t k = r->kind[x->slot];
-    uint16_t ms = r->ms[x->slot];
+    uint8_t k = x->lead ? RP_K_W : r->kind[x->slot];
+    uint16_t ms = x->lead ? RP_I8_WIFI_MIN_MS : r->ms[x->slot];
     x->slot_done = false;
     x->kind = k;
     x->slot_ms = ms;
@@ -1314,7 +1323,9 @@ static void exec_next_slot(exec_t *x, TickType_t now, uint8_t want_row)
 {
     if (x->row == want_row && x->slot_done) {
         const rp_row_t *r = radio_policy_row(x->row);
-        if (x->left <= 1) {
+        if (x->lead) {
+            x->lead = false;   // the lead Wi-Fi slot is over: the row's Coded window (row_begin())
+        } else if (x->left <= 1) {
             uint8_t next = (want_row == RP_ROW_RECOVERY) ? want_row : radio_policy_exec_row(now, true);
             if (next != x->row) {
                 row_begin(x, next, now);
