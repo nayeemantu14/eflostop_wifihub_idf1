@@ -588,11 +588,33 @@ void radio_policy_note_sta_attempt(bool in_flight)
 
 void radio_policy_note_submit(bool in_flight)
 {
-    s_submit = in_flight;
     if (in_flight) {
+        s_submit = true;
         (void)req_ask(RP_PULSE_SUBMIT, -1);
-    } else {
-        radio_policy_pulse_end(RP_PULSE_SUBMIT);
+        return;
+    }
+    // The Connect ended (its IP or its failure). A SUBMIT still pending got no pulse: the whole
+    // attempt ran beside BLE (a paced Connect that ended within the pulse spacing or before a Coded
+    // window's end, I2b's room, or a leak response's claim first). It is withdrawn with s_submit in
+    // one critical section, so the executor either granted it before (its pulse ends at the next
+    // pass) or cannot grant it now. One line per RP_REFUSE_LOG_MS: anyone on the open SoftAP can
+    // post Connects.
+    static TickType_t lost_logged = 0;   // this task's (wifi_manager) only
+    TickType_t now = xTaskGetTickCount();
+    taskENTER_CRITICAL(&s_req_lock);
+    s_submit = false;
+    bool lost = (s_req[RP_PULSE_SUBMIT].state == RP_GRANT_PENDING);
+    TickType_t asked = s_req[RP_PULSE_SUBMIT].at;
+    if (lost)
+        s_req[RP_PULSE_SUBMIT].state = RP_GRANT_IDLE;
+    taskEXIT_CRITICAL(&s_req_lock);
+    radio_policy_pulse_end(RP_PULSE_SUBMIT);   // a pulse that is on ends
+    if (lost && !rp_within(lost_logged, now, RP_REFUSE_LOG_MS)) {
+        lost_logged = rp_nz(now);
+        // Signed: the executor re-asks a SUBMIT stamped with its own tick, which can follow `now`.
+        int32_t waited = (int32_t)(now - asked);
+        ESP_LOGI(RP_TAG, "SUBMIT pulse not granted before its Connect ended (asked %lu ms before) - the attempt ran beside BLE",
+                 (unsigned long)rp_ms(waited > 0 ? (TickType_t)waited : 0));
     }
 }
 
@@ -1338,7 +1360,7 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         waiting = k;
         // Its lines: the claim's, and a Connect's own (one limit each). A Connect's other waits (a
         // paced one's Coded window end, a young Coded scan) last one row period at most; its pulse
-        // line says when it is paced.
+        // line says when it is paced, and radio_policy_note_submit() when its Connect ended first.
         if (claim_first) {
             if (!rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
                 s_x.hold_logged = rp_nz(now);

@@ -218,12 +218,12 @@ void radio_policy_note_sta_attempt(bool in_flight);
  *  spacing and stops BLE at once; otherwise it is paced (M4): RP_RETRY_MS from a Coded window's
  *  own end, after the spacing, so no pattern of Connects and joins blinds BLE beyond the
  *  invariants, nor, timed to a sensor's heartbeats, its every burst. It waits for its grant until
- *  the Connect ends (no 2 s limit, no refusal for room). While a leak response is pending the
- *  valve's claim goes first: every Wi-Fi pulse leaves it 2.5 s of I2b's room, and while it is due
- *  no Wi-Fi pulse goes before it unless the last pulse was a claim, so Connects cannot hold its
- *  RMLEAK / CLOSE off (radio_policy_exec_wifi_grant()). The caller does not wait: BLE stops
- *  within one executor wake for a first Connect, at a Coded window's end after the spacing for a
- *  paced one. */
+ *  the Connect ends (no 2 s limit, no refusal for room); a Connect that ends first prints that it
+ *  ran beside BLE. While a leak response is pending the valve's claim goes first: every Wi-Fi
+ *  pulse leaves it 2.5 s of I2b's room, and while it is due no Wi-Fi pulse goes before it unless
+ *  the last pulse was a claim, so Connects cannot hold its RMLEAK / CLOSE off
+ *  (radio_policy_exec_wifi_grant()). The caller does not wait: BLE stops within one executor wake
+ *  for a first Connect, at a Coded window's end after the spacing for a paced one. */
 void radio_policy_note_submit(bool in_flight);
 
 /** A station joined / left the SoftAP (default event loop: AP_STACONNECTED, AP_STADISCONNECTED).
