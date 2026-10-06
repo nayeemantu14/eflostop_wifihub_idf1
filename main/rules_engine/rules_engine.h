@@ -120,9 +120,10 @@ bool rules_engine_has_kept_reports(void);
 
 /**
  * @brief True while a valve swap's purge is owed (rules_engine_on_valve_replaced() met a busy
- *        rules mutex; 2.1.4 WP3). iothub_task polls at 100 ms meanwhile, so its next hold
- *        of the mutex runs the purge soon: until then LEAK_RESET and override_cancel (esp-mqtt
- *        task) and a snapshot still count the old valve's flood source. iothub_task only.
+ *        rules mutex; 2.1.4 WP3). The next hold of the mutex runs it first, on iothub_task or
+ *        in a LEAK_RESET, override_cancel, override_enable or full reset on the esp-mqtt task
+ *        (review RTOS-WP3-1), so none of those counts the old valve's flood source.
+ *        iothub_task polls at 100 ms meanwhile. Any task.
  */
 bool rules_engine_valve_purge_owed(void);
 

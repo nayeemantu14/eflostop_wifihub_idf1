@@ -4129,8 +4129,8 @@ void iothub_task(void *param)
                                         s_tx_twin_refused != s_twin_refused_seen);
         // A report the rules mutex refused is evaluated again on the next pass, after its tick
         // (2.1.4 WP2d): 100 ms, so its close follows the mutex's release. So is a valve swap's
-        // purge the mutex refused (2.1.4 WP3): until it runs, the old valve's flood source still
-        // counts for LEAK_RESET, override_cancel and the snapshot.
+        // purge the mutex refused (2.1.4 WP3): until a hold runs it (a C2D command's may, review
+        // RTOS-WP3-1), the old valve's flood source still counts for the snapshot.
         int64_t base = (rules_engine_has_kept_reports() || rules_engine_valve_purge_owed()) ? 100 :
                        admit_pending ? 1000 :
                        (commission_pending || cloud_pending || s_ble_apply_owed ||

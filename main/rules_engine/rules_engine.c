@@ -112,8 +112,11 @@ static uint8_t g_kept_n = 0;
 static bool g_lock_busy_logged = false;         // one W line per busy episode
 static bool g_tick_ran = false;                 // this pass's tick took the rules lock
 /* A valve swap's purge whose rules-lock take timed out (rules_engine_on_valve_replaced()),
- * run first in this task's next hold of the lock (valve_purge_if_owed()). iothub_task only,
- * like every caller that holds the lock and reads the active-leak set, so no lock. */
+ * run first in the next hold of the lock that reads the active-leak set or the interlock
+ * flags, on any task (valve_purge_if_owed()): iothub_task's, and the esp-mqtt task's
+ * LEAK_RESET, override_cancel, override_enable and full reset (2.1.4 WP3 review RTOS-WP3-1).
+ * Set by iothub_task without the lock; read and cleared atomically, under the lock, so the
+ * purge runs exactly once. */
 #define PURGE_OWED          0x01
 #define PURGE_KEPT_DROPPED  0x02   // the swap dropped an old valve's kept report
 static uint8_t g_valve_purge_owed = 0;
@@ -753,23 +756,28 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
 
 static void valve_replaced_locked(bool kept_dropped);
 
-// iothub_task, with g_mutex held: first in every hold of that task that reads the active-leak
-// set or decides on a leak (evaluate_leak_once(), the kept reports' retry, the tick, the valve
-// reconnect's reconciliation, forget_unprovisioned()). Runs the purge a valve swap could not
-// (rules_engine_on_valve_replaced()), so the old valve's MAC-less flood source is gone before
-// any of them can act on it, or a new valve's report is tracked (2.1.4 WP3, 15o residual 3).
+// Any task, with g_mutex held: first in every hold that reads the active-leak set, decides on
+// a leak or sets the interlock flags. On iothub_task: evaluate_leak_once(), the kept reports'
+// retry, the tick, the valve reconnect's reconciliation, forget_unprovisioned(). On the
+// esp-mqtt task: LEAK_RESET, override_cancel, override_enable and the full reset (2.1.4 WP3
+// review RTOS-WP3-1): owed, the old valve's source was counted there (LEAK_RESET refused,
+// the new, dry valve closed at an override_cancel), and the purge, run later on iothub_task,
+// cleared a g_rmleak_clear_owed one of them had just set for its own clear (F-01).
+// Runs the purge a valve swap could not (rules_engine_on_valve_replaced()), so the old
+// valve's MAC-less flood source is gone before any of them can act on it, or a new valve's
+// report is tracked (2.1.4 WP3, 15o residual 3). valve_replaced_locked() touches only state
+// under g_mutex (not the kept reports, iothub_task's own), so it runs on either task.
 static void valve_purge_if_owed(void)
 {
-    if (g_valve_purge_owed != 0) {
-        bool kept_dropped = (g_valve_purge_owed & PURGE_KEPT_DROPPED) != 0;
-        g_valve_purge_owed = 0;
-        valve_replaced_locked(kept_dropped);
+    uint8_t owed = __atomic_exchange_n(&g_valve_purge_owed, 0, __ATOMIC_ACQ_REL);
+    if (owed != 0) {
+        valve_replaced_locked((owed & PURGE_KEPT_DROPPED) != 0);
     }
 }
 
 bool rules_engine_valve_purge_owed(void)
 {
-    return g_valve_purge_owed != 0;   // iothub_task's own state, read on iothub_task
+    return __atomic_load_n(&g_valve_purge_owed, __ATOMIC_ACQUIRE) != 0;
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -1357,6 +1365,7 @@ bool rules_engine_reset_leak_incident(void)
         ESP_LOGW(RULES_TAG, "Failed to take mutex for LEAK_RESET");
         return false;
     }
+    valve_purge_if_owed();   // a swapped-out valve's source counts for nothing below
 
     /* Guard: refuse to clear the interlock while any leak source is still wet.
      * Otherwise a follow-up valve_open would restore water during an active leak
@@ -1455,6 +1464,7 @@ bool rules_engine_cancel_override(void)
         ESP_LOGW(RULES_TAG, "Failed to take mutex for override_cancel");
         return false;
     }
+    valve_purge_if_owed();   // nor closes the new valve for the old one's source
 
     if (g_override_state != OVERRIDE_STATE_ACTIVE) {
         ESP_LOGI(RULES_TAG, "override_cancel: no active override window");
@@ -1602,6 +1612,7 @@ override_enable_result_t rules_engine_enable_override_remote(void)
         ESP_LOGW(RULES_TAG, "override_enable: mutex timeout");
         return OVERRIDE_ENABLE_ERR_INTERNAL;
     }
+    valve_purge_if_owed();   // before the clear owed below, which a later purge would undo
     g_leak_incident_active = false;
     incident_save_to_nvs();
     g_auto_close_triggered = false;
@@ -2203,6 +2214,7 @@ bool rules_engine_reset_all(void)
     bool locked = g_initialized &&
                   xSemaphoreTake(g_mutex, pdMS_TO_TICKS(5000)) == pdTRUE;
     if (locked) {
+        valve_purge_if_owed();   // taken here, so it never runs after this reset
         g_leak_incident_active      = false;
         g_auto_close_triggered      = false;
         g_all_clear_since           = 0;
@@ -2382,18 +2394,19 @@ void rules_engine_on_valve_replaced(void)
 
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         // sync_valve_detectors() commits the new valve anyway, so this purge is not asked for
-        // again: owed instead, and run first in this task's next hold of the lock, before
-        // anything there reads the active-leak set (valve_purge_if_owed(); 2.1.4 WP3, 15o
-        // residual 3). Until then the old valve's flood source could close the new valve at
-        // its first link (E-04).
+        // again: owed instead, and run first in the next hold of the lock, on this task or in a
+        // C2D command's, before anything there reads the active-leak set (valve_purge_if_owed();
+        // 2.1.4 WP3, 15o residual 3, review RTOS-WP3-1). Until then the old valve's flood source
+        // could close the new valve at its first link (E-04).
         // iothub_task polls at 100 ms while it is owed (rules_engine_valve_purge_owed()).
-        g_valve_purge_owed |= PURGE_OWED | (kept_dropped ? PURGE_KEPT_DROPPED : 0);
+        __atomic_fetch_or(&g_valve_purge_owed,
+                          (uint8_t)(PURGE_OWED | (kept_dropped ? PURGE_KEPT_DROPPED : 0)),
+                          __ATOMIC_RELEASE);
         ESP_LOGW(RULES_TAG, "Failed to take mutex (valve replaced)");
         return;
     }
     // A purge still owed from an earlier swap: this one covers it, and says what that one dropped.
-    kept_dropped = kept_dropped || (g_valve_purge_owed & PURGE_KEPT_DROPPED) != 0;
-    g_valve_purge_owed = 0;
-    valve_replaced_locked(kept_dropped);
+    uint8_t owed = __atomic_exchange_n(&g_valve_purge_owed, 0, __ATOMIC_ACQ_REL);
+    valve_replaced_locked(kept_dropped || (owed & PURGE_KEPT_DROPPED) != 0);
     xSemaphoreGive(g_mutex);
 }
