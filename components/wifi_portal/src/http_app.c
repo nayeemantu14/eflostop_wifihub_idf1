@@ -361,25 +361,22 @@ static uint32_t http_app_ipv4_of(const http_app_sockaddr_t *addr){
 }
 
 /**
- * @brief LOCAL PATCH (2.1.4 C3, plan D3): the request came to the SoftAP's own address
+ * @brief LOCAL PATCH (2.1.4 C3, plan D3): the socket fd is connected to the SoftAP's own address
  * (DEFAULT_AP_IP) from a client in the SoftAP's subnet (DEFAULT_AP_NETMASK), both IPv4 or
  * IPv4-mapped; a native IPv6 address on either side fails. *client_ip is the client's IPv4
  * address in network byte order, 0 if unknown (the activity hook's). The local address alone
  * would not do: lwIP takes a packet for any of the hub's addresses on any interface, so a
  * home-LAN host with a route to the SoftAP's subnet through the hub's STA address reaches
- * 10.10.0.1:80 while the SoftAP is up (HANDOFF 15h, WP1 risk 8).
+ * 10.10.0.1:80 while the SoftAP is up (HANDOFF 15h, WP1 risk 8). Used for each new session
+ * (http_app_open_fn()) and again for each request (http_app_on_ap()).
  */
-static bool http_app_on_ap(httpd_req_t *req, uint32_t *client_ip){
+static bool http_app_fd_on_ap(int fd, uint32_t *client_ip){
 
 	http_app_sockaddr_t local, peer;
 	socklen_t len;
 	struct in_addr ap_ip, ap_mask;
 
 	*client_ip = 0;
-	int fd = httpd_req_to_sockfd(req);
-	if(fd < 0){
-		return false;
-	}
 	len = sizeof(peer);
 	if(getpeername(fd, &peer.sa, &len) == 0){
 		*client_ip = http_app_ipv4_of(&peer);
@@ -391,6 +388,13 @@ static bool http_app_on_ap(httpd_req_t *req, uint32_t *client_ip){
 	}
 	return http_app_ipv4_of(&local) == ap_ip.s_addr && *client_ip != 0 &&
 			(*client_ip & ap_mask.s_addr) == (ap_ip.s_addr & ap_mask.s_addr);
+}
+
+/* the request's session is the SoftAP's (http_app_fd_on_ap()) */
+static bool http_app_on_ap(httpd_req_t *req, uint32_t *client_ip){
+	*client_ip = 0;
+	int fd = httpd_req_to_sockfd(req);
+	return fd >= 0 && http_app_fd_on_ap(fd, client_ip);
 }
 
 /**
@@ -849,17 +853,30 @@ static const httpd_uri_t http_server_head_request = {
 
 
 /**
- * @brief LOCAL PATCH (2.1.4 C6): httpd's open_fn, for each new session (httpd task). Below
- * HTTP_APP_SESSION_MIN_FREE of internal DMA-capable heap the session's socket is shut down
- * (shutdown(SHUT_RDWR)): its first read fails, and httpd deletes the session itself on its next
- * pass, before any request is served, so a flood of connections (the E2 laptop) cannot take the
- * heap the Wi-Fi driver needs. ESP_OK either way: httpd closes a session whose open_fn fails twice
- * (httpd_sess_new(), then httpd_accept_conn()), and a socket opened by another task between the
- * two closes would be the second one's. httpd_sess_trigger_close() would not do: httpd skips the
- * close of a session that has served no request yet (lru_counter 0, "race condition").
- * ESP_FAIL only if the shutdown itself fails.
+ * @brief LOCAL PATCH (2.1.4 C6): httpd's open_fn, for each new session (httpd task). A session
+ * that is not the SoftAP's (http_app_fd_on_ap(): a home-LAN host on the STA's address, say) is
+ * shut down (shutdown(SHUT_RDWR)) before any of its request is read: such a host could otherwise
+ * trickle its headers or a long body, and hold the one httpd task, and with it the wifi_manager
+ * task in STOP_AP's httpd_stop(), for as long as it liked (each handler's 403 came only after the
+ * whole request was read). Logged at DEBUG only, as that 403, so a LAN scan cannot fill the log.
+ * Below HTTP_APP_SESSION_MIN_FREE of internal DMA-capable heap a SoftAP session is shut down the
+ * same way, so a flood of connections (the E2 laptop) cannot take the heap the Wi-Fi driver
+ * needs. A shut-down socket fails its first read, and httpd deletes the session itself on its
+ * next pass, before any request is served. Always ESP_OK, whatever shutdown() returns (it fails
+ * for a peer that has reset already, whose first read then fails all the same): httpd closes a
+ * session whose open_fn fails twice (httpd_sess_new(), then httpd_accept_conn()), and a socket
+ * another task opened between the two closes would be the second one's.
+ * httpd_sess_trigger_close() would not do: httpd skips the close of a session that has served no
+ * request yet (lru_counter 0, "race condition").
  */
 static esp_err_t http_app_open_fn(httpd_handle_t hd, int sockfd){
+
+	uint32_t client_ip;
+	if(!http_app_fd_on_ap(sockfd, &client_ip)){
+		ESP_LOGD(TAG, "session closed at once: not to the SoftAP from its subnet");
+		shutdown(sockfd, SHUT_RDWR);
+		return ESP_OK;
+	}
 
 	size_t free_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
 	if(free_dma >= HTTP_APP_SESSION_MIN_FREE){
@@ -873,7 +890,8 @@ static esp_err_t http_app_open_fn(httpd_handle_t hd, int sockfd){
 		ESP_LOGW(TAG, "session closed: internal DMA free %u B (needs %u) - %lu since the server start",
 				(unsigned)free_dma, (unsigned)HTTP_APP_SESSION_MIN_FREE, (unsigned long)http_app_refused);
 	}
-	return (shutdown(sockfd, SHUT_RDWR) == 0) ? ESP_OK : ESP_FAIL;
+	shutdown(sockfd, SHUT_RDWR);
+	return ESP_OK;
 }
 
 
