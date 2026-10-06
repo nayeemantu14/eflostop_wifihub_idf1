@@ -110,7 +110,10 @@ static TaskHandle_t ble_leak_task_handle = NULL;
 // The executor's cross-task flags (the rest of its state lives on its own stack, exec_t).
 static volatile bool s_nimble_ready = false;   // app_ble_leak_signal_start() ran
 static volatile bool s_scan_ended = false;     // DISC_COMPLETE: the GAP handler stores it...
-static volatile int s_scan_end_reason = 0;     // ... with its reason; the executor takes both
+static volatile int s_scan_end_reason = 0;     // ... with its reason,
+static volatile uint8_t s_scan_end_gen = 0;    // ... the generation of the scan it ends (its
+                                               //     callback argument),
+static volatile TickType_t s_scan_end_tick = 0;    // ... and when; the executor takes them all
 
 // Cached whitelist from provisioning manager
 static uint8_t s_whitelist[MAX_TRACKED_SENSORS][6];
@@ -818,7 +821,7 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  *   PAUSED     the portal priority window or a Wi-Fi radio hold has the radio: no scan, exactly
  *              as before WP5 ...
  *   HOLD_HUNT  ... unless a leak response is pended: then the valve hunt's scan runs, as before
- *              (it covers the sensors too), and a claim is granted at once.
+ *              (it covers the sensors too), and a claim is granted at a hunt scan's end.
  *   RECOVERY   1.2 s of Coded after a claim pulse (I2), before the profile resumes.
  *   NORMAL_LR  a leak response is pending and the valve is not linked, at most 10 min per
  *              incident (the valve module's overlay): [1M 1.0 s][Coded 0.6 s] in turn.
@@ -833,6 +836,20 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * Every scan is timed, the hold's hunt too: a cancel that meets a scan's own timeout can leave
  * NimBLE's state idle while the controller still scans, and every start then fails until that
  * scan ends by itself, which a scan with no duration never would.
+ *
+ * A scan's own end races a cancel: the controller's LE Scan Timeout can already be queued for the
+ * host task when ble_gap_disc_cancel() returns, and ble_gap_disc_complete() then resets whatever
+ * GAP procedure NimBLE runs when it is processed. A connect issued in the pass that cancelled
+ * would be lost with no CONNECT event (and the valve with it); a scan started then would be reset
+ * while the controller scans on, with NimBLE dropping its adverts. So:
+ *   - a claim is granted only at a scan's own end (its DISC_COMPLETE, after which no end of that
+ *     scan can come), in a hold's hunt as in NORMAL; never right after a cancel;
+ *   - nothing starts in the pass that cancels: the next start is SCAN_SETTLE_MS later, so a
+ *     queued end is delivered first, while no scan runs, and dropped (each scan's callback
+ *     argument is its generation, and an end is taken only for the running scan's);
+ *   - an end that still comes after the next scan started carries that scan's generation (NimBLE
+ *     keeps one callback argument), but comes well before its duration: the executor then takes
+ *     it as reset, waits out that scan's time, and grants no claim on it.
  *
  * The GAP handler only stores and notifies (DISC_COMPLETE). The task is woken by it, by the valve
  * module (app_ble_leak_kick()) and at least every EXEC_POLL_MS. A start that fails is retried
@@ -870,6 +887,8 @@ _Static_assert(MIX_SLOT_MS >= W_MIN_MS && MIX_SLOT_MS + 2 * JITTER_MS <= GAP_MAX
 _Static_assert(LR_CODED_MS >= W_MIN_MS && LR_1M_MS + 2 * JITTER_MS <= GAP_MAX_MS, "I1: NORMAL_LR's Coded");
 
 #define SCAN_GONE_MS        1000    // a scan NimBLE dropped with no DISC_COMPLETE is restarted after this
+#define SCAN_SETTLE_MS      50      // nothing starts this soon after a cancel (a queued end is delivered first)
+#define SCAN_EARLY_MS       100     // an end this much before a scan's duration is a stopped scan's late end
 #define CHORES_LATE_MS      5000    // the executor's slow chores run at least this often
 #define SUMMARY_MS          60000   // the summary line's period
 #define DUTY_WARN_PCT       80      // the duty watchdog: BLE scanning below this share of the
@@ -961,9 +980,12 @@ typedef struct {
     uint8_t slot;               // ... and its place in that profile
     uint8_t announced;          // the scanning mode last announced (MODE_COUNT: none)
     uint8_t low_duty;           // summaries in a row below DUTY_WARN_PCT
+    uint8_t gen;                // the running (or last) scan's generation: its callback argument
+    uint8_t gen_next;           // ... the last one handed out (every start attempt takes one)
     uint16_t start_fails;       // scan starts failed in a row
     uint16_t claims;            // claim pulses since the last summary
     TickType_t retry_at;        // no scan start before this tick
+    TickType_t started_at;      // when the running (or last) scan started
     TickType_t coded_end_at;    // when the last scan that covered Coded ended
     TickType_t gone_at;         // our scan was first seen gone without its DISC_COMPLETE (0: no)
     TickType_t paused_since;    // when the pause began, for the heartbeat line
@@ -981,7 +1003,6 @@ typedef struct {
  * --------------------------------------------------------- */
 static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
 {
-    (void)arg;
     switch (event->type) {
 
     case BLE_GAP_EVENT_DISC:
@@ -1008,7 +1029,9 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
 
     case BLE_GAP_EVENT_DISC_COMPLETE: {
         s_scan_end_reason = event->disc_complete.reason;
-        s_scan_ended = true;
+        s_scan_end_gen = (uint8_t)(uintptr_t)arg;
+        s_scan_end_tick = xTaskGetTickCount();
+        s_scan_ended = true;   // last: the executor reads the others after it
         TaskHandle_t t = ble_leak_task_handle;
         if (t != NULL) {
             xTaskNotifyGive(t);
@@ -1024,7 +1047,8 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
 }
 
 /* ---------------------------------------------------------
- * Start a scan of geometry `geo` (executor task only): 0, or the NimBLE error.
+ * Start a scan of geometry `geo` (executor task only): 0, or the NimBLE error. `gen` is the
+ * scan's generation, its GAP callback argument (see the executor's notes).
  *
  * filter_duplicates is DISABLED, and that is a safety fix, not a latency one. The controller's
  * duplicate cache keys on ADDRESS ONLY and never refreshes (CONFIG_BT_CTRL_SCAN_DUPL_TYPE=0,
@@ -1034,7 +1058,7 @@ static int ble_leak_gap_event(struct ble_gap_event *event, void *arg)
  * it hunted a dead valve. The cost of turning it off: duplicate valve reports, which the valve
  * module's claim guard absorbs (ble_valve_note_adv()).
  * --------------------------------------------------------- */
-static int scan_start(uint8_t geo)
+static int scan_start(uint8_t geo, uint8_t gen)
 {
     const scan_geo_t *g = &k_scan_geo[geo];
 #if MYNEWT_VAL(BLE_EXT_ADV)
@@ -1056,7 +1080,7 @@ static int scan_start(uint8_t geo)
         g->win_1m ? &p1m : NULL,        // 1M PHY scan params
         g->win_c ? &pcoded : NULL,      // Coded PHY scan params
         ble_leak_gap_event,
-        NULL
+        (void *)(uintptr_t)gen
     );
 #else
     // Fallback: legacy scanning (1M PHY only)
@@ -1066,13 +1090,14 @@ static int scan_start(uint8_t geo)
     disc_params.itvl = g->itvl_1m ? g->itvl_1m : g->itvl_c;
     disc_params.window = g->win_1m ? g->win_1m : g->win_c;
     return ble_gap_disc(BLE_OWN_ADDR_PUBLIC, g->dur ? (int32_t)g->dur * 10 : BLE_HS_FOREVER,
-                        &disc_params, ble_leak_gap_event, NULL);
+                        &disc_params, ble_leak_gap_event, (void *)(uintptr_t)gen);
 #endif
 }
 
-// Stops our scan before its end (executor task only): the profile then restarts with Coded. A
-// cancel the controller refuses leaves it marked running, and the next pass tries again.
-static void scan_stop(exec_t *x)
+// Stops our scan before its end (executor task only): the profile then restarts with Coded, and
+// nothing starts before SCAN_SETTLE_MS (its own end may already be queued, see the executor's
+// notes). A cancel the controller refuses leaves it marked running, and the next pass tries again.
+static void scan_stop(exec_t *x, TickType_t now)
 {
     if (!x->scan_on) {
         return;
@@ -1086,16 +1111,24 @@ static void scan_stop(exec_t *x)
     x->slot_ended = false;
     x->coded_last = false;
     x->slot_mode = MODE_COUNT;
+    x->retry_at = now + pdMS_TO_TICKS(SCAN_SETTLE_MS);
 }
 
-// Our scan ended (executor task only): its DISC_COMPLETE, or (lost) NimBLE dropped it with none.
-// A timed scan's end makes the profile's next one due after the dither; a continuous one (none in
-// WP6's geometries) is not expected to end, and starts again SCAN_RESTART_DELAY_MS later.
-static void scan_ended(exec_t *x, TickType_t now, bool lost)
+// Our scan ended (executor task only): its DISC_COMPLETE, delivered at `at` (the GAP handler's
+// stamp), or (lost) NimBLE dropped it with none. A timed scan's own end makes the profile's next
+// one due after the dither from that end, and lets a claim be granted (executor_pass()). A
+// continuous one (none in WP6's geometries) is not expected to end, and starts again
+// SCAN_RESTART_DELAY_MS later.
+// Three ends are no scan's own: a lost one, one with a reason (a host reset), and one that comes
+// well before the scan's duration, which is a stopped scan's late end that reset this one (see
+// the executor's notes). They grant no claim and restart the profile with its Coded scan, as after
+// a stop; after the third the controller scans on to this scan's end, so nothing starts before.
+static void scan_ended(exec_t *x, TickType_t now, TickType_t at, bool lost)
 {
     x->scan_on = false;
     x->gone_at = 0;
-    if (k_scan_geo[x->geo].dur == 0) {
+    uint32_t dur_ms = (uint32_t)k_scan_geo[x->geo].dur * 10u;
+    if (dur_ms == 0) {
         if (!lost) {
             ESP_LOGW(BLE_LEAK_TAG, "Scan complete (reason=%d) — will restart", s_scan_end_reason);
         }
@@ -1103,15 +1136,30 @@ static void scan_ended(exec_t *x, TickType_t now, bool lost)
         x->coded_last = false;
         return;
     }
+    TickType_t ran = at - x->started_at;
+    bool early = !lost && s_scan_end_reason == 0 &&
+                 ran + pdMS_TO_TICKS(SCAN_EARLY_MS) < pdMS_TO_TICKS(dur_ms);
+    if (lost || early || s_scan_end_reason != 0) {
+        x->slot_ended = false;
+        x->coded_last = false;
+        x->slot_mode = MODE_COUNT;
+        x->retry_at = now + pdMS_TO_TICKS(SCAN_SETTLE_MS);
+        if (early) {
+            ESP_LOGW(BLE_LEAK_TAG, "Scan ended after %lu of its %lu ms: a stopped scan's late end - the next starts after this one's time",
+                     (unsigned long)(ran * portTICK_PERIOD_MS), (unsigned long)dur_ms);
+            x->retry_at = x->started_at + pdMS_TO_TICKS(dur_ms + SCAN_SETTLE_MS);
+        }
+        return;
+    }
     x->slot_ended = true;
     x->coded_last = geo_has_coded(x->geo);
     if (x->coded_last) {
-        x->coded_end_at = now;
+        x->coded_end_at = at;
     }
     if (x->geo == GEO_RECOVERY) {
         x->recovery = false;
     }
-    x->retry_at = now + pdMS_TO_TICKS(esp_random() % (JITTER_MS + 1));
+    x->retry_at = at + pdMS_TO_TICKS(esp_random() % (JITTER_MS + 1));
 }
 
 // The lines for a scanning mode, when its first scan starts. The leak scan's start line is the one
@@ -1169,8 +1217,12 @@ static TickType_t executor_pass(exec_t *x)
 
     if (s_scan_ended) {
         s_scan_ended = false;
-        if (x->scan_on) {
-            scan_ended(x, now, false);
+        // Only the running scan's end: a late end of a scan already stopped carries that scan's
+        // generation and is dropped.
+        uint8_t gen = s_scan_end_gen;
+        TickType_t at = s_scan_end_tick;
+        if (x->scan_on && gen == x->gen) {
+            scan_ended(x, now, at, false);
         }
     }
     // Self-healing: our scan is gone with no DISC_COMPLETE. NimBLE delivers one for every end
@@ -1181,7 +1233,7 @@ static TickType_t executor_pass(exec_t *x)
             x->gone_at = now ? now : 1;
         } else if ((now - x->gone_at) >= pdMS_TO_TICKS(SCAN_GONE_MS)) {
             ESP_LOGW(BLE_LEAK_TAG, "Scan not active (external cancel?), restarting");
-            scan_ended(x, now, true);
+            scan_ended(x, now, now, true);
         }
     } else {
         x->gone_at = 0;
@@ -1237,40 +1289,38 @@ static TickType_t executor_pass(exec_t *x)
         mode = MODE_N_CODED;
     }
 
-    // The valve module's claim. In a hold's hunt (both PHYs): at once, as before. Otherwise in
-    // the dither right after a scan that covered Coded ended, so the pulse is the only Coded gap
-    // (I2): not after a pause, whose last scan ended long before (the profile scans first).
+    // The valve module's claim: in the dither right after a scan that covered Coded ended by
+    // itself, so the pulse is the only Coded gap (I2), in NORMAL and in a hold's hunt alike. Never
+    // right after a cancel (see the executor's notes). Not after a pause, whose last scan ended
+    // long before (the profile scans first).
     if (ble_valve_claim_wanted()) {
-        bool fresh = x->slot_ended && x->coded_last &&
+        bool fresh = !x->scan_on && x->slot_ended && x->coded_last &&
                      (now - x->coded_end_at) <= pdMS_TO_TICKS(JITTER_MS) + 1;
-        bool grant = (mode == MODE_HOLD_HUNT) || (mode_is_normal(mode) && !x->scan_on && fresh);
-        if (grant) {
-            scan_stop(x);
-            if (!x->scan_on) {
-                ble_valve_claim_start();
-                if (ble_gap_conn_active()) {
-                    x->claim_inflight = true;
-                    x->slot_ended = false;
-                    x->coded_last = false;
-                    x->slot_mode = MODE_COUNT;
-                    if (x->claims < UINT16_MAX) {
-                        x->claims++;
-                    }
-                    mode = MODE_CLAIM;
+        if (fresh && (mode == MODE_HOLD_HUNT || mode_is_normal(mode))) {
+            ble_valve_claim_start();
+            if (ble_gap_conn_active()) {
+                x->claim_inflight = true;
+                x->slot_ended = false;
+                x->coded_last = false;
+                x->slot_mode = MODE_COUNT;
+                if (x->claims < UINT16_MAX) {
+                    x->claims++;
                 }
+                mode = MODE_CLAIM;
             }
         }
     }
 
     if (mode != x->mode) {
-        // NORMAL's modes switch at a scan's end; a hold, a hold's hunt and a claim at once.
-        if (x->scan_on && !(mode_is_normal(mode) && mode_is_normal(x->slot_mode))) {
-            scan_stop(x);
-        }
         if (mode == MODE_PAUSED) {
             x->announced = MODE_PAUSED;
         }
         x->mode = mode;
+    }
+    // A scan the mode has no part in stops now: in a hold, its hunt, or a claim. NORMAL's modes
+    // switch at a scan's end. On every pass, so a cancel the controller refused is tried again.
+    if (x->scan_on && x->slot_mode != mode && !(mode_is_normal(mode) && mode_is_normal(x->slot_mode))) {
+        scan_stop(x, now);
     }
 
     const scan_prof_t *p = &k_prof[mode];
@@ -1285,10 +1335,13 @@ static TickType_t executor_pass(exec_t *x)
             }
         }
         uint8_t geo = p->geo[slot];
-        int rc = scan_start(geo);
+        uint8_t gen = ++x->gen_next;
+        int rc = scan_start(geo, gen);
         if (rc == 0) {
             x->scan_on = true;
             x->geo = geo;
+            x->gen = gen;
+            x->started_at = now;
             x->slot = slot;
             x->slot_mode = mode;
             x->slot_ended = false;
