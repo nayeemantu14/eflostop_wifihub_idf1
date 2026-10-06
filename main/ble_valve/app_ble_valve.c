@@ -2,7 +2,7 @@
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "health_engine/health_engine.h"
 #include "app_wifi/portal_priority.h"
-
+#include "rules_engine/rules_engine.h"
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
@@ -134,6 +134,41 @@ static uint16_t valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static volatile bool s_hunt_announced = false;
 // The valve was heard while the hunt wants it: a claim is due (host task sets, executor clears).
 static volatile bool s_claim_req = false;
+
+// ---- The valve claim policy (2.1.4 WP6; plan §4.4 CONNECT, decision D5) -----------------------
+// Every claim is a CONNECT pulse: no BLE scan runs from its grant until its CONNECT event, at most
+// BLE_VALVE_CLAIM_MS (BLE_VALVE_CLAIM_LR_MS while a leak response is pending), and the executor
+// follows it with a Coded recovery window (I2). A claim fails when it gives no link held for
+// CLAIM_HELD_MS: no link within its pulse, a refused connect, or a link lost sooner. Failures in a
+// row back the next claim off by k_claim_backoff_s[]; a link held CLAIM_HELD_MS resets the count.
+// While a leak response is pending (s_lr_trigger) no back-off applies: claims are spaced by the
+// executor's recovery window only, so a pended RMLEAK / CLOSE reaches a valve as soon as it is
+// heard (D5: shutoff delayed, never dropped). A claim cancelled by this module (a hold, a
+// DISCONNECT command, a target change) and a link it drops itself are no failure.
+// Under s_mac_lock: written on the executor's task (grant), the host task (CONNECT, link loss)
+// and the command task (link held).
+#define CLAIM_HELD_MS  60000
+static const uint16_t k_claim_backoff_s[] = { 10, 30, 60, 300 };   // after 1, 2, 3, 4+ failures
+#define CLAIM_FAILS_MAX  ((uint8_t)(sizeof(k_claim_backoff_s) / sizeof(k_claim_backoff_s[0])))
+static uint8_t s_claim_fails = 0;           // failed claims in a row (0 .. CLAIM_FAILS_MAX)
+static TickType_t s_claim_not_before = 0;   // the back-off: no claim before this tick
+static bool s_claim_open = false;           // a claim was granted and has no link held yet
+static TickType_t s_link_up_at = 0;         // the current link's CONNECT (s_claim_open only)
+
+// ---- The leak-response trigger and its scanning overlay (2.1.4 WP6; plan §4.1, D5) -----------
+// s_lr_trigger: a leak response is pending (ble_valve_lr_pending()). s_lr_on: the executor runs
+// NORMAL_LR, at most LR_OVERLAY_CAP_MS from the episode's start (s_lr_start, 0 = none): the
+// incident latch stays set until LEAK_RESET, so without the cap a dead valve would keep the hub on
+// the 1M-weighted profile, with its weaker sensor coverage, for good. An episode ends when no
+// RMLEAK / CLOSE is pended and no incident is latched. Command task (lr_poll()) writes them.
+#define LR_OVERLAY_CAP_MS  (10u * 60u * 1000u)
+#define LR_POLL_MS         1000
+static volatile bool s_lr_trigger = false;
+static volatile bool s_lr_on = false;
+static TickType_t s_lr_start = 0;
+static TickType_t s_lr_polled = 0;          // lr_poll()'s last read of the incident latch
+static bool s_incident = false;             // ... and what it read
+static bool s_interlock_ok = false;         // the valve confirmed RMLEAK=1 + CLOSED in this incident
 
 // True between issuing ble_gap_connect() and the BLE_GAP_EVENT_CONNECT that
 // resolves it. Guards the claim (ble_valve_note_adv(), ble_valve_claim_start()) against
@@ -466,6 +501,7 @@ static void post_connect_timer_cb(TimerHandle_t xTimer);
 static void security_retry_timer_cb(TimerHandle_t xTimer);
 static void initiate_security(void);
 static bool link_stale_check(void);
+static void claim_end(bool failed, const char *why);
 
 // -----------------------------------------------------------------------------
 // DEBUG HELPER
@@ -1729,6 +1765,7 @@ static void reset_link_cache(void)
 // it came, with nothing to the hub or the health engine. Rescans when a link is wanted.
 static void link_closed(void)
 {
+    bool dropped_here = s_link_dropping;   // a link this module dropped is no claim failure
     s_link_dropping = false;   // the dropped link is gone (drop_link_after_failed_write())
     s_term_failed = false;
 
@@ -1737,6 +1774,7 @@ static void link_closed(void)
         // The link GAP CONNECT rejected. It never reached the hub or the health
         // engine, so it leaves the same way: no notify, no health post.
         s_rejecting_conn = false;
+        claim_end(false, NULL);
         valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
         reset_link_cache();
         clear_all_state_bits();
@@ -1797,8 +1835,49 @@ static void link_closed(void)
     if (discovery_timeout_timer) xTimerStop(discovery_timeout_timer, 0);
     if (security_retry_timer) xTimerStop(security_retry_timer, 0);
 
+    // The claim (WP6): a link lost before it was held CLAIM_HELD_MS is a failed claim, unless
+    // this module dropped it (failed writes, BLE_CMD_DISCONNECT, a target change). Nothing once
+    // the link was held (claim_held_poll() closed the claim).
+    claim_end(g_connect_requested && !dropped_here, "link lost before it was held 60 s");
+
     if (g_connect_requested)
         request_hunt();
+}
+
+// ---- The claim policy's bookkeeping (WP6, see s_claim_open) ------------------------------------
+// A granted claim ended without a link held CLAIM_HELD_MS: `failed` counts it as one more failure
+// in a row and backs the next claim off; otherwise (cancelled by this module, a link it dropped)
+// it ends with no count. Nothing when no claim is open. Any task.
+static void claim_end(bool failed, const char *why)
+{
+    TickType_t now = xTaskGetTickCount();
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool counted = s_claim_open && failed;
+    s_claim_open = false;
+    uint8_t n = s_claim_fails;
+    if (counted)
+    {
+        if (n < CLAIM_FAILS_MAX)
+            n++;
+        s_claim_fails = n;
+        s_claim_not_before = now + pdMS_TO_TICKS((uint32_t)k_claim_backoff_s[n - 1] * 1000u);
+    }
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (counted)
+        ESP_LOGW(BLE_TAG, "[CLAIM] Valve claim failed (%s), %u in a row - next claim in %u s (at once while a leak response is pending)",
+                 why, (unsigned)n, (unsigned)k_claim_backoff_s[n - 1]);
+}
+
+// No claim before the back-off has run out, unless a leak response is pending. Any task.
+static bool claim_backoff_over(void)
+{
+    if (s_lr_trigger)
+        return true;
+    TickType_t now = xTaskGetTickCount();
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool over = (s_claim_fails == 0) || (int32_t)(now - s_claim_not_before) >= 0;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    return over;
 }
 
 // ---- The valve hunt, as the BLE scan executor sees it (WP5) -----------------------------------
@@ -1855,6 +1934,11 @@ void ble_valve_note_adv(const void *adv_addr)
     if (portal_holds_valve())
         return;
 
+    // The claim back-off (WP6): the valve keeps advertising, and its first report after the
+    // back-off asks for the claim. Not while a leak response is pending.
+    if (!claim_backoff_over())
+        return;
+
     ESP_LOGI(BLE_TAG, "[SCAN] Target MAC matched - connecting to provisioned valve: %s",
              discovered_mac);
 
@@ -1881,7 +1965,9 @@ bool ble_valve_claim_wanted(void)
 
 // The executor's grant (its task, its scan stopped): connect to the valve heard. g_connecting is
 // set BEFORE the connect is issued (link_poll() reads it against ble_gap_conn_active()). The
-// connect's own initiator runs until its CONNECT event; the executor starts no scan meanwhile.
+// connect is the claim's CONNECT pulse (WP6): it ends at its CONNECT event or after
+// BLE_VALVE_CLAIM_MS (BLE_VALVE_CLAIM_LR_MS while a leak response is pending, s_lr_trigger); the
+// executor starts no scan meanwhile.
 void ble_valve_claim_start(void)
 {
     s_claim_req = false;
@@ -1891,15 +1977,21 @@ void ble_valve_claim_start(void)
     ble_addr_t peer;
     taskENTER_CRITICAL(&s_mac_lock);
     memcpy(&peer, &g_peer_addr, sizeof(peer));
+    s_claim_open = true;
     taskEXIT_CRITICAL(&s_mac_lock);
 
+    bool lr = s_lr_trigger;
+    uint32_t pulse_ms = lr ? BLE_VALVE_CLAIM_LR_MS : BLE_VALVE_CLAIM_MS;
+    ESP_LOGI(BLE_TAG, "[CLAIM] Connecting to the valve: pulse up to %lu ms%s", (unsigned long)pulse_ms,
+             lr ? " (leak response pending)" : "");
     s_hunt_announced = false;   // the hunt ends with its claim
     g_connecting = true;
-    int rc = ble_gap_connect(g_own_addr_type, &peer, 30000, NULL, ble_gap_event, NULL);
+    int rc = ble_gap_connect(g_own_addr_type, &peer, (int32_t)pulse_ms, NULL, ble_gap_event, NULL);
     if (rc != 0)
     {
         ESP_LOGE(BLE_TAG, "[SCAN] ble_gap_connect rc=%d", rc);
         g_connecting = false;
+        claim_end(true, "connect not started");
         request_hunt();
     }
     else if (portal_holds_valve())
@@ -1945,6 +2037,9 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             valve_conn_handle = event->connect.conn_handle;
             s_hunt_announced = false;
             s_rejecting_conn = false;
+            taskENTER_CRITICAL(&s_mac_lock);
+            s_link_up_at = xTaskGetTickCount();   // the claim's link: held from now (claim_held_poll())
+            taskEXIT_CRITICAL(&s_mac_lock);
 
             clear_all_state_bits();
             reset_link_cache();
@@ -2008,6 +2103,11 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             ESP_LOGW(BLE_TAG, "[CONNECT] Failed status=%d", event->connect.status);
             valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
             clear_all_state_bits();
+            // BLE_HS_EAPP: this module cancelled it (a hold, BLE_CMD_DISCONNECT, a connect it did
+            // not start): no failure. BLE_HS_ETIMEOUT: the valve was not reached within the pulse.
+            claim_end(event->connect.status != BLE_HS_EAPP,
+                      event->connect.status == BLE_HS_ETIMEOUT ? "no link within the claim's pulse"
+                                                               : "connect failed");
             // Not after BLE_CMD_DISCONNECT cancelled this connect (status BLE_HS_EAPP):
             // rescanning would undo the disconnect (N8).
             if (g_connect_requested)
@@ -3000,6 +3100,93 @@ static void link_poll(void)
     }
 }
 
+// The claim policy (WP6, see s_claim_open), every pass: a set-up link held CLAIM_HELD_MS closes its
+// claim and resets the back-off.
+static void claim_held_poll(void)
+{
+    if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE || !is_ready_for_gatt())
+        return;
+    TickType_t now = xTaskGetTickCount();
+    uint8_t had = 0;
+    bool held = false;
+    taskENTER_CRITICAL(&s_mac_lock);
+    if (s_claim_open && (now - s_link_up_at) >= pdMS_TO_TICKS(CLAIM_HELD_MS))
+    {
+        s_claim_open = false;
+        had = s_claim_fails;
+        s_claim_fails = 0;
+        held = true;
+    }
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (held && had > 0)
+        ESP_LOGI(BLE_TAG, "[CLAIM] Valve link held %d s - claim back-off reset (%u failures in a row before)",
+                 CLAIM_HELD_MS / 1000, (unsigned)had);
+}
+
+// The leak-response trigger and its overlay (WP6; plan §4.1, D5), every pass (the incident latch
+// is read at most every LR_POLL_MS, the pended commands every pass):
+//   trigger = valve provisioned AND not linked AND (an RMLEAK / CLOSE pended, OR a leak incident
+//             latched AND the valve has not confirmed the interlock in it);
+//   overlay = trigger AND less than LR_OVERLAY_CAP_MS since the episode began.
+// The incident latch is the rules engine's (its mutex, up to 1 s: a read that times out reads
+// "no incident", which can only end an episode early and start a new one, with a new cap). The
+// interlock is confirmed, for the rest of the incident, when the provisioned valve's own reports
+// on a set-up link read RMLEAK=1 and CLOSED. The episode ends when nothing is pended and no
+// incident is latched. Pended commands stay pended after the cap: the next claim writes them.
+static void lr_poll(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    bool provisioned = ble_valve_has_target_mac();
+    if (s_lr_polled == 0 || (now - s_lr_polled) >= pdMS_TO_TICKS(LR_POLL_MS))
+    {
+        s_lr_polled = now ? now : 1;
+        s_incident = provisioned && rules_engine_is_leak_incident_active();
+    }
+    bool incident = provisioned && s_incident;
+    bool pended = leak_response_pending();
+    bool linked = (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE);
+
+    if (!incident)
+    {
+        s_interlock_ok = false;
+    }
+    else if (!s_interlock_ok && ble_valve_is_ready() && g_val_rmleak && g_val_state == 0)
+    {
+        s_interlock_ok = true;
+        ESP_LOGI(BLE_TAG, "[LR] The valve confirms the interlock for this incident (RMLEAK=1, CLOSED)");
+    }
+
+    bool trigger = provisioned && !linked && (pended || (incident && !s_interlock_ok));
+    s_lr_trigger = trigger;
+    bool first = false;
+    if (trigger && s_lr_start == 0)
+    {
+        s_lr_start = now ? now : 1;
+        first = true;
+    }
+    uint32_t ran_s = s_lr_start ? (uint32_t)((now - s_lr_start) / configTICK_RATE_HZ) : 0;
+    bool overlay = trigger && (now - s_lr_start) < pdMS_TO_TICKS(LR_OVERLAY_CAP_MS);
+    if (overlay != s_lr_on)
+    {
+        s_lr_on = overlay;
+        if (overlay && first)
+            ESP_LOGW(BLE_TAG, "[LR] Leak response pending, valve not linked (%s) - leak-response scanning, at most %u s for this incident",
+                     pended ? "RMLEAK/CLOSE pended" : "incident latched, interlock not confirmed",
+                     (unsigned)(LR_OVERLAY_CAP_MS / 1000));
+        else if (overlay)
+            ESP_LOGW(BLE_TAG, "[LR] Leak-response scanning resumed (valve not linked), %lu s into this incident's %u s",
+                     (unsigned long)ran_s, (unsigned)(LR_OVERLAY_CAP_MS / 1000));
+        else
+            ESP_LOGW(BLE_TAG, "[LR] Leak-response scanning ended after %lu s (%s)", (unsigned long)ran_s,
+                     linked ? "valve linked"
+                            : (trigger ? "the cap per incident - normal scanning, claims go on"
+                                       : "leak response written or withdrawn"));
+        app_ble_leak_kick();
+    }
+    if (!pended && !incident)
+        s_lr_start = 0;   // the episode is over
+}
+
 // -----------------------------------------------------------------------------
 // BLE COMMAND TASK
 // -----------------------------------------------------------------------------
@@ -3013,6 +3200,8 @@ static void ble_valve_task(void *pvParameters)
     while (1)
     {
         link_poll();
+        claim_held_poll();
+        lr_poll();
         portal_priority_poll();
         if (xQueueReceive(ble_cmd_queue, &item, pdMS_TO_TICKS(PORTAL_POLL_MS)) != pdTRUE)
             continue;
@@ -3452,8 +3641,12 @@ void ble_valve_set_target_mac(const char *mac_str)
         return;
 
     // A claim requested for the previous valve's advert is not granted: the executor would
-    // connect to that valve's address (WP5).
+    // connect to that valve's address (WP5). The new valve starts with no claim back-off (WP6).
     s_claim_req = false;
+    taskENTER_CRITICAL(&s_mac_lock);
+    s_claim_fails = 0;
+    s_claim_open = false;
+    taskEXIT_CRITICAL(&s_mac_lock);
     app_ble_leak_kick();
 
     report_valve_cmd_flush(!mac_str ? "valve decommissioned"
@@ -3515,6 +3708,16 @@ bool ble_valve_get_rmleak_state(void)
 bool ble_valve_is_connected(void)
 {
     return valve_conn_handle != BLE_HS_CONN_HANDLE_NONE;
+}
+
+bool ble_valve_lr_active(void)
+{
+    return s_lr_on;
+}
+
+bool ble_valve_lr_pending(void)
+{
+    return s_lr_trigger;
 }
 
 void ble_valve_cancel_pending_close(void)

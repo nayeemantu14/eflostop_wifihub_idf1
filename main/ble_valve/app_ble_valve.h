@@ -154,6 +154,26 @@ extern "C"
     // BLE scan executor interface (2.1.4 WP5). For the ble_leak_scan task (app_ble_leak.c),
     // the only code that starts or stops a BLE scan; nothing else calls these.
     // -------------------------------------------------------------------------
+
+    // A claim's connect (the CONNECT pulse, plan §4.4) ends at its CONNECT event or after this
+    // long, the second while a leak response is pending (ble_valve_lr_pending()). The executor
+    // starts no scan meanwhile and checks the second against its blind budget (I2).
+    #define BLE_VALVE_CLAIM_MS     1500
+    #define BLE_VALVE_CLAIM_LR_MS  2500
+
+    /**
+     * @brief The leak-response scanning overlay (NORMAL_LR, plan §4.1, D5) should run: a leak
+     * response is pending (ble_valve_lr_pending()) and its episode began less than 10 min ago.
+     */
+    bool ble_valve_lr_active(void);
+
+    /**
+     * @brief A leak response is pending (WP6's widened trigger): the valve is provisioned and
+     * not linked, and an RMLEAK or CLOSE is pended for it, or a leak incident is latched and
+     * the valve has not confirmed the interlock (RMLEAK=1 and CLOSED) in it. Claims then skip
+     * the back-off and run for BLE_VALVE_CLAIM_LR_MS. Re-evaluated by the valve task each second.
+     */
+    bool ble_valve_lr_pending(void);
     /**
      * @brief The valve module wants its valve found: the provisioned valve is wanted
      * (connect requested), not linked and no connect is in flight, NimBLE is synced, and
@@ -163,9 +183,10 @@ extern "C"
     bool ble_valve_hunt_wanted(void);
 
     /**
-     * @brief The provisioned valve was heard while the hunt is wanted: a claim (connect) is
-     * due. The executor stops its scan and calls ble_valve_claim_start(). Clears a claim
-     * request the hunt no longer wants.
+     * @brief The provisioned valve was heard while the hunt is wanted, and the claim back-off
+     * allows a claim: a claim (connect) is due. The executor grants it at the end of a scan
+     * window that covered Coded (or at once in a hold's hunt): it stops its scan and calls
+     * ble_valve_claim_start(). Clears a claim request the hunt no longer wants.
      */
     bool ble_valve_claim_wanted(void);
 
