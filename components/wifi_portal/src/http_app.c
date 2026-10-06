@@ -257,10 +257,16 @@ static bool http_app_query_has(const char *uri, const char *param){
 }
 
 /**
- * @brief LOCAL PATCH (2.1.4 C7, plan 6.3): the client takes a gzipped answer: its Accept-Encoding
- * header is absent (RFC 9110: then any coding is acceptable), or it lists gzip, x-gzip or "*"
- * with a q-value other than 0. False only for an explicit refusal, an identity-only or empty
- * list, which gets 406. Codings are compared case-insensitively.
+ * @brief LOCAL PATCH (2.1.4 C7, plan 6.3): the client takes a gzipped answer. The plan's rule:
+ * gzip when Accept-Encoding is absent (RFC 9110: then any coding is acceptable) or lists gzip,
+ * 406 only for an explicit identity-only request; there is no identity copy to send instead.
+ * Each coding is read with its q-value (q=0 refuses it), case-insensitively, and then:
+ *  - gzip or x-gzip refused: 406, whatever else is listed (an explicit refusal wins over "*");
+ *  - gzip or x-gzip listed: gzip;
+ *  - otherwise "*": gzip, or 406 for "*;q=0";
+ *  - otherwise another coding (br, deflate): gzip, the only copy there is (the request is not
+ *    identity-only);
+ *  - identity alone, or an empty list: 406.
  */
 static bool http_app_gzip_accepted(httpd_req_t *req){
 
@@ -273,6 +279,8 @@ static bool http_app_gzip_accepted(httpd_req_t *req){
 		return true;	/* absent */
 	}
 
+	int gzip = -1, star = -1;	/* -1: not listed, 0: refused (q=0), 1: accepted */
+	bool other = false;			/* a coding other than gzip, x-gzip, "*" and identity is listed */
 	const char *p = ae;
 	while(*p){
 		/* one coding: its name, then its parameters up to the next comma */
@@ -284,9 +292,10 @@ static bool http_app_gzip_accepted(httpd_req_t *req){
 			p++;
 		}
 		size_t name_len = (size_t)(p - name);
-		bool gzip = (name_len == 4 && strncasecmp(name, "gzip", 4) == 0) ||
-				(name_len == 6 && strncasecmp(name, "x-gzip", 6) == 0) ||
-				(name_len == 1 && name[0] == '*');
+		bool is_gzip = (name_len == 4 && strncasecmp(name, "gzip", 4) == 0) ||
+				(name_len == 6 && strncasecmp(name, "x-gzip", 6) == 0);
+		bool is_star = (name_len == 1 && name[0] == '*');
+		bool is_identity = (name_len == 8 && strncasecmp(name, "identity", 8) == 0);
 		bool q_zero = false;
 		while(*p && *p != ','){
 			if((*p == 'q' || *p == 'Q') && p[1] == '='){
@@ -307,11 +316,23 @@ static bool http_app_gzip_accepted(httpd_req_t *req){
 			}
 			p++;
 		}
-		if(gzip && !q_zero){
-			return true;
+		if(is_gzip){
+			gzip = q_zero ? 0 : (gzip < 0 ? 1 : gzip);
+		}
+		else if(is_star){
+			star = q_zero ? 0 : 1;
+		}
+		else if(!is_identity && name_len > 0){
+			other = true;
 		}
 	}
-	return false;
+	if(gzip >= 0){
+		return gzip == 1;
+	}
+	if(star >= 0){
+		return star == 1;
+	}
+	return other;
 }
 
 /**
