@@ -1304,6 +1304,11 @@ bool wifi_manager_scan_in_flight(){
 	return scan_in_flight;
 }
 
+bool wifi_manager_ap_list_built(){
+	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h */
+	return ap_list_tick != 0;
+}
+
 bool wifi_manager_ap_stop_done(uint32_t *ms_since){
 
 	/* LOCAL PATCH (2.1.4 WP2): see wifi_manager.h. The flag first: the tick is written before

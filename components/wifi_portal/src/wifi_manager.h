@@ -391,6 +391,16 @@ bool wifi_manager_scan_async();
  */
 int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C10b): the network list has been rebuilt from a scan since it was
+ * allocated, in this AP session. Until it has, the page's background reads of GET /ap.json order
+ * the scan too (wifi_manager_scan_request(false, ...), so still at least 20 s apart): the order of
+ * the page's load can fail (a scan cannot start while a connect attempt runs, ESP_ERR_WIFI_STATE,
+ * and an attempt that starts stops a running scan), and nothing else would order it again. Any
+ * task; a stale read costs one order too many, or one a poll late.
+ */
+bool wifi_manager_ap_list_built();
+
 
 /**
  * @brief saves the current STA wifi config to flash ram storage.

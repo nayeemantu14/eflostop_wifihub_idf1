@@ -778,10 +778,13 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 			/* LOCAL PATCH (2.1.4 C10b): the page's own polls carry "bg=1". Its first read, once
 			 * the page has loaded (not GET /, whose assets then had the radio to themselves), orders
-			 * a scan when the list is empty or stale and none was ordered in the last 20 s */
+			 * a scan when the list is empty or stale and none was ordered in the last 20 s. A poll
+			 * does too while no list has been built in this AP session: the first read's scan may
+			 * have failed (a connect attempt in flight, the router-fallback portal's retry), and
+			 * nothing else would order it again (wifi_manager_ap_list_built()) */
 			bool bg = http_app_query_has(req->uri, "bg=1");
 			http_app_note_activity(bg ? HTTP_APP_ACT_API_BG : HTTP_APP_ACT_API_USER, client_ip);
-			if(!bg && req->method == HTTP_GET){
+			if(req->method == HTTP_GET && (!bg || !wifi_manager_ap_list_built())){
 				wifi_manager_scan_request(false, NULL);
 			}
 
