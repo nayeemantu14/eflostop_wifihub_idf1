@@ -831,7 +831,10 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * 0-100 ms (the 1 s dither, from DISC_COMPLETE): before WP6 one continuous scan at 100 ms could
  * stay phase-locked to a sensor's heartbeat bursts, so about 1.5 % of sensor timings were never
  * heard (plan §5.1). A claim is granted at the end of a scan that covered Coded, so the pulse is
- * the only Coded gap (at most BLE_VALVE_CLAIM_LR_MS, I2), and RECOVERY follows it.
+ * the only Coded gap (at most BLE_VALVE_CLAIM_LR_MS, I2), and RECOVERY follows it. And only as
+ * often as the pulse-rate limit allows (I2b): at least 6 s + U(0, 1 s) of profile time since the
+ * last pulse, and at most 12 s of pulses in any 60 s, a leak response included (the valve's claim
+ * back-off does not apply then, so this is what bounds a valve that is heard but never links).
  *
  * Every scan is timed, the hold's hunt too: a cancel that meets a scan's own timeout can leave
  * NimBLE's state idle while the controller still scans, and every start then fails until that
@@ -885,6 +888,16 @@ _Static_assert(BLE_VALVE_CLAIM_LR_MS <= BLIND_MAX_MS && BLE_VALVE_CLAIM_MS <= BL
 _Static_assert(N_SCAN_MS >= W_MIN_MS && JITTER_MS <= GAP_MAX_MS, "I1: N_CODED");
 _Static_assert(MIX_SLOT_MS >= W_MIN_MS && MIX_SLOT_MS + 2 * JITTER_MS <= GAP_MAX_MS, "I1: N_MIXED, both PHYs");
 _Static_assert(LR_CODED_MS >= W_MIN_MS && LR_1M_MS + 2 * JITTER_MS <= GAP_MAX_MS, "I1: NORMAL_LR's Coded");
+
+// The pulse-rate limit (plan §3 I2b; SUBMIT, WP8's, is exempt from the spacing). Only the valve
+// claim's CONNECT pulse exists before WP8.
+#define I2B_SPACING_MS     6000    // profile time (a mode that scans) between two pulses, at least ...
+#define I2B_JITTER_MS      1000    // ... plus U(0, this): every re-arm jittered (the size is ours)
+#define I2B_BLIND_MAX_MS  12000    // pulses in any rolling ...
+#define I2B_WINDOW_MS     60000    // ... 60 s
+#define I2B_RING             10    // pulses kept: one per I2B_SPACING_MS of the window
+_Static_assert(I2B_RING * I2B_SPACING_MS >= I2B_WINDOW_MS, "I2b: the ring holds every pulse of a window");
+_Static_assert(BLE_VALVE_CLAIM_LR_MS <= I2B_BLIND_MAX_MS, "I2b: a pulse fits the blind budget");
 
 #define SCAN_GONE_MS        1000    // a scan NimBLE dropped with no DISC_COMPLETE is restarted after this
 #define SCAN_SETTLE_MS      50      // nothing starts this soon after a cancel (a queued end is delivered first)
@@ -975,6 +988,7 @@ typedef struct {
     bool just_started;          // this pass started a timed scan: time for the slow chores
     bool paused;                // the window or a radio hold has the radio
     bool portal_paused;         // ... the window itself, for its log lines
+    bool i2b_noted;             // a claim waits for I2b: logged once per wait
     uint8_t geo;                // the geometry running, or that ran last
     uint8_t mode;               // the mode now
     uint8_t slot_mode;          // the mode whose profile the last scan belonged to (MODE_COUNT: none)
@@ -983,6 +997,7 @@ typedef struct {
     uint8_t low_duty;           // summaries in a row below DUTY_WARN_PCT
     uint8_t gen;                // the running (or last) scan's generation: its callback argument
     uint8_t gen_next;           // ... the last one handed out (every start attempt takes one)
+    uint8_t pulse_i;            // the next slot of the pulse ring (I2b)
     uint16_t start_fails;       // scan starts failed in a row
     uint16_t claims;            // claim pulses since the last summary
     TickType_t retry_at;        // no scan start before this tick
@@ -994,6 +1009,11 @@ typedef struct {
     uint32_t mode_ms[MODE_COUNT];   // time per mode since the last summary
     uint32_t want_ms;           // ... in modes that should scan
     uint32_t on_ms;             // ... of it with our scan running
+    TickType_t pulse_at;        // when the claim pulse in flight began
+    uint32_t prof_ms;           // profile time since the last pulse (I2b), up to I2B_WINDOW_MS ...
+    uint32_t space_ms;          // ... and the spacing the next pulse needs
+    TickType_t pulse_end[I2B_RING]; // the last pulses (I2b): when each ended ...
+    uint16_t pulse_ms[I2B_RING];    // ... and how long it was (0: none)
 } exec_t;
 
 /* ---------------------------------------------------------
@@ -1200,10 +1220,37 @@ static void exec_account(exec_t *x, TickType_t now)
     x->mode_ms[x->mode] += dt;
     if (x->mode == MODE_HOLD_HUNT || mode_is_normal(x->mode)) {
         x->want_ms += dt;
+        x->prof_ms = (x->prof_ms + dt < I2B_WINDOW_MS) ? x->prof_ms + dt : I2B_WINDOW_MS;
         if (x->scan_on) {
             x->on_ms += dt;
         }
     }
+}
+
+// The pulse-rate limit for the next claim (I2b): enough profile time since the last pulse, and room
+// in the rolling window for the next one at its longest (BLE_VALVE_CLAIM_LR_MS while a leak
+// response is pending), counting the pulses that end in it. Logs once per wait.
+static bool i2b_allows(exec_t *x, TickType_t now)
+{
+    uint32_t next_ms = ble_valve_lr_pending() ? BLE_VALVE_CLAIM_LR_MS : BLE_VALVE_CLAIM_MS;
+    TickType_t from = now + pdMS_TO_TICKS(next_ms) - pdMS_TO_TICKS(I2B_WINDOW_MS);
+    uint32_t blind = 0;
+    for (int i = 0; i < I2B_RING; i++) {
+        if (x->pulse_ms[i] != 0 && (int32_t)(x->pulse_end[i] - from) > 0) {
+            blind += x->pulse_ms[i];
+        }
+    }
+    if (x->prof_ms >= x->space_ms && blind + next_ms <= I2B_BLIND_MAX_MS) {
+        return true;
+    }
+    if (!x->i2b_noted) {
+        x->i2b_noted = true;
+        ESP_LOGI(BLE_LEAK_TAG, "[CLAIM] Valve claim waits for the pulse-rate limit (I2b): %lu.%lu of %lu.%lu s scanned since the last pulse, %lu.%lu s of pulses in the last 60 s",
+                 (unsigned long)(x->prof_ms / 1000), (unsigned long)(x->prof_ms % 1000 / 100),
+                 (unsigned long)(x->space_ms / 1000), (unsigned long)(x->space_ms % 1000 / 100),
+                 (unsigned long)(blind / 1000), (unsigned long)(blind % 1000 / 100));
+    }
+    return false;
 }
 
 /* ---------------------------------------------------------
@@ -1278,6 +1325,11 @@ static TickType_t executor_pass(exec_t *x)
     if (x->claim_inflight && !conn) {
         x->claim_inflight = false;
         x->coded_last = false;
+        // The pulse, into I2b's window.
+        uint32_t ms = (uint32_t)(now - x->pulse_at) * portTICK_PERIOD_MS;
+        x->pulse_end[x->pulse_i] = now;
+        x->pulse_ms[x->pulse_i] = (uint16_t)(ms == 0 ? 1 : (ms > UINT16_MAX ? UINT16_MAX : ms));
+        x->pulse_i = (uint8_t)((x->pulse_i + 1) % I2B_RING);
         if (!hold) {
             x->recovery = true;
             x->retry_at = now;
@@ -1302,13 +1354,13 @@ static TickType_t executor_pass(exec_t *x)
     }
 
     // The valve module's claim: in the dither right after a scan that covered Coded ended by
-    // itself, so the pulse is the only Coded gap (I2), in NORMAL and in a hold's hunt alike. Never
-    // right after a cancel (see the executor's notes). Not after a pause, whose last scan ended
-    // long before (the profile scans first).
+    // itself, so the pulse is the only Coded gap (I2), in NORMAL and in a hold's hunt alike, when
+    // the pulse-rate limit allows (I2b). Never right after a cancel (see the executor's notes).
+    // Not after a pause, whose last scan ended long before (the profile scans first).
     if (ble_valve_claim_wanted()) {
         bool fresh = !x->scan_on && x->slot_ended && x->coded_last &&
                      (now - x->coded_end_at) <= pdMS_TO_TICKS(JITTER_MS) + 1;
-        if (fresh && (mode == MODE_HOLD_HUNT || mode_is_normal(mode))) {
+        if (fresh && (mode == MODE_HOLD_HUNT || mode_is_normal(mode)) && i2b_allows(x, now)) {
             ble_valve_claim_start();
             if (ble_gap_conn_active()) {
                 x->claim_inflight = true;
@@ -1318,9 +1370,15 @@ static TickType_t executor_pass(exec_t *x)
                 if (x->claims < UINT16_MAX) {
                     x->claims++;
                 }
+                x->pulse_at = now;
+                x->prof_ms = 0;
+                x->space_ms = I2B_SPACING_MS + esp_random() % (I2B_JITTER_MS + 1);
+                x->i2b_noted = false;
                 mode = MODE_CLAIM;
             }
         }
+    } else {
+        x->i2b_noted = false;
     }
 
     if (mode != x->mode) {
@@ -1463,6 +1521,14 @@ static __attribute__((noinline)) void exec_summary(exec_t *x)
     x->want_ms = 0;
     x->on_ms = 0;
     x->claims = 0;
+
+    // I2b's ring: pulses out of the window are dropped, so a wrapped tick count cannot bring one back.
+    TickType_t now = xTaskGetTickCount();
+    for (int i = 0; i < I2B_RING; i++) {
+        if (x->pulse_ms[i] != 0 && (now - x->pulse_end[i]) >= pdMS_TO_TICKS(I2B_WINDOW_MS)) {
+            x->pulse_ms[i] = 0;
+        }
+    }
 }
 
 // The scan-alive heartbeat line. While the leak scan is held it says so, for how long and for what

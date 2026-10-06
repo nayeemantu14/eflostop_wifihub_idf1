@@ -171,7 +171,8 @@ extern "C"
      * @brief A leak response is pending (WP6's widened trigger): the valve is provisioned and
      * not linked, and an RMLEAK or CLOSE is pended for it, or a leak incident is latched and
      * the valve has not confirmed the interlock (RMLEAK=1 and CLOSED) in it. Claims then skip
-     * the back-off and run for BLE_VALVE_CLAIM_LR_MS. Re-evaluated on every pass of the valve
+     * the back-off (the executor's pulse-rate limit, I2b, still spaces them) and run for
+     * BLE_VALVE_CLAIM_LR_MS. Re-evaluated on every pass of the valve
      * task (at least once a second); the incident latch is read lock-free.
      */
     bool ble_valve_lr_pending(void);
@@ -186,8 +187,9 @@ extern "C"
     /**
      * @brief The provisioned valve was heard while the hunt is wanted, and the claim back-off
      * allows a claim: a claim (connect) is due. The executor grants it at the end of a scan
-     * window that covered Coded (or at once in a hold's hunt): it stops its scan and calls
-     * ble_valve_claim_start(). Clears a claim request the hunt no longer wants.
+     * that covered Coded, in NORMAL and in a hold's hunt alike, when its pulse-rate limit (I2b)
+     * allows, and calls ble_valve_claim_start() with no scan running. Clears a claim request
+     * the hunt no longer wants.
      */
     bool ble_valve_claim_wanted(void);
 
