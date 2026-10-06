@@ -205,6 +205,13 @@ extern "C" {
  */
 #define JSON_IP_INFO_SIZE 					295
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): the room wifi_manager_status_json() needs: the status of before
+ * (JSON_IP_INFO_SIZE, its terminator included), ,"reason":255 (13) and ,"pend": (8), and the
+ * candidate's SSID as a JSON string (194, JSON_SSID_STR_MAX in json.h).
+ */
+#define WIFI_MANAGER_STATUS_JSON_SIZE		510
+
 
 /**
  * @brief defines the minimum length of an access point password running on WPA2
@@ -253,13 +260,36 @@ typedef enum update_reason_code_t {
 	UPDATE_LOST_CONNECTION = 3
 }update_reason_code_t;
 
+/**
+ * @brief The kinds of connect attempt (LOCAL PATCH 2.1.4 C8: one owner for all of them, the
+ * wifi_manager task; see wifi_manager.c).
+ *  - USER: the setup page's Connect, with its candidate (wifi_manager_connect_user_async());
+ *  - AUTO_RECONNECT: this component's retry timer, only while the SoftAP is down (C5);
+ *  - RESTORE_CONNECTION: the boot's, with the saved network;
+ *  - APP_RETRY: the app's router retry (wifi_manager_retry_async()), with the network in use.
+ */
 typedef enum connection_request_made_by_code_t{
 	CONNECTION_REQUEST_NONE = 0,
 	CONNECTION_REQUEST_USER = 1,
 	CONNECTION_REQUEST_AUTO_RECONNECT = 2,
 	CONNECTION_REQUEST_RESTORE_CONNECTION = 3,
+	CONNECTION_REQUEST_APP_RETRY = 4,
 	CONNECTION_REQUEST_MAX = 0x7fffffff /*force the creation of this enum as a 32 bit int */
 }connection_request_made_by_code_t;
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): WM_ORDER_CONNECT_STA's callback parameter: the order's kind
+ * (connection_request_made_by_code_t) in WIFI_MANAGER_CONNECT_KIND_MASK, and
+ * WIFI_MANAGER_CONNECT_NOT_STARTED when the order started no attempt.
+ */
+#define WIFI_MANAGER_CONNECT_KIND_MASK		0xFFu
+#define WIFI_MANAGER_CONNECT_NOT_STARTED	0x100u
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): status.json's "reason" for a user's attempt that got no IP within
+ * its time (an IEEE or ESP-IDF disconnect reason otherwise; those end at 212).
+ */
+#define WIFI_MANAGER_REASON_NO_IP			250
 
 /**
  * The actual WiFi settings in use
@@ -319,7 +349,22 @@ void wifi_manager( void * pvParameters );
  * from START_AP to STOP_AP). Read it under wifi_manager_lock_json_buffer().
  */
 char* wifi_manager_get_ap_list_json();
-char* wifi_manager_get_ip_info_json();
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8, C6): writes status.json into out (size at least
+ * WIFI_MANAGER_STATUS_JSON_SIZE) and returns its length, the terminator excluded (0, out "", for
+ * a smaller buffer). Its own lock, held only to copy the status out: never while formatting or
+ * sending, and not the network list's (wifi_manager_lock_json_buffer()). Any task.
+ *  {"ssid":S[,"raw":1],"ip":A,"netmask":A,"gw":A,"urc":U,"reason":R,"pend":P}
+ *  - ssid, urc: urc (update_reason_code_t) for the network in use, or UPDATE_FAILED_ATTEMPT for a
+ *    user's candidate that failed, with its SSID; the addresses for urc 0 only ("0" otherwise);
+ *  - reason: that failure's disconnect reason (WIFI_MANAGER_REASON_NO_IP: no IP in time), 0 if
+ *    none;
+ *  - pend: the SSID of a user's candidate not yet decided (stored, waiting or connecting), "" if
+ *    none. While it is set, ssid and urc are still the hub's state of before.
+ * "{}" before any status (a boot with nothing decided yet) with no candidate.
+ */
+size_t wifi_manager_status_json(char *out, size_t size);
 
 /**
  * @brief LOCAL PATCH (2.1.4 WP1, a bench diagnostic): true while a scan the wifi_manager task
@@ -352,11 +397,23 @@ wifi_config_t* wifi_manager_get_wifi_sta_config();
 
 
 /**
- * @brief requests a connection to an access point that will be process in the main task thread.
- * LOCAL PATCH (2.1.4 C6): false when the request did not fit in the queue within
- * WIFI_MANAGER_POST_WAIT_MS (nothing is sent then).
+ * @brief LOCAL PATCH (2.1.4 C8): the setup page's Connect: stores the candidate (ssid_len 1-32
+ * bytes, password_len 0-64, 0 for an open network; channel: the page's hint, 0 for none) and
+ * queues a USER order, waiting WIFI_MANAGER_POST_WAIT_MS at most. The network in use and NVS
+ * change only when the candidate gets an IP; a candidate that fails is reported in status.json
+ * and dropped, and the network in use stays. A newer call replaces a candidate whose attempt has
+ * not started. False for bad lengths, or when the order did not fit in the queue (the candidate is
+ * taken back then). Any task; the bytes are copied.
  */
-bool wifi_manager_connect_async();
+bool wifi_manager_connect_user_async(const uint8_t *ssid, size_t ssid_len, const uint8_t *password, size_t password_len, uint8_t channel);
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): the app's router retry: an APP_RETRY order, with the network in
+ * use. It starts nothing while the STA is connected, an attempt runs or a user's candidate waits
+ * (the callback says NOT_STARTED). False when it did not fit in the queue within
+ * WIFI_MANAGER_POST_WAIT_MS.
+ */
+bool wifi_manager_retry_async();
 
 /**
  * @brief requests a wifi scan
@@ -416,16 +473,8 @@ bool wifi_manager_lock_json_buffer(TickType_t xTicksToWait);
  */
 void wifi_manager_unlock_json_buffer();
 
-/**
- * @brief Generates the connection status json: ssid and IP addresses.
- * @note This is not thread-safe and should be called only if wifi_manager_lock_json_buffer call is successful.
- */
-void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code);
-/**
- * @brief Clears the connection status json.
- * @note This is not thread-safe and should be called only if wifi_manager_lock_json_buffer call is successful.
- */
-void wifi_manager_clear_ip_info_json();
+/* LOCAL PATCH (2.1.4 C8): wifi_manager_generate_ip_info_json() and wifi_manager_clear_ip_info_json()
+ * are gone: the wifi_manager task keeps the status itself, and wifi_manager_status_json() reads it. */
 
 /**
  * @brief Clear the list of access points (LOCAL PATCH 2.1.4 C2b: nothing while the AP is down).
@@ -462,6 +511,13 @@ void wifi_manager_safe_update_sta_ip_string(uint32_t ip);
  * pointer to read (cast it with (uintptr_t)):
  *  - WM_EVENT_STA_GOT_IP: the STA's IPv4 address in network byte order (esp_ip4_addr_t.addr);
  *  - WM_EVENT_STA_DISCONNECTED: the disconnect reason (wifi_err_reason_t), 0 if none was given;
+ *    once per attempt or link that ended (LOCAL PATCH 2.1.4 C8: also, with
+ *    WIFI_REASON_ASSOC_LEAVE, for one ended by our esp_wifi_disconnect() whose event never came);
+ *  - WM_ORDER_CONNECT_STA (LOCAL PATCH 2.1.4 C8): once per order, when an attempt starts (its
+ *    kind) or when the order starts none (its kind | WIFI_MANAGER_CONNECT_NOT_STARTED): the STA
+ *    connected, an attempt under way, a user's candidate first, or the driver refused it. A USER
+ *    order that waits is reported when it is decided. No STA_DISCONNECTED follows an order that
+ *    started nothing;
  *  - WM_EVENT_SCAN_DONE: the scan's status, 0 = success;
  *  - WM_ORDER_STOP_AP (LOCAL PATCH 2.1.4 WP2): 0 = the AP and its servers are stopped; 1 = the
  *    switch to STA mode failed, so the AP keeps its servers and the stop is tried again

@@ -129,8 +129,84 @@ static bool scan_in_flight = false;
  * itself for good. Set instead, and run at the top of the loop, right after the message that set
  * it and its callback (the order the post gave). wifi_manager task only. */
 static bool start_ap_due = false;
-char *ip_info_json = NULL;
+/* The network in use (the RAM copy of the saved one, or all zero: nothing saved). LOCAL PATCH (2.1.4
+ * C8): written by the wifi_manager task only, at the boot's load, at a candidate's IP and at a
+ * forget; an HTTP handler no longer writes it (it wrote what was typed into it, before any attempt). */
 wifi_config_t* wifi_manager_config_sta = NULL;
+
+/* LOCAL PATCH (2.1.4 C8): connect ownership and transactional credentials (plan 6.2 C8, I13).
+ *
+ * The wifi_manager task owns every connect attempt, one at a time, of four kinds: USER (the setup
+ * page's Connect, with its candidate), APP_RETRY (the app's router retry), AUTO (this component's
+ * retry timer) and RESTORE (the boot's). attempt_kind is the attempt in flight, from its
+ * esp_wifi_connect() to its STA_DISCONNECTED or GOT_IP.
+ *
+ * A Connect stores a candidate (SSID, password, channel hint) in wm_shared and queues a USER
+ * order. The network in use (wifi_manager_config_sta) and NVS change only when the candidate gets
+ * an IP: the GOT_IP that finds the driver's config different from the network in use commits it
+ * and saves it (wifi_manager_commit_driver_config()). A candidate that fails is reported and
+ * dropped, and the network in use is the one the next automatic attempt tries (the router retry
+ * or the retry timer): a mistyped password no longer replaces a working network.
+ *
+ * A USER order never meets a running attempt: with an attempt in flight it waits for it, at most
+ * WIFI_MANAGER_USER_WAIT_MS, then ends it (esp_wifi_disconnect()); with the STA connected (the
+ * SoftAP's tail, or a router-fallback hub that rejoined) it leaves that network for the candidate,
+ * if the SoftAP is up to report it, and does nothing if the candidate is the network in use. An
+ * automatic order gives way to a user's candidate and to an attempt in flight, and starts nothing
+ * then. A user's attempt with no IP after WIFI_MANAGER_USER_ATTEMPT_MS is ended (an open network
+ * with no DHCP, say): it fails with WIFI_MANAGER_REASON_NO_IP and the network in use stays. The
+ * latest Connect wins: a newer one replaces a candidate that has not started.
+ *
+ * Every esp_wifi_disconnect() of ours (ending an attempt, leaving the network for a candidate, a
+ * forget) waits for its STA_DISCONNECTED (abort_tick); none in WIFI_MANAGER_ABORT_WAIT_MS ends the
+ * attempt as if it had come, so nothing waits for good.
+ *
+ * WM_ORDER_CONNECT_STA's callback says what each order did (wifi_manager.h): the kind of an
+ * attempt that started, or the kind with WIFI_MANAGER_CONNECT_NOT_STARTED. A USER order that waits
+ * is reported when its attempt starts (or does not). No synthetic STA_DISCONNECTED follows an
+ * order that did not start any more (2.1.4 C2c's), except the one of an abort that got no event. */
+typedef struct {
+	/* status.json, as the wifi_manager task last set it; wifi_manager_status_json() formats it */
+	uint8_t ssid[MAX_SSID_SIZE];		/* its network: the one in use, or the candidate that failed */
+	uint32_t ip;						/* the STA's addresses (network byte order) for urc 0 */
+	uint32_t netmask;
+	uint32_t gw;
+	uint8_t urc;						/* update_reason_code_t, or WIFI_MANAGER_URC_NONE */
+	uint8_t reason;						/* that candidate's failure (wifi_err_reason_t, WIFI_MANAGER_REASON_NO_IP), 0 = none */
+	/* the user's candidate */
+	uint8_t cand_state;					/* WM_CAND_* */
+	uint8_t cand_chan;					/* the page's channel hint, 0 = none */
+	uint8_t cand_ssid[MAX_SSID_SIZE];	/* zero-padded; no terminator when 32 bytes long */
+	uint8_t cand_pwd[MAX_PASSWORD_SIZE];
+} wifi_manager_shared_t;
+
+#define WIFI_MANAGER_URC_NONE		0xFF	/* no status yet: status.json is "{}" */
+
+#define WM_CAND_NONE				0		/* no candidate */
+#define WM_CAND_POSTED				1		/* stored by an HTTP handler; its USER order is queued */
+#define WM_CAND_WAITING				2		/* taken by its order: waits for an attempt or a link to end */
+#define WM_CAND_ACTIVE				3		/* its attempt runs: the driver has it, the network in use is unchanged */
+
+/* LOCAL PATCH (2.1.4 C8, C6): status.json and the candidate, allocated at boot in place of the
+ * 295 B status JSON, under wm_lock, a spinlock (C6's status lock: a short copy in, or out to the
+ * reader's stack, never held while formatting or sending). The HTTP handlers store a candidate and
+ * read the status; the wifi_manager task does the rest. */
+static wifi_manager_shared_t *wm_shared = NULL;
+static portMUX_TYPE wm_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* LOCAL PATCH (2.1.4 C8): wifi_manager task only */
+static uint8_t attempt_kind = CONNECTION_REQUEST_NONE;	/* the attempt in flight */
+static TickType_t attempt_tick = 0;			/* its start */
+static TickType_t user_wait_tick = 0;		/* when a WM_CAND_WAITING candidate began to wait */
+static TickType_t abort_tick = 0;			/* an esp_wifi_disconnect() of ours awaits its event, 0 = none */
+static uint8_t abort_reason = 0;			/* the reason that end reports for a user's attempt, 0 = the driver's */
+static bool user_due = false;				/* a waiting candidate may go on, after the message's callback */
+
+#define WIFI_MANAGER_USER_WAIT_MS		8000	/* a Connect waits this long for a running attempt (plan C8) */
+#define WIFI_MANAGER_USER_ATTEMPT_MS	25000	/* a user's attempt with no IP this long is ended (the page waits 30 s) */
+#define WIFI_MANAGER_ABORT_WAIT_MS		2000	/* our esp_wifi_disconnect()'s STA_DISCONNECTED, awaited this long */
+_Static_assert(WIFI_MANAGER_STATUS_JSON_SIZE >= JSON_IP_INFO_SIZE + 21 + JSON_SSID_STR_MAX,
+		"status.json: the status of before, \",\"reason\":255,\"pend\":\" and the candidate's SSID");
 
 /* @brief Array of callback function pointers */
 void (**cb_ptr_arr)(void*) = NULL;
@@ -173,14 +249,12 @@ const int WIFI_MANAGER_AP_STA_CONNECTED_BIT = BIT1;
 /* @brief Set automatically once the SoftAP is started */
 const int WIFI_MANAGER_AP_STARTED_BIT = BIT2;
 
-/* @brief When set, means a client requested to connect to an access point.*/
-const int WIFI_MANAGER_REQUEST_STA_CONNECT_BIT = BIT3;
+/* BIT3 (a client requested to connect) and BIT5 (the boot's restore): LOCAL PATCH (2.1.4 C8),
+ * no longer used: attempt_kind says which attempt runs. */
 
 /* @brief This bit is set automatically as soon as a connection was lost */
 const int WIFI_MANAGER_STA_DISCONNECT_BIT = BIT4;
 
-/* @brief When set, means the wifi manager attempts to restore a previously saved connection at startup. */
-const int WIFI_MANAGER_REQUEST_RESTORE_STA_BIT = BIT5;
 
 /* @brief When set, means a client requested to disconnect from currently connected AP. */
 const int WIFI_MANAGER_REQUEST_WIFI_DISCONNECT_BIT = BIT6;
@@ -336,7 +410,7 @@ void wifi_manager_start(){
 	 * 5 more 8-byte slots: +40 B of heap. */
 	wifi_manager_queue = xQueueCreate( 8, sizeof( queue_message) );
 	wifi_manager_json_mutex = xSemaphoreCreateMutex();
-	ip_info_json = (char*)malloc(sizeof(char) * JSON_IP_INFO_SIZE);
+	wm_shared = (wifi_manager_shared_t*)calloc(1, sizeof(wifi_manager_shared_t));	/* LOCAL PATCH (2.1.4 C8) */
 	wifi_manager_config_sta = (wifi_config_t*)malloc(sizeof(wifi_config_t));
 	cb_ptr_arr = malloc(sizeof(void (*)(void*)) * WM_MESSAGE_CODE_COUNT);
 	wifi_manager_sta_ip_mutex = xSemaphoreCreateMutex();
@@ -352,12 +426,12 @@ void wifi_manager_start(){
 	/* LOCAL PATCH (2.1.4 C2d): every allocation above is checked before its first use. The task, its
 	 * event handler, the HTTP handlers and the app's calls use them unchecked from here on, so a
 	 * failure stops the boot, as the ESP_ERROR_CHECKs above do (at boot, with the heap whole). */
-	bool allocated = wifi_manager_queue && wifi_manager_json_mutex && ip_info_json && wifi_manager_config_sta &&
+	bool allocated = wifi_manager_queue && wifi_manager_json_mutex && wm_shared && wifi_manager_config_sta &&
 			cb_ptr_arr && wifi_manager_sta_ip_mutex && wifi_manager_sta_ip && wifi_manager_event_group &&
 			wifi_manager_retry_timer && wifi_manager_shutdown_ap_timer;
 	ESP_ERROR_CHECK(allocated ? ESP_OK : ESP_ERR_NO_MEM);
 
-	wifi_manager_clear_ip_info_json();
+	wm_shared->urc = WIFI_MANAGER_URC_NONE;
 	memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
 	memset(&wifi_settings.sta_static_ip_config, 0x00, sizeof(esp_netif_ip_info_t));
 	for(int i=0; i<WM_MESSAGE_CODE_COUNT; i++){
@@ -583,65 +657,196 @@ bool wifi_manager_fetch_wifi_sta_config(){
 }
 
 
-void wifi_manager_clear_ip_info_json(){
-	strcpy(ip_info_json, "{}\n");
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): fills n bytes with zeros with stores the compiler keeps (a memset()
+ * of a buffer about to go out of scope may be removed): the copies of a password.
+ */
+static void wifi_manager_wipe(void *p, size_t n){
+	volatile uint8_t *v = (volatile uint8_t*)p;
+	while(n--){
+		*v++ = 0;
+	}
 }
 
+/* LOCAL PATCH (2.1.4 C8): under wm_lock: the candidate is gone, its bytes zeroed */
+static void wifi_manager_cand_clear_locked(){
+	wm_shared->cand_state = WM_CAND_NONE;
+	wm_shared->cand_chan = 0;
+	memset(wm_shared->cand_ssid, 0x00, sizeof(wm_shared->cand_ssid));
+	wifi_manager_wipe(wm_shared->cand_pwd, sizeof(wm_shared->cand_pwd));
+}
 
-void wifi_manager_generate_ip_info_json(update_reason_code_t update_reason_code){
+/* LOCAL PATCH (2.1.4 C8): the candidate's state (one byte, read under the lock all the same) */
+static uint8_t wifi_manager_cand_state(){
+	taskENTER_CRITICAL(&wm_lock);
+	uint8_t state = wm_shared->cand_state;
+	taskEXIT_CRITICAL(&wm_lock);
+	return state;
+}
 
-	wifi_config_t *config = wifi_manager_get_wifi_sta_config();
-	if(config){
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): status.json now reads urc for the network in use, with its
+ * addresses for UPDATE_CONNECTION_OK ("0" otherwise). A candidate in end_state ends with it (the
+ * one whose attempt got this IP: WM_CAND_ACTIVE), in the same lock: status.json never shows it
+ * pending after the result. WM_CAND_NONE: no candidate ends. wifi_manager task only.
+ */
+static void wifi_manager_status_set(update_reason_code_t urc, uint8_t end_state){
 
-		/* LOCAL PATCH (2.1.4 C2e): built with bounds. json_print_ssid() writes the SSID bounded by
-		 * its 32-byte field, which has no terminator when the SSID is 32 bytes long (the password
-		 * stored after it ran into this JSON), and a raw SSID (json.h) gets "raw":1 after it. */
-		const char *ip_info_json_format = "%s,\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"urc\":%d}\n";
-
-		/* the reason code tells why this was updated without a connection: "0" for each address then */
-		char ip[IP4ADDR_STRLEN_MAX] = "0"; /* note: IP4ADDR_STRLEN_MAX is defined in lwip */
-		char gw[IP4ADDR_STRLEN_MAX] = "0";
-		char netmask[IP4ADDR_STRLEN_MAX] = "0";
-		if(update_reason_code == UPDATE_CONNECTION_OK){
-			esp_netif_ip_info_t ip_info;
-			/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK: the addresses stay "0" then */
-			esp_err_t err = esp_netif_get_ip_info(esp_netif_sta, &ip_info);
-			if(err == ESP_OK){
-				esp_ip4addr_ntoa(&ip_info.ip, ip, IP4ADDR_STRLEN_MAX);
-				esp_ip4addr_ntoa(&ip_info.gw, gw, IP4ADDR_STRLEN_MAX);
-				esp_ip4addr_ntoa(&ip_info.netmask, netmask, IP4ADDR_STRLEN_MAX);
-			}
-			else{
-				ESP_LOGW(TAG, "esp_netif_get_ip_info failed (%s) - status without addresses", esp_err_to_name(err));
-			}
+	esp_netif_ip_info_t ip_info;
+	memset(&ip_info, 0x00, sizeof(ip_info));
+	if(urc == UPDATE_CONNECTION_OK){
+		/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK: the addresses stay "0" then */
+		esp_err_t err = esp_netif_get_ip_info(esp_netif_sta, &ip_info);
+		if(err != ESP_OK){
+			ESP_LOGW(TAG, "esp_netif_get_ip_info failed (%s) - status without addresses", esp_err_to_name(err));
+			memset(&ip_info, 0x00, sizeof(ip_info));
 		}
-
-		/* to avoid declaring a new buffer we copy the data directly into the buffer at its correct address */
-		static const char ssid_key[] = "{\"ssid\":";
-		size_t len = sizeof(ssid_key) - 1;
-		memcpy(ip_info_json, ssid_key, len);
-		bool raw = false;
-		size_t ssid_len = json_print_ssid(config->sta.ssid, sizeof(config->sta.ssid), ip_info_json + len, JSON_IP_INFO_SIZE - len, &raw);
-		if(ssid_len == 0){
-			/* cannot happen: JSON_IP_INFO_SIZE takes the longest SSID */
-			wifi_manager_clear_ip_info_json();
-			return;
-		}
-		len += ssid_len;
-
-		/* rest of the information is copied after the ssid */
-		snprintf( (ip_info_json + len), JSON_IP_INFO_SIZE - len, ip_info_json_format,
-				raw ? ",\"raw\":1" : "",
-				ip,
-				netmask,
-				gw,
-				(int)update_reason_code);
-	}
-	else{
-		wifi_manager_clear_ip_info_json();
 	}
 
+	taskENTER_CRITICAL(&wm_lock);
+	memcpy(wm_shared->ssid, wifi_manager_config_sta->sta.ssid, MAX_SSID_SIZE);
+	wm_shared->ip = ip_info.ip.addr;
+	wm_shared->netmask = ip_info.netmask.addr;
+	wm_shared->gw = ip_info.gw.addr;
+	wm_shared->urc = (uint8_t)urc;
+	wm_shared->reason = 0;
+	if(end_state != WM_CAND_NONE && wm_shared->cand_state == end_state){
+		wifi_manager_cand_clear_locked();
+	}
+	taskEXIT_CRITICAL(&wm_lock);
+}
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): the candidate, if in state, failed: status.json reads
+ * UPDATE_FAILED_ATTEMPT for its SSID with reason (0: none to give), and it is dropped. A newer
+ * candidate (another state) is left alone. Returns whether one failed. wifi_manager task only.
+ */
+static bool wifi_manager_cand_fail(uint8_t state, uint8_t reason){
+
+	bool failed = false;
+	taskENTER_CRITICAL(&wm_lock);
+	if(wm_shared->cand_state == state){
+		memcpy(wm_shared->ssid, wm_shared->cand_ssid, MAX_SSID_SIZE);
+		wm_shared->ip = 0;
+		wm_shared->netmask = 0;
+		wm_shared->gw = 0;
+		wm_shared->urc = (uint8_t)UPDATE_FAILED_ATTEMPT;
+		wm_shared->reason = reason;
+		wifi_manager_cand_clear_locked();
+		failed = true;
+	}
+	taskEXIT_CRITICAL(&wm_lock);
+	return failed;
+}
+
+size_t wifi_manager_status_json(char *out, size_t size){
+
+	/* LOCAL PATCH (2.1.4 C8, C6): see wifi_manager.h. The lock is held for the copy only */
+	struct {
+		uint8_t ssid[MAX_SSID_SIZE];
+		uint8_t cand_ssid[MAX_SSID_SIZE];
+		uint32_t ip, netmask, gw;
+		uint8_t urc, reason, cand_state;
+	} s;
+
+	if(out == NULL || size < WIFI_MANAGER_STATUS_JSON_SIZE || wm_shared == NULL){
+		if(out != NULL && size > 0){
+			out[0] = '\0';
+		}
+		return 0;
+	}
+
+	taskENTER_CRITICAL(&wm_lock);
+	memcpy(s.ssid, wm_shared->ssid, MAX_SSID_SIZE);
+	memcpy(s.cand_ssid, wm_shared->cand_ssid, MAX_SSID_SIZE);
+	s.ip = wm_shared->ip;
+	s.netmask = wm_shared->netmask;
+	s.gw = wm_shared->gw;
+	s.urc = wm_shared->urc;
+	s.reason = wm_shared->reason;
+	s.cand_state = wm_shared->cand_state;
+	taskEXIT_CRITICAL(&wm_lock);
+
+	if(s.urc == WIFI_MANAGER_URC_NONE && s.cand_state == WM_CAND_NONE){
+		strcpy(out, "{}\n");
+		return 3;
+	}
+
+	/* the reason code tells why this was updated without a connection: "0" for each address then */
+	char ip[IP4ADDR_STRLEN_MAX] = "0"; /* note: IP4ADDR_STRLEN_MAX is defined in lwip */
+	char gw[IP4ADDR_STRLEN_MAX] = "0";
+	char netmask[IP4ADDR_STRLEN_MAX] = "0";
+	if(s.urc == UPDATE_CONNECTION_OK){
+		esp_ip4_addr_t a;
+		a.addr = s.ip;
+		esp_ip4addr_ntoa(&a, ip, IP4ADDR_STRLEN_MAX);
+		a.addr = s.gw;
+		esp_ip4addr_ntoa(&a, gw, IP4ADDR_STRLEN_MAX);
+		a.addr = s.netmask;
+		esp_ip4addr_ntoa(&a, netmask, IP4ADDR_STRLEN_MAX);
+	}
+
+	/* LOCAL PATCH (2.1.4 C2e): built with bounds; json_print_ssid() reads at most the 32-byte
+	 * field, and a raw SSID (json.h) gets "raw":1 after it */
+	static const char ssid_key[] = "{\"ssid\":";
+	size_t len = sizeof(ssid_key) - 1;
+	memcpy(out, ssid_key, len);
+	bool raw = false;
+	size_t n = json_print_ssid(s.ssid, MAX_SSID_SIZE, out + len, size - len, &raw);
+	len += n;
+	int k = snprintf(out + len, size - len, "%s,\"ip\":\"%s\",\"netmask\":\"%s\",\"gw\":\"%s\",\"urc\":%d,\"reason\":%u,\"pend\":",
+			raw ? ",\"raw\":1" : "", ip, netmask, gw,
+			(s.urc == WIFI_MANAGER_URC_NONE) ? -1 : (int)s.urc, (unsigned)s.reason);
+	if(n == 0 || k < 0 || (size_t)k >= size - len){
+		strcpy(out, "{}\n");	/* cannot happen: WIFI_MANAGER_STATUS_JSON_SIZE takes the longest */
+		return 3;
+	}
+	len += (size_t)k;
+	/* "pend": the SSID of a candidate posted, waiting or connecting, "" otherwise */
+	n = json_print_ssid(s.cand_state != WM_CAND_NONE ? s.cand_ssid : NULL, MAX_SSID_SIZE, out + len, size - len, NULL);
+	if(n == 0 || len + n + 3 > size){
+		strcpy(out, "{}\n");	/* cannot happen, as above */
+		return 3;
+	}
+	len += n;
+	memcpy(out + len, "}\n", 3);
+	return len + 2;
+}
+
+bool wifi_manager_connect_user_async(const uint8_t *ssid, size_t ssid_len, const uint8_t *password, size_t password_len, uint8_t channel){
+
+	/* LOCAL PATCH (2.1.4 C8): see wifi_manager.h */
+	if(wm_shared == NULL || ssid == NULL || ssid_len == 0 || ssid_len > MAX_SSID_SIZE ||
+			password_len > MAX_PASSWORD_SIZE || (password_len != 0 && password == NULL)){
+		return false;
+	}
+
+	taskENTER_CRITICAL(&wm_lock);
+	wifi_manager_cand_clear_locked();	/* the latest Connect wins over one not started yet */
+	memcpy(wm_shared->cand_ssid, ssid, ssid_len);
+	if(password_len){
+		memcpy(wm_shared->cand_pwd, password, password_len);
+	}
+	wm_shared->cand_chan = channel;
+	wm_shared->cand_state = WM_CAND_POSTED;
+	taskEXIT_CRITICAL(&wm_lock);
+
+	if(wifi_manager_send_message_wait(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_USER, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS){
+		return true;
+	}
+
+	/* not queued: taken back, unless an earlier USER order took it meanwhile (it runs then) */
+	taskENTER_CRITICAL(&wm_lock);
+	if(wm_shared->cand_state == WM_CAND_POSTED){
+		wifi_manager_cand_clear_locked();
+	}
+	taskEXIT_CRITICAL(&wm_lock);
+	return false;
+}
+
+bool wifi_manager_retry_async(){
+	/* LOCAL PATCH (2.1.4 C8): the app's router retry, an APP_RETRY order */
+	return wifi_manager_send_message_wait(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_APP_RETRY, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS;
 }
 
 
@@ -1251,23 +1456,9 @@ wifi_config_t* wifi_manager_get_wifi_sta_config(){
 }
 
 
-bool wifi_manager_connect_async(){
-	/* in order to avoid a false positive on the front end app we need to quickly flush the ip json
-	 * There'se a risk the front end sees an IP or a password error when in fact
-	 * it's a remnant from a previous connection
-	 * LOCAL PATCH (2.1.4 C6): both waits bounded (WIFI_MANAGER_POST_WAIT_MS), from an HTTP handler
-	 */
-	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS) )){
-		wifi_manager_clear_ip_info_json();
-		wifi_manager_unlock_json_buffer();
-	}
-	return wifi_manager_send_message_wait(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_USER, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS;
-}
-
-
-char* wifi_manager_get_ip_info_json(){
-	return ip_info_json;
-}
+/* LOCAL PATCH (2.1.4 C8): wifi_manager_connect_async() and wifi_manager_get_ip_info_json() are
+ * gone: wifi_manager_connect_user_async() (a candidate), wifi_manager_retry_async() and
+ * wifi_manager_status_json() replace them. */
 
 
 void wifi_manager_destroy(){
@@ -1278,8 +1469,8 @@ void wifi_manager_destroy(){
 	/* heap buffers */
 	free(accessp_json);
 	accessp_json = NULL;
-	free(ip_info_json);
-	ip_info_json = NULL;
+	free(wm_shared);
+	wm_shared = NULL;
 	free(wifi_manager_sta_ip);
 	wifi_manager_sta_ip = NULL;
 	if(wifi_manager_config_sta){
@@ -1336,6 +1527,337 @@ esp_netif_t* wifi_manager_get_esp_netif_ap(){
 
 esp_netif_t* wifi_manager_get_esp_netif_sta(){
 	return esp_netif_sta;
+}
+
+/* ---- LOCAL PATCH (2.1.4 C8): connect ownership (see wm_shared at the top) ---- */
+
+/* WM_ORDER_CONNECT_STA's callback: the order's kind, with WIFI_MANAGER_CONNECT_NOT_STARTED when it
+ * started no attempt (wifi_manager.h) */
+static void wifi_manager_connect_cb(uint32_t info){
+	if(cb_ptr_arr[WM_ORDER_CONNECT_STA]) (*cb_ptr_arr[WM_ORDER_CONNECT_STA])( (void*)(uintptr_t)info );
+}
+
+/* an esp_wifi_disconnect() of ours succeeded: its STA_DISCONNECTED is awaited (abort_tick), and that
+ * end reports reason for a user's attempt (0: the driver's) */
+static void wifi_manager_abort_mark(uint8_t reason){
+	TickType_t now = xTaskGetTickCount();
+	abort_tick = (now != 0) ? now : 1;
+	abort_reason = reason;
+}
+
+/* the candidate is the network in use already: the same SSID and password */
+static bool wifi_manager_cand_is_live(){
+	taskENTER_CRITICAL(&wm_lock);
+	bool same = memcmp(wm_shared->cand_ssid, wifi_manager_config_sta->sta.ssid, MAX_SSID_SIZE) == 0 &&
+			memcmp(wm_shared->cand_pwd, wifi_manager_config_sta->sta.password, MAX_PASSWORD_SIZE) == 0;
+	taskEXIT_CRITICAL(&wm_lock);
+	return same;
+}
+
+/**
+ * @brief starts an attempt of kind: a USER one with the waiting candidate (it becomes
+ * WM_CAND_ACTIVE), any other with the network in use. One that does not start is a failed
+ * attempt of its kind: a user's is reported and dropped, an automatic one is a lost connection
+ * (its status, and the retry timer or the AP). The callback follows either way. In a frame of
+ * its own: the candidate's config (about 0.15 KB) is on it, and wiped.
+ */
+static __attribute__((noinline)) void wifi_manager_start_attempt(connection_request_made_by_code_t kind, uint8_t *retries){
+
+	wifi_config_t config;
+	const wifi_config_t *use = wifi_manager_config_sta;
+	memset(&config, 0x00, sizeof(config));
+
+	if(kind == CONNECTION_REQUEST_USER){
+		bool taken = false;
+		taskENTER_CRITICAL(&wm_lock);
+		if(wm_shared->cand_state == WM_CAND_WAITING){
+			memcpy(config.sta.ssid, wm_shared->cand_ssid, MAX_SSID_SIZE);
+			memcpy(config.sta.password, wm_shared->cand_pwd, MAX_PASSWORD_SIZE);
+			config.sta.channel = wm_shared->cand_chan;
+			wm_shared->cand_state = WM_CAND_ACTIVE;
+			taken = true;
+		}
+		taskEXIT_CRITICAL(&wm_lock);
+		if(!taken){
+			wifi_manager_connect_cb((uint32_t)kind | WIFI_MANAGER_CONNECT_NOT_STARTED);
+			return;
+		}
+		use = &config;
+	}
+
+	/* LOCAL PATCH (2.1.4 C2c): esp_wifi_set_config() and esp_wifi_connect() were each under
+	 * ESP_ERROR_CHECK, and both fail at runtime (ESP_ERR_WIFI_STATE when a scan cannot stop in
+	 * time, ESP_ERR_WIFI_SSID for an empty SSID, others at low heap): logged, never a reboot */
+	EventBits_t uxBits = xEventGroupGetBits(wifi_manager_event_group);
+	esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, (wifi_config_t*)use);
+	bool config_failed = (err != ESP_OK);
+	if(!config_failed){
+		/* if there is a wifi scan in progress abort it first
+		   Calling esp_wifi_scan_stop will trigger a SCAN_DONE event which will reset this bit */
+		if(uxBits & WIFI_MANAGER_SCAN_BIT){
+			esp_wifi_scan_stop();
+		}
+		err = esp_wifi_connect();
+	}
+	wifi_manager_wipe(config.sta.password, sizeof(config.sta.password));
+
+	if(err == ESP_OK){
+		TickType_t now = xTaskGetTickCount();
+		attempt_kind = (uint8_t)kind;
+		attempt_tick = (now != 0) ? now : 1;
+		wifi_manager_connect_cb((uint32_t)kind);
+		return;
+	}
+
+	ESP_LOGW(TAG, "ORDER_CONNECT_STA: %s failed (%s) - attempt not started",
+			config_failed ? "esp_wifi_set_config" : "esp_wifi_connect", esp_err_to_name(err));
+	if(kind == CONNECTION_REQUEST_USER){
+		/* reported and dropped; the network in use is as it was (the driver gets it again at the
+		 * next automatic attempt) */
+		wifi_manager_cand_fail(WM_CAND_ACTIVE, 0);
+	}
+	else{
+		wifi_manager_status_set(UPDATE_LOST_CONNECTION, WM_CAND_NONE);
+		wifi_manager_retry_or_start_ap(uxBits, retries);
+	}
+	wifi_manager_connect_cb((uint32_t)kind | WIFI_MANAGER_CONNECT_NOT_STARTED);
+}
+
+/**
+ * @brief a waiting candidate goes on, if nothing it waits for remains: with the STA idle its
+ * attempt starts; with the STA connected (and the SoftAP up to report it) the network in use is
+ * left for it, and its attempt starts at that STA_DISCONNECTED; the network in use already: done.
+ * An attempt in flight, or our disconnect's event, it waits for (the loop ends an attempt after
+ * WIFI_MANAGER_USER_WAIT_MS).
+ */
+static void wifi_manager_user_next(uint8_t *retries){
+
+	if(wifi_manager_cand_state() != WM_CAND_WAITING || abort_tick != 0 || attempt_kind != CONNECTION_REQUEST_NONE){
+		return;
+	}
+
+	EventBits_t uxBits = xEventGroupGetBits(wifi_manager_event_group);
+	if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
+		if(wifi_manager_cand_is_live()){
+			ESP_LOGI(TAG, "user connect: the network in use already");
+			wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_WAITING);
+			wifi_manager_connect_cb((uint32_t)CONNECTION_REQUEST_USER | WIFI_MANAGER_CONNECT_NOT_STARTED);
+			return;
+		}
+		if(!(uxBits & WIFI_MANAGER_AP_STARTED_BIT)){
+			/* no page can see the result: the network in use is not left for it */
+			ESP_LOGW(TAG, "user connect dropped: the SoftAP is down and the STA connected");
+			wifi_manager_cand_fail(WM_CAND_WAITING, 0);
+			wifi_manager_connect_cb((uint32_t)CONNECTION_REQUEST_USER | WIFI_MANAGER_CONNECT_NOT_STARTED);
+			return;
+		}
+		esp_err_t err = esp_wifi_disconnect();
+		if(err != ESP_OK){
+			ESP_LOGW(TAG, "user connect: esp_wifi_disconnect failed (%s) - the network in use stays", esp_err_to_name(err));
+			wifi_manager_cand_fail(WM_CAND_WAITING, 0);
+			wifi_manager_connect_cb((uint32_t)CONNECTION_REQUEST_USER | WIFI_MANAGER_CONNECT_NOT_STARTED);
+			return;
+		}
+		ESP_LOGI(TAG, "user connect: leaving the network in use for the candidate");
+		wifi_manager_abort_mark(0);
+		return;
+	}
+
+	wifi_manager_start_attempt(CONNECTION_REQUEST_USER, retries);
+}
+
+/**
+ * @brief WM_ORDER_CONNECT_STA. A USER order takes its candidate (posted: waiting) and goes on as
+ * far as it can (wifi_manager_user_next()); one that finds none (a newer Connect's order took it,
+ * or a forget dropped it) starts nothing. Any other kind starts an attempt with the network in use,
+ * unless the STA is connected, an attempt or our disconnect is under way, or a user's candidate is
+ * posted or waiting: it gives way then and starts nothing.
+ */
+static void wifi_manager_order_connect(connection_request_made_by_code_t kind, uint8_t *retries){
+
+	ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA (kind %d)", (int)kind);
+
+	if(kind == CONNECTION_REQUEST_USER){
+		bool taken = false;
+		taskENTER_CRITICAL(&wm_lock);
+		if(wm_shared->cand_state == WM_CAND_POSTED){
+			wm_shared->cand_state = WM_CAND_WAITING;
+			taken = true;
+		}
+		taskEXIT_CRITICAL(&wm_lock);
+		if(!taken){
+			wifi_manager_connect_cb((uint32_t)kind | WIFI_MANAGER_CONNECT_NOT_STARTED);
+			return;
+		}
+		TickType_t now = xTaskGetTickCount();
+		user_wait_tick = (now != 0) ? now : 1;
+		wifi_manager_user_next(retries);
+		return;
+	}
+
+	EventBits_t uxBits = xEventGroupGetBits(wifi_manager_event_group);
+	uint8_t state = wifi_manager_cand_state();
+	if((uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT) || attempt_kind != CONNECTION_REQUEST_NONE || abort_tick != 0 ||
+			state == WM_CAND_POSTED || state == WM_CAND_WAITING){
+		wifi_manager_connect_cb((uint32_t)kind | WIFI_MANAGER_CONNECT_NOT_STARTED);
+		return;
+	}
+	wifi_manager_start_attempt(kind, retries);
+}
+
+/**
+ * @brief the forget (the page's Disconnect, D9, or the 10 s reset): the network in use is zeroed
+ * and saved (zero SSID and password blobs: "nothing saved"), any candidate dropped, status.json
+ * reads UPDATE_USER_DISCONNECT, and a START_AP is owed (it opens the portal window).
+ */
+static void wifi_manager_forget_now(){
+
+	memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
+	taskENTER_CRITICAL(&wm_lock);
+	wifi_manager_cand_clear_locked();
+	taskEXIT_CRITICAL(&wm_lock);
+	user_due = false;
+	wifi_manager_status_set(UPDATE_USER_DISCONNECT, WM_CAND_NONE);
+	wifi_manager_save_sta_config();
+	start_ap_due = true;
+}
+
+/**
+ * @brief the attempt of kind (CONNECTION_REQUEST_NONE: the link in use, or none) has ended without
+ * an IP, for reason: at its STA_DISCONNECTED, or when its event never came. A forget first; then
+ * a user's candidate that failed is reported (no retry after it, by design: the network in use is
+ * kept, and the app's router retry rejoins it); a candidate that waited for this end goes on
+ * (user_due), and the end is not a lost connection then; otherwise it is one (its status, and
+ * the retry timer or the AP, as before).
+ */
+static void wifi_manager_attempt_ended(uint8_t kind, uint8_t reason, EventBits_t uxBits, uint8_t *retries){
+
+	if(uxBits & WIFI_MANAGER_REQUEST_DISCONNECT_BIT){
+		/* user manually requested a disconnect so the lost connection is a normal event. Clear the flag and restart the AP */
+		xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
+		wifi_manager_forget_now();
+		return;
+	}
+	if(kind == CONNECTION_REQUEST_USER){
+		wifi_manager_cand_fail(WM_CAND_ACTIVE, reason);
+	}
+	if(wifi_manager_cand_state() == WM_CAND_WAITING){
+		user_due = true;
+		return;
+	}
+	if(kind == CONNECTION_REQUEST_USER){
+		return;
+	}
+	wifi_manager_status_set(UPDATE_LOST_CONNECTION, WM_CAND_NONE);
+	wifi_manager_retry_or_start_ap(uxBits, retries);
+}
+
+/**
+ * @brief our esp_wifi_disconnect() got no STA_DISCONNECTED in WIFI_MANAGER_ABORT_WAIT_MS. With the
+ * STA still connected nothing was left: a forget is dropped (nothing erased, as for a disconnect
+ * that fails) and a waiting candidate fails. Otherwise the attempt counts as ended, and the app is
+ * told with the STA_DISCONNECTED callback it would have had (WIFI_REASON_ASSOC_LEAVE).
+ */
+static void wifi_manager_abort_expired(uint8_t *retries){
+
+	uint8_t why = abort_reason;
+	abort_tick = 0;
+	abort_reason = 0;
+
+	EventBits_t uxBits = xEventGroupGetBits(wifi_manager_event_group);
+	if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
+		ESP_LOGW(TAG, "no STA_DISCONNECTED %d ms after esp_wifi_disconnect() - still connected, nothing changed", WIFI_MANAGER_ABORT_WAIT_MS);
+		xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
+		wifi_manager_cand_fail(WM_CAND_WAITING, 0);
+		return;
+	}
+
+	ESP_LOGW(TAG, "no STA_DISCONNECTED %d ms after esp_wifi_disconnect() - the attempt counts as ended", WIFI_MANAGER_ABORT_WAIT_MS);
+	uint8_t kind = attempt_kind;
+	attempt_kind = CONNECTION_REQUEST_NONE;
+	wifi_manager_attempt_ended(kind, why ? why : (uint8_t)WIFI_REASON_ASSOC_LEAVE, uxBits, retries);
+	if(cb_ptr_arr[WM_EVENT_STA_DISCONNECTED]) (*cb_ptr_arr[WM_EVENT_STA_DISCONNECTED])( (void*)(uintptr_t)WIFI_REASON_ASSOC_LEAVE );
+}
+
+/**
+ * @brief the deadlines of the connect ownership, at the top of the task's loop: our disconnect's
+ * event, a waiting candidate's WIFI_MANAGER_USER_WAIT_MS, a user's attempt's
+ * WIFI_MANAGER_USER_ATTEMPT_MS. Acts on those that are due; returns the ticks to the next one,
+ * portMAX_DELAY if none (0: go round again at once).
+ */
+static TickType_t wifi_manager_connect_deadlines(uint8_t *retries){
+
+	TickType_t now = xTaskGetTickCount();
+	TickType_t wait = portMAX_DELAY;
+
+	if(abort_tick != 0){
+		TickType_t since = now - abort_tick;
+		if(since >= pdMS_TO_TICKS(WIFI_MANAGER_ABORT_WAIT_MS)){
+			wifi_manager_abort_expired(retries);
+			return 0;
+		}
+		return pdMS_TO_TICKS(WIFI_MANAGER_ABORT_WAIT_MS) - since;
+	}
+
+	if(attempt_kind != CONNECTION_REQUEST_NONE && wifi_manager_cand_state() == WM_CAND_WAITING){
+		TickType_t since = now - user_wait_tick;
+		if(since >= pdMS_TO_TICKS(WIFI_MANAGER_USER_WAIT_MS)){
+			esp_err_t err = esp_wifi_disconnect();
+			if(err == ESP_OK){
+				ESP_LOGW(TAG, "user connect: the attempt in flight is ended after %d ms", WIFI_MANAGER_USER_WAIT_MS);
+				wifi_manager_abort_mark(0);
+				return 0;
+			}
+			ESP_LOGW(TAG, "user connect: esp_wifi_disconnect failed (%s) - waiting again", esp_err_to_name(err));
+			user_wait_tick = (now != 0) ? now : 1;
+			since = 0;
+		}
+		wait = pdMS_TO_TICKS(WIFI_MANAGER_USER_WAIT_MS) - since;
+	}
+
+	if(attempt_kind == CONNECTION_REQUEST_USER){
+		TickType_t since = now - attempt_tick;
+		if(since >= pdMS_TO_TICKS(WIFI_MANAGER_USER_ATTEMPT_MS)){
+			esp_err_t err = esp_wifi_disconnect();
+			if(err == ESP_OK){
+				ESP_LOGW(TAG, "user connect: no IP after %d ms - ended, the network in use stays", WIFI_MANAGER_USER_ATTEMPT_MS);
+				wifi_manager_abort_mark(WIFI_MANAGER_REASON_NO_IP);
+				return 0;
+			}
+			ESP_LOGW(TAG, "user connect: esp_wifi_disconnect failed (%s) - tried again later", esp_err_to_name(err));
+			attempt_tick = (now != 0) ? now : 1;
+			since = 0;
+		}
+		TickType_t left = pdMS_TO_TICKS(WIFI_MANAGER_USER_ATTEMPT_MS) - since;
+		if(left < wait){
+			wait = left;
+		}
+	}
+	return wait;
+}
+
+/**
+ * @brief at an IP: the driver's config is committed as the network in use if it differs from it
+ * (the user's candidate got its IP: plan C8, I13), and saved. In a frame of its own (the config,
+ * about 0.15 KB, wiped).
+ */
+static __attribute__((noinline)) void wifi_manager_commit_driver_config(){
+
+	wifi_config_t drv;
+	memset(&drv, 0x00, sizeof(drv));
+	esp_err_t err = esp_wifi_get_config(WIFI_IF_STA, &drv);
+	if(err != ESP_OK){
+		ESP_LOGW(TAG, "esp_wifi_get_config failed (%s) - the network in use is kept", esp_err_to_name(err));
+	}
+	else if(memcmp(drv.sta.ssid, wifi_manager_config_sta->sta.ssid, MAX_SSID_SIZE) != 0 ||
+			memcmp(drv.sta.password, wifi_manager_config_sta->sta.password, MAX_PASSWORD_SIZE) != 0){
+		memcpy(wifi_manager_config_sta->sta.ssid, drv.sta.ssid, MAX_SSID_SIZE);
+		memcpy(wifi_manager_config_sta->sta.password, drv.sta.password, MAX_PASSWORD_SIZE);
+		wifi_manager_config_sta->sta.channel = 0;	/* the old network's hint is not this one's */
+		ESP_LOGI(TAG, "user connect: the candidate got its IP - it is the network in use now, saved");
+		wifi_manager_save_sta_config();
+	}
+	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
 }
 
 void wifi_manager( void * pvParameters ){
@@ -1438,17 +1960,24 @@ void wifi_manager( void * pvParameters ){
 			wifi_manager_order_start_ap();
 		}
 
+		/* LOCAL PATCH (2.1.4 C8): a candidate the last message let go on (user_due), after that
+		 * message's callback; then the connect ownership's deadlines, which bound the wait */
+		if(user_due){
+			user_due = false;
+			wifi_manager_user_next(&retries);
+		}
+		TickType_t wait = wifi_manager_connect_deadlines(&retries);
+
 		/* LOCAL PATCH (2.1.4 WP1): with the AP up and one of its servers down, they are started
 		 * again every WIFI_MANAGER_AP_SERVERS_RETRY_MS between messages, and the wait for the next
 		 * message ends at the next try. Otherwise the task waits for a message as before. */
-		TickType_t wait = portMAX_DELAY;
 		if(ap_servers_down){
 			TickType_t since = xTaskGetTickCount() - ap_servers_tick;
 			if(since >= pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS)){
 				wifi_manager_start_ap_servers(true);
 				since = 0;
 			}
-			if(ap_servers_down){
+			if(ap_servers_down && pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS) - since < wait){
 				wait = pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS) - since;
 			}
 		}
@@ -1529,93 +2058,9 @@ void wifi_manager( void * pvParameters ){
 
 				break;
 
-			case WM_ORDER_CONNECT_STA:{
-				ESP_LOGI(TAG, "MESSAGE: ORDER_CONNECT_STA");
-
-				/* LOCAL PATCH (2.1.4 C2c): esp_wifi_set_config() and esp_wifi_connect() were each under
-				 * ESP_ERROR_CHECK, and both fail at runtime: ESP_ERR_WIFI_STATE when an attempt is still
-				 * connecting (a portal Submit, the app's router retry and the retry timer each send their
-				 * own) or a scan cannot stop in time, ESP_ERR_WIFI_SSID for an empty SSID (the retry timer
-				 * after a forget), others at low heap. A connect that does not start is now a failed
-				 * attempt of its kind (below), and nothing reboots. */
-				connection_request_made_by_code_t request = (connection_request_made_by_code_t)(uintptr_t)msg.param;
-				esp_err_t connect_err = ESP_OK;
-				bool config_failed = false;
-
-				uxBits = xEventGroupGetBits(wifi_manager_event_group);
-				if( ! (uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT) ){
-					/* update config to latest and attempt connection */
-					connect_err = esp_wifi_set_config(ESP_IF_WIFI_STA, wifi_manager_get_wifi_sta_config());
-					config_failed = (connect_err != ESP_OK);
-
-					if(!config_failed){
-						/* if there is a wifi scan in progress abort it first
-						   Calling esp_wifi_scan_stop will trigger a SCAN_DONE event which will reset this bit */
-						if(uxBits & WIFI_MANAGER_SCAN_BIT){
-							esp_wifi_scan_stop();
-						}
-						connect_err = esp_wifi_connect();
-					}
-
-					if(connect_err == ESP_OK){
-						/* very important: precise that this connection attempt is specifically requested.
-						 * Param in that case is a boolean indicating if the request was made automatically
-						 * by the wifi_manager.
-						 * LOCAL PATCH (2.1.4 C2c): set once the attempt has started, never for one that did
-						 * not, nor with the STA connected (no attempt starts then): a bit left set was read
-						 * by a later, unrelated disconnect as this request's failure, with no retry and no
-						 * AP after it.
-						 * */
-						if(request == CONNECTION_REQUEST_USER) {
-							xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
-						}
-						else if(request == CONNECTION_REQUEST_RESTORE_CONNECTION) {
-							xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
-						}
-					}
-					else{
-						ESP_LOGW(TAG, "ORDER_CONNECT_STA: %s failed (%s) - attempt not started",
-								config_failed ? "esp_wifi_set_config" : "esp_wifi_connect", esp_err_to_name(connect_err));
-
-						if(request == CONNECTION_REQUEST_USER){
-							/* a user's request (the portal page's Connect, or the app's router retry): its
-							 * status reads failed, for the SSID it asked for, as for an attempt that fails */
-							if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
-								wifi_manager_generate_ip_info_json( UPDATE_FAILED_ATTEMPT );
-								wifi_manager_unlock_json_buffer();
-							}
-							/* what the page wrote into the RAM copy is dropped if the driver refused it:
-							 * the copy goes back to the network the driver has. An attempt still
-							 * connecting to that one then saves and reports that one at its IP, not what
-							 * was typed, and the app's router retry tries it. */
-							if(config_failed && wifi_manager_config_sta){
-								esp_wifi_get_config(ESP_IF_WIFI_STA, wifi_manager_config_sta);
-							}
-						}
-						else{
-							/* an automatic retry or the restore at boot: as a lost connection, its status
-							 * and the next retry or the AP (C5: no retry timer with the AP up) */
-							if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
-								wifi_manager_generate_ip_info_json( UPDATE_LOST_CONNECTION );
-								wifi_manager_unlock_json_buffer();
-							}
-							wifi_manager_retry_or_start_ap(uxBits, &retries);
-						}
-					}
-				}
-
-				/* callback */
-				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
-
-				/* LOCAL PATCH (2.1.4 C2c): an attempt that did not start ends here for the app too, which
-				 * counts one from the callback above: its STA_DISCONNECTED callback, with the reason
-				 * WIFI_REASON_CONNECTION_FAIL, as after an attempt that failed. Not with the STA
-				 * connected: nothing started or ended then. */
-				if(connect_err != ESP_OK && cb_ptr_arr[WM_EVENT_STA_DISCONNECTED]){
-					(*cb_ptr_arr[WM_EVENT_STA_DISCONNECTED])( (void*)(uintptr_t)WIFI_REASON_CONNECTION_FAIL );
-				}
-
-				}
+			case WM_ORDER_CONNECT_STA:
+				/* LOCAL PATCH (2.1.4 C8): one owner for every attempt (see wm_shared at the top) */
+				wifi_manager_order_connect((connection_request_made_by_code_t)(uintptr_t)msg.param, &retries);
 				break;
 
 			case WM_EVENT_STA_DISCONNECTED:
@@ -1641,6 +2086,11 @@ void wifi_manager( void * pvParameters ){
 				 *  If WIFI_MANAGER_REQUEST_STA_CONNECT_BIT and WIFI_MANAGER_REQUEST_STA_CONNECT_BIT are NOT set, it's a lost connection
 				 *
 				 *  In this version of the software, reason codes are not used. They are indicated here for potential future usage.
+				 *
+				 *  LOCAL PATCH (2.1.4 C8): the request bits above are gone. attempt_kind (the attempt in
+				 *  flight) and the forget's WIFI_MANAGER_REQUEST_DISCONNECT_BIT decide, in
+				 *  wifi_manager_attempt_ended(); a user's candidate that fails reports its reason in
+				 *  status.json ("reason"), which the page turns into a text.
 				 *
 				 *  REASON CODE:
 				 *  1		UNSPECIFIED
@@ -1684,52 +2134,18 @@ void wifi_manager( void * pvParameters ){
 				 * and a stop sent now reaches it after that re-arm */
 				xTimerStop( wifi_manager_shutdown_ap_timer, (TickType_t)0 );
 
-				uxBits = xEventGroupGetBits(wifi_manager_event_group);
-				if( uxBits & WIFI_MANAGER_REQUEST_STA_CONNECT_BIT ){
-					/* there are no retries when it's a user requested connection by design. This avoids a user hanging too much
-					 * in case they typed a wrong password for instance. Here we simply clear the request bit and move on */
-					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
-
-					if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
-						wifi_manager_generate_ip_info_json( UPDATE_FAILED_ATTEMPT );
-						wifi_manager_unlock_json_buffer();
-					}
-
-				}
-				else if (uxBits & WIFI_MANAGER_REQUEST_DISCONNECT_BIT){
-					/* user manually requested a disconnect so the lost connection is a normal event. Clear the flag and restart the AP */
-					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
-
-					/* erase configuration */
-					if(wifi_manager_config_sta){
-						memset(wifi_manager_config_sta, 0x00, sizeof(wifi_config_t));
-					}
-
-					/* regenerate json status */
-					if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
-						wifi_manager_generate_ip_info_json( UPDATE_USER_DISCONNECT );
-						wifi_manager_unlock_json_buffer();
-					}
-
-					/* save NVS memory */
-					wifi_manager_save_sta_config();
-
-					/* start SoftAP (LOCAL PATCH 2.1.4 C6: owed, not posted to this task's own queue) */
-					start_ap_due = true;
-				}
-				else{
-					/* lost connection ? */
-					if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
-						wifi_manager_generate_ip_info_json( UPDATE_LOST_CONNECTION );
-						wifi_manager_unlock_json_buffer();
-					}
-
-					/* if it was a restore attempt connection, we clear the bit */
-					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
-
-					/* the retry timer and the count towards the AP (LOCAL PATCH 2.1.4 C2c: shared with a
-					 * connect that does not start) */
-					wifi_manager_retry_or_start_ap(uxBits, &retries);
+				/* LOCAL PATCH (2.1.4 C8): the attempt, or the link, has ended (see
+				 * wifi_manager_attempt_ended()): a forget first, then a user's candidate, then a
+				 * lost connection. An end our own disconnect asked for reports its reason for a
+				 * user's attempt (no IP in time) in place of the driver's. */
+				{
+					uxBits = xEventGroupGetBits(wifi_manager_event_group);
+					uint8_t kind = attempt_kind;
+					uint8_t why = (abort_tick != 0 && abort_reason != 0) ? abort_reason : disconnect_reason;
+					attempt_kind = CONNECTION_REQUEST_NONE;
+					abort_tick = 0;
+					abort_reason = 0;
+					wifi_manager_attempt_ended(kind, why, uxBits, &retries);
 				}
 
 				/* callback */
@@ -1814,33 +2230,24 @@ void wifi_manager( void * pvParameters ){
 				uint32_t got_ip = (uint32_t)(uintptr_t)msg.param;
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
 
-				/* reset connection requests bits -- doesn't matter if it was set or not */
-				xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_STA_CONNECT_BIT);
+				/* LOCAL PATCH (2.1.4 C8): the attempt is over. An esp_wifi_disconnect() of ours that
+				 * crossed this IP still has its STA_DISCONNECTED to come (abort_tick stays). */
+				attempt_kind = CONNECTION_REQUEST_NONE;
 
 				/* save IP as a string for the HTTP server host */
 				wifi_manager_safe_update_sta_ip_string(got_ip);
 
-				/* save wifi config in NVS if it wasn't a restored of a connection */
-				if(uxBits & WIFI_MANAGER_REQUEST_RESTORE_STA_BIT){
-					xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_RESTORE_STA_BIT);
-				}
-				else{
-					wifi_manager_save_sta_config();
-				}
+				/* LOCAL PATCH (2.1.4 C8): the config that got this IP is the network in use from now
+				 * on, saved if it is new (a user's candidate): before, every IP but the boot
+				 * restore's saved the RAM config, which a Connect had already overwritten */
+				wifi_manager_commit_driver_config();
 
 				/* reset number of retries */
 				retries = 0;
 
-				/* refresh JSON with the new IP */
-				if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
-					/* generate the connection info with success */
-					wifi_manager_generate_ip_info_json( UPDATE_CONNECTION_OK );
-					wifi_manager_unlock_json_buffer();
-				}
-				else{
-					/* LOCAL PATCH (2.1.4 C2d): logged, not abort() (an unbounded wait: only a missing mutex fails it) */
-					ESP_LOGE(TAG, "could not get access to json mutex in WM_EVENT_STA_GOT_IP");
-				}
+				/* refresh the status with the new IP (LOCAL PATCH 2.1.4 C8: and the candidate whose
+				 * attempt got it ends, in the same lock) */
+				wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_ACTIVE);
 
 				/* LOCAL PATCH (2.1.4 C4): the DNS hijack is no longer brought down here. It stays up with
 				 * the AP until STOP_AP, so a phone that joins or re-joins the AP in its tail (the setup
@@ -1873,30 +2280,55 @@ void wifi_manager( void * pvParameters ){
 				/* callback */
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
 
+				/* LOCAL PATCH (2.1.4 C8): a candidate that waited for this attempt goes on now (it
+				 * leaves this network for its own), after the callback */
+				if(wifi_manager_cand_state() == WM_CAND_WAITING){
+					user_due = true;
+				}
+
 				break;
 
 			case WM_ORDER_DISCONNECT_STA:
 				ESP_LOGI(TAG, "MESSAGE: ORDER_DISCONNECT_STA");
 
-				/* precise this is coming from a user request */
-				xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
+				/* LOCAL PATCH (2.1.4 C8): the forget (the page's Disconnect, D9 kept, and the 10 s
+				 * reset) wins over a user's candidate, which is dropped. An idle STA, with no attempt
+				 * and no disconnect of ours under way, posts no disconnect event: its saved network
+				 * is erased now (the app no longer posts that event for it). Otherwise the request bit
+				 * is set and the STA_DISCONNECTED that follows erases, before anything else it does
+				 * (wifi_manager_attempt_ended()); our disconnect's event is awaited, and the loop
+				 * erases WIFI_MANAGER_ABORT_WAIT_MS later should none come. */
+				taskENTER_CRITICAL(&wm_lock);
+				wifi_manager_cand_clear_locked();
+				taskEXIT_CRITICAL(&wm_lock);
+				user_due = false;
+				uxBits = xEventGroupGetBits(wifi_manager_event_group);
+				if(!(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT) && attempt_kind == CONNECTION_REQUEST_NONE && abort_tick == 0){
+					ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: the STA is not connected - the saved network is erased now");
+					wifi_manager_forget_now();
+				}
+				else{
+					/* precise this is coming from a user request */
+					xEventGroupSetBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
 
-				/* order wifi discconect */
-				/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK. The request bit stays set, as it
-				 * did: the next disconnect (the app's own forget event for an idle STA) still erases.
-				 * LOCAL PATCH (2.1.4 WP1): not with the STA connected (it has its IP), where no
-				 * disconnect event follows a failed call: the bit, and the app's forget waiting for
-				 * that event, would stay armed, and the next link loss, maybe days later, would erase
-				 * the saved network then. The forget is dropped instead (nothing erased, the STA
-				 * stays connected), and the callback is not called. */
-				esp_err_t disconnect_err = esp_wifi_disconnect();
-				if(disconnect_err != ESP_OK){
-					if(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT){
-						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
-						ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s) - still connected, nothing erased", esp_err_to_name(disconnect_err));
-						break;
+					/* order wifi discconect */
+					/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK.
+					 * LOCAL PATCH (2.1.4 WP1): not with the STA connected (it has its IP), where no
+					 * disconnect event follows a failed call: the bit would stay armed, and the next link
+					 * loss, maybe days later, would erase the saved network then. The forget is dropped
+					 * instead (nothing erased, the STA stays connected), and the callback is not called. */
+					esp_err_t disconnect_err = esp_wifi_disconnect();
+					if(disconnect_err != ESP_OK){
+						if(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT){
+							xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
+							ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s) - still connected, nothing erased", esp_err_to_name(disconnect_err));
+							break;
+						}
+						ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s)", esp_err_to_name(disconnect_err));
 					}
-					ESP_LOGW(TAG, "ORDER_DISCONNECT_STA: esp_wifi_disconnect failed (%s)", esp_err_to_name(disconnect_err));
+					if(abort_tick == 0){
+						wifi_manager_abort_mark(0);
+					}
 				}
 
 				/* callback */

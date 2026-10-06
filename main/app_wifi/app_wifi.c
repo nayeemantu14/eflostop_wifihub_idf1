@@ -182,13 +182,12 @@ static void portal_priority_close(const char *reason)
  * heartbeats (about 300 s) at most, half the health engine's 600 s. The page (code.js) stops
  * asking 60 s after it was last used, so a chain normally ends long before that; the long listen
  * is for a copy that does not (an older page, another client).
- * A portal submit: a CONNECT_STA that is not the router retry's (s_retry_sent) while the page is
- * open is the user's Connect. Its hold starts whatever else holds, and runs through the windows
- * until its disconnect or its IP, RADIO_HOLD_SUBMIT_MS at most: the user is waiting, and in a
- * crowded band an attempt beside the leak scan ends NO_AP_FOUND. BLE can then be off about 20 s
- * once (a period's holds, its window, the next period's holds). wifi_manager's own retries come
- * right after a link loss, normally with no page open, and keep the 2.5 s cap; one that comes
- * while a page is open counts as a submit.
+ * A portal submit: an attempt wifi_manager starts for the page's Connect (its callback's kind
+ * CONNECTION_REQUEST_USER, 2.1.4 C8). Its hold starts whatever else holds, and runs through the
+ * windows until its disconnect or its IP, RADIO_HOLD_SUBMIT_MS at most: the user is waiting, and
+ * in a crowded band an attempt beside the leak scan ends NO_AP_FOUND. BLE can then be off about
+ * 20 s once (a period's holds, its window, the next period's holds). wifi_manager's own retries
+ * come right after a link loss and keep the 2.5 s cap.
  * None while the STA is connected (it has its air time then, and BLE never pauses for nothing):
  * app_wifi_radio_hold_active() reads false and the callbacks set nothing. None is set in the
  * portal window either, where BLE is paused already. Unlike the window: no health hold (the
@@ -225,8 +224,6 @@ static volatile TickType_t s_chain_start = 0;     // a page's chain's first hold
 static volatile TickType_t s_scan_asked = 0;      // the last scan order; wifi_manager task only
 static volatile uint16_t s_page_stops = 0;        // the chain's scans stopped for BLE; wifi_manager task only
 static volatile uint8_t s_submits = 0;            // portal submits, for the log; wifi_manager task only
-static volatile uint8_t s_retry_sent = 0;         // router retries sent; wifi_task only
-static volatile uint8_t s_retry_seen = 0;         // those taken by cb_connect_sta(); wifi_manager task only
 
 // The deadline is set and still ahead, by at most RADIO_HOLD_MAX_MS. Without that bound a deadline
 // left unchanged for 2^31 ticks (248 days at 100 Hz) would read as ahead again, for 248 days; with
@@ -330,76 +327,48 @@ static const char *radio_hold_reason(TickType_t now)
 
 /* ---- Router retry --------------------------------------------------------------------------
  * wifi_manager retries a lost router 3 times, then opens the SoftAP as a router-fallback portal,
- * and its START_AP stops the retry timer (the LOCAL PATCH in wifi_manager.c, against a scan race):
- * nothing tried the router again, and on the 2026-09-29 bench the hub never rejoined once the
- * router was back. wifi_manager can also leave the STA idle with the SoftAP down: after a user
- * connect that fails (a portal submit, or this retry's own, below) it starts no retry timer and no
- * AP. So whenever the STA is down with credentials in its config, outside the portal window
- * (router_fallback()), SoftAP up or not, wifi_task asks wifi_manager for a connect once no attempt
- * has started or ended for ROUTER_RETRY_MS and none is in flight; never before wifi_manager's own
- * first attempt (its restore at boot, or a portal submit: s_attempt_tick still 0). BLE is paused
+ * and its START_AP stops the retry timer (the LOCAL PATCH in wifi_manager.c, against a scan race);
+ * while the SoftAP is up it starts none (its C5): nothing tried the router again, and on the
+ * 2026-09-29 bench the hub never rejoined once the router was back. wifi_manager can also leave
+ * the STA idle with the SoftAP down: after a Connect's attempt that fails it starts no retry and no
+ * AP. So whenever the STA is down with a network in use (credentials in wifi_manager's RAM copy),
+ * outside the portal window (router_fallback()), SoftAP up or not, wifi_task asks wifi_manager for
+ * an APP_RETRY (wifi_manager_retry_async()) once no attempt has started or ended for
+ * ROUTER_RETRY_MS and none is in flight; never before wifi_manager's own first attempt (its
+ * restore at boot, or a portal submit: s_attempt_tick still 0). BLE is paused
  * RADIO_HOLD_RETRY_LEAD_MS ahead (s_retry_until), so the leak scanner (500 ms loop) is off the
  * radio when the connect's scan for the router starts; the valve hunt (1 s poll) may still be on.
  * That hold lasts RADIO_HOLD_RETRY_MS in all, the attempt's included (the radio hold above). No
  * retry starts in a page's BLE window, or so close before one that its hold would reach into it,
  * where its attempt would run with BLE on: it waits, 6.5 s at most (RADIO_HOLD_WINDOW_MS +
- * RADIO_HOLD_RETRY_MS), or out a chain's long listen, after the page deferral below too. The order
- * is wifi_manager_connect_async() (CONNECTION_REQUEST_USER): a failure starts no retry timer and
- * no AP, it only marks the portal's status failed (UPDATE_FAILED_ATTEMPT), and an IP saves the
- * config only if it changed. The config tried is the one in RAM: the saved one, unless a portal
- * submit replaced it, one that failed or one wifi_manager ignored because the STA was connected
- * (one the driver refused is dropped: wifi_manager's C2c): then what was typed, until a reboot
- * reloads the saved one. So after a submit that does not match the router (a mistyped password,
- * another SSID) the retries fail, router back or not, until a reboot or a new submit; with the
- * SoftAP down, with no SoftAP to submit from, until a reboot (or the 10 s reset).
+ * RADIO_HOLD_RETRY_MS), or out a chain's long listen, after the page deferral below too.
+ * The network tried is the one in use: since 2.1.4 C8 a page's Connect writes it only once its
+ * candidate has an IP, so after a mistyped password, or a Connect to another network that fails,
+ * the retries go on with the working network and rejoin it when the router is back.
  * wifi_manager's own retries, its first three after a link loss with the SoftAP down, come about
- * every 10 s, so the 30 s rule adds none beside them. With the SoftAP up (the fallback portal, or
- * the setup AP left up by "Wi-Fi lost after setup") it starts none (its C5), and this retry is
- * the only one.
+ * every 10 s, so the 30 s rule adds none beside them.
  *
  * Counted from an attempt's end too, not only its start: every lost-link disconnect with the
  * SoftAP down arms wifi_manager's one-shot retry timer (WIFI_MANAGER_RETRY_TIMER, 5 s) before our
  * STA_DISCONNECTED callback runs, and only START_AP stops it. A link loss can come long after
- * the last attempt started (a link up for minutes), and a retry sent then would still be
- * connecting when that timer's CONNECT_STA arrives, which then fails to start (below).
- * ROUTER_RETRY_MS after the last disconnect the timer has fired (its attempt then counts) or
- * START_AP has stopped it. A retry therefore comes ROUTER_RETRY_MS after the previous one
- * failed, on the fallback AP or with the SoftAP down: about every 33-36 s.
+ * the last attempt started (a link up for minutes); ROUTER_RETRY_MS after the last disconnect the
+ * timer has fired (its attempt then counts) or START_AP has stopped it. A retry therefore comes
+ * ROUTER_RETRY_MS after the previous one failed, on the fallback AP or with the SoftAP down:
+ * about every 33-36 s.
  *
- * Never a second connect while one is in flight: wifi_manager's CONNECT_STA would then call
- * esp_wifi_set_config() on a connecting STA, which fails ("sta is connecting, cannot set config").
- * That was an ESP_ERROR_CHECK and a reboot; since its C2c wifi_manager counts the request as a
- * failed attempt that did not start (a submit's status reads failed, and the STA_DISCONNECTED
- * callback runs with WIFI_REASON_CONNECTION_FAIL). A portal submit (POST /connect.json) sends its
- * own, which the app cannot see coming, so no retry is sent while the portal page is open
- * (page_open(): it asked for a scan less than PAGE_OPEN_MS ago, as it does about every 3.8 s while
- * it is used, and at once when it is used again; not the scan hold, which a BLE window ends while
- * the page is still open), for at most ROUTER_RETRY_PAGE_MAX_MS since the last attempt, so a page
- * that keeps asking cannot keep the hub off its router. The retry looks at the page again after
- * its lead, and the page holds a Connect until it has been asking for 8 s, longer than an attempt
- * the retry may have started just before (code.js). A submit can still land in a retry's attempt,
- * as in one of wifi_manager's own retries, and then reads failed: after a retry that waited out
- * ROUTER_RETRY_PAGE_MAX_MS on a page in use (one every 5 min then), or when the page's requests do
- * not reach the hub.
+ * wifi_manager owns every attempt (2.1.4 C8): a retry that meets an attempt in flight, the STA
+ * connected, or a Connect's candidate starts nothing (its callback says so, and the retry counts
+ * from it), and a page's Connect never meets the retry's attempt: it waits for it, 8 s at most,
+ * then ends it. The retry still waits while the page is open (page_open()), for at most
+ * ROUTER_RETRY_PAGE_MAX_MS since the last attempt, so that a Connect rarely waits at all, and a
+ * page that keeps asking cannot keep the hub off its router.
  *
  * Attempts are tracked on the wifi_manager task: its CONNECT_STA callback starts one
- * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), its STA_DISCONNECTED callback
- * ends it and stamps s_attempt_tick again (a lost link too, and an attempt that did not start:
- * wifi_manager calls that callback right after the CONNECT_STA one then), and its GOT_IP callback
- * ends it. That synthetic disconnect (reason 205) ends whatever attempt is tracked, also one still
- * running: a portal submit that lands in the router retry's attempt is counted as a submit (its
- * hold, wifi_task's "Connect sent" line) and then ends the tracking of both, while the retry's
- * attempt goes on; a forget then is posted at once (the portal's forget below). The next retry
- * still waits ROUTER_RETRY_MS from that stamp, by when the real attempt has ended (C8 in WP4
- * replaces this). On the bench, "Connect sent" beside wifi_manager's "attempt not started" means
- * no hold took effect and no attempt of that submit ran. An attempt that neither fails nor gets
- * its IP (associated, with no DHCP answer) keeps the retry off until the STA's next disconnect,
- * since a second connect would not start; its radio hold still ends at the cap. A retry sent
- * stays pending until wifi_manager takes it (its CONNECT_STA callback restamps s_attempt_tick,
- * or finds the STA connected), however long that takes: a second order queued behind it would
- * reach a connecting STA. s_retry_sent, counted up just before the order and matched in that
- * callback (s_retry_seen), tells the retry's CONNECT_STA from a portal submit's, which comes from
- * the same wifi_manager_connect_async(). */
+ * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), or stamps s_attempt_tick only
+ * for an order that started none; its STA_DISCONNECTED callback ends it and stamps s_attempt_tick
+ * again (a lost link too), and its GOT_IP callback ends it. An attempt that associates but gets no
+ * IP keeps the retry off until its disconnect (wifi_manager ends a Connect's after 25 s). An order
+ * not queued within WIFI_MANAGER_POST_WAIT_MS (C6) is sent again on a later pass. */
 #define ROUTER_RETRY_MS           30000    // a retry once no attempt has started or ended this long
 #define ROUTER_RETRY_PAGE_MAX_MS  300000   // an open portal page defers one at most this long
 
@@ -433,20 +402,12 @@ static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end
  * only after its GOT_IP, so that it armed no timer, a SoftAP that came up after the IP):
  * wifi_task sends one STOP_AP for that IP. It takes over the portal window's old safety net.
  *
- * Automatic or a Connect: the attempt that got the IP decides. Each CONNECT_STA callback marks
- * the attempt it starts (cb_connect_sta(), s_attempt_submit): the router retry's order
- * (s_retry_sent) is automatic, and any other one is the setup page's Connect, because while
- * the SoftAP is up wifi_manager's own retry timer never runs (its C5) and its restore runs only
- * at boot, with the SoftAP down. An attempt that starts with the SoftAP down gets no tail, so
- * its mark does not matter. A disconnect ends the attempt and clears the mark, except the
- * synthetic one of wifi_manager's C2c (WIFI_REASON_CONNECTION_FAIL, 205) for a CONNECT_STA that
- * did not start: it cannot be told from an attempt that really failed with 205, and the attempt
- * that order met may still be running. So a Connect that lands in the router retry's running
- * attempt marks that attempt a Connect's: the longer tail, the side that keeps the page's
- * result up. The reverse, the router retry's order landing in a Connect's attempt, does not
- * happen with today's page: the retry waits while the page asks for its list, and the page
- * holds a Connect until it has asked for 8 s (WP4's C8 replaces this bookkeeping). Every
- * CONNECT_STA writes the mark again, so a stale one never outlives the next attempt. */
+ * Automatic or a Connect: the attempt that got the IP decides. wifi_manager starts every attempt
+ * itself, one at a time, and its CONNECT_STA callback gives the kind of each one it starts (2.1.4
+ * C8): CONNECTION_REQUEST_USER is the setup page's Connect (s_attempt_submit), any other kind is
+ * automatic. A Connect never lands in another attempt any more: it waits for it, at most 8 s, or
+ * ends it, and gets an attempt of its own. A disconnect ends the attempt and clears the mark;
+ * every attempt that starts writes it again. */
 #define AP_TAIL_AUTO_EMPTY_MS    500      // an automatic rejoin with no station on the SoftAP
 #define AP_TAIL_AUTO_MS          20000    // an automatic rejoin with a station: at the latest ...
 #define AP_TAIL_AUTO_LEFT_MS     10000    // ... or this long after the last station left
@@ -554,9 +515,9 @@ static const char *scan_note(void)
 }
 
 // WM_ORDER_START_AP (wifi_manager task), once the SoftAP, HTTP and DNS servers are up. The STA
-// config is what LOAD_AND_RESTORE read from NVS (all zero when nothing is saved), or what a
-// requested disconnect zeroed and saved just before sending this START_AP. This task writes
-// it; the portal's POST handler writes it too, but only once the AP is already up.
+// config is the network in use: what LOAD_AND_RESTORE read from NVS (all zero when nothing is
+// saved), or what a forget zeroed and saved just before this START_AP. Only the wifi_manager task
+// writes it (since 2.1.4 C8 a page's Connect changes it only at its candidate's IP).
 static void cb_ap_started(void *pvParameter)
 {
     (void)pvParameter;
@@ -607,27 +568,35 @@ static void cb_ap_stopped(void *pvParameter)
     portal_priority_close("AP stopped");
 }
 
-// WM_ORDER_CONNECT_STA (wifi_manager task), after wifi_manager's esp_wifi_connect(): a connect
-// attempt started, unless the STA already has its IP (wifi_manager then connects nothing). The
-// router retry counts from it, in the window too; the radio hold is outside the window only: a
-// portal submit's whatever else holds, wifi_manager's own only with no hold on or just over (the
+// WM_ORDER_CONNECT_STA (wifi_manager task): wifi_manager decided an order (2.1.4 C8). The
+// parameter is its kind, with WIFI_MANAGER_CONNECT_NOT_STARTED when it started no attempt (the STA
+// connected, an attempt under way, a Connect's candidate first, or the driver refused it): the
+// router retry counts from that too, and nothing else changes. An attempt that started: the router
+// retry counts from it, the SoftAP tail's kind is marked, and the radio hold is set outside the
+// window: a portal submit's whatever else holds, any other's only with no hold on or just over (the
 // router retry's own covers its attempt).
 static void cb_connect_sta(void *pvParameter)
 {
-    (void)pvParameter;
-    // The router retry's order, if wifi_task has sent one that this task has not taken yet.
-    bool retry = (s_retry_seen != s_retry_sent);
-    s_retry_seen = s_retry_sent;
-    if (s_sta_connected)
-        return;
+    uint32_t info = (uint32_t)(uintptr_t)pvParameter;
+    bool user = (info & WIFI_MANAGER_CONNECT_KIND_MASK) == CONNECTION_REQUEST_USER;
     TickType_t now = xTaskGetTickCount();
+    if (info & WIFI_MANAGER_CONNECT_NOT_STARTED)
+    {
+        if (user)
+            ESP_LOGI(WIFI_TAG, "Wi-Fi setup page: Connect - no attempt (the network in use, refused or replaced)");
+        if (!s_attempt_in_flight)
+            s_attempt_tick = (now != 0) ? now : 1;
+        return;
+    }
     s_attempt_tick = (now != 0) ? now : 1;   // 0 means "no attempt yet"
     s_attempt_in_flight = true;
     s_connect_submit = false;
-    s_attempt_submit = !retry;   // the SoftAP tail's kind, if this attempt gets the IP (see there)
+    s_attempt_submit = user;   // the SoftAP tail's kind, if this attempt gets the IP (see there)
+    if (user)
+        ESP_LOGI(WIFI_TAG, "Wi-Fi setup page: Connect - attempt started");
     if (s_portal_priority)
         return;
-    if (!retry && page_open(now))
+    if (user)
     {
         // The user's Connect on the page (see the radio hold above).
         s_connect_submit = true;
@@ -689,54 +658,14 @@ static void cb_scan_done(void *pvParameter)
 }
 
 /* ---- The portal's forget ------------------------------------------------------------------
- * The portal page's Disconnect (DELETE /connect.json) and the 10 s reset send wifi_manager a
- * DISCONNECT_STA: it sets its user-disconnect bit and calls esp_wifi_disconnect(). Only its
- * STA_DISCONNECTED handler acts on that bit: it zeroes the STA config in RAM, saves it (zero SSID
- * and password blobs over the saved ones, under its NVS lock, which it gives back) and sends
- * START_AP, whose callback opens the portal window (cb_ap_started()). A connected STA gets there
- * (if its esp_wifi_disconnect() fails, no event follows: wifi_manager then drops the forget,
- * erases nothing and calls no cb_disconnect_sta(), so no forget is left waiting). An idle one
- * (on the router outage's fallback portal, between attempts) posts no disconnect
- * event: nothing was erased, the router retry went on with the old credentials, and the bit
- * stayed set, so the next disconnect that was not a user connect's (a router outage, maybe days
- * after a new setup) would have erased whatever was saved then and reopened the portal, with BLE
- * paused until someone sets Wi-Fi up again. So for an idle STA this callback posts that event
- * itself (forget_post()): wifi_manager runs the same erase, save and START_AP as for a connected
- * STA, the bit is used up, and the hub is where the 10 s reset leaves it, without the reboot.
- * Other handlers see the event too: the default netif handler takes the STA interface down, which
- * it already is, and cb_connection_lost() prints "WiFi Disconnected. Reason: 8", as for a
- * connected STA's forget. With an attempt in flight, or the STA connected, the driver's own
- * disconnect event follows, and wifi_manager erases unless that attempt was a user connect (a
- * portal submit or the router retry, one that started: wifi_manager's C2c), whose failure branch
- * it takes first, leaving the bit set: cb_connection_lost() then posts the event, the STA being
- * idle by then (s_forget_pending). The window, the router retry (no credentials: none) and the
- * page (its scan view) then behave as after the reset. wifi_manager task only. */
-static volatile bool s_forget_pending = false;   // a forget waits for its disconnect; wifi_manager task only
-
-static void forget_post(void)
-{
-    wifi_event_sta_disconnected_t ev = { 0 };
-    ev.reason = WIFI_REASON_ASSOC_LEAVE;   // what a connected STA's forget reports
-    // A bounded wait: the event loop can itself be waiting for room in this task's queue.
-    esp_err_t err = esp_event_post(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &ev, sizeof(ev),
-                                   pdMS_TO_TICKS(100));
-    if (err == ESP_OK)
-        ESP_LOGW(WIFI_TAG, "Wi-Fi forget with the STA not connected - wifi_manager erases the saved network");
-    else
-        ESP_LOGE(WIFI_TAG, "Wi-Fi forget: disconnect event not posted (%s) - the saved network is kept",
-                 esp_err_to_name(err));
-}
-
-// WM_ORDER_DISCONNECT_STA (wifi_manager task), after wifi_manager's esp_wifi_disconnect(): the
-// portal's forget or the 10 s reset (see above).
-static void cb_disconnect_sta(void *pvParameter)
-{
-    (void)pvParameter;
-    if (s_sta_connected || s_attempt_in_flight)
-        s_forget_pending = true;
-    else
-        forget_post();
-}
+ * The portal page's Disconnect (DELETE /connect.json, kept: D9) and the 10 s reset send
+ * wifi_manager a DISCONNECT_STA. Since 2.1.4 C8 wifi_manager does the whole forget itself, in
+ * every state of the STA: idle, it erases at once (zero SSID and password over the saved ones,
+ * and START_AP, whose callback opens the portal window: cb_ap_started()); connecting or connected,
+ * the STA_DISCONNECTED that follows erases before anything else it does, and one that never comes
+ * erases 2 s later. A forget also drops a Connect's candidate. The app's own forget (an event it
+ * posted for an idle STA, and a forget it kept pending through a user connect) is gone with it:
+ * nothing of it is left waiting for a later link loss. */
 
 /* ---- Portal client log (the G0 bench baseline) --------------------------------------------
  * When each phone on the SoftAP joined, got its DHCP lease, and first asked the captive DNS, got
@@ -1005,8 +934,6 @@ void app_wifi_start()
     wifi_manager_set_callback(WM_ORDER_CONNECT_STA, &cb_connect_sta);
     wifi_manager_set_callback(WM_ORDER_START_WIFI_SCAN, &cb_scan_start);
     wifi_manager_set_callback(WM_EVENT_SCAN_DONE, &cb_scan_done);
-    // The portal's forget and the 10 s reset. Nothing else registers it.
-    wifi_manager_set_callback(WM_ORDER_DISCONNECT_STA, &cb_disconnect_sta);
 #if CONFIG_APP_BENCH_DIAG
     // Bench build (main/Kconfig.projbuild): wifi_manager_start() turned the Wi-Fi driver's log
     // off; back to INFO, so the bench log has its channel switch and CSA (csa_count) lines. The
@@ -1085,12 +1012,9 @@ void cb_connection_lost(void *pvParameter)
                  radio_channel(), (unsigned)s_router_channel, scan_note());
 
     // No IP any more: no SoftAP tail and no backstop (a SoftAP that is up stays up, as a
-    // router-fallback portal). The attempt's mark ends with it, except for the synthetic
-    // disconnect of a CONNECT_STA that did not start: the attempt that order met may still be
-    // running (see the SoftAP's tail above).
+    // router-fallback portal). The attempt's mark ends with it (see the SoftAP's tail above).
     s_ip_tick = 0;
-    if (reason != WIFI_REASON_CONNECTION_FAIL)
-        s_attempt_submit = false;
+    s_attempt_submit = false;
 
     // The link was lost, or a connect attempt ended, and its radio hold with it (the deadline stays
     // for RADIO_HOLD_GAP_MS). The router retry counts from here too: this disconnect may have armed
@@ -1118,17 +1042,6 @@ void cb_connection_lost(void *pvParameter)
             s_setup_ok_tick = 0;
     }
 
-    // A forget sent while an attempt ran or the STA was connected: if wifi_manager took a user
-    // connect's branch for this disconnect, it erased nothing and its disconnect bit is still set,
-    // so the forget's event is posted now, the STA being idle (see the portal's forget above).
-    if (s_forget_pending)
-    {
-        s_forget_pending = false;
-        const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
-        if (sta != NULL && sta->sta.ssid[0] != '\0')
-            forget_post();
-    }
-
     // Network LED -> "no internet" (ramp red). This also clears the MQTT flag
     // inside net_status so a later reconnect shows "connecting" first.
     net_status_set_wifi(false);
@@ -1151,8 +1064,6 @@ typedef struct
     TickType_t page_since;   // when that first line was printed
     bool long_on;            // that chain is in its long listen, and its line is printed
     uint8_t submits;         // s_submits as last seen
-    TickType_t retry_mark;   // s_attempt_tick when the last router retry was set up
-    bool retry_pending;      // that retry is sent and wifi_manager has not taken it yet
     unsigned retries;        // router retries sent since the fallback began
     bool defer_logged;       // the "retry deferred" line is printed for the page open now
     TickType_t tail_ip;      // the IP (s_ip_tick) whose SoftAP tail is followed, 0 = none
@@ -1231,15 +1142,11 @@ static bool router_fallback(void)
 }
 
 // The router retry (see above), on every wifi_task pass: every second while the STA is down.
-// wifi_manager_connect_async() waits for room in wifi_manager's queue, so it is sent from here,
-// never from a wifi_manager callback.
+// wifi_manager_retry_async() waits up to WIFI_MANAGER_POST_WAIT_MS for room in wifi_manager's
+// queue, so it is sent from here, never from a wifi_manager callback.
 static void router_retry(wifi_task_state_t *st)
 {
     TickType_t now = xTaskGetTickCount();
-    // Taken: its attempt started (or another one started or ended), or the STA has its IP.
-    if (st->retry_pending && (s_sta_connected || s_attempt_tick != st->retry_mark))
-        st->retry_pending = false;
-
     if (!router_fallback())
     {
         st->retries = 0;
@@ -1247,11 +1154,11 @@ static void router_retry(wifi_task_state_t *st)
         return;
     }
     // Since the last attempt started or ended. None before wifi_manager's first: at boot its
-    // restore's CONNECT_STA can still be queued, and a retry then would reach a connecting STA.
+    // restore's CONNECT_STA can still be queued (a retry then would start nothing).
     if (s_attempt_tick == 0)
         return;
     TickType_t age = now - s_attempt_tick;
-    if (s_attempt_in_flight || st->retry_pending || age < pdMS_TO_TICKS(ROUTER_RETRY_MS))
+    if (s_attempt_in_flight || age < pdMS_TO_TICKS(ROUTER_RETRY_MS))
         return;
     if (page_open(now) && age < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS))
     {
@@ -1274,7 +1181,7 @@ static void router_retry(wifi_task_state_t *st)
     if (!hold_running(s_scan_until, now) && radio_hold_near(now))
         return;
 
-    st->retry_mark = s_attempt_tick;
+    TickType_t mark = s_attempt_tick;
     s_retry_until = hold_deadline(RADIO_HOLD_RETRY_MS);
     radio_hold_log(st);   // its ON line comes before the retry's
     vTaskDelay(pdMS_TO_TICKS(RADIO_HOLD_RETRY_LEAD_MS));
@@ -1283,22 +1190,18 @@ static void router_retry(wifi_task_state_t *st)
     // or the config changed. Then nothing is sent, and the hold runs out: it covers an attempt that
     // started in it, which took no hold of its own.
     now = xTaskGetTickCount();
-    if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != st->retry_mark ||
+    if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != mark ||
         (page_open(now) && now - s_attempt_tick < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)))
         return;
-    s_retry_sent++;   // before the order: cb_connect_sta() tells it from a portal submit
-    // The order waits WIFI_MANAGER_POST_WAIT_MS at most for room in wifi_manager's queue (2.1.4
-    // C6); one not taken is not pending, and the next pass tries again.
-    if (!wifi_manager_connect_async())
+    // Not queued within WIFI_MANAGER_POST_WAIT_MS (2.1.4 C6): tried again on a later pass.
+    if (!wifi_manager_retry_async())
     {
-        s_retry_sent--;
         ESP_LOGW(WIFI_TAG, "router fallback: retry not sent (wifi_manager queue full)");
         return;
     }
-    st->retry_pending = true;
     st->retries++;
-    // "configured", not "saved": after a portal submit that failed, or one made while the STA was
-    // connected, the STA config in RAM holds what was typed (see the router retry above).
+    // The network in use (2.1.4 C8: never what a failed Connect typed); "configured" kept for the
+    // bench logs.
     ESP_LOGI(WIFI_TAG, "router fallback: retrying the configured network (attempt %u)", st->retries);
 }
 

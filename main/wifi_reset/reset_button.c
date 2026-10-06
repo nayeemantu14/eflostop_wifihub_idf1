@@ -169,20 +169,19 @@ static void execute_wifi_reset(void)
      * AP mode for reconfiguration. Whatever the STA is doing: connected, idle on a
      * router-outage fallback portal, or already in the setup portal.
      *
-     * wifi_manager_disconnect_async() comes first: with the STA connected it leaves
-     * the router cleanly ("WiFi Disconnected. Reason: 8"), and wifi_manager's
-     * STA_DISCONNECTED handler zeroes its RAM copy and saves that. That handler is
-     * wifi_manager's only erase, though, and an idle STA never reaches it: no
-     * disconnect event comes. On the router-outage fallback portal the STA is idle
-     * (START_AP stops the retry timer), so a reset there used to keep the credentials,
-     * and with them a fallback AP that keeps BLE scanning: a customer whose router
-     * password changed could not reconfigure the hub (2026-09-29 bench capture). So
-     * after the 2 s wait erase_wifi_credentials() erases them straight from NVS, in
-     * every state, and keeps wifi_manager from saving them again before the reboot.
-     * To wifi_manager this disconnect is the portal's forget, and for an idle STA
-     * app_wifi.c's forget callback now posts that disconnect event itself, so the
-     * handler's erase (and its START_AP) runs within the 2 s too; the erase below
-     * still makes sure, the post being able to fail.
+     * wifi_manager_disconnect_async() comes first: to wifi_manager it is the portal's
+     * forget. With the STA connected it leaves the router cleanly ("WiFi Disconnected.
+     * Reason: 8"), and wifi_manager's STA_DISCONNECTED handling zeroes its RAM copy
+     * and saves that. Since 2.1.4 C8 wifi_manager also forgets an idle STA itself (on
+     * the router-outage fallback portal the STA is idle: no disconnect event comes)
+     * and one that is connecting, with no help from app_wifi.c: it erases at once, or
+     * at that attempt's disconnect, within the 2 s below. Before 2.1.4 a reset with an
+     * idle STA kept the credentials, and with them a fallback AP that keeps BLE
+     * scanning: a customer whose router password changed could not reconfigure the
+     * hub (2026-09-29 bench capture). The request waits 200 ms at most for room in
+     * wifi_manager's queue (C6), and erase_wifi_credentials() erases straight from NVS
+     * after the 2 s wait in every case, whether the request was taken or not, and
+     * keeps wifi_manager from saving the credentials again before the reboot.
      *
      * We then reboot. A fresh boot gives the SoftAP captive portal a less fragmented
      * heap than the running one, with no MQTT/TLS session loaded (without Wi-Fi

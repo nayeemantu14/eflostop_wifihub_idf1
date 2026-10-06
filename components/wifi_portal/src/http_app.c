@@ -95,6 +95,10 @@ static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 /* a refused session is logged at most once in this long (with the count since the server start) */
 #define HTTP_APP_REFUSE_LOG_MS		10000
 
+/* LOCAL PATCH (2.1.4 C8): the room for an X-Custom-* credential header's value, terminator
+ * included: a 64-byte password percent-encoded is 192 characters. A longer value gets 400. */
+#define HTTP_APP_CRED_HDR_SIZE		(3 * MAX_PASSWORD_SIZE + 1)
+
 /* LOCAL PATCH (2.1.4 C6): refused sessions since the server start, and when the last W line was
  * printed (httpd task only) */
 static uint32_t http_app_refused = 0;
@@ -368,6 +372,161 @@ static esp_err_t http_app_refuse(httpd_req_t *req){
 }
 
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): fills n bytes with zeros with stores the compiler keeps (the
+ * password's copies on the stack; a memset() of a buffer about to go out of scope may be removed).
+ */
+static void http_app_wipe(void *p, size_t n){
+	volatile uint8_t *v = (volatile uint8_t*)p;
+	while(n--){
+		*v++ = 0;
+	}
+}
+
+static int http_app_hex(char c){
+	if(c >= '0' && c <= '9') return c - '0';
+	if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+	if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+	return -1;
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): reads the credential header field into out (at most out_max
+ * bytes) and its length into *out_len (0 when the header is absent or empty). With pct (the page's
+ * "X-Custom-enc: pct") the value is percent-decoded: "%XX" is the byte XX, every other character
+ * is itself ("+" included); without it the value is taken as it is (an older page's raw header,
+ * whose spaces at either end HTTP itself drops). The length is checked after decoding. tmp
+ * (HTTP_APP_CRED_HDR_SIZE) holds the value meanwhile; the caller wipes it.
+ * @return NULL, or the reason for the 400: "enc" (a "%" without two hex digits after it), or what
+ * (a value too long, or one holding a NUL byte).
+ */
+static const char *http_app_read_cred(httpd_req_t *req, const char *field, bool pct, char *tmp,
+		uint8_t *out, size_t out_max, size_t *out_len, const char *what){
+
+	*out_len = 0;
+	size_t len = httpd_req_get_hdr_value_len(req, field);
+	if(len == 0){
+		return NULL;
+	}
+	if(len >= HTTP_APP_CRED_HDR_SIZE || httpd_req_get_hdr_value_str(req, field, tmp, HTTP_APP_CRED_HDR_SIZE) != ESP_OK){
+		return what;
+	}
+
+	size_t o = 0;
+	for(size_t i = 0; i < len; i++){
+		int byte = (unsigned char)tmp[i];
+		if(pct && byte == '%'){
+			/* tmp ends with its terminator at len: a "%" at the end reads it, never past it */
+			int hi = http_app_hex(tmp[i + 1]);
+			int lo = (hi >= 0) ? http_app_hex(tmp[i + 2]) : -1;
+			if(hi < 0 || lo < 0){
+				return "enc";
+			}
+			byte = (hi << 4) | lo;
+			i += 2;
+		}
+		if(byte == 0 || o >= out_max){
+			return what;
+		}
+		out[o++] = (uint8_t)byte;
+	}
+	*out_len = o;
+	return NULL;
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8): POST /connect.json, the page's Connect: the intake of a candidate.
+ * Headers: X-Custom-ssid (1-32 bytes), X-Custom-pwd (0-64 bytes: empty or absent for an open
+ * network; 64 bytes only as 64 hex digits, a WPA PSK), X-Custom-enc: pct (both percent-encoded;
+ * absent: both raw, as before), X-Custom-chan (the network's channel, 1-14, a hint only; anything
+ * else is ignored). Lengths are checked after decoding. 400 with {"err":"ssid"|"pwd"|"enc"} for a
+ * bad request, 503 when wifi_manager's queue has no room (C6), 200 once the candidate is queued:
+ * status.json then shows it in "pend" until it is decided. The network in use changes only when
+ * the candidate gets an IP (wifi_manager_connect_user_async()). In a frame of its own; the
+ * password's copies are wiped before it returns. Never logs a credential (C1).
+ */
+static __attribute__((noinline)) esp_err_t http_app_post_connect(httpd_req_t *req){
+
+	char tmp[HTTP_APP_CRED_HDR_SIZE];
+	uint8_t ssid[MAX_SSID_SIZE];
+	uint8_t pwd[MAX_PASSWORD_SIZE];
+	size_t ssid_len = 0, pwd_len = 0;
+	const char *err = NULL;
+	bool pct = false;
+
+	/* the encoding flag: "pct", or absent */
+	size_t enc_len = httpd_req_get_hdr_value_len(req, "X-Custom-enc");
+	if(enc_len){
+		pct = enc_len < sizeof(tmp) && httpd_req_get_hdr_value_str(req, "X-Custom-enc", tmp, sizeof(tmp)) == ESP_OK &&
+				strcasecmp(tmp, "pct") == 0;
+		if(!pct){
+			err = "enc";
+		}
+	}
+	if(err == NULL){
+		err = http_app_read_cred(req, "X-Custom-ssid", pct, tmp, ssid, sizeof(ssid), &ssid_len, "ssid");
+	}
+	if(err == NULL && ssid_len == 0){
+		err = "ssid";
+	}
+	if(err == NULL){
+		err = http_app_read_cred(req, "X-Custom-pwd", pct, tmp, pwd, sizeof(pwd), &pwd_len, "pwd");
+	}
+	if(err == NULL && pwd_len == MAX_PASSWORD_SIZE){
+		for(size_t i = 0; i < pwd_len; i++){
+			if(http_app_hex((char)pwd[i]) < 0){
+				err = "pwd";
+				break;
+			}
+		}
+	}
+
+	/* the channel hint */
+	uint8_t chan = 0;
+	size_t chan_len = httpd_req_get_hdr_value_len(req, "X-Custom-chan");
+	if(err == NULL && chan_len > 0 && chan_len <= 2 && httpd_req_get_hdr_value_str(req, "X-Custom-chan", tmp, sizeof(tmp)) == ESP_OK){
+		int c = 0;
+		for(size_t i = 0; i < chan_len && tmp[i] >= '0' && tmp[i] <= '9'; i++){
+			c = c * 10 + (tmp[i] - '0');
+		}
+		chan = (c >= 1 && c <= 14) ? (uint8_t)c : 0;
+	}
+	http_app_wipe(tmp, sizeof(tmp));
+
+	if(err != NULL){
+		char body[24];
+		int n = snprintf(body, sizeof(body), "{\"err\":\"%s\"}", err);
+		ESP_LOGW(TAG, "POST connect.json refused (400): %s", err);
+		httpd_resp_set_status(req, http_400_hdr);
+		httpd_resp_set_type(req, http_content_type_json);
+		httpd_resp_send(req, body, (n > 0 && (size_t)n < sizeof(body)) ? n : 0);
+	}
+	else{
+		/* LOCAL PATCH (2.1.4 C1): no credential in the log, the password's length only */
+		ESP_LOGI(TAG, "ssid: %.*s, pwd_len: %u, chan: %u", (int)ssid_len, (const char*)ssid, (unsigned)pwd_len, (unsigned)chan);
+		bool queued = wifi_manager_connect_user_async(ssid, ssid_len, pwd, pwd_len, chan);
+		httpd_resp_set_status(req, queued ? http_200_hdr : http_503_hdr);
+		httpd_resp_set_type(req, http_content_type_json);
+		httpd_resp_send(req, NULL, 0);
+	}
+
+	http_app_wipe(pwd, sizeof(pwd));
+	return ESP_OK;
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C8, C6): GET /status.json: formatted on this task's stack from a copy
+ * taken under the status's own lock, and sent with no lock held (wifi_manager_status_json()).
+ */
+static __attribute__((noinline)) esp_err_t http_app_send_status(httpd_req_t *req){
+	char buf[WIFI_MANAGER_STATUS_JSON_SIZE];
+	size_t len = wifi_manager_status_json(buf, sizeof(buf));
+	httpd_resp_set_status(req, http_200_hdr);
+	httpd_resp_set_type(req, http_content_type_json);
+	return http_app_send(req, buf, len);
+}
+
+
 static esp_err_t http_server_delete_handler(httpd_req_t *req){
 
 	/* LOCAL PATCH (2.1.4 C3): only for a client on the SoftAP (the portal's forget, D9, is kept).
@@ -418,50 +577,9 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 
 		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip); /* LOCAL PATCH (2.1.4 C10a) */
 
-		/* buffers for the headers
-		 * LOCAL PATCH (2.1.4 C2g): on the stack, where two malloc()s per request were used unchecked.
-		 * The password's copy is cleared before the handler returns. */
-		size_t ssid_len = 0, password_len = 0;
-		char ssid[MAX_SSID_SIZE + 1];
-		char password[MAX_PASSWORD_SIZE + 1];
-		wifi_config_t* config = wifi_manager_get_wifi_sta_config();
-
-		/* len of values provided */
-		ssid_len = httpd_req_get_hdr_value_len(req, "X-Custom-ssid");
-		password_len = httpd_req_get_hdr_value_len(req, "X-Custom-pwd");
-
-		/* get the actual value of the headers */
-		bool valid = ssid_len && ssid_len <= MAX_SSID_SIZE && password_len && password_len <= MAX_PASSWORD_SIZE &&
-				httpd_req_get_hdr_value_str(req, "X-Custom-ssid", ssid, sizeof(ssid)) == ESP_OK &&
-				httpd_req_get_hdr_value_str(req, "X-Custom-pwd", password, sizeof(password)) == ESP_OK;
-
-		if(valid && config != NULL){
-
-			memset(config, 0x00, sizeof(wifi_config_t));
-			memcpy(config->sta.ssid, ssid, ssid_len);
-			memcpy(config->sta.password, password, password_len);
-			/* LOCAL PATCH (2.1.4 C1): no credential in the log, the password's length only */
-			ESP_LOGI(TAG, "ssid: %s, pwd_len: %u", ssid, (unsigned)password_len);
-			ESP_LOGD(TAG, "http_server_post_handler: wifi_manager_connect_async() call");
-			/* LOCAL PATCH (2.1.4 C6): 503 when wifi_manager's queue has no room within its bound */
-			httpd_resp_set_status(req, wifi_manager_connect_async() ? http_200_hdr : http_503_hdr);
-			httpd_resp_set_type(req, http_content_type_json);
-			httpd_resp_send(req, NULL, 0);
-
-		}
-		else if(valid){
-			/* LOCAL PATCH (2.1.4 C2g): no STA config to write into (never, once the start succeeded) */
-			httpd_resp_set_status(req, http_503_hdr);
-			httpd_resp_send(req, NULL, 0);
-		}
-		else{
-			/* bad request the authentification header is not complete/not the correct format */
-			httpd_resp_set_status(req, http_400_hdr);
-			httpd_resp_send(req, NULL, 0);
-		}
-
-		memset(password, 0x00, sizeof(password));
-
+		/* LOCAL PATCH (2.1.4 C8): the candidate's intake (it wrote the network in use directly,
+		 * with no decoding, no open network and a dead-store memset of its password copy) */
+		ret = http_app_post_connect(req);
 	}
 	else{
 
@@ -583,26 +701,9 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 			http_app_note_activity(HTTP_APP_ACT_STATUS, client_ip);
 
-			if(wifi_manager_lock_json_buffer(( TickType_t ) 10)){
-				char *buff = wifi_manager_get_ip_info_json();
-				if(buff){
-					httpd_resp_set_status(req, http_200_hdr);
-					httpd_resp_set_type(req, http_content_type_json);
-					http_app_send(req, buff, strlen(buff));	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
-					wifi_manager_unlock_json_buffer();
-				}
-				else{
-					/* LOCAL PATCH (2.1.4 C2g): the json lock is given back here too (it was kept) */
-					wifi_manager_unlock_json_buffer();
-					httpd_resp_set_status(req, http_503_hdr);
-					httpd_resp_send(req, NULL, 0);
-				}
-			}
-			else{
-				httpd_resp_set_status(req, http_503_hdr);
-				httpd_resp_send(req, NULL, 0);
-				ESP_LOGE(TAG, "http_server_netconn_serve: GET /status.json failed to obtain mutex");
-			}
+			/* LOCAL PATCH (2.1.4 C8, C6): its own lock, not the network list's: never a 503 for a
+			 * list being rebuilt, and no lock held while it is sent */
+			ret = http_app_send_status(req);
 		}
 		else{
 
