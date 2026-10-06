@@ -43,9 +43,8 @@
 #define ELEAK_DEVICE_NAME       "eleak"
 #define ELEAK_DEVICE_NAME_LEN   5
 #define MAX_TRACKED_SENSORS     MAX_BLE_LEAK_SENSORS
-#define EXEC_POLL_MS            500         // the executor's longest wait: the portal window and
-                                            // the Wi-Fi radio holds are polled at least this often,
-                                            // as the old 500 ms loop did, and every fact (I6)
+#define EXEC_POLL_MS            500         // the executor's longest wait: every fact is read
+                                            // again at least this often (I6)
 #define SCAN_RETRY_MS           50          // a scan start that failed is retried this soon
 #define SCAN_FAIL_LOG_EVERY     200         // ... and logged again every this many failures (10 s)
 #define WHITELIST_RELOAD_MS     10000       // Re-check provisioning every 10s
@@ -853,14 +852,14 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  *                   (I3); then RECOVERY, 1.2 s of Coded, when its blind span was longer than the
  *                   row's own Coded gap (I2);
  *   not synced      no scan;
- *   a legacy hold   app_wifi.c's portal priority window or a Wi-Fi radio hold (TRANSITIONAL, until
- *                   WP8's next stage removes them): no scan, or the valve hunt's while a leak
- *                   response is pended (HOLD_HUNT), as before;
  *   RECOVERY        due after a pulse (above);
  *   the mode's row  radio_policy_exec_row(): N_CODED, N_HUNT (B2: the valve hunted in NORMAL),
- *                   N_MIXED (a sensor on 1M, or B3's unknown PHY), NORMAL_LR, an AP mode's row, or
- *                   none (BLE_IDLE).
- * A row changes only at a slot boundary (a hold or a pulse excepted), and a new row starts at its
+ *                   N_MIXED (a sensor on 1M, or B3's unknown PHY), NORMAL_LR, an AP mode's row
+ *                   (AP_IDLE, SERVE, LR_AP: the SoftAP up and the STA not connected), or none
+ *                   (BLE_IDLE).
+ * Nothing else pauses BLE for Wi-Fi: since 2.1.4 WP8 app_wifi.c's portal priority window and Wi-Fi
+ * radio holds are gone, and the no-credential setup portal keeps scanning in the AP modes (D2).
+ * A row changes only at a slot boundary (a pulse excepted), and a new row starts at its
  * Coded window, or right after it when the slot that just ended was a Coded window, so no switch
  * widens a Coded gap beyond a row's own (I1). NORMAL's rows start each scan U(0, 100 ms) after the
  * last one ended (the 1 s dither: before WP6 one continuous scan could stay phase-locked to a
@@ -876,7 +875,7 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * pending the valve's claim goes first (its RMLEAK / CLOSE), then SUBMIT, JOIN, RETRY, LIST;
  * otherwise SUBMIT, JOIN, RETRY, LIST, then the claim.
  *
- * Every scan is timed, the hold's hunt too: a cancel that meets a scan's own timeout can leave
+ * Every scan is timed: a cancel that meets a scan's own timeout can leave
  * NimBLE's state idle while the controller still scans, and every start then fails until that scan
  * ends by itself, which a scan with no duration never would.
  *
@@ -935,17 +934,12 @@ static const scan_geo_t k_kind_geo[RP_K_W + 1] = {
     [RP_K_M] = { 160, 160, 0, 0 },
     // N_CODED: 20 ms of 1M and 80 ms of Coded in every 100 ms.
     [RP_K_N] = { 160, 32, 160, 128 },
-    // The legacy hold's hunt (as before WP6): 110 ms / 55 ms on each PHY. Deliberately NOT 100 ms:
-    // the valve advertises every 500-700 ms, and 100 ms against 500 ms is a 5:1 harmonic lock in
-    // which escape depends solely on the 0-10 ms per-event advDelay drifting the phase; 110 ms
-    // breaks the lock at the same duty (50 %). Passive: the valve is matched by its MAC alone.
-    [RP_K_H] = { 176, 88, 176, 88 },
 };
 
-// A Coded window: the blind budget (I2) counts from its end. The hold's hunt counts, as before.
+// A Coded window: the blind budget (I2) counts from its end.
 static bool kind_coded(uint8_t k)
 {
-    return k == RP_K_C || k == RP_K_N || k == RP_K_H;
+    return k == RP_K_C || k == RP_K_N;
 }
 
 static uint32_t ticks_ms(TickType_t t)
@@ -961,9 +955,7 @@ typedef struct {
     bool coded_last;            // the slot that ended last was a Coded window
     bool recovery;              // a pulse ended: RECOVERY is due, or runs
     bool just_started;          // this pass started a scan the chores may follow
-    bool idle;                  // nothing is to scan (a hold, BLE_IDLE, not synced): chores any time
-    bool paused;                // a legacy hold has the radio
-    bool portal_paused;         // ... the window itself, for its log lines
+    bool idle;                  // nothing is to scan (BLE_IDLE, not synced): chores any time
     bool want;                  // the accounting: a scan slot is due or runs
     bool overrun_asked;         // the running claim's overrun went to the valve module
     uint8_t pulse;              // the pulse running (rp_pulse_t)
@@ -983,7 +975,6 @@ typedef struct {
     TickType_t coded_end_at;    // when the last Coded window ended (0: none yet)
     TickType_t gap_from;        // the I2 monitor: the Coded end it times from (0: a pause since)
     TickType_t gone_at;         // our scan was first seen gone without its DISC_COMPLETE (0: no)
-    TickType_t paused_since;    // when the pause began, for the heartbeat line
 } exec_t;
 
 /* ---------------------------------------------------------
@@ -1168,25 +1159,21 @@ static void exec_announce(exec_t *x)
     if (row == x->announced || row == RP_ROW_RECOVERY) {
         return;
     }
-    if (row == RP_ROW_HOLD_HUNT) {
-        ESP_LOGI(BLE_LEAK_TAG, "Valve hunt scan started (1M + Coded PHY, passive)");
-    } else {
-        if (x->announced == RP_ROW_NONE || x->announced == RP_ROW_HOLD_HUNT) {
-            ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
-        }
-        if (row == RP_ROW_N_CODED) {
-            ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED: 1M 20 %% + Coded 80 %%, 1 s scans, each next after 0-%d ms",
-                     RP_JITTER_MS);
-        } else if (row == RP_ROW_N_HUNT) {
-            ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED with a valve hunt (valve not linked): 1 s of 1M 20 %% + Coded 80 %%, then 0.3 s on 1M, each next after 0-%d ms",
-                     RP_JITTER_MS);
-        } else if (row == RP_ROW_N_MIXED) {
-            ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_MIXED (a sensor on 1M, or a sensor's PHY not known yet): 1 s on 1M and 1 s on Coded in turn, each next after 0-%d ms",
-                     RP_JITTER_MS);
-        } else if (row == RP_ROW_NORMAL_LR) {
-            ESP_LOGI(BLE_LEAK_TAG, "Scan mode NORMAL_LR (leak response, valve not linked): 1 s on 1M and 0.6 s on Coded in turn, each next after 0-%d ms",
-                     RP_JITTER_MS);
-        }
+    if (x->announced == RP_ROW_NONE) {
+        ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
+    }
+    if (row == RP_ROW_N_CODED) {
+        ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED: 1M 20 %% + Coded 80 %%, 1 s scans, each next after 0-%d ms",
+                 RP_JITTER_MS);
+    } else if (row == RP_ROW_N_HUNT) {
+        ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED with a valve hunt (valve not linked): 1 s of 1M 20 %% + Coded 80 %%, then 0.3 s on 1M, each next after 0-%d ms",
+                 RP_JITTER_MS);
+    } else if (row == RP_ROW_N_MIXED) {
+        ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_MIXED (a sensor on 1M, or a sensor's PHY not known yet): 1 s on 1M and 1 s on Coded in turn, each next after 0-%d ms",
+                 RP_JITTER_MS);
+    } else if (row == RP_ROW_NORMAL_LR) {
+        ESP_LOGI(BLE_LEAK_TAG, "Scan mode NORMAL_LR (leak response, valve not linked): 1 s on 1M and 0.6 s on Coded in turn, each next after 0-%d ms",
+                 RP_JITTER_MS);
     }
     x->announced = row;
 }
@@ -1312,8 +1299,7 @@ static void exec_next_slot(exec_t *x, TickType_t now, uint8_t want_row)
     if (x->row == want_row && x->slot_done) {
         const rp_row_t *r = radio_policy_row(x->row);
         if (x->left <= 1) {
-            uint8_t next = (want_row == RP_ROW_RECOVERY || want_row == RP_ROW_HOLD_HUNT)
-                         ? want_row : radio_policy_exec_row(now, true);
+            uint8_t next = (want_row == RP_ROW_RECOVERY) ? want_row : radio_policy_exec_row(now, true);
             if (next != x->row) {
                 row_begin(x, next, now);
             } else {
@@ -1434,36 +1420,12 @@ static TickType_t executor_pass(exec_t *x)
         x->ended_at = x->w_end_at;
     }
 
-    // Portal priority window or a Wi-Fi radio hold (app_wifi.c, read through the radio policy):
-    // no leak scan while either is on, as before WP5. A hold (a few seconds around a Wi-Fi scan or
-    // connect attempt, up to 20 s while a setup page is in use) logs nothing here: app_wifi.c
-    // prints its start and end.
-    bool portal = radio_policy_legacy_window();
-    bool hold = portal || radio_policy_legacy_hold();
-    if (hold) {
-        if (portal && !x->portal_paused) {
-            x->portal_paused = true;
-            ESP_LOGI(BLE_LEAK_TAG, "Scan paused - Wi-Fi setup portal has the radio");
-        }
-        if (!x->paused) {
-            x->paused_since = now;
-        }
-        x->paused = true;
-        x->gap_from = 0;   // the I2 monitor times no gap across a hold
-    } else if (x->paused) {
-        x->paused = false;
-        if (x->portal_paused) {
-            x->portal_paused = false;
-            ESP_LOGI(BLE_LEAK_TAG, "Scan resumed - Wi-Fi setup portal closed");
-        }
-    }
-
     bool synced = ble_hs_synced();
     bool conn = ble_gap_conn_active();
 
     // The facts and the mode (I6), before a pulse's end: the recovery after it is decided on the row
-    // the mode runs now, not on the last pass's (a mode that changed in between, a hold that just
-    // ended, would otherwise resume with no recovery).
+    // the mode runs now, not on the last pass's (a mode that changed in between would otherwise
+    // resume with no recovery).
     rp_ble_facts_t f;
     exec_facts(&f, synced, now);
     (void)radio_policy_exec_mode(&f, now);
@@ -1493,7 +1455,7 @@ static TickType_t executor_pass(exec_t *x)
             x->row = RP_ROW_NONE;
             // I2: every blind span longer than the row's own Coded gap is followed by the recovery.
             uint8_t resume = radio_policy_exec_row(now, false);
-            if (!hold && synced && resume != RP_ROW_NONE &&
+            if (synced && resume != RP_ROW_NONE &&
                 blind > radio_policy_row_gap_ms(resume) + RP_JITTER_MS) {
                 x->recovery = true;
             }
@@ -1512,9 +1474,9 @@ static TickType_t executor_pass(exec_t *x)
     // Grants, between pulses, after their recovery. While a leak response is pending the valve's
     // claim goes first (its RMLEAK / CLOSE outranks a Connect: a stranger's Connects on the open
     // SoftAP must not hold it off), then SUBMIT, JOIN, RETRY and LIST; otherwise SUBMIT, JOIN, RETRY,
-    // LIST, then the claim. In a legacy hold the radio policy answers Wi-Fi requests FREE (BLE does
-    // not scan), and only the hold's hunt claims. Not synced: the same (PAUSED), and no claim
-    // (radio_policy_exec_connect_len() answers 0), so a requester never waits out its 2 s for nothing.
+    // LIST, then the claim. With no BLE scan to pause (BLE_IDLE, or not synced: PAUSED) the radio
+    // policy answers Wi-Fi requests FREE, so a requester never waits out its 2 s for nothing; no
+    // claim then (radio_policy_exec_connect_len() answers 0).
     if (x->pulse == RP_PULSE_NONE && !x->recovery) {
         bool boundary = !x->scan_on && (x->row == RP_ROW_NONE || x->slot_done);
         bool at_coded_end = boundary && x->slot_done && x->coded_last &&
@@ -1531,23 +1493,17 @@ static TickType_t executor_pass(exec_t *x)
         }
     }
 
-    // What runs now: nothing (a pulse, not synced, a hold with no hunt, BLE_IDLE), the hold's hunt,
-    // the recovery, or the mode's row. A scan nothing wants any more stops now: in a hold or a
-    // pulse, or the hold's hunt once the hold is over. Rows otherwise change at a slot boundary.
+    // What runs now: nothing (a pulse, not synced, BLE_IDLE), the recovery, or the mode's row. A
+    // scan stops now only for a pulse or when NimBLE lost its sync; rows otherwise change at a slot
+    // boundary (a scan of a row nothing wants any more, BLE_IDLE's, runs to its end).
     uint8_t want_row;
-    bool stop;
     if (x->pulse != RP_PULSE_NONE || !synced) {
         want_row = RP_ROW_NONE;
-        stop = true;
-    } else if (hold) {
-        want_row = radio_policy_exec_row(now, false);   // HOLD_HUNT or none
-        stop = (x->row != want_row);
+        if (x->scan_on) {
+            scan_stop(x, now);
+        }
     } else {
         want_row = x->recovery ? RP_ROW_RECOVERY : radio_policy_exec_row(now, false);
-        stop = (x->row == RP_ROW_HOLD_HUNT);
-    }
-    if (x->scan_on && stop) {
-        scan_stop(x, now);
     }
     x->idle = (want_row == RP_ROW_NONE && x->pulse == RP_PULSE_NONE);
     if (x->idle) {
@@ -1555,7 +1511,7 @@ static TickType_t executor_pass(exec_t *x)
         if (!x->scan_on && x->row != RP_ROW_NONE) {
             x->row = RP_ROW_NONE;   // a Wi-Fi slot or a finished scan: the next row starts afresh
         }
-        if (!synced || hold || x->row == RP_ROW_NONE) {
+        if (!synced || x->row == RP_ROW_NONE) {
             x->announced = RP_ROW_NONE;   // scanning resumes with its start line
         }
     }
@@ -1671,19 +1627,11 @@ static void starve_scan(TickType_t now)
     s_starved = kind;
 }
 
-// The scan-alive heartbeat line. While the leak scan is held it says so, for how long and for what
-// (2.1.4 WP1: until WP8 the no-credential portal's pause has no time cap); otherwise it is as it
-// always was. In a frame of its own, so the task's loop frame does not carry its arguments.
-static __attribute__((noinline)) void heartbeat_log(bool paused, bool portal, TickType_t paused_since)
+// The scan-alive heartbeat line, as it always was (no pause to report since 2.1.4 WP8). In a frame
+// of its own, so the task's loop frame does not carry the log call.
+static __attribute__((noinline)) void heartbeat_log(void)
 {
-    if (paused) {
-        ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors, scanning paused for %lu s (%s)",
-                 s_whitelist_count,
-                 (unsigned long)((xTaskGetTickCount() - paused_since) / configTICK_RATE_HZ),
-                 portal ? "Wi-Fi setup portal" : "Wi-Fi radio hold");
-    } else {
-        ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors", s_whitelist_count);
-    }
+    ESP_LOGI(BLE_LEAK_TAG, "[HEARTBEAT] Scanner alive, whitelist=%d sensors", s_whitelist_count);
 }
 
 /* ---------------------------------------------------------
@@ -1750,15 +1698,15 @@ static void ble_leak_scan_task(void *param)
                 phy_saved_at = now ? now : 1;
             }
 
-            // The burst log: a line for each sensor's burst that is over (paused or not).
+            // The burst log: a line for each sensor's burst that is over.
             burst_log();
 
             // The starvation guard's fact.
             starve_scan(now);
 
-            // Periodic scan-alive heartbeat (every 60s), with the pause if the leak scan is held
+            // Periodic scan-alive heartbeat (every 60s)
             if ((now - last_heartbeat_log) >= pdMS_TO_TICKS(60000)) {
-                heartbeat_log(x.paused, x.portal_paused, x.paused_since);
+                heartbeat_log();
                 last_heartbeat_log = now;
             }
 

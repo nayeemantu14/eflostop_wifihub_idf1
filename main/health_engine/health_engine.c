@@ -96,23 +96,6 @@ static volatile bool s_valve_batt_crit = false;
 // NOT under s_mutex: the writer already holds the rules-engine mutex, and taking
 // s_mutex there would create the one lock ordering this module has otherwise avoided.
 static volatile bool s_interlock_held = false;
-/* Whether the hub is listening to its BLE leak sensors and hunting for its valve
- * (health_set_ble_scan_paused()):
- * 0 = scanning never paused, BLE_LISTEN_PAUSED = paused now, else the monotonic second
- * (now_s()) at which scanning last resumed. ONE 32-bit word, so a lock-free read gets the
- * state and its stamp together. Written only by the setter, on the wifi_manager task, which
- * must not take s_mutex; read where the timeouts are evaluated, under s_mutex. */
-#define BLE_LISTEN_PAUSED UINT32_MAX
-static volatile uint32_t s_ble_listen_s = 0;
-/* When the hub started hunting for its valve for a pended leak response during the current
- * scan pause, with the valve not linked since (health_note_valve_leak_hunt()): the monotonic
- * second (now_s()), forced non-zero; 0 = none. It ends the valve's hold early
- * (valve_hold_left_s()). Cleared by the setter before it stores a pause, by a CONNECTED
- * applied while the valve's link is up, and when the reconcile removes the valve; left at the
- * resume. Written lock-free by the NimBLE host and valve command tasks (the note) and the
- * wifi_manager task, and under s_mutex by the health task and iothub_task; read where the
- * timeouts are evaluated, under s_mutex, after s_ble_listen_s. */
-static volatile uint32_t s_valve_hunt_s = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -213,94 +196,6 @@ static health_device_t *find_valve_for(const char *mac)
 // Forward declaration (defined after evaluate_timeouts)
 static void check_boot_sync_locked(void);
 
-/* Seconds for which a BLE device's silence (a sensor's, or the valve's) is still excused
- * because the hub was not listening (see s_ble_listen_s): the whole `window_s` while scanning
- * is paused (its clock has not started), what is left of it after the resume, else 0. */
-static uint32_t ble_hold_left_s(uint32_t t_s, uint32_t window_s)
-{
-    uint32_t v = s_ble_listen_s;              // one read: the state and its stamp together
-    if (v == BLE_LISTEN_PAUSED) return window_s;
-    if (v == 0) return 0;
-    int32_t elapsed = (int32_t)(t_s - v);     // < 0: resumed after t_s was sampled
-    if (elapsed < 0) elapsed = 0;
-    return ((uint32_t)elapsed < window_s) ? (window_s - (uint32_t)elapsed) : 0;
-}
-
-/* The valve's share of that: its HEALTH_VALVE_DISC_TIMEOUT_MS as above, but never past the same
- * length after a hunt for a pended leak response started in the pause (s_valve_hunt_s). The
- * hub is looking for the valve then, so the valve counts again while Wi-Fi setup still runs.
- * After the resume the earlier of the two ends applies. s_ble_listen_s is read first: the
- * setter clears the stamp before it stores a pause, so a read that sees the pause never sees
- * the previous pause's stamp. */
-static uint32_t valve_hold_left_s(uint32_t t_s)
-{
-    const uint32_t window_s = HEALTH_VALVE_DISC_TIMEOUT_MS / 1000;
-    uint32_t left = ble_hold_left_s(t_s, window_s);
-    uint32_t hunt = s_valve_hunt_s;
-    if (left == 0 || hunt == 0) return left;
-    int32_t elapsed = (int32_t)(t_s - hunt);  // < 0: stamped after t_s was sampled
-    if (elapsed < 0) elapsed = 0;
-    uint32_t hunt_left = ((uint32_t)elapsed < window_s) ? (window_s - (uint32_t)elapsed) : 0;
-    return (hunt_left < left) ? hunt_left : left;
-}
-
-/* A BLE sensor whose silence is excused by a scan pause: it was online at its last
- * evaluation (cause is not LINK) and the hold has not run out. Never one already offline,
- * so the hold only delays an offline verdict and can never fake a recovery. Shared by
- * compute_sensor_rating() and the snapshot's `connected`, so the two agree. */
-static bool ble_silence_held(const health_device_t *dev, int64_t now)
-{
-    return dev->dev_type == HEALTH_DEV_BLE_LEAK && dev->last_seen_ms != 0 &&
-           dev->cause != HEALTH_CAUSE_LINK &&
-           ble_hold_left_s((uint32_t)(now / 1000), HEALTH_BLE_LEAK_TIMEOUT_MS / 1000) > 0;
-}
-
-/* A dropped valve whose offline verdict is held by a scan pause: the hub is not hunting for it
- * then (the portal window pauses the valve hunt), so compute_valve_rating() keeps it in the
- * WARNING grace until a full HEALTH_VALVE_DISC_TIMEOUT_MS after scanning resumed, or after a
- * hunt for a pended leak response started in the pause, whichever is earlier
- * (valve_hold_left_s()). Never one already offline (CRITICAL because of the link at its last
- * evaluation, which includes the CRITICAL a valve is seeded with before it ever links), so the
- * hold only delays the verdict and can never fake a recovery. */
-static bool valve_offline_held(const health_device_t *dev, int64_t now)
-{
-    return !(dev->rating == HEALTH_CRITICAL && dev->cause == HEALTH_CAUSE_LINK) &&
-           valve_hold_left_s((uint32_t)(now / 1000)) > 0;
-}
-
-/* Seconds for which a never-heard device's roll-up excuse is still held by a scan pause
- * (check_boot_sync_locked()): a BLE sensor's until HEALTH_ROLLUP_UNHEARD_MS after the resume,
- * the valve's until its own HEALTH_VALVE_DISC_TIMEOUT_MS after it or after a leak-response
- * hunt in the pause, whichever is earlier (valve_hold_left_s()), a LoRa sensor's never. */
-static uint32_t unheard_hold_left_s(const health_device_t *d, uint32_t t_s)
-{
-    switch (d->dev_type) {
-        case HEALTH_DEV_BLE_LEAK: return ble_hold_left_s(t_s, HEALTH_ROLLUP_UNHEARD_MS / 1000);
-        case HEALTH_DEV_VALVE:    return valve_hold_left_s(t_s);
-        default:                  return 0;
-    }
-}
-
-/* The snapshot gate's timeout (check_boot_sync_locked()) waits for a BLE sensor never heard,
- * or a valve never linked, while the hub is not listening to it, and for a full gate window
- * after scanning resumed, as after a boot. Otherwise a scan pause longer than the window opens
- * the gate with those devices unheard, and the first snapshot after Wi-Fi setup (BOOT, which
- * opens no refresh window) reports them as syncing until the next heartbeat. The valve waits
- * only while its own hold lasts (valve_hold_left_s()): once a leak-response hunt has ended it,
- * the valve counts in the roll-up and must not keep the gate shut. Only delays the gate: it
- * still opens as soon as every device is heard. Call with s_mutex held. */
-static bool ble_gate_held_locked(uint32_t t_s)
-{
-    if (ble_hold_left_s(t_s, s_boot_sync_timeout_ms / 1000) == 0) return false;
-    for (int i = 0; i < HEALTH_MAX_DEVICES; i++) {
-        const health_device_t *d = &s_devices[i];
-        if (!d->in_use || d->ever_seen) continue;
-        if (d->dev_type == HEALTH_DEV_BLE_LEAK) return true;
-        if (d->dev_type == HEALTH_DEV_VALVE && valve_hold_left_s(t_s) > 0) return true;
-    }
-    return false;
-}
-
 // ---------------------------------------------------------------------------
 // Rating calculation
 // ---------------------------------------------------------------------------
@@ -327,10 +222,7 @@ static health_rating_t compute_sensor_rating(const health_device_t *dev, int64_t
                           ? HEALTH_LORA_TIMEOUT_MS
                           : HEALTH_BLE_LEAK_TIMEOUT_MS;
 
-    /* Not while the hub was not listening: a BLE sensor online when scanning paused stays
-     * online until a full timeout has passed since scanning resumed (ble_silence_held()). */
-    if ((dev->last_seen_ms == 0 || (now - dev->last_seen_ms) > timeout_ms) &&
-        !ble_silence_held(dev, now)) {
+    if (dev->last_seen_ms == 0 || (now - dev->last_seen_ms) > timeout_ms) {
         *cause = HEALTH_CAUSE_LINK;
         return HEALTH_CRITICAL;
     }
@@ -369,13 +261,7 @@ static health_rating_t compute_sensor_rating(const health_device_t *dev, int64_t
  * disconnect grace a known <=10 % reading still wins over the WARNING grace: the last real
  * reading is still <=10 %, and letting the grace demote it would dip the rating
  * CRITICAL -> WARNING -> CRITICAL (a spurious device_recovered under the 2.1.3 alert rule)
- * for a valve that never got better.
- *
- * While BLE scanning is paused the hub is not hunting for the valve, so the grace does not
- * expire then, nor until HEALTH_VALVE_DISC_TIMEOUT_MS after the resume (valve_offline_held()):
- * a valve hub does not read RED during Wi-Fi setup only because it stopped looking. A hunt for
- * a pended leak response in the pause is looking: the hold then ends
- * HEALTH_VALVE_DISC_TIMEOUT_MS after that hunt started, and the grace expires as usual. */
+ * for a valve that never got better. */
 static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t now,
                                             health_cause_t *cause)
 {
@@ -388,11 +274,9 @@ static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t 
     bool batt_known = (dev->last_battery != 0xFF);
 
     // Offline past the grace outranks the battery at CRITICAL: unreachable is the
-    // actionable fact, and it is what the reachability alert reports. Not while a scan
-    // pause holds it: then the battery and the grace below decide, as inside the grace.
+    // actionable fact, and it is what the reachability alert reports.
     if (dev->disconnect_ms > 0 &&
-        (now - dev->disconnect_ms) >= HEALTH_VALVE_DISC_TIMEOUT_MS &&
-        !valve_offline_held(dev, now)) {
+        (now - dev->disconnect_ms) >= HEALTH_VALVE_DISC_TIMEOUT_MS) {
         *cause = HEALTH_CAUSE_LINK;
         return HEALTH_CRITICAL;
     }
@@ -474,25 +358,6 @@ static health_rating_t compute_valve_rating(const health_device_t *dev, int64_t 
  * drops stamps disconnect_ms, is not excluded at all, and escalates via
  * compute_valve_rating()'s own 180 s grace. Never-connected must not be treated more
  * leniently than connected-then-lost.
- *
- * A BLE scan pause (health_set_ble_scan_paused(), the Wi-Fi portal window) is NOT that
- * extended grace. It holds the valve's verdicts only while the hub is not hunting for the
- * valve, and restarts the valve's OWN 180 s at the resume, as the sensors' 600 s restarts:
- * a never-linked valve's excuse does not latch while scanning is paused nor until
- * HEALTH_VALVE_DISC_TIMEOUT_MS after the resume, and a dropped valve stays in its WARNING
- * grace as long (valve_offline_held()), so both cases still get the same treatment.
- * Otherwise a valve hub would read RED during Wi-Fi setup only because it had stopped looking
- * for its valve. An excuse already latched stays latched, and a valve already offline stays
- * offline. With a leak response pended, though, the valve hunt runs in the window
- * (app_ble_valve.c), and then the hub IS looking: the hold ends HEALTH_VALVE_DISC_TIMEOUT_MS
- * after that hunt started (s_valve_hunt_s, valve_hold_left_s()), with setup still running.
- * A valve the hunt has not reached by then counts like any other: its excuse latches if it
- * never linked (CRITICAL in the roll-up: RED, "Valve offline"), and if it dropped it goes
- * CRITICAL (device_offline) once its own grace has run as well. That stays so after the leak
- * clears and the hunt is held again, until the valve links. Any pended CLOSE runs the hunt, so
- * a cloud valve_close pended after the STA's IP, while the setup AP is still up, starts that
- * clock too with no leak at all. Accepted: the hub tried to close the valve and could not
- * reach it. With no such hunt nothing changes: setup shows no RED for the valve.
  *
  * A device reporting a LEAK is never excluded, whatever ever_seen says. If we know it is
  * wet then we have plainly heard from it, and suppressing that to keep the boot LED tidy
@@ -749,14 +614,6 @@ static void handle_valve_event(const char *mac, bool connected)
     if (connected) {
         dev->last_seen_ms = now;
         dev->disconnect_ms = 0;   // Clear grace period
-        /* The valve linked, so a leak-response hunt no longer ends its hold (s_valve_hunt_s).
-         * Only while the link is up NOW, read on this task as handle_valve_resync() does:
-         * every changed valve value posts a CONNECTED too, and one queued just before a drop
-         * is applied after the drop's hunt stamped, which it must not undo. The valve module
-         * clears its ready bits before it posts the DISCONNECTED and starts that hunt. A drop
-         * between the check and the store still loses the stamp: the valve module's portal
-         * poll notes the running hunt again within a second. */
-        if (s_valve_hunt_s != 0 && ble_valve_is_ready()) s_valve_hunt_s = 0;
     } else if (dev->disconnect_ms == 0) {
         // LATCH the stamp. This was an unconditional `dev->disconnect_ms = now`,
         // and compute_valve_rating() measures the grace ONLY from this field — so
@@ -976,8 +833,7 @@ static void check_boot_sync_locked(void)
         if (all_seen) {
             s_boot_sync_done = true;
             ESP_LOGI(HEALTH_TAG, "Boot sync: all devices seen");
-        } else if ((now_ms() - s_boot_start_ms) >= s_boot_sync_timeout_ms &&
-                   !ble_gate_held_locked(t_s)) {
+        } else if ((now_ms() - s_boot_start_ms) >= s_boot_sync_timeout_ms) {
             s_boot_sync_done = true;
             /* State the REMAINING excuse, not a constant: the longest time any unheard
              * device is still kept out of the roll-up. A bench capture once read "still
@@ -990,12 +846,6 @@ static void check_boot_sync_locked(void)
                 uint32_t elapsed_s = t_s - d->added_s;
                 uint32_t window_s  = (uint32_t)d->excuse_s;
                 uint32_t left_s = (elapsed_s < window_s) ? (window_s - elapsed_s) : 0;
-                // A BLE sensor's or the valve's excuse is held by a scan pause too (see the
-                // latch below). The gate does not time out while one is unheard and still held
-                // during a pause (ble_gate_held_locked()), so this hold counts from the resume,
-                // or for the valve from a leak-response hunt (valve_hold_left_s()).
-                uint32_t hold_s = unheard_hold_left_s(d, t_s);
-                if (hold_s > left_s) left_s = hold_s;
                 if (left_s > further_s) further_s = left_s;
             }
             ESP_LOGW(HEALTH_TAG, "Boot sync: timeout (%lu s) — snapshot gate open; "
@@ -1016,13 +866,6 @@ static void check_boot_sync_locked(void)
         health_device_t *d = &s_devices[i];
         if (!d->in_use || d->excuse_done) continue;
         if ((uint32_t)(t_s - d->added_s) < (uint32_t)d->excuse_s) continue;
-        /* A BLE sensor is not counted as unheard while the hub is not listening to it, nor
-         * until a full HEALTH_ROLLUP_UNHEARD_MS after scanning resumed (s_ble_listen_s); the
-         * valve, not hunted meanwhile, until its own HEALTH_VALVE_DISC_TIMEOUT_MS after it, or
-         * after a hunt for a pended leak response in the pause if that is earlier
-         * (valve_hold_left_s()). An excuse already latched stays latched (the check above): a
-         * pause never re-excuses. */
-        if (unheard_hold_left_s(d, t_s) > 0) continue;
 
         bool was_unheard = rollup_unheard_locked(d);
         d->excuse_done = true;
@@ -1272,12 +1115,8 @@ bool health_engine_reconcile_devices(uint32_t sync_window_ms, health_reconcile_r
         if (!dev->in_use) continue;
         if (!device_in_set(&set, dev)) {
             // A dropped DISCONNECTED pending for this valve has no MAC: replayed after the
-            // swap, it would stamp a disconnect on the next valve's fresh entry. Its
-            // leak-response hunt (s_valve_hunt_s) would cut the next valve's hold short.
-            if (dev->dev_type == HEALTH_DEV_VALVE) {
-                g_health_valve_disc_pending = false;
-                s_valve_hunt_s = 0;
-            }
+            // swap, it would stamp a disconnect on the next valve's fresh entry.
+            if (dev->dev_type == HEALTH_DEV_VALVE) g_health_valve_disc_pending = false;
             memset(dev, 0, sizeof(*dev));
             removed++;
         }
@@ -1452,48 +1291,6 @@ bool health_is_interlock_held(void)
     return s_interlock_held;
 }
 
-/* One state store per transition and no re-roll: neither edge changes a rating by itself. The
- * pause only keeps later verdicts from being reached (compute_sensor_rating(),
- * compute_valve_rating(), the excuse latch and the gate in check_boot_sync_locked()), and the
- * resume starts their clock. Single writer (the wifi_manager task), so the read-then-store
- * needs no lock. A pause first clears the valve's leak-hunt stamp (s_valve_hunt_s): a new pause
- * starts with none, and a reader that sees the pause cannot see the last pause's stamp
- * (valve_hold_left_s()). The resume leaves it: after the resume the earlier end applies. The
- * two log lines are bench anchors from 5b5d70e and name only the BLE sensors' timeout; the
- * valve's HEALTH_VALVE_DISC_TIMEOUT_MS is held and restarts with it. */
-void health_set_ble_scan_paused(bool paused)
-{
-    uint32_t v = s_ble_listen_s;
-    if (paused) {
-        if (v == BLE_LISTEN_PAUSED) return;
-        s_valve_hunt_s = 0;                   // before the pause is stored: see above
-        s_ble_listen_s = BLE_LISTEN_PAUSED;
-        ESP_LOGI(HEALTH_TAG, "BLE scanning paused - BLE sensor timeouts held");
-    } else {
-        if (v != BLE_LISTEN_PAUSED) return;   // no pause to end: nothing to stamp
-        uint32_t t = now_s();
-        s_ble_listen_s = (t != 0) ? t : 1;    // 0 means "never paused"
-        ESP_LOGI(HEALTH_TAG, "BLE scanning resumed - BLE sensor timeouts restart now (%d s)",
-                 HEALTH_BLE_LEAK_TIMEOUT_MS / 1000);
-    }
-}
-
-/* Lock-free: its callers, the NimBLE host and valve command tasks, must not take s_mutex. Two
- * callers racing only write a near-identical second. One racing the resume stamps the resume's
- * second, which changes nothing. One racing a CONNECTED could keep a stamp that the valve's
- * link should clear, but the valve module calls it only with no link up, so that link must come
- * up and finish its setup in between, and the next CONNECTED clears it. No re-roll: like the
- * pause, the stamp changes no rating by itself; the verdict it lets through is reached
- * HEALTH_VALVE_DISC_TIMEOUT_MS later, by the tick or check_boot_sync_locked(). */
-void health_note_valve_leak_hunt(void)
-{
-    if (s_ble_listen_s != BLE_LISTEN_PAUSED || s_valve_hunt_s != 0) return;
-    uint32_t t = now_s();
-    s_valve_hunt_s = (t != 0) ? t : 1;    // 0 means "no hunt"
-    ESP_LOGI(HEALTH_TAG, "Valve hunt for a pended leak response during the scan pause - "
-             "valve timeouts count from now (%d s)", HEALTH_VALVE_DISC_TIMEOUT_MS / 1000);
-}
-
 bool health_pop_alert(health_alert_t *out)
 {
     if (!s_alert_queue || !out) return false;
@@ -1591,8 +1388,7 @@ bool health_get_device_status_all(health_device_status_t out[HEALTH_MAX_DEVICES]
                 uint32_t timeout = (src->dev_type == HEALTH_DEV_LORA)
                                     ? HEALTH_LORA_TIMEOUT_MS
                                     : HEALTH_BLE_LEAK_TIMEOUT_MS;
-                dst->connected = ((now - src->last_seen_ms) <= timeout) ||
-                                 ble_silence_held(src, now);   // same hold as its rating
+                dst->connected = ((now - src->last_seen_ms) <= timeout);
             }
         }
 

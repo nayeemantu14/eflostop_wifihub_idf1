@@ -1890,7 +1890,7 @@ static esp_err_t wifi_manager_erase_saved_network(){
 /**
  * @brief the forget (the page's Disconnect, D9, or the 10 s reset): the network in use is zeroed
  * and saved (zero SSID and password blobs: "nothing saved"), any candidate dropped, status.json
- * reads UPDATE_USER_DISCONNECT, and a START_AP is owed (it opens the portal window).
+ * reads UPDATE_USER_DISCONNECT, and a START_AP is owed (the no-credential setup portal).
  * LOCAL PATCH (2.1.4 C8): a save that fails (NVS full, say) is followed by the erase of the saved
  * network's keys, or a reboot would rejoin the network the user forgot; a forget that reaches
  * NVS neither way prints an E line, and its save is owed (save_owed). Any save owed from an
@@ -2527,9 +2527,9 @@ void wifi_manager( void * pvParameters ){
 					 * them, and the stop is tried again WIFI_MANAGER_STOP_AP_RETRY_MS later through
 					 * the shutdown timer, which a lost link stops (the AP then stays up, as after
 					 * any lost link). The callback is told, with parameter 1 (the AP is not
-					 * stopped): the app ends what waited only for this moment (its portal window,
-					 * which pauses BLE leak scanning), as it did when the result was ignored, so a
-					 * switch that keeps failing cannot hold it with the STA connected.
+					 * stopped), so the app knows the AP is still up (since 2.1.4 WP8 it waits for
+					 * nothing at this moment: its portal window, which paused BLE leak scanning,
+					 * is gone).
 					 * LOCAL PATCH (2.1.4 WP2): the stop is under way from just before the switch
 					 * (ap_stop_busy), so a mode read as STA from here on finds it so until the
 					 * servers and the list below are freed (wifi_manager_ap_stop_done()) */

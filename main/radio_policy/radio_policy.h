@@ -24,9 +24,9 @@ extern "C" {
  * second (I6). No task, timer or heap of its own (I10): it runs on its callers' tasks.
  *
  * The Wi-Fi side (app_wifi.c) gives the SoftAP, the STA's IP and attempts, the setup page's Connect,
- * the SoftAP's stations and the page's activity, and asks for its RETRY and LIST pulses. Until they
- * are deleted, app_wifi.c's portal priority window and Wi-Fi radio holds still pause BLE as before
- * (the HOLD mode; radio_policy_legacy_*(), read here only).
+ * the SoftAP's stations and the page's activity, and asks for its RETRY and LIST pulses. Nothing
+ * else pauses BLE for Wi-Fi (2.1.4 WP8 deleted app_wifi.c's portal priority window and Wi-Fi radio
+ * holds): the no-credential setup portal keeps scanning in the AP modes (D2).
  * ================================================================================================= */
 
 /* ---- The sensor-firmware timings the profiles depend on (FW 1.1.0, unchanged in this release;
@@ -84,8 +84,7 @@ typedef enum {
 
 /* ---- The profile table (plan 4.8): one row is one scan pattern, its slots run in turn --------------
  * Slot kinds: C Coded only (160/160, continuous), M 1M only (160/160), N N_CODED's combined scan
- * (1M 160/32 + Coded 160/128), H the legacy hold's valve hunt (176/88 on both PHYs), W a Wi-Fi slot
- * (no scan), _ unused. Times in ms. Flags:
+ * (1M 160/32 + Coded 160/128), W a Wi-Fi slot (no scan), _ unused. Times in ms. Flags:
  *   RP_F_DITHER  each scan starts after U(0, RP_JITTER_MS) (NORMAL's de-lock, plan 5.1), and that
  *                jitter counts once per slot boundary in the I1 gap;
  *   RP_F_I1      I1 for Coded: exactly one Coded window, >= RP_W_MIN_MS, its gap plus jitter
@@ -94,15 +93,13 @@ typedef enum {
  *   RP_F_I8      I8: every BLE slot <= 600 ms and followed by a Wi-Fi slot, every Wi-Fi slot >= 300 ms;
  *   RP_F_DISC    a discovery row: it runs only in turn with its plain row, so the period rule is
  *                checked on that sequence (RP_SEQ_*), not on the row alone.
- * N_HUNT is B2's (the valve hunted in NORMAL, see radio_policy.c); RECOVERY follows every pulse (I2);
- * HOLD_HUNT runs only in the legacy hold, while a leak response is pended (removed with the holds).
+ * N_HUNT is B2's (the valve hunted in NORMAL, see radio_policy.c); RECOVERY follows every pulse (I2).
  * SERVE_B and SERVE_B_DISC are the council's rung, for SERVE_RUNG (G1 decides). */
 #define RP_K__ 0
 #define RP_K_C 1
 #define RP_K_M 2
 #define RP_K_N 3
-#define RP_K_H 4
-#define RP_K_W 5
+#define RP_K_W 4
 
 #define RP_F_DITHER 0x01
 #define RP_F_I1     0x02
@@ -125,8 +122,7 @@ typedef enum {
     X(APIDLE_DISC,  RP_F_I1 | RP_F_I8 | RP_F_DISC,               C,600,  W,300,  M,300, W,300) \
     X(AP_K1M,       RP_F_I1 | RP_F_I1M | RP_F_I8,                C,600,  W,300,  M,600, W,300) \
     X(LR_AP_30,     RP_F_I1 | RP_F_I1M,                          M,1200, C,600,  _,0,   _,0)   \
-    X(LR_AP,        RP_F_I1 | RP_F_I1M | RP_F_I8,                M,600,  W,300,  C,600, W,300) \
-    X(HOLD_HUNT,    RP_F_DITHER,                                 H,1000, _,0,    _,0,   _,0)
+    X(LR_AP,        RP_F_I1 | RP_F_I1M | RP_F_I8,                M,600,  W,300,  C,600, W,300)
 
 #define RP_ROW_ENUM(name, fl, k0, m0, k1, m1, k2, m2, k3, m3) RP_ROW_##name,
 typedef enum { RP_ROWS(RP_ROW_ENUM) RP_ROW_COUNT } rp_row_id_t;
@@ -138,7 +134,7 @@ typedef struct {
     uint16_t ms[4];
     uint8_t n;          // slots in use (the first n)
     uint8_t flags;      // RP_F_*
-    uint8_t coded;      // the index of its Coded window (C, N or H), or 0
+    uint8_t coded;      // the index of its Coded window (C or N), or 0
 } rp_row_t;
 
 /* The SERVE rung (plan 4.3, D8): the densest Coded geometry that passes the phone gates.
@@ -151,8 +147,6 @@ typedef struct {
 /* ---- Modes (plan 4.2; first match wins) ------------------------------------------------------------ */
 typedef enum {
     RP_MODE_PAUSED = 0,   // NimBLE not synced: nothing scans
-    RP_MODE_HOLD,         // TRANSITIONAL: app_wifi.c's portal priority window or a Wi-Fi radio hold
-                          // has the radio (the hunt still runs while a leak response is pended)
     RP_MODE_BLE_IDLE,     // no BLE leak sensor, and no valve or its link verified: nothing scans
     RP_MODE_LR_AP,        // a leak response (overlay), SoftAP up and STA not connected
     RP_MODE_NORMAL_LR,    // a leak response (overlay), otherwise
@@ -218,9 +212,9 @@ typedef enum {
     RP_GRANT_IDLE = 0,    // nothing asked, or the pulse is over
     RP_GRANT_PENDING,     // asked, waiting for the executor
     RP_GRANT_ON,          // BLE is off for this pulse now, until radio_policy_pulse_end() or its deadline
-    RP_GRANT_FREE,        // no pulse is needed: BLE is not scanning (a legacy hold, BLE_IDLE, not
-                          // synced, or the executor not started: no BLE device, NimBLE not up) or
-                          // the SoftAP is down (RETRY/LIST are pulses only while it is up)
+    RP_GRANT_FREE,        // no pulse is needed: BLE is not scanning (BLE_IDLE, not synced, or the
+                          // executor not started: no BLE device, NimBLE not up) or the SoftAP is
+                          // down (RETRY/LIST are pulses only while it is up)
     RP_GRANT_REFUSED,     // not granted (limits, or RP_GRANT_WAIT_MS passed): go on without a pulse
 } rp_grant_t;
 
@@ -264,13 +258,6 @@ bool radio_policy_lr_overlay(void);
 
 /** A leak response is pending (the trigger, whatever the cap). Lock-free; any task. */
 bool radio_policy_lr_pending(void);
-
-/* =================================================================================================
- * TRANSITIONAL: app_wifi.c's portal priority window and Wi-Fi radio holds, read here only, so the
- * BLE modules no longer include portal_priority.h. Deleted with the holds (the next stage).
- * ================================================================================================= */
-bool radio_policy_legacy_window(void);   // app_wifi_portal_priority_active()
-bool radio_policy_legacy_hold(void);     // the window, or a Wi-Fi radio hold
 
 /* =================================================================================================
  * The executor's interface: the ble_leak_scan task (app_ble_leak.c) only, so none of it locks.

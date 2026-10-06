@@ -175,9 +175,8 @@ extern "C"
     bool ble_valve_link_verified(void);
     /**
      * @brief The valve module wants its valve found: the provisioned valve is wanted
-     * (connect requested), not linked and no connect is in flight, NimBLE is synced, and
-     * neither the portal priority window nor a Wi-Fi radio hold holds the hunt (they do not
-     * while a leak response is pended). Recomputed from those facts on every call.
+     * (connect requested), not linked and no connect is in flight, and NimBLE is synced.
+     * Recomputed from those facts on every call.
      */
     bool ble_valve_hunt_wanted(void);
 
@@ -190,10 +189,10 @@ extern "C"
 
     /**
      * @brief The provisioned valve was heard while the hunt is wanted, and the claim back-off
-     * allows a claim: a claim (connect) is due. The executor grants it at the end of a scan
-     * that covered Coded, in NORMAL and in a hold's hunt alike, when its pulse-rate limit (I2b)
-     * allows, and calls ble_valve_claim_start() with no scan running. Clears a claim request
-     * the hunt no longer wants.
+     * allows a claim: a claim (connect) is due. The executor grants it at the end of a scan,
+     * when the radio policy allows a CONNECT pulse (its mode, the blind budget, I2, and the
+     * pulse-rate limit, I2b), and calls ble_valve_claim_start() with no scan running. Clears a
+     * claim request the hunt no longer wants.
      */
     bool ble_valve_claim_wanted(void);
 

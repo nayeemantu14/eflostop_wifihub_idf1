@@ -13,7 +13,6 @@
 #include "esp_log.h"
 #include "esp_random.h"
 #include "sdkconfig.h"
-#include "app_wifi/portal_priority.h"
 #include "ble_leak_scanner/app_ble_leak.h"
 
 #define RP_TAG "RADIO"
@@ -49,7 +48,6 @@
  * rule). radio_policy_init() runs the same checks on the table as built (the boot self-test).
  * --------------------------------------------------------- */
 #define RP_KC(k)   ((k) == RP_K_C || (k) == RP_K_N)                 // a Coded window (I1)
-#define RP_KCH(k)  (RP_KC(k) || (k) == RP_K_H)                      // ... or the legacy hunt's
 #define RP_KM(k)   ((k) == RP_K_M)
 #define RP_KB(k)   ((k) != RP_K__ && (k) != RP_K_W)                 // BLE runs in it
 #define RP_KS(k)   ((k) != RP_K__)                                  // a slot in use
@@ -66,7 +64,7 @@
 #define RP_COMPACT(k0, k1, k2, k3) \
     (RP_KS(k0) && (RP_KS(k1) || (!RP_KS(k2) && !RP_KS(k3))) && (RP_KS(k2) || !RP_KS(k3)))
 #define RP_CODED_IDX(k0, k1, k2, k3) \
-    (RP_KCH(k0) ? 0 : RP_KCH(k1) ? 1 : RP_KCH(k2) ? 2 : RP_KCH(k3) ? 3 : 0)
+    (RP_KC(k0) ? 0 : RP_KC(k1) ? 1 : RP_KC(k2) ? 2 : RP_KC(k3) ? 3 : 0)
 
 #define RP_ASSERT_ROW_(name, fl, k0, m0, k1, m1, k2, m2, k3, m3)                                   \
     _Static_assert(RP_COMPACT(k0, k1, k2, k3) && RP_SLOT_OK(k0, m0) && RP_SLOT_OK(k1, m1) &&      \
@@ -228,7 +226,7 @@ static volatile bool s_live = false;            // the executor runs (radio_poli
 typedef struct {
     rp_ble_facts_t f;           // the facts of the last pass
     uint8_t mode;               // the mode now (rp_mode_t)
-    uint8_t logged;             // the mode last printed (RP_MODE_COUNT: none; HOLD is never printed)
+    uint8_t logged;             // the mode last printed (RP_MODE_COUNT: none)
     uint8_t period_row;         // AP modes: the row of the current period
     uint16_t period_n;          // ... and the periods run with that row set (discovery cadence)
     bool backoff;               // discovery is backed off (for its line)
@@ -289,7 +287,7 @@ static const char *row_check(const rp_row_t *r)
             n_m++;
             m1 += r->ms[i];
         }
-        if (RP_KCH(k) && !coded_seen) {
+        if (RP_KC(k) && !coded_seen) {
             coded_seen = true;
             coded_at = (unsigned)i;
         }
@@ -397,19 +395,6 @@ uint32_t radio_policy_row_gap_ms(uint8_t row)
             coded += r->ms[i];
     }
     return coded ? period - coded : 0;
-}
-
-/* =========================================================
- * TRANSITIONAL: the legacy window and holds (app_wifi.c). Lock-free reads, any task.
- * ========================================================= */
-bool radio_policy_legacy_window(void)
-{
-    return app_wifi_portal_priority_active();
-}
-
-bool radio_policy_legacy_hold(void)
-{
-    return app_wifi_portal_priority_active() || app_wifi_radio_hold_active();
 }
 
 /* =========================================================
@@ -764,11 +749,10 @@ static bool serve_now(TickType_t now)
            (s_prov_until != 0 && (int32_t)(s_prov_until - now) > 0);
 }
 
-// The mode's line (plan 4.7: one INFO line per mode change). HOLD is never printed (app_wifi.c
-// prints the window and each hold), and the mode after a hold only if it changed.
+// The mode's line (plan 4.7: one INFO line per mode change).
 static void mode_line(uint8_t m)
 {
-    if (m == RP_MODE_HOLD || m == s_x.logged)
+    if (m == s_x.logged)
         return;
     s_x.logged = m;
     const char *serve_rung = RP_SERVE_RUNG == RP_RUNG_SERVE_B ? "Coded 0.6 s / Wi-Fi 1.2 s (rung SERVE-B)" :
@@ -833,8 +817,6 @@ rp_mode_t radio_policy_exec_mode(const rp_ble_facts_t *f, TickType_t now)
     rp_mode_t m;
     if (!f->synced)
         m = RP_MODE_PAUSED;
-    else if (radio_policy_legacy_hold())
-        m = RP_MODE_HOLD;
     else if (s_pinned)
         m = RP_MODE_NORMAL;
     else if (f->sensors == 0 && (!f->valve || f->valve_linked))
@@ -918,8 +900,6 @@ uint8_t radio_policy_exec_row(TickType_t now, bool new_period)
     // boot or its provisioning (D1: some field sensors are on 1M).
     bool k1m = f->any_1m || (f->any_unknown && f->listed_ms < RP_UNKNOWN_PHY_MS);
     switch (s_x.mode) {
-    case RP_MODE_HOLD:
-        return f->valve_hunt ? RP_ROW_HOLD_HUNT : RP_ROW_NONE;
     case RP_MODE_NORMAL_LR:
         return RP_ROW_NORMAL_LR;
     case RP_MODE_LR_AP: {
@@ -987,8 +967,8 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         if (st != RP_GRANT_PENDING)
             continue;
 
-        // BLE is not scanning (a legacy hold, BLE_IDLE, not synced): no pulse is needed.
-        if (s_x.mode == RP_MODE_PAUSED || s_x.mode == RP_MODE_HOLD || s_x.mode == RP_MODE_BLE_IDLE) {
+        // BLE is not scanning (BLE_IDLE, not synced): no pulse is needed.
+        if (s_x.mode == RP_MODE_PAUSED || s_x.mode == RP_MODE_BLE_IDLE) {
             req_set(k, RP_GRANT_FREE);
             continue;
         }
@@ -1297,12 +1277,12 @@ void radio_policy_exec_summary(const char *adverts, unsigned phy_flips)
     s_lease_ms_max = 0;
     taskEXIT_CRITICAL(&s_sta_lock);
 
-    ESP_LOGI(RP_TAG, "[SUMMARY] modes NORMAL %lu s, NORMAL_LR %lu s, AP_IDLE %lu s, SERVE %lu s, LR_AP %lu s, BLE_IDLE %lu s, hold %lu s, paused %lu s; "
+    ESP_LOGI(RP_TAG, "[SUMMARY] modes NORMAL %lu s, NORMAL_LR %lu s, AP_IDLE %lu s, SERVE %lu s, LR_AP %lu s, BLE_IDLE %lu s, paused %lu s; "
              "BLE scanning %lu.%lu of %lu.%lu s (%u %%); LR overlay %lu s; PHY changes %u; adverts %s",
              (unsigned long)(s_x.mode_ms[RP_MODE_NORMAL] / 1000), (unsigned long)(s_x.mode_ms[RP_MODE_NORMAL_LR] / 1000),
              (unsigned long)(s_x.mode_ms[RP_MODE_AP_IDLE] / 1000), (unsigned long)(s_x.mode_ms[RP_MODE_SERVE] / 1000),
              (unsigned long)(s_x.mode_ms[RP_MODE_LR_AP] / 1000), (unsigned long)(s_x.mode_ms[RP_MODE_BLE_IDLE] / 1000),
-             (unsigned long)(s_x.mode_ms[RP_MODE_HOLD] / 1000), (unsigned long)(s_x.mode_ms[RP_MODE_PAUSED] / 1000),
+             (unsigned long)(s_x.mode_ms[RP_MODE_PAUSED] / 1000),
              (unsigned long)(s_x.on_ms / 1000), (unsigned long)(s_x.on_ms % 1000 / 100),
              (unsigned long)(s_x.want_ms / 1000), (unsigned long)(s_x.want_ms % 1000 / 100), duty,
              (unsigned long)(s_x.lr_ms / 1000), phy_flips, adverts);

@@ -102,9 +102,9 @@ static void erase_wifi_credentials(void)
      * reads as "nothing saved".
      * "ssid" first, and the password only once the SSID is cleared: a saved SSID whose password
      * is gone reads as "nothing saved" (no reconnect) yet leaves the SSID in wifi_manager's RAM
-     * copy, which keeps the portal window shut (a fallback AP that keeps BLE scanning). An
-     * empty SSID beside a password left behind (a failure, or power lost between the two)
-     * reads as the factory state. These keys are the only copy: wifi_manager runs the driver
+     * copy, which the app then takes for a network in use (a router-fallback portal, and router
+     * retries). An empty SSID beside a password left behind (a failure, or power lost between the
+     * two) reads as the factory state. These keys are the only copy: wifi_manager runs the driver
      * with WIFI_STORAGE_RAM.
      * Probed read-only first: NVS_READWRITE creates the namespace on a hub that never saved
      * one, so ESP_ERR_NVS_NOT_FOUND there means nothing was ever saved. */
@@ -193,12 +193,15 @@ static void execute_wifi_reset(void)
      * to BLE is recorded on the bench (S21: free, min_ever, largest block while a
      * phone drives the portal).
      *
-     * BLE does not SCAN beside this portal, though. With no credentials saved, the
-     * portal priority window (app_wifi.c) pauses the leak scanner and the valve hunt
-     * while the setup portal is up: continuous scanning left the SoftAP so little radio
-     * time that no phone could join. A valve already linked stays linked. The window
-     * opens only if the credentials really are gone after the reboot, which the erase
-     * above now makes sure of.
+     * BLE leak protection keeps running beside this portal (2.1.4 WP8, decision D2). Until
+     * WP8 the portal priority window (app_wifi.c) paused the leak scanner and the valve hunt
+     * for as long as the no-credential setup portal was up, with no time cap: continuous
+     * scanning had left the SoftAP so little radio time that no phone could join. The radio
+     * policy (main/radio_policy) now shares the radio: with sensors or a valve provisioned
+     * the hub scans in short Coded windows between the SoftAP's Wi-Fi slots (AP_IDLE, or
+     * SERVE while a phone uses the setup page), and pauses BLE only for bounded pulses (a
+     * phone's join, its Connect, the list's scan; at most 2.8 s each, 12 s per minute). A
+     * valve already linked stays linked. A hub with nothing provisioned runs no BLE scan.
      *
      * The reboot does NOT forget provisioned devices: commissioning (valve / LoRa
      * / BLE-leak sensors), hub identity, and DPS cache live in the dedicated

@@ -13,9 +13,7 @@
 #include "app_ble_valve.h"
 #include "provisioning_manager/provisioning_manager.h"
 #include "hub_identity/hub_identity.h"
-#include "health_engine/health_engine.h"
 #include "radio_policy/radio_policy.h"
-#include "portal_priority.h"
 
 TaskHandle_t wifiTaskHandle = NULL;
 
@@ -23,315 +21,36 @@ void cb_connection_ok(void *pvParameter);
 void cb_connection_lost(void *pvParameter);
 void wifi_task(void *pvParameter);
 
-/* ---- Portal priority window --------------------------------------------------------------
- * While the Wi-Fi setup portal is up and NO Wi-Fi credentials are saved (first setup, or
- * after the 10 s reset erased them), BLE scanning is paused so the SoftAP gets the radio.
+/* ---- The radio and the setup portal (2.1.4 WP8; plan sections 4 and 5, decision D2) -------
+ * The ESP32-S3 has one 2.4 GHz radio for Wi-Fi and BLE. Until 2.1.4 WP8 the setup portal took it
+ * from BLE by pausing the leak scan: for as long as the SoftAP was up with no Wi-Fi credentials
+ * saved (the portal priority window: on the 2026-09-29 bench a phone could not join beside the
+ * continuous 1M + Coded scan), and for a few seconds around each Wi-Fi scan and connect attempt
+ * (the radio holds, chained in 12 s periods while a setup page was in use). Leak protection was
+ * off in the reset portal, with no time cap, and the health engine held the sensors' timeouts.
+ * The radio policy (main/radio_policy) shares the radio instead, from the facts this file gives it
+ * (below). With the SoftAP up and the STA not connected, BLE runs short Coded windows between
+ * Wi-Fi slots (AP_IDLE, or SERVE while a setup page is in use: plan I8), and stops only for a
+ * pulse of at most 2.8 s followed by 1.2 s of Coded scanning, within 12 s per minute (I2, I2b): a
+ * station's join (JOIN_ASSIST), the page's Connect (SUBMIT), the router retry (RETRY) and the
+ * network list's scan (LIST). So the no-credential portal after a 10 s reset keeps scanning for
+ * the provisioned sensors and the valve (D2); first setup, with nothing provisioned, runs no BLE
+ * scan at all (BLE_IDLE, or NimBLE not started). With the STA connected the SoftAP's tail runs
+ * NORMAL.
  *
- * Why: the ESP32-S3 has one 2.4 GHz radio, and under software coexistence Bluetooth gets it
- * while the STA is idle. 2.1.4 starts BLE at boot, and its continuous 1M + Coded leak scan (on
- * a valve hub also the valve hunt and its 100 %-duty connect initiator) left the SoftAP too
- * little air time: on the 2026-09-29 bench a phone saw the SSID but could not join, and no
- * DHCP lease was ever given. 2.1.3 never started BLE in AP mode, so its portal had the radio.
- *
- * In the window the leak scanner and the valve hunt start nothing new, and each cancels its
- * own scan and connect attempt on its own task (both read the flag at every start: at boot,
- * START_AP and the BLE start come in no fixed order). NimBLE stays initialised, and a valve
- * already linked stays linked, with its commands. Leak protection still outranks the portal:
- * while a leak response (RMLEAK or CLOSE) is pended for an unlinked valve, the valve hunt and
- * its connect run anyway until the valve takes it (app_ble_valve.c). The health engine holds
- * the BLE sensors' and the valve's timeouts meanwhile (health_set_ble_scan_paused()), except
- * after such a leak-response hunt: the valve's hold then ends 180 s after that hunt started,
- * with setup still running (health_note_valve_leak_hunt()). No time cap before setup (product
- * decision).
- *
- * The window closes when the setup AP stops (cb_ap_stopped()), not when the STA gets its IP:
- * the phone that submitted the credentials is still on the SoftAP, which stays up after the IP
- * so the portal page can load its success status (the SoftAP's tail, below: 15-60 s after a
- * setup-page Connect), and resuming the dual-PHY scan at the IP starved the SoftAP again. BLE
- * must never stay paused while the hub is on Wi-Fi, so two nets back that up:
- *   - the STA loses that Wi-Fi before the AP stops: wifi_manager stops its AP-shutdown timer
- *     and the SoftAP stays up as a router-fallback portal with the credentials saved, which
- *     keeps BLE scanning, so cb_connection_lost() closes the window;
- *   - the SoftAP is still up AP_TAIL_BACKSTOP_MS after the IP: wifi_task sends the STOP_AP
- *     itself (the tail's backstop, ap_tail_maintain()).
- *
- * NOT for the fallback AP that wifi_manager opens after failed retries while credentials are
- * still saved (router outage): that is the field case BLE-from-boot leak protection is for,
- * so BLE keeps scanning there, apart from the Wi-Fi radio holds below (a few seconds each, or
- * up to 8 s at a time while a setup page is in use, about 20 s once around its Connect).
- *
- * Every transition runs on the wifi_manager task (the START_AP, STOP_AP, GOT_IP and
- * STA_DISCONNECTED callbacks), which is therefore the only writer of the flag and of
- * s_setup_ok_tick; wifi_task only reads them. They only set flags: nothing here blocks, calls
- * provisioning or touches NimBLE. */
-static volatile bool s_portal_priority = false;
+ * The router retry's deferral keys on the setup page in use (page_in_use()): it or one of its API
+ * calls was requested less than PAGE_OPEN_MS ago, the page's own polls included (GET /ap.json?bg=1
+ * every 3.8 s while the user is active), not status.json (portal_activity(), the httpd task). A
+ * stale tick reads as recent for PAGE_OPEN_MS once every 2^32 ticks, which only defers a retry. */
+#define PAGE_OPEN_MS 10000   // the page counts as in use this long after its last request
 
-/* The tick of the GOT_IP that set Wi-Fi up in the open window (forced non-zero), 0 = none.
- * Set by cb_connection_ok(); cleared when the window opens or closes, and by a requested
- * disconnect in the window. Read by cb_connection_lost() ("Wi-Fi lost after setup"). */
-static volatile TickType_t s_setup_ok_tick = 0;
-
-/* For the window the wifi_manager task runs at PORTAL_TASK_PRIORITY: above the app tasks (5),
- * far below lwIP (18) and the Wi-Fi and BT tasks (20-23). Insurance only: the portal was short
- * of radio time, not CPU. Only this task is raised. The HTTP and DNS server tasks ("httpd",
- * "dns_server") keep their priority: their handles are private to the portal component, and
- * the one lookup by name, xTaskGetHandle(), is not linked in this image and is IRAM-resident
- * (CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH is off). Linking it would add about 0.4 KB of
- * IRAM, which on the ESP32-S3 moves the IRAM/DRAM split up by 512 B of heap.
- * Closing the window restores WIFI_MANAGER_TASK_PRIORITY, the priority wifi_manager.c creates
- * the task with, not a sampled value: uxTaskPriorityGet() returns the effective priority,
- * which can include one inherited through a mutex, and restoring that would make it the
- * task's base priority for good. */
-#define PORTAL_TASK_PRIORITY 8
-static TaskHandle_t s_wm_task = NULL;   // the raised wifi_manager task; NULL = none raised
-
-bool app_wifi_portal_priority_active(void)
-{
-    return s_portal_priority;
-}
-
-// wifi_manager task only (see above). The health hold goes on before the flag, and its resume
-// is stamped before the flag clears, so it always covers the time the scans are paused.
-static void portal_priority_open(void)
-{
-    if (s_portal_priority)
-        return;
-    health_set_ble_scan_paused(true);
-    s_portal_priority = true;
-    ESP_LOGW(WIFI_TAG, "portal priority ON (no Wi-Fi credentials) - BLE scanning paused");
-
-    // The callbacks run on the wifi_manager task itself, so it raises its own priority.
-    TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    UBaseType_t prio = uxTaskPriorityGet(self);
-    if (prio < PORTAL_TASK_PRIORITY)
-    {
-        s_wm_task = self;
-        vTaskPrioritySet(self, PORTAL_TASK_PRIORITY);
-    }
-    ESP_LOGI(WIFI_TAG, "portal priority: wifi_manager task prio %u -> %u (httpd, dns_server not raised)",
-             (unsigned)prio, (unsigned)uxTaskPriorityGet(self));
-}
-
-static void portal_priority_close(const char *reason)
-{
-    if (!s_portal_priority)
-        return;
-    // Stamps the resume: the sensors' and the valve's timeouts restart, the valve's hold still
-    // ending 180 s after a leak-response hunt in the window if that is sooner (see the top).
-    health_set_ble_scan_paused(false);
-    s_portal_priority = false;
-    s_setup_ok_tick = 0;
-    // The raise lasts as long as the window, so cb_connection_ok()'s work (the LED, the iothub
-    // flag and wake) runs at PORTAL_TASK_PRIORITY when Wi-Fi is set up in it. That is
-    // harmless: none of it spins. Where it can block, on the net_status mutex, the holder
-    // inherits the raised priority until it gives the mutex, so the wait is no longer than at
-    // the task's own priority. The rest are flags and a non-blocking queue post (MQTT is
-    // iothub_task's since 2.1.4 WP2).
-    if (s_wm_task != NULL)
-    {
-        vTaskPrioritySet(s_wm_task, WIFI_MANAGER_TASK_PRIORITY);
-        s_wm_task = NULL;
-    }
-    ESP_LOGI(WIFI_TAG, "portal priority OFF (%s) - BLE scanning resumed", reason);
-}
-
-/* ---- Wi-Fi radio hold ---------------------------------------------------------------------
- * While the STA is not connected, BLE scanning also stops for a few seconds around each Wi-Fi
- * scan and each STA connect attempt, so they get the radio: the window's starvation on a small
- * scale. On the 2026-09-29 bench (router off, then on again) the router-fallback AP's page never
- * got past "Scanning for networks..." with many networks in range, and the connect attempts
- * ended NO_AP_FOUND (201): beside the continuous 1M + Coded leak scan (on a valve hub also the
- * valve hunt) a Wi-Fi scan hears next to nothing, and a connect attempt starts with a scan for
- * the SSID. The scan holds of a setup page in use chain, though, with BLE windows between them
- * (below). Since 2.1.4 WP8 the router retry takes no hold: the radio policy grants it a RETRY
- * pulse (router_retry()).
- *
- * A hold is a deadline (a tick, 0 = none), never a flag, so it always ends. Each has one writer:
- *   - s_scan_until (wifi_manager task): from a Wi-Fi scan order until RADIO_HOLD_SCAN_TAIL_MS
- *     after its SCAN_DONE, at most RADIO_HOLD_SCAN_MS, and never into the page's next BLE window.
- *     Since 2.1.4 C10b the page's network list is a cache: a scan is ordered only by the page's
- *     load with an empty or stale list, and by its Rescan, at least 20 s apart (it was one at
- *     every 3.8 s poll), so a hold's chain rarely outlasts one scan; with no page in use, no scan
- *     is asked for.
- *   - s_connect_until (wifi_manager task): from a CONNECT_STA order until its disconnect, or its
- *     IP: at most RADIO_HOLD_CONNECT_MS, or RADIO_HOLD_SUBMIT_MS for a portal submit
- *     (s_connect_submit, below).
- * A connect attempt's hold is capped at 2.5 s, which covers the
- * attempt's scan for the SSID and its join; the rest of the attempt runs with BLE on. With the
- * leak scanner's 500 ms loop, which can resume its scan up to half a second late, BLE is then off
- * about 3 s at most: less than the 4 s burst a BLE leak sensor sends when it gets wet. Holds never
- * run back to back either, a page's scans and its submit apart: none starts while another is on
- * or ended less than RADIO_HOLD_GAP_MS ago (radio_hold_near()), so BLE hears at least about 1 s
- * between two, and at least about 1 s of that burst. A connect attempt started then takes no hold
- * of its own: the router retry's covers the retry's attempt. One that starts in the gap just after
- * a hold ended (wifi_manager's own retry just after the page closed, say) runs with BLE on: the
- * price of keeping holds apart. The valve hunt's 1 s poll can still reach into the start of the
- * router retry's attempt.
- * A page's BLE windows. The holds of a page in use form a chain from its first (s_chain_start),
- * which lasts as long as the page keeps asking (page_open()). Its schedule runs from that first
- * hold in periods of RADIO_HOLD_PERIOD_MS whose last RADIO_HOLD_WINDOW_MS are BLE's window, with
- * no hold of any kind but a portal submit's (app_wifi_radio_hold_active()). No scan hold reaches
- * into a window (scan_hold_set()), and a scan the page asks for in one, or less than
- * RADIO_HOLD_QUIET_MS before one, is stopped at once (cb_scan_start()): no Wi-Fi scan shares a
- * window with BLE, and the page's list keeps what the last full scan found. BLE is then off 8 s
- * at a time at most, and listens at least 4 s of every 12. A wet BLE sensor's heartbeat, a 2.5 s
- * burst every 15 s, meets the 12 s periods in the same four phases, 3 s apart, every 60 s, and in
- * one of them at least 1 s of the burst (2 or more of its adverts, 0.31-0.44 s apart) falls in a
- * window after the leak scanner's restart (up to 0.5 s): with a page in use the sensor is heard
- * at least about every 60 s. A dry sensor's 100 s heartbeat has no such cycle against the periods
- * (it can miss every window for as long as a chain lasts), so after RADIO_HOLD_LONG_AFTER_MS of a
- * chain BLE listens RADIO_HOLD_LONG_MS in one go, longer than that heartbeat and its burst, before
- * the schedule starts over: a page that keeps asking leaves a dry sensor unheard for three of its
- * heartbeats (about 300 s) at most, half the health engine's 600 s. The page (code.js) stops
- * asking 60 s after it was last used, so a chain normally ends long before that; the long listen
- * is for a copy that does not (an older page, another client).
- * A portal submit: an attempt wifi_manager starts for the page's Connect (its callback's kind
- * CONNECTION_REQUEST_USER, 2.1.4 C8). Its hold starts whatever else holds, and runs through the
- * windows until its disconnect or its IP, RADIO_HOLD_SUBMIT_MS at most: the user is waiting, and
- * in a crowded band an attempt beside the leak scan ends NO_AP_FOUND. BLE can then be off about
- * 20 s once (a period's holds, its window, the next period's holds). wifi_manager's own retries
- * come right after a link loss and keep the 2.5 s cap.
- * None while the STA is connected (it has its air time then, and BLE never pauses for nothing):
- * app_wifi_radio_hold_active() reads false and the callbacks set nothing. None is set in the
- * portal window either, where BLE is paused already. Unlike the window: no health hold (the
- * sensors' and the valve's timeouts, minutes long, keep running through about 20 s at most), no
- * priority raise, and in the BLE modules no [PORTAL] lines and no valve go-red stamp. They
- * otherwise treat a hold like the window, the valve's leak-response exception included
- * (app_ble_leak.c, app_ble_valve.c). wifi_task prints each hold's start and end, and a page's
- * chain as a whole (radio_hold_log()). The callbacks only store ticks and flags, and stop a
- * page's scan. */
-#define RADIO_HOLD_SCAN_MS         6000    // a Wi-Fi scan until its SCAN_DONE (a cap: ~2 s is usual)
-#define RADIO_HOLD_SCAN_TAIL_MS    4000    // after the SCAN_DONE: past the page's next request
-#define RADIO_HOLD_CONNECT_MS      2500    // a connect attempt until its disconnect or IP (a cap)
-#define RADIO_HOLD_SUBMIT_MS       7000    // a portal submit's attempt, the same way (a cap)
-#define RADIO_HOLD_GAP_MS          1500    // no new hold this soon after one (a page's scans apart)
-#define RADIO_HOLD_PERIOD_MS       12000   // a page's chain: its schedule's period, from its first hold
-#define RADIO_HOLD_WINDOW_MS       4000    // the last this long of each period: BLE's window
-#define RADIO_HOLD_QUIET_MS        2000    // no page scan starts this soon before a window
-#define RADIO_HOLD_LONG_AFTER_MS   180000  // 15 periods, then BLE listens in one go ...
-#define RADIO_HOLD_LONG_MS         105000  // ... this long: past a dry sensor's 100 s heartbeat
-#define RADIO_HOLD_MAX_MS          RADIO_HOLD_SUBMIT_MS    // the furthest deadline ever set
-#define PAGE_OPEN_MS               10000   // the page counts as open this long after a scan order
-
-_Static_assert(RADIO_HOLD_LONG_AFTER_MS % RADIO_HOLD_PERIOD_MS == 0,
-               "the long listen follows a whole period, its window included");
-
-static volatile bool s_sta_connected = false;     // the STA has its IP; wifi_manager task only
-static volatile TickType_t s_scan_until = 0;      // wifi_manager task only
-static volatile TickType_t s_connect_until = 0;   // wifi_manager task only
-static volatile bool s_connect_submit = false;    // that hold is a portal submit's; wifi_manager task only
-static volatile TickType_t s_chain_start = 0;     // a page's chain's first hold, 0 = none; wifi_manager task only
-static volatile TickType_t s_scan_asked = 0;      // the last scan order; wifi_manager task only
-static volatile uint16_t s_page_stops = 0;        // the chain's scans stopped for BLE; wifi_manager task only
-static volatile uint8_t s_submits = 0;            // portal submits, for the log; wifi_manager task only
-
-// The deadline is set and still ahead, by at most RADIO_HOLD_MAX_MS. Without that bound a deadline
-// left unchanged for 2^31 ticks (248 days at 100 Hz) would read as ahead again, for 248 days; with
-// it, for at most RADIO_HOLD_MAX_MS once every 2^32 ticks.
-static bool hold_running(TickType_t until, TickType_t now)
-{
-    int32_t left = (int32_t)(until - now);
-    return until != 0 && left > 0 && left <= (int32_t)pdMS_TO_TICKS(RADIO_HOLD_MAX_MS);
-}
-
-// The deadline is still ahead (bounded as above) or passed less than RADIO_HOLD_GAP_MS ago.
-static bool hold_near(TickType_t until, TickType_t now)
-{
-    int32_t left = (int32_t)(until - now);
-    return until != 0 && left > -(int32_t)pdMS_TO_TICKS(RADIO_HOLD_GAP_MS) &&
-           left <= (int32_t)pdMS_TO_TICKS(RADIO_HOLD_MAX_MS);
-}
-
-// A hold is on or ended less than RADIO_HOLD_GAP_MS ago: no new one starts (see above). A stale
-// read of the other task's deadline costs one hold, or one hold not taken.
-static bool radio_hold_near(TickType_t now)
-{
-    return hold_near(s_scan_until, now) || hold_near(s_connect_until, now);
-}
-
-static TickType_t hold_deadline(uint32_t ms)
-{
-    TickType_t t = xTaskGetTickCount() + pdMS_TO_TICKS(ms);
-    return (t != 0) ? t : 1;   // 0 means "no hold"
-}
-
-// The portal page asked for a scan less than PAGE_OPEN_MS ago: a page's chain of scan holds goes
-// on. Since 2.1.4 C10b it asks only at its load (an empty or stale list) and at its Rescan, at
-// least 20 s apart (code.js). A stale order reads as recent again for PAGE_OPEN_MS once every 2^32
-// ticks, which only joins a chain.
-static bool page_open(TickType_t now)
-{
-    TickType_t asked = s_scan_asked;
-    return asked != 0 && now - asked < pdMS_TO_TICKS(PAGE_OPEN_MS);
-}
-
-// The portal page is in use (2.1.4 C10b): it or one of its API calls was requested less than
-// PAGE_OPEN_MS ago, the page's own polls included (GET /ap.json?bg=1 every 3.8 s while the user is
-// active), not status.json (portal_activity(), the httpd task). It replaces page_open() for the
-// router retry's deferral, since the page no longer orders a scan at every poll. A stale tick reads
-// as recent for PAGE_OPEN_MS once every 2^32 ticks, which only defers a router retry.
-static volatile TickType_t s_page_tick = 0;   // httpd task only
+static volatile bool s_sta_connected = false;   // the STA has its IP; wifi_manager task only
+static volatile TickType_t s_page_tick = 0;     // httpd task only
 
 static bool page_in_use(TickType_t now)
 {
     TickType_t t = s_page_tick;
     return t != 0 && now - t < pdMS_TO_TICKS(PAGE_OPEN_MS);
-}
-
-// Ticks into the schedule of the chain that started at start (its periods, then its long listen).
-// Unsigned, so a chain that runs for 2^32 ticks (497 days at 100 Hz) only shifts its schedule once.
-static TickType_t chain_phase(TickType_t start, TickType_t now)
-{
-    return (now - start) % pdMS_TO_TICKS(RADIO_HOLD_LONG_AFTER_MS + RADIO_HOLD_LONG_MS);
-}
-
-// Ticks from now to that chain's next BLE window: 0 in one (the last RADIO_HOLD_WINDOW_MS of a
-// period, or the long listen).
-static TickType_t ble_window_in(TickType_t start, TickType_t now)
-{
-    TickType_t x = chain_phase(start, now);
-    if (x >= pdMS_TO_TICKS(RADIO_HOLD_LONG_AFTER_MS))
-        return 0;
-    TickType_t p = x % pdMS_TO_TICKS(RADIO_HOLD_PERIOD_MS);
-    TickType_t hold = pdMS_TO_TICKS(RADIO_HOLD_PERIOD_MS - RADIO_HOLD_WINDOW_MS);
-    return (p >= hold) ? 0 : hold - p;
-}
-
-// wifi_manager task: a page's scan hold, ms ahead but not into its chain's next BLE window.
-static void scan_hold_set(TickType_t now, uint32_t ms)
-{
-    TickType_t ahead = pdMS_TO_TICKS(ms);
-    TickType_t start = s_chain_start;
-    if (start != 0)
-    {
-        TickType_t to_window = ble_window_in(start, now);
-        if (to_window < ahead)
-            ahead = to_window;
-    }
-    TickType_t until = now + ahead;
-    s_scan_until = (until != 0) ? until : 1;
-}
-
-bool app_wifi_radio_hold_active(void)
-{
-    if (s_sta_connected)
-        return false;
-    TickType_t now = xTaskGetTickCount();
-    // A portal submit's attempt holds through the page's BLE windows (see above).
-    if (s_connect_submit && hold_running(s_connect_until, now))
-        return true;
-    TickType_t start = s_chain_start;
-    if (start != 0 && page_open(now) && ble_window_in(start, now) == 0)
-        return false;
-    return hold_running(s_scan_until, now) || hold_running(s_connect_until, now);
-}
-
-// For the log: the hold that is on, the connect attempt's first.
-static const char *radio_hold_reason(TickType_t now)
-{
-    if (hold_running(s_connect_until, now))
-        return s_connect_submit ? "portal submit" : "connect attempt";
-    return "Wi-Fi scan";
 }
 
 /* ---- Router retry --------------------------------------------------------------------------
@@ -340,8 +59,8 @@ static const char *radio_hold_reason(TickType_t now)
  * while the SoftAP is up it starts none (its C5): nothing tried the router again, and on the
  * 2026-09-29 bench the hub never rejoined once the router was back. wifi_manager can also leave
  * the STA idle with the SoftAP down: after a Connect's attempt that fails it starts no retry and no
- * AP. So whenever the STA is down with a network in use (credentials in wifi_manager's RAM copy),
- * outside the portal window (router_fallback()), SoftAP up or not, wifi_task asks wifi_manager for
+ * AP. So whenever the STA is down with a network in use (credentials in wifi_manager's RAM copy:
+ * router_fallback()), SoftAP up or not, wifi_task asks wifi_manager for
  * an APP_RETRY (wifi_manager_retry_async()) once no attempt has started or ended for
  * ROUTER_RETRY_MS plus a jitter of up to ROUTER_RETRY_JITTER_MS, drawn again for each attempt
  * (plan 4.4: 30 s + U(0, 5) s), and none is in flight; never before wifi_manager's own first
@@ -457,7 +176,7 @@ static void rp_attempt_over(void)
  * The backstop: the SoftAP still up with the STA connected AP_TAIL_BACKSTOP_MS (75 s) after the
  * IP, whatever kept it up (a timer command that was not taken, wifi_manager's AP_STARTED bit set
  * only after its GOT_IP, so that it armed no timer, a SoftAP that came up after the IP):
- * wifi_task sends one STOP_AP for that IP. It takes over the portal window's old safety net.
+ * wifi_task sends one STOP_AP for that IP.
  *
  * Automatic or a Connect: the attempt that got the IP decides. wifi_manager starts every attempt
  * itself, one at a time, and its CONNECT_STA callback gives the kind of each one it starts (2.1.4
@@ -658,15 +377,13 @@ static bool list_scan_gate(void)
 static void cb_ap_started(void *pvParameter)
 {
     (void)pvParameter;
+    // The radio policy runs its AP modes from here (see the top): BLE leak scanning goes on beside
+    // the SoftAP, with or without saved credentials (D2). In a router fallback wifi_task keeps
+    // retrying the router, as it does whenever the STA is down (router_retry()).
     const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
     if (sta == NULL || sta->sta.ssid[0] == '\0')
-    {
-        s_setup_ok_tick = 0;   // also a re-open after the portal's forget: no setup in it yet
-        portal_priority_open();
-    }
-    // Router fallback: BLE scanning stays on apart from the radio holds, and wifi_task keeps
-    // retrying the router, as it does whenever the STA is down (router_retry()).
-    else if (!s_portal_priority)
+        ESP_LOGI(WIFI_TAG, "SoftAP up with no saved Wi-Fi credentials (setup portal) - BLE scanning, if any, stays on beside it");
+    else
         ESP_LOGI(WIFI_TAG, "SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on");
     rp_note_wifi(true);
 
@@ -683,20 +400,15 @@ static void cb_ap_started(void *pvParameter)
 
 // WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected, once
 // the SoftAP and its servers are stopped: at the stop the SoftAP's tail set, or from its
-// backstop (see there). This is where Wi-Fi setup ends the window. Idempotent: a second STOP_AP
-// for the same IP (the backstop's after the timer's, or the other way round) finds the SoftAP
-// down already, and its call prints and closes nothing more.
+// backstop (see there). The radio policy leaves the SoftAP's tail (NORMAL either way).
+// Idempotent: a second STOP_AP for the same IP (the backstop's after the timer's, or the other
+// way round) finds the SoftAP down already, and prints nothing more.
 // Parameter 1: wifi_manager could not leave APSTA mode (its E line says why), so the SoftAP and
-// its servers stay up and it tries the stop again in 5 s. The window closes all the same: this
-// is when the tail meant it to, and BLE must never stay paused while the hub is on Wi-Fi, which
-// a mode switch that keeps failing would otherwise do for good. No "SoftAP stopped" line.
+// its servers stay up and it tries the stop again in 5 s: no fact changes, no "SoftAP stopped" line.
 static void cb_ap_stopped(void *pvParameter)
 {
     if ((uintptr_t)pvParameter != 0)
-    {
-        portal_priority_close("SoftAP stop failed");   // the SoftAP itself is still up
-        return;
-    }
+        return;   // the SoftAP is still up
     rp_note_wifi(false);
     TickType_t ip = s_ip_tick;
     if (ip != 0 && ip != s_ap_stop_seen)
@@ -706,16 +418,14 @@ static void cb_ap_stopped(void *pvParameter)
         ESP_LOGI(WIFI_TAG, "SoftAP stopped (its servers too) %lu.%lu s after the IP",
                  (unsigned long)(ms / 1000), (unsigned long)((ms % 1000) / 100));
     }
-    portal_priority_close("AP stopped");
 }
 
 // WM_ORDER_CONNECT_STA (wifi_manager task): wifi_manager decided an order (2.1.4 C8). The
 // parameter is its kind, with WIFI_MANAGER_CONNECT_NOT_STARTED when it started no attempt (the STA
 // connected, an attempt under way, a Connect's candidate first, or the driver refused it): the
 // router retry counts from that too, and nothing else changes. An attempt that started: the router
-// retry counts from it, the SoftAP tail's kind is marked, and the radio hold is set outside the
-// window: a portal submit's whatever else holds, any other's only with no hold on or just over (the
-// router retry's own covers its attempt).
+// retry counts from it, the SoftAP tail's kind is marked, and the radio policy is told (an attempt
+// in flight; a Connect's asks for the SUBMIT pulse).
 static void cb_connect_sta(void *pvParameter)
 {
     uint32_t info = (uint32_t)(uintptr_t)pvParameter;
@@ -731,7 +441,6 @@ static void cb_connect_sta(void *pvParameter)
     }
     s_attempt_tick = (now != 0) ? now : 1;   // 0 means "no attempt yet"
     s_attempt_in_flight = true;
-    s_connect_submit = false;
     s_attempt_submit = user;   // the SoftAP tail's kind, if this attempt gets the IP (see there)
     if (user)
         ESP_LOGI(WIFI_TAG, "Wi-Fi setup page: Connect - attempt started");
@@ -743,78 +452,33 @@ static void cb_connect_sta(void *pvParameter)
         s_submit_noted = user;
         radio_policy_note_submit(user);
     }
-    if (s_portal_priority)
-        return;
-    if (user)
-    {
-        // The user's Connect on the page (see the radio hold above).
-        s_connect_submit = true;
-        s_connect_until = hold_deadline(RADIO_HOLD_SUBMIT_MS);
-        s_submits++;
-    }
-    else if (!radio_hold_near(now))
-        s_connect_until = hold_deadline(RADIO_HOLD_CONNECT_MS);
 }
 
 // WM_ORDER_START_WIFI_SCAN (wifi_manager task): the portal page asked for the network list, and
-// wifi_manager has started a scan, or skipped it (one already running, or its start failed: the
-// cap ends the hold then). The order joins the page's chain, or starts one unless another hold is
-// on or just over. In the chain's BLE window, or less than RADIO_HOLD_QUIET_MS before it, the scan
-// is stopped at once and the hold ends (see the radio hold above).
+// wifi_manager has started a scan, or skipped it (one already running, or its gate or the driver
+// refused it). A scan that did not start ends the LIST pulse its gate may have been granted
+// (list_scan_gate()). Nothing here stops a scan any more (2.1.4 WP8): the LIST pulse gives it the
+// radio, and BLE its Coded windows around it.
 static void cb_scan_start(void *pvParameter)
 {
     (void)pvParameter;
-    // No scan started (the gate refused it, or the driver did): the LIST pulse, if any, ends now.
     if (!wifi_manager_scan_in_flight())
         radio_policy_pulse_end(RP_PULSE_LIST);
-    TickType_t now = xTaskGetTickCount();
-    bool open = page_open(now);            // the page's last order came recently: its chain goes on
-    s_scan_asked = (now != 0) ? now : 1;   // the router retry's page_open(), whatever the hold
-    if (s_sta_connected || s_portal_priority)
-    {
-        s_chain_start = 0;
-        return;
-    }
-    if (s_chain_start == 0 || !open)
-    {
-        s_chain_start = 0;
-        if (radio_hold_near(now))
-            return;   // not right behind another hold: this scan runs with BLE on (2.1.4 C10b: no retry)
-        s_chain_start = (now != 0) ? now : 1;
-        s_page_stops = 0;
-    }
-    if (ble_window_in(s_chain_start, now) < pdMS_TO_TICKS(RADIO_HOLD_QUIET_MS))
-    {
-        // BLE's turn. The stopped scan ends failed (its SCAN_DONE clears wifi_manager's scan bit,
-        // and wifi_manager keeps its list), so the page shows the last full scan's. Never in a
-        // connect attempt: wifi_manager could not start a scan then, and esp_wifi_scan_stop()
-        // refuses a connecting STA's (ESP_ERR_WIFI_STATE) anyway.
-        if (!s_attempt_in_flight)
-            esp_wifi_scan_stop();
-        s_page_stops++;
-        if (hold_running(s_scan_until, now))
-            s_scan_until = (now != 0) ? now : 1;
-        return;
-    }
-    scan_hold_set(now, RADIO_HOLD_SCAN_MS);
 }
 
 // WM_EVENT_SCAN_DONE (wifi_manager task), once the list is rebuilt (or kept, for a scan that
-// failed or was stopped): only the tail is left, and not into the chain's next BLE window.
+// failed or was stopped): the LIST pulse ends, and BLE resumes with a Coded recovery window.
 static void cb_scan_done(void *pvParameter)
 {
     (void)pvParameter;
-    radio_policy_pulse_end(RP_PULSE_LIST);   // its scan is over: BLE resumes (with a Coded recovery)
-    TickType_t now = xTaskGetTickCount();
-    if (hold_running(s_scan_until, now))
-        scan_hold_set(now, RADIO_HOLD_SCAN_TAIL_MS);
+    radio_policy_pulse_end(RP_PULSE_LIST);
 }
 
 /* ---- The portal's forget ------------------------------------------------------------------
  * The portal page's Disconnect (DELETE /connect.json, kept: D9) and the 10 s reset send
  * wifi_manager a DISCONNECT_STA. Since 2.1.4 C8 wifi_manager does the whole forget itself, in
  * every state of the STA: idle, it erases at once (zero SSID and password over the saved ones,
- * and START_AP, whose callback opens the portal window: cb_ap_started()); connecting or connected,
+ * and START_AP: the no-credential setup portal, cb_ap_started()); connecting or connected,
  * the STA_DISCONNECTED that follows erases before anything else it does, and one that never comes
  * erases 2 s later. A forget also drops a Connect's candidate. The app's own forget (an event it
  * posted for an idle STA, and a forget it kept pending through a user connect) is gone with it:
@@ -1091,15 +755,16 @@ void app_wifi_start()
     // The network list's scan gate (2.1.4 WP8: the LIST pulse, above). A plain store too.
     wifi_manager_set_scan_gate(&list_scan_gate);
     wifi_manager_start();
-    // The portal priority window's callbacks first: with no credentials saved, START_AP comes
-    // about 0.7 s after the start (network and Wi-Fi init, the HTTP server), while these calls
-    // take microseconds. Not before the start: wifi_manager_start() allocates the callback
-    // table, and a callback set before it is silently dropped.
+    // The SoftAP's and the STA's callbacks first (the radio policy's facts): with no credentials
+    // saved, START_AP comes about 0.7 s after the start (network and Wi-Fi init, the HTTP server),
+    // while these calls take microseconds. Not before the start: wifi_manager_start() allocates
+    // the callback table, and a callback set before it is silently dropped.
     wifi_manager_set_callback(WM_ORDER_START_AP, &cb_ap_started);
     wifi_manager_set_callback(WM_ORDER_STOP_AP, &cb_ap_stopped);
     wifi_manager_set_callback(WM_EVENT_STA_GOT_IP, &cb_connection_ok);
     wifi_manager_set_callback(WM_EVENT_STA_DISCONNECTED, &cb_connection_lost);
-    // The Wi-Fi radio hold's. Nothing else registers these three.
+    // The attempts' and the network list's scan (the SUBMIT and LIST pulses). Nothing else
+    // registers these three.
     wifi_manager_set_callback(WM_ORDER_CONNECT_STA, &cb_connect_sta);
     wifi_manager_set_callback(WM_ORDER_START_WIFI_SCAN, &cb_scan_start);
     wifi_manager_set_callback(WM_EVENT_SCAN_DONE, &cb_scan_done);
@@ -1129,31 +794,13 @@ void cb_connection_ok(void *pvParameter)
     ESP_LOGI(WIFI_TAG, "Wi-Fi channel at IP: radio %u, router %u%s", radio_channel(), (unsigned)router,
              scan_note());
 
-    // The STA has its air time now: no Wi-Fi radio hold, and BLE resumes at once. The attempt
-    // that got here is over, and so is a page's chain.
+    // The attempt that got here is over.
     s_sta_connected = true;
     s_attempt_in_flight = false;
-    s_scan_until = 0;
-    s_connect_until = 0;
-    s_connect_submit = false;
-    s_chain_start = 0;
     // The radio policy: the STA has its IP (with the SoftAP up, its tail runs NORMAL), the attempt
     // and a Connect's SUBMIT are over.
     rp_attempt_over();
     rp_note_wifi(softap_up());
-
-    // Wi-Fi is set up, but the portal priority window stays open until the setup AP stops
-    // (cb_ap_stopped()): the phone that submitted the credentials is still on the SoftAP and
-    // loads the portal's success status from it. Only the time of this IP is kept, for
-    // cb_connection_lost(). Nothing when the window is not open (a router reconnect, or a boot
-    // with saved credentials). The line gives the tail's cap (60 s); the tail's own line follows.
-    if (s_portal_priority)
-    {
-        TickType_t now = xTaskGetTickCount();
-        s_setup_ok_tick = (now != 0) ? now : 1;   // 0 means "no setup in this window"
-        ESP_LOGI(WIFI_TAG, "portal priority: Wi-Fi connected - BLE scanning stays paused until the setup AP stops (about %d s)",
-                 AP_TAIL_SUBMIT_MS / 1000);
-    }
 
     // The SoftAP's tail, with the SoftAP up (see there): its kind and its first stop.
     ap_tail_start();
@@ -1189,35 +836,16 @@ void cb_connection_lost(void *pvParameter)
     s_ip_tick = 0;
     s_attempt_submit = false;
 
-    // The link was lost, or a connect attempt ended, and its radio hold with it (the deadline stays
-    // for RADIO_HOLD_GAP_MS). The router retry counts from here too: this disconnect may have armed
-    // wifi_manager's own retry timer (see the router retry above).
+    // The link was lost, or a connect attempt ended. The router retry counts from here too: this
+    // disconnect may have armed wifi_manager's own retry timer (see the router retry above).
     s_sta_connected = false;
     s_attempt_in_flight = false;
     TickType_t now = xTaskGetTickCount();
     s_attempt_tick = (now != 0) ? now : 1;   // 0 means "no attempt yet"
-    if (hold_running(s_connect_until, now))
-        s_connect_until = s_attempt_tick;
-    s_connect_submit = false;
     // The radio policy: no IP (with the SoftAP up the AP modes run), the attempt and a Connect's
     // SUBMIT are over.
     rp_attempt_over();
     rp_note_wifi(softap_up());
-
-    // The STA lost the Wi-Fi it was set up with in this window, before the setup AP stopped.
-    // wifi_manager has just stopped its AP-shutdown timer, so the SoftAP stays up as a
-    // router-fallback portal with the credentials saved, which keeps BLE scanning: close the
-    // window. Not after a requested disconnect (the 10 s reset, the portal's forget):
-    // wifi_manager zeroes the STA config before this callback and sends START_AP next, so the
-    // window stays open for the next setup.
-    if (s_portal_priority && s_setup_ok_tick != 0)
-    {
-        const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
-        if (sta != NULL && sta->sta.ssid[0] != '\0')
-            portal_priority_close("Wi-Fi lost after setup");
-        else
-            s_setup_ok_tick = 0;
-    }
 
     // Network LED -> "no internet" (ramp red). This also clears the MQTT flag
     // inside net_status so a later reconnect shows "connecting" first.
@@ -1231,16 +859,9 @@ void cb_connection_lost(void *pvParameter)
     iothub_on_wifi_lost();
 }
 
-// wifi_task's own state for the Wi-Fi radio hold's log lines, the router retry and the SoftAP's
-// tail.
+// wifi_task's own state: the router retry, the SoftAP's tail and the SoftAP fact's cross-check.
 typedef struct
 {
-    bool hold_on;            // a hold's ON line is printed, its OFF line not yet
-    TickType_t hold_since;   // when that ON line was printed
-    bool page_on;            // a page chain's first line is printed, its last not yet
-    TickType_t page_since;   // when that first line was printed
-    bool long_on;            // that chain is in its long listen, and its line is printed
-    uint8_t submits;         // s_submits as last seen
     unsigned retries;        // router retries sent since the fallback began
     bool defer_logged;       // the "retry deferred" line is printed for the page open now
     TickType_t retry_mark;   // the attempt (s_attempt_tick) the retry's jitter was drawn for
@@ -1253,70 +874,13 @@ typedef struct
     TickType_t backstop_for; // the IP the backstop sent its STOP_AP for
 } wifi_task_state_t;
 
-// Prints each Wi-Fi radio hold's start and end as wifi_task sees them. It looks on every pass,
-// every second while the STA is down (the only time a hold can run), so a line is at most about
-// a second late, and holds that chain print one pair. A page's chain, whose holds stop for a BLE
-// window every 12 s, prints one line as it starts and one as it ends instead, with one for its
-// long listen and one for each portal submit in it.
-static void radio_hold_log(wifi_task_state_t *st)
-{
-    TickType_t now = xTaskGetTickCount();
-    uint8_t submits = s_submits;
-    TickType_t start = s_chain_start;   // one read: the wifi_manager task can end the chain
-    if (start != 0 && page_open(now) && !s_sta_connected && !s_portal_priority)
-    {
-        if (!st->page_on)
-        {
-            st->page_on = true;
-            st->page_since = now;
-            st->hold_on = false;   // the chain's lines stand for its holds
-            st->long_on = false;
-            ESP_LOGI(WIFI_TAG, "Wi-Fi setup page in use - its scans pause BLE scanning, BLE listens %d s of every %d s",
-                     RADIO_HOLD_WINDOW_MS / 1000, RADIO_HOLD_PERIOD_MS / 1000);
-        }
-        if (submits != st->submits)
-            ESP_LOGI(WIFI_TAG, "Wi-Fi setup page: Connect sent - BLE scanning paused for its attempt (%d s at most)",
-                     RADIO_HOLD_SUBMIT_MS / 1000);
-        st->submits = submits;
-        bool long_listen = chain_phase(start, now) >= pdMS_TO_TICKS(RADIO_HOLD_LONG_AFTER_MS);
-        if (long_listen && !st->long_on)
-            ESP_LOGI(WIFI_TAG, "Wi-Fi setup page in use %u s - BLE listens %d s with none of its scans",
-                     (unsigned)((now - st->page_since) / configTICK_RATE_HZ), RADIO_HOLD_LONG_MS / 1000);
-        st->long_on = long_listen;
-        return;
-    }
-    st->submits = submits;
-    if (st->page_on)
-    {
-        // Done: the STA got its IP, or the portal's forget opened the window, which pauses BLE.
-        st->page_on = false;
-        ESP_LOGI(WIFI_TAG, "Wi-Fi setup page idle, closed or done after %u s (%u of its scans stopped for BLE) - %s",
-                 (unsigned)((now - st->page_since) / configTICK_RATE_HZ), (unsigned)s_page_stops,
-                 s_portal_priority ? "BLE stays paused for the setup portal" : "BLE scanning resumed");
-    }
-    bool on = app_wifi_radio_hold_active();
-    if (on == st->hold_on)
-        return;
-    st->hold_on = on;
-    if (on)
-    {
-        st->hold_since = now;
-        ESP_LOGI(WIFI_TAG, "Wi-Fi radio hold ON (%s) - BLE scanning paused", radio_hold_reason(now));
-    }
-    else
-    {
-        ESP_LOGI(WIFI_TAG, "Wi-Fi radio hold OFF after %u s - BLE scanning resumed",
-                 (unsigned)((now - st->hold_since + configTICK_RATE_HZ / 2) / configTICK_RATE_HZ));
-    }
-}
-
-// The STA is down with credentials in its config, outside the portal window, SoftAP up or not:
-// wifi_manager's fallback AP after its retries, a SoftAP left up by "Wi-Fi lost after setup", or
-// the STA left idle with no AP (see the router retry above). The flags are the wifi_manager
-// task's; a stale read costs one pass.
+// The STA is down with credentials in its config, SoftAP up or not: wifi_manager's fallback AP
+// after its retries, a SoftAP left up after a link lost in its tail, or the STA left idle with no
+// AP (see the router retry above). The flags are the wifi_manager task's; a stale read costs one
+// pass.
 static bool router_fallback(void)
 {
-    if (s_sta_connected || s_portal_priority)
+    if (s_sta_connected)
         return false;
     const wifi_config_t *sta = wifi_manager_get_wifi_sta_config();
     return sta != NULL && sta->sta.ssid[0] != '\0';
@@ -1374,8 +938,8 @@ static void router_retry(wifi_task_state_t *st)
     radio_policy_pulse_request(RP_PULSE_RETRY);
     rp_grant_t g = radio_policy_pulse_wait(RP_PULSE_RETRY, RP_GRANT_WAIT_MS);
     // Again after the wait: an attempt may have started (a portal submit) or ended meanwhile, the
-    // page may be in use again, or the STA, the window or the config changed. Then nothing is
-    // sent, and the pulse, if granted, is ended.
+    // page may be in use again, or the STA or the config changed. Then nothing is sent, and the
+    // pulse, if granted, is ended.
     now = xTaskGetTickCount();
     if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != mark ||
         (page_in_use(now) && now - mark < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)))
@@ -1417,8 +981,7 @@ static void ap_tail_maintain(wifi_task_state_t *st)
     }
     TickType_t since = xTaskGetTickCount() - ip;
 
-    // The backstop, once per IP. wifi_manager stops the SoftAP only with the STA connected. In the
-    // portal window it prints the window's old safety-net line.
+    // The backstop, once per IP. wifi_manager stops the SoftAP only with the STA connected.
     if (since >= pdMS_TO_TICKS(AP_TAIL_BACKSTOP_MS))
     {
         // The order waits WIFI_MANAGER_POST_WAIT_MS at most (2.1.4 C6); one not taken is sent
@@ -1427,11 +990,8 @@ static void ap_tail_maintain(wifi_task_state_t *st)
             wifi_manager_send_message_wait(WM_ORDER_STOP_AP, NULL, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS)
         {
             st->backstop_for = ip;
-            unsigned s = (unsigned)(since / configTICK_RATE_HZ);
-            if (s_portal_priority)
-                ESP_LOGW(WIFI_TAG, "portal priority: setup AP still up %u s after Wi-Fi connected - stopping it", s);
-            else
-                ESP_LOGW(WIFI_TAG, "SoftAP still up %u s after Wi-Fi connected - stopping it", s);
+            ESP_LOGW(WIFI_TAG, "SoftAP still up %u s after Wi-Fi connected - stopping it",
+                     (unsigned)(since / configTICK_RATE_HZ));
         }
         return;
     }
@@ -1531,24 +1091,23 @@ void wifi_task(void *pvParameter)
     // lock, which the loop holds while it runs wifi_manager's handler, and that handler can block
     // posting to the wifi_manager task. The wifi_manager task creates the default loop, so a first
     // try can find none (ESP_ERR_INVALID_STATE, silent): retried every second until each is in.
-    // Each pass also runs the SoftAP's tail and its backstop (ap_tail_maintain()), the router
-    // retry (router_retry()) and the Wi-Fi radio hold's log (radio_hold_log()): every second while
-    // the STA is down, a tail is followed, or a hold's OFF line or a page chain's last line is
-    // still due, else every 5 s.
+    // Each pass also runs the SoftAP's tail and its backstop (ap_tail_maintain()), the SoftAP
+    // fact's cross-check (ap_fact_check()), the radio policy's stations against the driver's list
+    // (ap_stations_prune()) and the router retry (router_retry()): every second while the STA is
+    // down or a tail is followed, else every 5 s.
     // First on each pass, the MQTT client's stop when iothub_task has asked for one (2.1.4: a
     // link loss, a SoftAP start, a SAS renewal). iothub_task evaluates the leaks, so it never
     // waits in esp_mqtt_client_stop(); this task can: about 1 s in a session, up to 5 s
     // between esp-mqtt's reconnects, 10-30 s with a connect in flight, once per outage or
     // renewal (iothub_mqtt_stop_service()). First, so it never falls between a router retry's
-    // hold and its order. iothub_task's ask wakes the pass (a task notification); every other
+    // grant and its order. iothub_task's ask wakes the pass (a task notification); every other
     // wake is harmless, as each step reads its own facts and ticks.
     bool ap_log_on = false;
     bool lease_log_on = false;
     wifi_task_state_t st = { 0 };
     while (1)
     {
-        bool fast = !ap_log_on || !lease_log_on || !s_sta_connected || st.hold_on || st.page_on ||
-                    st.tail_ip != 0;
+        bool fast = !ap_log_on || !lease_log_on || !s_sta_connected || st.tail_ip != 0;
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(fast ? 1000 : 5000));
         iothub_mqtt_stop_service();
         if (!ap_log_on)
@@ -1561,7 +1120,6 @@ void wifi_task(void *pvParameter)
         ap_fact_check(&st);
         ap_stations_prune();
         router_retry(&st);
-        radio_hold_log(&st);
     }
     vTaskDelete(NULL);
 }
