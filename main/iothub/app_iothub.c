@@ -283,8 +283,9 @@ static int64_t       s_hb_interval_ms    = SNAPSHOT_INTERVAL_MS;// latched from 
 static bool          g_fast_snapshot_sent = false;             // one-shot fast boot/reconnect snapshot (reset only at a new session's reset)
 static int64_t       g_fast_arm_ms        = 0;                  // monotonic ms when the fast snapshot was (re)armed; ceiling is relative to THIS
 static uint32_t      s_rating_seq_seen    = 0;                  // health_get_rating_seq() already requested/published (see Phase 3)
-// A due snapshot held last pass for cloud_tx (2.1.4 WP2c): TX not idle, one in flight, or a
-// session whose resets this task has not applied. The loop then polls at SNAP_TX_HOLD_POLL_MS,
+// A due snapshot held last pass for cloud_tx (2.1.4 WP2c): TX not idle, one in flight, a
+// session whose resets this task has not applied, or a device-set change's twin report owed
+// (s_twin_snap_hold, 2.1.4 WP3 review F3). The loop then polls at SNAP_TX_HOLD_POLL_MS,
 // not 1 tick (R0-3); cloud_tx's wake (idle, or the result) usually comes first.
 #define SNAP_TX_HOLD_POLL_MS   2000
 static bool          s_snap_tx_held       = false;
@@ -769,7 +770,7 @@ static char *build_ble_leak_delta_json(const ble_leak_event_t *evt)
 // ---------------------------------------------------------------------------
 
 static void twin_request(void);            // forward declaration
-static void post_twin_reported(void);      // forward declaration
+static void post_twin_reported(bool devset);   // forward declaration
 static void mark_mqtt_disconnected(void);  // forward declaration (used by mqtt_stop_request)
 
 // Reject an "open the valve" request while the valve's RMLEAK latch is asserted
@@ -1106,7 +1107,7 @@ static void apply_device_set_change(void)
     // twin claiming the removed device until the next reconnect). Built here and sent by
     // cloud_tx in order with every other report; owed while 8 or more items wait in the FIFO
     // (2.1.4 TW-1, SAFE-1: post_twin_reported()).
-    post_twin_reported();
+    post_twin_reported(true);
 }
 
 // ---- Snapshot scheduler helpers (iothub_task context ONLY) ----------------
@@ -1754,6 +1755,16 @@ static uint32_t          s_twin_req_done = 0;       // iothub_task only
 // A device-set change's report not handed to cloud_tx (8 or more items in the FIFO, or no
 // memory for its build), or one esp-mqtt refused: owed like a request. iothub_task only.
 static bool              s_twin_due      = false;
+// A device-set change's report left owed by the TWIN_REPORT_RETRY_MS back-off (2.1.4 WP3
+// review F3): the snapshot that change asks for waits for it (the flush block) until the
+// loop's owed post next tries to build it, so the order stays cmd_ack, twin, snapshot. Once per
+// owed report: that try ends the hold, built or not, and no change holds again until a report
+// is posted. A provisioning mutex that stays busy, with the change retried meanwhile, so holds
+// snapshots for one back-off and one 2 s poll at most. iothub_task only.
+#define TWIN_HOLD_NONE   0
+#define TWIN_HOLD_ON     1   // the flush waits for the owed report
+#define TWIN_HOLD_SPENT  2   // ended without a post: not again until one
+static uint8_t           s_twin_snap_hold = TWIN_HOLD_NONE;
 // The build number of the last report handed to cloud_tx (twin_posted()). A build whose post
 // failed was freed and never reached cloud_tx, so its number is used again. iothub_task only.
 static uint16_t          s_twin_seq      = 0;
@@ -1892,9 +1903,18 @@ static char *twin_build(uint16_t *seq, uint32_t *req)
 // iothub_task: report `seq`, built after those requests, is with cloud_tx: none is owed now.
 static void twin_posted(uint16_t seq, uint32_t req)
 {
-    s_twin_seq      = seq;
-    s_twin_req_done = req;
-    s_twin_due      = false;
+    s_twin_seq       = seq;
+    s_twin_req_done  = req;
+    s_twin_due       = false;
+    s_twin_snap_hold = TWIN_HOLD_NONE;
+}
+
+// iothub_task: a device-set change's report is owed (post_twin_reported()): hold the snapshot
+// for it, once per owed report (review F3).
+static void twin_snap_hold_arm(bool devset)
+{
+    if (devset && s_twin_snap_hold == TWIN_HOLD_NONE)
+        s_twin_snap_hold = TWIN_HOLD_ON;
 }
 
 // iothub_task: a device-set change's report (apply_device_set_change()) or an owed one (the
@@ -1904,19 +1924,23 @@ static void twin_posted(uint16_t seq, uint32_t req)
 // TELEM_TX_DEFERRABLE_MAX (8) items wait, like a health alert, so that at least 16 of the
 // FIFO's slots stay for the leak, valve and rules events (2.1.4 SAFE-1, TW-1 review): otherwise
 // owed, and built fresh on a later pass (the loop polls at 2 s meanwhile). Only this task posts
-// to the FIFO, so room seen here is still there at the post.
-static void post_twin_reported(void)
+// to the FIFO, so room seen here is still there at the post. devset: a device-set change's
+// report (apply_device_set_change()); false: the loop's owed post.
+static void post_twin_reported(bool devset)
 {
     // mqtt_client is NULL until cloud_bringup() succeeds.
     if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
     // Within TWIN_REPORT_RETRY_MS of a report not built (provisioning busy) or refused: owed,
     // and built when that time is up (the loop's owed post). A device-set change's report waits
     // too, so a busy provisioning mutex is not waited for again on every retry of that change
-    // (2.1.4 WP3 review).
+    // (2.1.4 WP3 review), and the snapshot that change asks for waits for it (review F3).
     if (snap_now_ms() < s_twin_retry_ms) {
         s_twin_due = true;
+        twin_snap_hold_arm(devset);
         return;
     }
+    if (s_twin_snap_hold == TWIN_HOLD_ON)
+        s_twin_snap_hold = TWIN_HOLD_SPENT;   // this try ends the hold, built or not
 
     uint32_t gen = telemetry_v2_session_gen();
     uint16_t seq = 0;
@@ -1927,8 +1951,10 @@ static void post_twin_reported(void)
         // Not built: provisioning busy for 1 s (or no memory). Not again before
         // TWIN_REPORT_RETRY_MS, as after a refusal: each try waits up to 1 s on this task,
         // which also evaluates the leaks (2.1.4 WP3 review).
-        if (json == NULL)
+        if (json == NULL) {
             s_twin_retry_ms = snap_now_ms() + TWIN_REPORT_RETRY_MS;
+            twin_snap_hold_arm(devset);   // its summary still answering busy
+        }
     }
     if (json == NULL) {
         s_twin_due = true;
@@ -4645,7 +4671,7 @@ void iothub_task(void *param)
         // command's order on the wire stays cmd_ack, twin, snapshot.
         if (telemetry_v2_is_connected() && (s_twin_due || s_twin_req != s_twin_req_done) &&
             snap_now_ms() >= s_twin_retry_ms)
-            post_twin_reported();
+            post_twin_reported(false);
 
         // ---- The result of the snapshot in flight (2.1.4 WP2c) ----
         // Its bookkeeping first, so the arming below re-arms BOOT/FAST/COMMISSION from the
@@ -4778,11 +4804,14 @@ void iothub_task(void *param)
         // overlaps a cloud_tx TLS write. The deadline stays due; cloud_tx wakes this task (its
         // result, or idle after tx_wake_request()), and the loop polls at SNAP_TX_HOLD_POLL_MS
         // meanwhile. The build holds the busy mutex, so cloud_tx starts nothing meanwhile.
+        // Held also while a device-set change's twin report waits out its back-off
+        // (s_twin_snap_hold, review F3): the owed post above builds it first when that ends.
         // =================================================================
         bool devset_unseen = g_devset_changed && !devset_retry;
         s_snap_tx_held = false;
         if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms &&
-            (s_fl.out || s_iot_gen_seen != telemetry_v2_session_gen())) {
+            (s_fl.out || s_iot_gen_seen != telemetry_v2_session_gen() ||
+             (s_twin_snap_hold == TWIN_HOLD_ON && s_twin_due))) {
             s_snap_tx_held = true;
         } else if (!devset_unseen && telemetry_v2_is_connected() && snap_now_ms() >= s_snap_due_ms) {
             int64_t flush_now = snap_now_ms();
