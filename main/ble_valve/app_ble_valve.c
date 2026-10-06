@@ -2117,6 +2117,16 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "║            GAP DISCONNECT EVENT                              ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGW(BLE_TAG, "[DISCONNECT] reason=0x%02x", event->disconnect.reason);
+        // Only the tracked link's own DISCONNECT closes it (a link GAP CONNECT rejected is tracked
+        // too). Since WP3 this module also closes a link itself, a stale handle (link_stale_check())
+        // or a REATTEMPT_COUNT, so a DISCONNECT for that old handle that comes late must not close
+        // the link or the claim that replaced it.
+        if (event->disconnect.conn.conn_handle != valve_conn_handle)
+        {
+            ESP_LOGW(BLE_TAG, "[DISCONNECT] Handle %u is not the tracked link (%u) - ignored",
+                     event->disconnect.conn.conn_handle, valve_conn_handle);
+            return 0;
+        }
         link_closed();
         return 0;
 
