@@ -195,7 +195,7 @@ static volatile bool s_sta_attempt = false;      // wifi_manager task
 static volatile bool s_submit = false;           // wifi_manager task
 static volatile TickType_t s_page_tick = 0;      // httpd task: the page in use
 static volatile TickType_t s_hot_tick = 0;       // httpd task: a hot event (SERVE-A-thin)
-static volatile TickType_t s_prov_until = 0;     // default event loop: provisional SERVE ends then
+static volatile TickType_t s_prov_at = 0;        // default event loop: provisional SERVE's start
 
 /* The SoftAP's stations (plan 4.1's station table), for the join assist and provisional SERVE.
  * Written by the default event loop (join, leave, lease) and the httpd task (a station's first page
@@ -713,7 +713,7 @@ void radio_policy_station_leased(const uint8_t mac[6], uint32_t ip)
             s_lease_ms_max = rp_ms(now - s->join_at);
         if (s->prov_at == 0 || (now - s->prov_at) >= pdMS_TO_TICKS(RP_PROV_SERVE_EVERY_MS)) {
             s->prov_at = now;
-            s_prov_until = rp_nz(now + pdMS_TO_TICKS(RP_PROV_SERVE_MS));
+            s_prov_at = now;
         }
     }
     taskEXIT_CRITICAL(&s_sta_lock);
@@ -872,10 +872,13 @@ static uint32_t i2b_used(void)
     return sum;
 }
 
+// The provisional SERVE is timed from its start, as the page is (rp_within()): an end stamp, never
+// cleared, would read as future again 2^31 ticks (248 days at 100 Hz) after it, and hold SERVE for
+// as long again.
 static bool serve_now(TickType_t now)
 {
     return rp_within(s_page_tick, now, RP_PAGE_ACTIVE_MS) || s_submit ||
-           (s_prov_until != 0 && (int32_t)(s_prov_until - now) > 0);
+           rp_within(s_prov_at, now, RP_PROV_SERVE_MS);
 }
 
 // The mode's line (plan 4.7: one INFO line per mode change).
