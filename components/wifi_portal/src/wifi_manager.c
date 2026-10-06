@@ -177,7 +177,10 @@ wifi_config_t* wifi_manager_config_sta = NULL;
  *
  * Every esp_wifi_disconnect() of ours (ending an attempt, leaving the network for a candidate, a
  * forget) waits for its STA_DISCONNECTED (abort_tick); none in WIFI_MANAGER_ABORT_WAIT_MS ends the
- * attempt as if it had come, so nothing waits for good.
+ * attempt as if it had come, so nothing waits for good. Should that attempt get an IP after all,
+ * the IP is not committed and the link is left at once (late_ip_leave): a forget has erased its
+ * network since, or the page has reported its candidate failed. Only a user's candidate is ever
+ * committed (WM_CAND_ACTIVE at its IP); an automatic attempt's IP never changes the network in use.
  *
  * WM_ORDER_CONNECT_STA's callback says what each order did (wifi_manager.h): the kind of an
  * attempt that started, or the kind with WIFI_MANAGER_CONNECT_NOT_STARTED. A USER order that waits
@@ -248,6 +251,9 @@ static TickType_t stale_leave_until = 0;	/* wifi_manager task only; 0 = none */
 static bool save_owed = false;				/* a committed network's NVS save failed; wifi_manager task only */
 static bool on_uncommitted = false;			/* connected to a network not committed (a replaced candidate's,
 											 * or one a forget is under way for); wifi_manager task only */
+static bool late_ip_leave = false;			/* an attempt counted as ended with no event (abort_expired()):
+											 * its IP, should one come, is left; cleared when an attempt
+											 * starts or a STA_DISCONNECTED ends it; wifi_manager task only */
 _Static_assert(WIFI_MANAGER_STATUS_JSON_SIZE >= JSON_IP_INFO_SIZE + 21 + JSON_SSID_STR_MAX,
 		"status.json: the status of before, \",\"reason\":255,\"pend\":\" and the candidate's SSID");
 
@@ -1707,6 +1713,7 @@ static __attribute__((noinline)) void wifi_manager_start_attempt(connection_requ
 		attempt_kind = (uint8_t)kind;
 		attempt_tick = (now != 0) ? now : 1;
 		on_uncommitted = false;		/* no link left: whatever it was */
+		late_ip_leave = false;		/* the IP to come is this attempt's */
 		wifi_manager_connect_cb((uint32_t)kind);
 		return;
 	}
@@ -1881,6 +1888,9 @@ static void wifi_manager_abort_expired(uint8_t *retries){
 
 	ESP_LOGW(TAG, "no STA_DISCONNECTED %d ms after esp_wifi_disconnect() - the attempt counts as ended", WIFI_MANAGER_ABORT_WAIT_MS);
 	on_uncommitted = false;		/* not connected: no link left */
+	/* should the attempt get its IP after all, that IP is left (WM_EVENT_STA_GOT_IP): what follows
+	 * (a forget's erase, a candidate reported failed) has written the attempt off */
+	late_ip_leave = true;
 	/* should it come late after all, it is not charged to the attempt that may start next */
 	TickType_t now = xTaskGetTickCount();
 	stale_leave_until = now + pdMS_TO_TICKS(WIFI_MANAGER_STALE_LEAVE_MS);
@@ -1957,36 +1967,65 @@ static TickType_t wifi_manager_connect_deadlines(uint8_t *retries){
 
 /**
  * @brief at an IP: the driver's config is committed as the network in use if it differs from it
- * (the user's candidate got its IP: plan C8, I13), and saved. In a frame of its own (the config,
+ * and adopt is set (a user's candidate, WM_CAND_ACTIVE, got its IP: plan C8, I13), and saved.
+ * Returns false when the driver's config differs and is not adopted: the STA is on a network that
+ * is not the one in use (nothing is committed or saved then). In a frame of its own (the config,
  * about 0.15 KB, wiped).
  */
-static __attribute__((noinline)) void wifi_manager_commit_driver_config(){
+static __attribute__((noinline)) bool wifi_manager_commit_driver_config(bool adopt){
 
 	wifi_config_t drv;
 	memset(&drv, 0x00, sizeof(drv));
+	bool in_use = true;
+	bool committed = false;
 	esp_err_t err = esp_wifi_get_config(WIFI_IF_STA, &drv);
 	if(err != ESP_OK){
 		ESP_LOGW(TAG, "esp_wifi_get_config failed (%s) - the network in use is kept", esp_err_to_name(err));
 	}
 	else if(memcmp(drv.sta.ssid, wifi_manager_config_sta->sta.ssid, MAX_SSID_SIZE) != 0 ||
 			memcmp(drv.sta.password, wifi_manager_config_sta->sta.password, MAX_PASSWORD_SIZE) != 0){
-		memcpy(wifi_manager_config_sta->sta.ssid, drv.sta.ssid, MAX_SSID_SIZE);
-		memcpy(wifi_manager_config_sta->sta.password, drv.sta.password, MAX_PASSWORD_SIZE);
-		wifi_manager_config_sta->sta.channel = 0;	/* the old network's hint is not this one's */
-		ESP_LOGW(TAG, "user connect: the candidate got its IP - it is the network in use now, saved");
-		save_owed = true;
+		if(adopt){
+			memcpy(wifi_manager_config_sta->sta.ssid, drv.sta.ssid, MAX_SSID_SIZE);
+			memcpy(wifi_manager_config_sta->sta.password, drv.sta.password, MAX_PASSWORD_SIZE);
+			wifi_manager_config_sta->sta.channel = 0;	/* the old network's hint is not this one's */
+			committed = true;
+			save_owed = true;
+		}
+		else{
+			in_use = false;
+		}
 	}
 	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
 
 	/* the save, now or owed from an earlier IP whose save failed (NVS full, say): the network in use
 	 * works, and only a reboot before a save succeeds would lose it */
-	if(save_owed){
+	if(in_use && save_owed){
 		esp_err_t save_err = wifi_manager_save_sta_config();
 		save_owed = (save_err != ESP_OK);
 		if(save_owed){
 			ESP_LOGE(TAG, "the network in use is not saved (%s) - tried again at the next IP; a reboot before then loses it",
 					esp_err_to_name(save_err));
 		}
+	}
+	if(committed && !save_owed){
+		ESP_LOGW(TAG, "user connect: the candidate got its IP - it is the network in use now, saved");
+	}
+	return in_use;
+}
+
+/**
+ * @brief leaves the link the STA is on: an IP not to keep (WM_EVENT_STA_GOT_IP). Our disconnect's
+ * STA_DISCONNECTED is awaited like any other (abort_tick), and ends the link as a lost one: the
+ * network in use is tried again as after any link loss (the router retry while the AP is up),
+ * and after a forget there is none.
+ */
+static void wifi_manager_leave_link(){
+	esp_err_t err = esp_wifi_disconnect();
+	if(err == ESP_OK){
+		wifi_manager_abort_mark(0);
+	}
+	else{
+		ESP_LOGW(TAG, "esp_wifi_disconnect failed (%s) - the network not saved stays until its link ends", esp_err_to_name(err));
 	}
 }
 
@@ -2290,9 +2329,13 @@ void wifi_manager( void * pvParameters ){
 
 				/* LOCAL PATCH (2.1.4 C8): the late event of an attempt the loop already ended (its
 				 * esp_wifi_disconnect() got no event in time, wifi_manager_abort_expired()): ignored,
-				 * callback included (the app had its own then), with the STA not connected */
+				 * callback included (the app had its own then), with the STA not connected. With our
+				 * disconnect's reason (ASSOC_LEAVE), or with any reason while no attempt has started
+				 * since: nothing else can end then (the attempt's own failure can cross our
+				 * disconnect, with its own reason), and the result already decided stands */
 				if(stale_leave_until != 0){
-					bool stale = disconnect_reason == WIFI_REASON_ASSOC_LEAVE && abort_tick == 0 &&
+					bool stale = (disconnect_reason == WIFI_REASON_ASSOC_LEAVE || attempt_kind == CONNECTION_REQUEST_NONE) &&
+							abort_tick == 0 &&
 							(int32_t)(stale_leave_until - xTaskGetTickCount()) > 0 &&
 							!(xEventGroupGetBits(wifi_manager_event_group) & WIFI_MANAGER_WIFI_CONNECTED_BIT);
 					stale_leave_until = 0;
@@ -2303,6 +2346,7 @@ void wifi_manager( void * pvParameters ){
 				}
 
 				on_uncommitted = false;	/* LOCAL PATCH (2.1.4 C8) */
+				late_ip_leave = false;	/* LOCAL PATCH (2.1.4 C8): that attempt has ended, with no IP */
 
 				/* reset saved sta IP */
 				wifi_manager_safe_update_sta_ip_string((uint32_t)0);
@@ -2412,6 +2456,7 @@ void wifi_manager( void * pvParameters ){
 				/* LOCAL PATCH (2.1.4 C2a): the parameter is the IPv4 address (network byte order), not a pointer */
 				uint32_t got_ip = (uint32_t)(uintptr_t)msg.param;
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
+				bool leave = false;		/* LOCAL PATCH (2.1.4 C8): an IP not to keep, left after the callback */
 
 				/* LOCAL PATCH (2.1.4 C8): the attempt is over. An esp_wifi_disconnect() of ours that
 				 * crossed this IP still has its STA_DISCONNECTED to come (abort_tick stays). */
@@ -2430,7 +2475,15 @@ void wifi_manager( void * pvParameters ){
 					 * is not saved, and the newer one leaves it next (user_due, below); the network in
 					 * use stays the one before. A save that failed is tried again at the next IP. */
 					uint8_t state = wifi_manager_cand_state();
-					if(kind == CONNECTION_REQUEST_USER && (state == WM_CAND_POSTED || state == WM_CAND_WAITING)){
+					if(late_ip_leave){
+						/* an attempt counted as ended when its disconnect's event did not come
+						 * (wifi_manager_abort_expired()): a forget erased its network since, or the
+						 * page reported its candidate failed. Not saved, and left */
+						ESP_LOGW(TAG, "an IP of an attempt already counted as ended - not saved, left");
+						on_uncommitted = true;
+						leave = true;
+					}
+					else if(kind == CONNECTION_REQUEST_USER && (state == WM_CAND_POSTED || state == WM_CAND_WAITING)){
 						ESP_LOGW(TAG, "user connect: a candidate a newer Connect replaced got its IP - not saved, left next");
 						on_uncommitted = true;
 					}
@@ -2442,11 +2495,18 @@ void wifi_manager( void * pvParameters ){
 					else if(on_uncommitted){
 						/* a new IP (a DHCP renewal) on a network that was not committed: still not */
 					}
+					else if(!wifi_manager_commit_driver_config(kind == CONNECTION_REQUEST_USER && state == WM_CAND_ACTIVE)){
+						/* not the network in use, and not a user's candidate: an IP no attempt of ours
+						 * should get (each automatic one runs with the network in use). Not saved, and
+						 * the link is kept */
+						ESP_LOGW(TAG, "an IP on a network other than the one in use, not a Connect's - not saved");
+						on_uncommitted = true;
+					}
 					else{
-						wifi_manager_commit_driver_config();
 						/* LOCAL PATCH (2.1.4 C13): the router's channel, as the next attempt's hint (RAM only) */
 						wifi_manager_channel_hint();
 					}
+					late_ip_leave = false;
 				}
 
 				/* reset number of retries */
@@ -2491,9 +2551,13 @@ void wifi_manager( void * pvParameters ){
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
 
 				/* LOCAL PATCH (2.1.4 C8): a candidate that waited for this attempt goes on now (it
-				 * leaves this network for its own), after the callback */
+				 * leaves this network for its own), after the callback. Otherwise an IP not to keep
+				 * is left now, unless an esp_wifi_disconnect() of ours is under way already */
 				if(wifi_manager_cand_state() == WM_CAND_WAITING){
 					user_due = true;
+				}
+				else if(leave && abort_tick == 0){
+					wifi_manager_leave_link();
 				}
 
 				break;
