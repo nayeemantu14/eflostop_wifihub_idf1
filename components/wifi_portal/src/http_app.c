@@ -74,6 +74,7 @@ static const char http_css_url[] = WEBAPP_LOCATION "style.css";
 static const char http_connect_url[] = WEBAPP_LOCATION "connect.json";
 static const char http_ap_url[] = WEBAPP_LOCATION "ap.json";
 static const char http_status_url[] = WEBAPP_LOCATION "status.json";
+static const char http_scan_url[] = WEBAPP_LOCATION "scan.json";		/* LOCAL PATCH (2.1.4 C10b) */
 static const char http_watts_logo_url[] = WEBAPP_LOCATION "Watts_Logo.png";
 static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 		"http://" DEFAULT_AP_IP : "http://" DEFAULT_AP_IP WEBAPP_LOCATION;
@@ -216,6 +217,24 @@ static bool http_app_path_is(const char *uri, const char *path){
  */
 static esp_err_t http_app_send(httpd_req_t *req, const char *buf, size_t len){
 	return httpd_resp_send(req, (req->method == HTTP_HEAD) ? NULL : buf, (ssize_t)len);
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C10b): the request's query has the parameter param ("bg=1"): after
+ * the "?", between "&"s. The page marks the requests it makes on its own (its polls) with "bg=1",
+ * so the activity hook can tell them from the user's (http_app_activity_t).
+ */
+static bool http_app_query_has(const char *uri, const char *param){
+	const char *q = strchr(uri, '?');
+	size_t n = strlen(param);
+	while(q != NULL){
+		q++;
+		if(strncmp(q, param, n) == 0 && (q[n] == '\0' || q[n] == '&' || q[n] == '#')){
+			return true;
+		}
+		q = strchr(q, '&');
+	}
+	return false;
 }
 
 /**
@@ -581,6 +600,26 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 		 * with no decoding, no open network and a dead-store memset of its password copy) */
 		ret = http_app_post_connect(req);
 	}
+	/* POST /scan.json: LOCAL PATCH (2.1.4 C10b), the page's Rescan. 200 with {"scan":1} when a scan
+	 * was ordered, {"scan":0,"in":S} when the last was less than 20 s ago (S: seconds to wait),
+	 * 503 when wifi_manager's queue had no room. The page then reads GET /ap.json again. */
+	else if(http_app_path_is(req->uri, http_scan_url)){
+		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip);
+		uint32_t wait_ms = 0;
+		int r = wifi_manager_scan_request(true, &wait_ms);
+		if(r < 0){
+			httpd_resp_set_status(req, http_503_hdr);
+			httpd_resp_send(req, NULL, 0);
+		}
+		else{
+			char body[32];
+			int n = (r > 0) ? snprintf(body, sizeof(body), "{\"scan\":1}") :
+					snprintf(body, sizeof(body), "{\"scan\":0,\"in\":%lu}", (unsigned long)((wait_ms + 999) / 1000));
+			httpd_resp_set_status(req, http_200_hdr);
+			httpd_resp_set_type(req, http_content_type_json);
+			httpd_resp_send(req, body, (n > 0 && (size_t)n < sizeof(body)) ? n : 0);
+		}
+	}
 	else{
 
 		if(custom_post_httpd_uri_handler == NULL){
@@ -667,12 +706,18 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 		if(asset != NULL){
 			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
+			/* LOCAL PATCH (2.1.4 C10b): the page's load orders a scan when the list is empty or
+			 * stale (and none was ordered in the last 20 s), before the page goes out */
+			if(asset->path == http_root_url && req->method == HTTP_GET){
+				wifi_manager_scan_request(false, NULL);
+			}
 			http_app_send_asset(req, asset);
 		}
 		/* GET /ap.json */
 		else if(http_app_path_is(req->uri, http_ap_url)){
 
-			http_app_note_activity(HTTP_APP_ACT_API_BG, client_ip);
+			/* LOCAL PATCH (2.1.4 C10b): the page's own polls carry "bg=1" */
+			http_app_note_activity(http_app_query_has(req->uri, "bg=1") ? HTTP_APP_ACT_API_BG : HTTP_APP_ACT_API_USER, client_ip);
 
 			/* if we can get the mutex, write the last version of the AP list */
 			if(wifi_manager_lock_json_buffer(( TickType_t ) 10)){
@@ -693,8 +738,9 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				ESP_LOGE(TAG, "http_server_netconn_serve: GET /ap.json failed to obtain mutex");
 			}
 
-			/* request a wifi scan */
-			wifi_manager_scan_async();
+			/* LOCAL PATCH (2.1.4 C10b): no scan here any more. It ordered an all-channel scan at
+			 * every poll (each one off the SoftAP's channel, plan I7): the list is a cache, filled
+			 * by the page's load and its Rescan (POST /scan.json) */
 		}
 		/* GET /status.json */
 		else if(http_app_path_is(req->uri, http_status_url)){

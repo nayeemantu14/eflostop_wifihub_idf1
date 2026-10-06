@@ -143,11 +143,12 @@ static void portal_priority_close(const char *reason)
  * (below).
  *
  * A hold is a deadline (a tick, 0 = none), never a flag, so it always ends. Each has one writer:
- *   - s_scan_until (wifi_manager task): from a Wi-Fi scan order (the portal page's GET /ap.json
- *     asks for one about every 3.8 s while it is used) until RADIO_HOLD_SCAN_TAIL_MS after its
- *     SCAN_DONE, at most RADIO_HOLD_SCAN_MS, and never into the page's next BLE window. The tail
- *     outlasts the page's next request, so the holds chain while the page is used and its list
- *     fills; with no page in use, no scan is asked for.
+ *   - s_scan_until (wifi_manager task): from a Wi-Fi scan order until RADIO_HOLD_SCAN_TAIL_MS
+ *     after its SCAN_DONE, at most RADIO_HOLD_SCAN_MS, and never into the page's next BLE window.
+ *     Since 2.1.4 C10b the page's network list is a cache: a scan is ordered only by the page's
+ *     load with an empty or stale list, and by its Rescan, at least 20 s apart (it was one at
+ *     every 3.8 s poll), so a hold's chain rarely outlasts one scan; with no page in use, no scan
+ *     is asked for.
  *   - s_connect_until (wifi_manager task): from a CONNECT_STA order until its disconnect, or its
  *     IP: at most RADIO_HOLD_CONNECT_MS, or RADIO_HOLD_SUBMIT_MS for a portal submit
  *     (s_connect_submit, below).
@@ -256,14 +257,27 @@ static TickType_t hold_deadline(uint32_t ms)
     return (t != 0) ? t : 1;   // 0 means "no hold"
 }
 
-// The portal page is open: it asked for a scan less than PAGE_OPEN_MS ago. It asks about every
-// 3.8 s while it is used, at once when it is used again, and nothing while it is idle (60 s after
-// it was last used), hidden or closed (code.js). A stale order reads as recent again for
-// PAGE_OPEN_MS once every 2^32 ticks, which only defers a router retry or joins a chain.
+// The portal page asked for a scan less than PAGE_OPEN_MS ago: a page's chain of scan holds goes
+// on. Since 2.1.4 C10b it asks only at its load (an empty or stale list) and at its Rescan, at
+// least 20 s apart (code.js). A stale order reads as recent again for PAGE_OPEN_MS once every 2^32
+// ticks, which only joins a chain.
 static bool page_open(TickType_t now)
 {
     TickType_t asked = s_scan_asked;
     return asked != 0 && now - asked < pdMS_TO_TICKS(PAGE_OPEN_MS);
+}
+
+// The portal page is in use (2.1.4 C10b): it or one of its API calls was requested less than
+// PAGE_OPEN_MS ago, the page's own polls included (GET /ap.json?bg=1 every 3.8 s while the user is
+// active), not status.json (portal_activity(), the httpd task). It replaces page_open() for the
+// router retry's deferral, since the page no longer orders a scan at every poll. A stale tick reads
+// as recent for PAGE_OPEN_MS once every 2^32 ticks, which only defers a router retry.
+static volatile TickType_t s_page_tick = 0;   // httpd task only
+
+static bool page_in_use(TickType_t now)
+{
+    TickType_t t = s_page_tick;
+    return t != 0 && now - t < pdMS_TO_TICKS(PAGE_OPEN_MS);
 }
 
 // Ticks into the schedule of the chain that started at start (its periods, then its long listen).
@@ -359,9 +373,9 @@ static const char *radio_hold_reason(TickType_t now)
  * wifi_manager owns every attempt (2.1.4 C8): a retry that meets an attempt in flight, the STA
  * connected, or a Connect's candidate starts nothing (its callback says so, and the retry counts
  * from it), and a page's Connect never meets the retry's attempt: it waits for it, 8 s at most,
- * then ends it. The retry still waits while the page is open (page_open()), for at most
- * ROUTER_RETRY_PAGE_MAX_MS since the last attempt, so that a Connect rarely waits at all, and a
- * page that keeps asking cannot keep the hub off its router.
+ * then ends it. The retry still waits while the page is in use (page_in_use(): its requests and
+ * polls, 2.1.4 C10b), for at most ROUTER_RETRY_PAGE_MAX_MS since the last attempt, so that a
+ * Connect rarely waits at all, and a page that keeps asking cannot keep the hub off its router.
  *
  * Attempts are tracked on the wifi_manager task: its CONNECT_STA callback starts one
  * (s_attempt_tick, forced non-zero, 0 = none; s_attempt_in_flight), or stamps s_attempt_tick only
@@ -712,8 +726,8 @@ static const char *const k_activity_names[HTTP_APP_ACT_COUNT] = {
     [HTTP_APP_ACT_DNS] = "DNS query",
     [HTTP_APP_ACT_PROBE_302] = "captive probe (302 sent)",
     [HTTP_APP_ACT_PAGE] = "page request",
-    [HTTP_APP_ACT_API_USER] = "Connect/Disconnect request",
-    [HTTP_APP_ACT_API_BG] = "network list request",
+    [HTTP_APP_ACT_API_USER] = "user request (list, Rescan, Connect, Disconnect or Finish)",
+    [HTTP_APP_ACT_API_BG] = "background poll (list)",
     [HTTP_APP_ACT_STATUS] = "status request",
 };
 
@@ -813,6 +827,12 @@ static uint32_t ap_client_leased(const uint8_t *mac, uint32_t ip)
 // Never blocks but on the log's own lock, once per kind and client.
 static void portal_activity(http_app_activity_t kind, uint32_t client_ip)
 {
+    // The page in use, for the router retry (page_in_use()): the page, its API, its polls.
+    if (kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_API_USER || kind == HTTP_APP_ACT_API_BG)
+    {
+        TickType_t t = xTaskGetTickCount();
+        s_page_tick = (t != 0) ? t : 1;
+    }
     if (client_ip == 0 || (unsigned)kind >= HTTP_APP_ACT_COUNT)
         return;
     uint32_t now = ap_now_ms();
@@ -1160,7 +1180,7 @@ static void router_retry(wifi_task_state_t *st)
     TickType_t age = now - s_attempt_tick;
     if (s_attempt_in_flight || age < pdMS_TO_TICKS(ROUTER_RETRY_MS))
         return;
-    if (page_open(now) && age < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS))
+    if (page_in_use(now) && age < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS))
     {
         if (!st->defer_logged)
         {
@@ -1191,7 +1211,7 @@ static void router_retry(wifi_task_state_t *st)
     // started in it, which took no hold of its own.
     now = xTaskGetTickCount();
     if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != mark ||
-        (page_open(now) && now - s_attempt_tick < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)))
+        (page_in_use(now) && now - s_attempt_tick < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)))
         return;
     // Not queued within WIFI_MANAGER_POST_WAIT_MS (2.1.4 C6): tried again on a later pass.
     if (!wifi_manager_retry_async())

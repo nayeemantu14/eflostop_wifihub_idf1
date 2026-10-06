@@ -81,9 +81,10 @@ typedef enum http_app_activity_t {
 	HTTP_APP_ACT_DNS = 0,		/**< a query to the captive DNS (dns_server task) */
 	HTTP_APP_ACT_PROBE_302,		/**< a request for another host, answered with the 302 to the portal */
 	HTTP_APP_ACT_PAGE,			/**< the page or one of its assets */
-	HTTP_APP_ACT_API_USER,		/**< a user action on the page: POST or DELETE /connect.json */
-	HTTP_APP_ACT_API_BG,		/**< a request the page makes on its own: GET /ap.json */
-	HTTP_APP_ACT_STATUS,		/**< GET /status.json */
+	HTTP_APP_ACT_API_USER,		/**< a request for the user (LOCAL PATCH 2.1.4 C10b): GET /ap.json without
+								     "bg=1", POST /connect.json, /scan.json and /finish.json, DELETE /connect.json */
+	HTTP_APP_ACT_API_BG,		/**< a request the page makes on its own: GET /ap.json?bg=1 (a poll) */
+	HTTP_APP_ACT_STATUS,		/**< GET /status.json (with "bg=1" or not) */
 	HTTP_APP_ACT_COUNT
 } http_app_activity_t;
 

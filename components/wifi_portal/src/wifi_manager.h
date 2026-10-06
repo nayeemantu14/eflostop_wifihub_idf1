@@ -381,6 +381,16 @@ bool wifi_manager_scan_in_flight();
  */
 bool wifi_manager_scan_async();
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C10b): a scan for the setup page's network list, which GET /ap.json
+ * only reads (a cache). rescan false: the page's load, which orders one only when the list is
+ * empty or older than 60 s; rescan true: the page's Rescan (POST /scan.json). Either way at least
+ * 20 s after the last one ordered here. Returns 1 when one was ordered, 0 when none was due
+ * (*wait_ms, when not NULL: the ms until a Rescan may order one, 0 if the list is fresh), -1 when
+ * the order did not fit in the queue. The httpd task only.
+ */
+int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
+
 
 /**
  * @brief saves the current STA wifi config to flash ram storage.

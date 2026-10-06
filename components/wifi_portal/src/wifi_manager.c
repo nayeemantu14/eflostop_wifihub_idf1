@@ -91,6 +91,18 @@ static bool ap_list_wanted = false;
  * clears it): once per AP session, not at every SCAN_DONE that finds no room. wifi_manager task
  * only. */
 static bool ap_list_logged = false;
+/* LOCAL PATCH (2.1.4 C10b): the network list is a cache. GET /ap.json only reads it (it ordered an
+ * all-channel scan at every 3.8 s poll); a scan is ordered by the page's load when the list is
+ * empty or older than WIFI_MANAGER_LIST_STALE_MS, and by the page's Rescan (POST /scan.json), at
+ * least WIFI_MANAGER_SCAN_GAP_MS apart (wifi_manager_scan_request()). In WP8 both become the radio
+ * policy's LIST pulse requests.
+ * ap_list_tick: the list's last rebuild from a scan, 0 = none since it was allocated (wifi_manager
+ * task writes it, the httpd task reads it); scan_order_tick: the last scan ordered for the page,
+ * 0 = none (httpd task only). */
+static volatile TickType_t ap_list_tick = 0;
+static TickType_t scan_order_tick = 0;
+#define WIFI_MANAGER_SCAN_GAP_MS		20000
+#define WIFI_MANAGER_LIST_STALE_MS		60000
 /* LOCAL PATCH (2.1.4 WP1): an allocation that can wait (the network list) is tried only while the
  * largest free block exceeds it by this much. One that fails is counted as a failed allocation
  * (MONITOR's allocfail, the figure the memory gates pass on) and replaces the record of the last
@@ -383,6 +395,30 @@ bool wifi_manager_ap_stop_in(uint32_t ms){
 /* LOCAL PATCH (2.1.4 C6): the requests of other tasks wait WIFI_MANAGER_POST_WAIT_MS at most */
 bool wifi_manager_scan_async(){
 	return wifi_manager_send_message_wait(WM_ORDER_START_WIFI_SCAN, NULL, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS;
+}
+
+int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms){
+
+	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. httpd task only (scan_order_tick) */
+	TickType_t now = xTaskGetTickCount();
+	if(wait_ms){
+		*wait_ms = 0;
+	}
+	TickType_t built = ap_list_tick;
+	if(!rescan && built != 0 && now - built < pdMS_TO_TICKS(WIFI_MANAGER_LIST_STALE_MS)){
+		return 0;
+	}
+	if(scan_order_tick != 0 && now - scan_order_tick < pdMS_TO_TICKS(WIFI_MANAGER_SCAN_GAP_MS)){
+		if(wait_ms){
+			*wait_ms = (uint32_t)(pdMS_TO_TICKS(WIFI_MANAGER_SCAN_GAP_MS) - (now - scan_order_tick)) * portTICK_PERIOD_MS;
+		}
+		return 0;
+	}
+	if(!wifi_manager_scan_async()){
+		return -1;
+	}
+	scan_order_tick = (now != 0) ? now : 1;
+	return 1;
 }
 
 bool wifi_manager_disconnect_async(){
@@ -1030,6 +1066,9 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 	/* make sure the http server isn't trying to access the list while it gets refreshed */
 	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(1000) )){
 		unsigned left_out = wifi_manager_generate_acess_points_json(aps, count);
+		/* LOCAL PATCH (2.1.4 C10b): the list's age, for the page load's scan */
+		TickType_t now = xTaskGetTickCount();
+		ap_list_tick = (now != 0) ? now : 1;
 		wifi_manager_unlock_json_buffer();
 		if(left_out){
 			ESP_LOGW(TAG, "network list: %u access points left out (list buffer full)", left_out);
@@ -1066,6 +1105,7 @@ static void wifi_manager_alloc_ap_list(){
 		}
 		accessp_json = (char*)malloc(ACCESSP_JSON_SIZE);
 		wifi_manager_clear_access_points_json();
+		ap_list_tick = 0;	/* LOCAL PATCH (2.1.4 C10b): a new list is empty */
 		wifi_manager_unlock_json_buffer();
 	}
 	if(accessp_json == NULL && !ap_list_logged){
