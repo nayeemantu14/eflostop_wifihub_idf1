@@ -1792,6 +1792,9 @@ static char *build_twin_reported(void)
     cJSON_AddStringToObject(root, "fw_version", telemetry_v2_fw_version());
     cJSON_AddStringToObject(root, "gateway_id", hub_identity_get_gateway_id());
     cJSON_AddStringToObject(root, "short_id", hub_identity_get_short_id());
+    // As set, control characters included: an app reads it back to see its desired value
+    // applied. Telemetry's gateway.name prints them as spaces (telemetry_v2_printable(),
+    // 2.1.4 WP3), so the two differ only for a name that holds one.
     cJSON_AddStringToObject(root, "hub_name", hub_identity_get_name());
     cJSON_AddBoolToObject(root, "provisioned", prov.provisioned);
 
@@ -1910,8 +1913,14 @@ static void post_twin_reported(void)
     uint16_t seq = 0;
     uint32_t req = 0;
     char *json = NULL;
-    if (telemetry_v2_tx_queued() < TELEM_TX_DEFERRABLE_MAX)
+    if (telemetry_v2_tx_queued() < TELEM_TX_DEFERRABLE_MAX) {
         json = twin_build(&seq, &req);
+        // Not built: provisioning busy for 1 s (or no memory). Not again before
+        // TWIN_REPORT_RETRY_MS, as after a refusal: each try waits up to 1 s on this task,
+        // which also evaluates the leaks (2.1.4 WP3 review).
+        if (json == NULL)
+            s_twin_retry_ms = snap_now_ms() + TWIN_REPORT_RETRY_MS;
+    }
     if (json == NULL) {
         s_twin_due = true;
         return;
@@ -2081,9 +2090,11 @@ static volatile uint32_t     s_mqtt_stop_done = 0;      // the last one served; 
 static volatile TaskHandle_t s_mqtt_stopper   = NULL;   // wifi_task's handle; wifi_task only
 static uint32_t              s_mqtt_stop_wait_logged = 0;   // wifi_task only
 // A stop esp-mqtt refuses is tried again this often, this far apart (iothub_mqtt_stop_service()):
-// at most 4 waits of 20 ms on wifi_task, with the publish gate held, so cloud_tx sends nothing
-// meanwhile (a stop is pending: its messages take the offline path).
-#define MQTT_STOP_TRIES     5
+// up to 9 waits of 20 ms on wifi_task, with the publish gate held, so cloud_tx sends nothing
+// meanwhile (a stop is pending: its messages take the offline path). A retry that finds the
+// new client's task in its first connect waits for that connect under esp-mqtt's API lock, as
+// any stop during a connect does (about 10 s at most, app_iothub.h).
+#define MQTT_STOP_TRIES     10
 #define MQTT_STOP_RETRY_MS  20
 // Created by initialize_iothub(), before any task can ask for or run a stop.
 static StaticSemaphore_t     s_pub_gate_buf;
@@ -2181,6 +2192,13 @@ void iothub_mqtt_stop_service(void)
         err = esp_mqtt_client_stop(mqtt_client);
         tries++;
     }
+    if (err == ESP_OK && tries > 1) {
+        // A retry that met the new task between its `run = true` and its clear of STOPPED_BIT
+        // returned at once, on the bit the last stop left set, before that task's teardown
+        // (transport close, outbox delete) ran. One more wait lets that end before iothub_task
+        // may start the client again, which would otherwise start a second task beside it.
+        vTaskDelay(pdMS_TO_TICKS(MQTT_STOP_RETRY_MS));
+    }
     // A connect that ended as the stop was asked may have marked MQTT connected again
     // (MQTT_EVENT_CONNECTED); the client's task has ended now, so this mark stays.
     if (telemetry_v2_is_connected())
@@ -2192,7 +2210,9 @@ void iothub_mqtt_stop_service(void)
             ESP_LOGW(IOTHUB_TAG, "MQTT stop refused %d time(s) - the client had just started", tries - 1);
         ESP_LOGI(IOTHUB_TAG, "MQTT client stopped on wifi_task in %lu.%lu s", ms / 1000, (ms % 1000) / 100);
     } else {
-        ESP_LOGW(IOTHUB_TAG, "MQTT stop refused %d times (%s) - the client was not running, taken as stopped",
+        // Most likely a client whose start failed (15i residual 6); a new task starved for
+        // all the tries would also land here, and would then run unseen (15m residual 3).
+        ESP_LOGW(IOTHUB_TAG, "MQTT stop refused %d times (%s) - taken as stopped, no client task seen",
                  tries, esp_err_to_name(err));
     }
     s_mqtt_stop_done = req;          // last: iothub_task may start the client from here on

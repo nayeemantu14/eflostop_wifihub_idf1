@@ -941,11 +941,16 @@ bool telemetry_v2_build_lifecycle(telem_msg_t *out)
     // HANDOFF 15p W2). Five reads with a 1 s timeout each could hold iothub_task about 5 s,
     // and a busy read went out as provisioned false with counts 0. Busy: not built, and the
     // caller builds it again (LIFECYCLE_RETRY_MS, app_iothub.c).
+    static bool s_busy_logged = false;   // iothub_task only: one W line per busy episode
     prov_summary_t prov;
     if (!provisioning_get_summary(&prov)) {
-        ESP_LOGW(TELEM_TAG, "Lifecycle not built - provisioning busy for 1 s, built again later");
+        if (!s_busy_logged) {
+            s_busy_logged = true;
+            ESP_LOGW(TELEM_TAG, "Lifecycle not built - provisioning busy for 1 s, built again later");
+        }
         return false;
     }
+    s_busy_logged = false;
 
     cJSON *root = build_envelope("lifecycle");
     if (!root) return false;
