@@ -1036,6 +1036,15 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         }
         case RP_PULSE_RETRY:
         case RP_PULSE_LIST: {
+            // LR_AP's first 30 s give Wi-Fi nothing but a SUBMIT (plan 4.2): the 1M and Coded scans
+            // look for the valve. Refused at once, so the retry or the scan goes on beside BLE now
+            // (the router's return carries the cloud alert) rather than after a 2 s wait.
+            TickType_t lr_start = s_lr_start;
+            if (s_x.mode == RP_MODE_LR_AP && lr_start != 0 &&
+                (now - lr_start) < pdMS_TO_TICKS(RP_LR_AP_30_MS)) {
+                req_refuse(k, "a leak response's first 30 s");
+                continue;
+            }
             uint32_t need = (k == RP_PULSE_RETRY) ? RP_RETRY_MS : RP_LIST_MAX_MS;
             if (at_coded_end && budget_ms >= need && s_x.prof_ms >= s_x.space_ms &&
                 used + need <= RP_I2B_BLIND_MAX_MS)
