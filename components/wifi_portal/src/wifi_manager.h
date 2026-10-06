@@ -163,6 +163,15 @@ extern "C" {
 #define DEFAULT_STA_POWER_SAVE 				WIFI_PS_NONE
 
 /**
+ * @brief LOCAL PATCH (2.1.4 C6): how long a request from another task (an HTTP handler, the
+ * app's wifi_task) waits for room in the wifi_manager queue. It was portMAX_DELAY: an HTTP
+ * handler then waited with no bound while the wifi_manager task itself waited in httpd_stop()
+ * (STOP_AP), for that handler to return. A request that does not fit in time is not sent: the
+ * caller is told (an HTTP request gets 503) and can try again.
+ */
+#define WIFI_MANAGER_POST_WAIT_MS			200
+
+/**
  * @brief Defines the maximum length in bytes of a JSON representation of an access point.
  *
  *  maximum ap string length with full 32 char ssid: 75 + \\n + \0 = 77\n
@@ -321,7 +330,11 @@ char* wifi_manager_get_ip_info_json();
 bool wifi_manager_scan_in_flight();
 
 
-void wifi_manager_scan_async();
+/**
+ * @brief asks for a Wi-Fi scan. LOCAL PATCH (2.1.4 C6): false when the request did not fit in the
+ * queue within WIFI_MANAGER_POST_WAIT_MS.
+ */
+bool wifi_manager_scan_async();
 
 
 /**
@@ -340,8 +353,10 @@ wifi_config_t* wifi_manager_get_wifi_sta_config();
 
 /**
  * @brief requests a connection to an access point that will be process in the main task thread.
+ * LOCAL PATCH (2.1.4 C6): false when the request did not fit in the queue within
+ * WIFI_MANAGER_POST_WAIT_MS (nothing is sent then).
  */
-void wifi_manager_connect_async();
+bool wifi_manager_connect_async();
 
 /**
  * @brief requests a wifi scan
@@ -350,8 +365,10 @@ void wifi_manager_scan_awifi_manager_send_messagesync();
 
 /**
  * @brief requests to disconnect and forget about the access point.
+ * LOCAL PATCH (2.1.4 C6): false when the request did not fit in the queue within
+ * WIFI_MANAGER_POST_WAIT_MS (nothing is sent then).
  */
-void wifi_manager_disconnect_async();
+bool wifi_manager_disconnect_async();
 
 /**
  * @brief LOCAL PATCH (2.1.4 C12): the SoftAP stops in ms milliseconds (rounded up to a tick, at
@@ -456,6 +473,13 @@ void wifi_manager_set_callback(message_code_t message_code, void (*func_ptr)(voi
 
 BaseType_t wifi_manager_send_message(message_code_t code, void *param);
 BaseType_t wifi_manager_send_message_to_front(message_code_t code, void *param);
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C6): wifi_manager_send_message() waiting at most wait ticks for room
+ * in the queue: pdPASS if the message was queued. For other tasks (the wifi_manager task never
+ * posts to its own queue with a wait: it is the queue's only reader).
+ */
+BaseType_t wifi_manager_send_message_wait(message_code_t code, void *param, TickType_t wait);
 
 #ifdef __cplusplus
 }

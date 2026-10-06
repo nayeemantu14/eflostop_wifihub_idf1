@@ -124,6 +124,11 @@ static volatile TickType_t ap_stop_done_tick = 0;
  * follows: were a SCAN_DONE ever lost, this would stay set until the next scan's, so it errs
  * towards "in flight", never away from it. wifi_manager task only. */
 static bool scan_in_flight = false;
+/* LOCAL PATCH (2.1.4 C6): a START_AP the task owes itself. It posted START_AP to its own queue
+ * with portMAX_DELAY (after its retries, after a forget), and with the queue full it waited on
+ * itself for good. Set instead, and run at the top of the loop, right after the message that set
+ * it and its callback (the order the post gave). wifi_manager task only. */
+static bool start_ap_due = false;
 char *ip_info_json = NULL;
 wifi_config_t* wifi_manager_config_sta = NULL;
 
@@ -202,8 +207,13 @@ void wifi_manager_timer_retry_cb( TimerHandle_t xTimer ){
 	/* stop the timer */
 	xTimerStop( xTimer, (TickType_t) 0 );
 
-	/* Attempt to reconnect */
-	wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_AUTO_RECONNECT);
+	/* Attempt to reconnect
+	 * LOCAL PATCH (2.1.4 C6): never waits (it waited with no bound, holding up the timer task and
+	 * every other timer): with the queue full the timer is started again, and tries next time */
+	if(wifi_manager_send_message_wait(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_AUTO_RECONNECT, (TickType_t)0) != pdPASS){
+		ESP_LOGW(TAG, "retry: queue full - tried again in %d ms", WIFI_MANAGER_RETRY_TIMER);
+		xTimerStart( xTimer, (TickType_t)0 );
+	}
 
 }
 
@@ -245,8 +255,8 @@ static void wifi_manager_retry_or_start_ap(EventBits_t uxBits, uint8_t *retries)
 			/* In this scenario the connection was lost beyond repair: kick start the AP! */
 			*retries = 0;
 
-			/* start SoftAP */
-			wifi_manager_send_message(WM_ORDER_START_AP, NULL);
+			/* start SoftAP (LOCAL PATCH 2.1.4 C6: owed, not posted to this task's own queue) */
+			start_ap_due = true;
 		}
 	}
 }
@@ -256,8 +266,13 @@ void wifi_manager_timer_shutdown_ap_cb( TimerHandle_t xTimer){
 	/* stop the timer */
 	xTimerStop( xTimer, (TickType_t) 0 );
 
-	/* Attempt to shutdown AP */
-	wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
+	/* Attempt to shutdown AP
+	 * LOCAL PATCH (2.1.4 C6): never waits, as the retry timer above: with the queue full the stop
+	 * is tried again WIFI_MANAGER_STOP_AP_RETRY_MS later (a lost link stops the timer, as ever) */
+	if(wifi_manager_send_message_wait(WM_ORDER_STOP_AP, NULL, (TickType_t)0) != pdPASS){
+		ESP_LOGW(TAG, "AP stop: queue full - tried again in %d ms", WIFI_MANAGER_STOP_AP_RETRY_MS);
+		xTimerChangePeriod( xTimer, pdMS_TO_TICKS(WIFI_MANAGER_STOP_AP_RETRY_MS), (TickType_t)0 );
+	}
 }
 
 bool wifi_manager_ap_stop_in(uint32_t ms){
@@ -291,12 +306,13 @@ bool wifi_manager_ap_stop_in(uint32_t ms){
 	return true;
 }
 
-void wifi_manager_scan_async(){
-	wifi_manager_send_message(WM_ORDER_START_WIFI_SCAN, NULL);
+/* LOCAL PATCH (2.1.4 C6): the requests of other tasks wait WIFI_MANAGER_POST_WAIT_MS at most */
+bool wifi_manager_scan_async(){
+	return wifi_manager_send_message_wait(WM_ORDER_START_WIFI_SCAN, NULL, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS;
 }
 
-void wifi_manager_disconnect_async(){
-	wifi_manager_send_message(WM_ORDER_DISCONNECT_STA, NULL);
+bool wifi_manager_disconnect_async(){
+	return wifi_manager_send_message_wait(WM_ORDER_DISCONNECT_STA, NULL, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS;
 }
 
 
@@ -854,6 +870,13 @@ static void wifi_manager_alloc_ap_list(){
 }
 
 /**
+ * @brief WM_ORDER_START_AP: the SoftAP, its servers, its network list, and the callback.
+ * LOCAL PATCH (2.1.4 C6): a function, for the message and for a START_AP the task owes itself
+ * (start_ap_due). wifi_manager task only. Defined after the server start below.
+ */
+static void wifi_manager_order_start_ap();
+
+/**
  * @brief LOCAL PATCH (2.1.4 WP1): starts the AP's HTTP and DNS servers: at START_AP, and again
  * (retry) from the task's loop while one of them is not running (see ap_servers_down). Each start
  * does nothing while its server runs. A retry waits for room in the heap (a start that fails is a
@@ -881,6 +904,55 @@ static void wifi_manager_start_ap_servers(bool retry){
 	else if(was_down){
 		ESP_LOGW(TAG, "AP servers running again (HTTP and DNS)");
 	}
+}
+
+static void wifi_manager_order_start_ap(){
+
+	ESP_LOGI(TAG, "MESSAGE: ORDER_START_AP");
+
+	/* LOCAL PATCH: stop the auto-reconnect retry timer while the captive
+	 * portal is up. Otherwise it keeps firing ORDER_CONNECT_STA and the
+	 * resulting esp_wifi_connect() races with captive-portal scan requests,
+	 * producing ESP_ERR_WIFI_STATE in WM_ORDER_START_WIFI_SCAN. The timer
+	 * is naturally re-armed by WM_EVENT_STA_DISCONNECTED if a later STA
+	 * attempt fails. (2.1.4 C5: only once the AP is down again; while it is
+	 * up, the app's router retry is the only retry.) */
+	if(xTimerIsTimerActive(wifi_manager_retry_timer) == pdTRUE){
+		xTimerStop(wifi_manager_retry_timer, (TickType_t)0);
+	}
+
+	/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK (a mode switch can fail for heap).
+	 * With no AP nothing else of the portal starts and the callback is not called. The retry
+	 * timer stopped above is armed instead: its attempt, failed or not started, counts towards
+	 * WIFI_MANAGER_MAX_RETRY_START_AP, which brings the hub back here. */
+	esp_err_t ap_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+	if(ap_err != ESP_OK){
+		ESP_LOGE(TAG, "ORDER_START_AP: esp_wifi_set_mode failed (%s) - no AP, tried again through the retry timer", esp_err_to_name(ap_err));
+		wifi_manager_start_retry_timer();
+		return;
+	}
+
+	/* start HTTP, and DNS
+	 * LOCAL PATCH (2.1.4 C3): HTTP is no longer stopped first. It ran from boot with the
+	 * STA's settings and was restarted here with the AP's; it now runs only while the
+	 * AP is up, so it runs here only at a START_AP with the AP already up (the portal's
+	 * forget), and keeps running, with its sessions, as the DNS does.
+	 * LOCAL PATCH (2.1.4 C4): DNS: nothing to do while it runs (START_AP with the AP up).
+	 * It now runs until STOP_AP: no longer stopped at GOT_IP.
+	 * LOCAL PATCH (2.1.4 WP1): a server that does not start is started again while the
+	 * AP is up (wifi_manager_start_ap_servers()) */
+	wifi_manager_start_ap_servers(false);
+
+	/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up.
+	 * LOCAL PATCH (2.1.4 WP1): after the servers, which captive detection needs (plan
+	 * I11): at the AP-start heap dip they have the memory first, and a list that does
+	 * not fit then is allocated at a later SCAN_DONE */
+	ap_list_wanted = true;
+	ap_list_logged = false;
+	wifi_manager_alloc_ap_list();
+
+	/* callback */
+	if(cb_ptr_arr[WM_ORDER_START_AP]) (*cb_ptr_arr[WM_ORDER_START_AP])(NULL);
 }
 
 
@@ -1179,16 +1251,17 @@ wifi_config_t* wifi_manager_get_wifi_sta_config(){
 }
 
 
-void wifi_manager_connect_async(){
+bool wifi_manager_connect_async(){
 	/* in order to avoid a false positive on the front end app we need to quickly flush the ip json
 	 * There'se a risk the front end sees an IP or a password error when in fact
 	 * it's a remnant from a previous connection
+	 * LOCAL PATCH (2.1.4 C6): both waits bounded (WIFI_MANAGER_POST_WAIT_MS), from an HTTP handler
 	 */
-	if(wifi_manager_lock_json_buffer( portMAX_DELAY )){
+	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS) )){
 		wifi_manager_clear_ip_info_json();
 		wifi_manager_unlock_json_buffer();
 	}
-	wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_USER);
+	return wifi_manager_send_message_wait(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_USER, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS;
 }
 
 
@@ -1240,6 +1313,13 @@ BaseType_t wifi_manager_send_message(message_code_t code, void *param){
 	msg.code = code;
 	msg.param = param;
 	return xQueueSend( wifi_manager_queue, &msg, portMAX_DELAY);
+}
+
+BaseType_t wifi_manager_send_message_wait(message_code_t code, void *param, TickType_t wait){
+	queue_message msg;
+	msg.code = code;
+	msg.param = param;
+	return xQueueSend( wifi_manager_queue, &msg, wait);
 }
 
 
@@ -1352,6 +1432,12 @@ void wifi_manager( void * pvParameters ){
 
 	/* main processing loop */
 	for(;;){
+		/* LOCAL PATCH (2.1.4 C6): a START_AP owed by the last message (start_ap_due), first */
+		if(start_ap_due){
+			start_ap_due = false;
+			wifi_manager_order_start_ap();
+		}
+
 		/* LOCAL PATCH (2.1.4 WP1): with the AP up and one of its servers down, they are started
 		 * again every WIFI_MANAGER_AP_SERVERS_RETRY_MS between messages, and the wait for the next
 		 * message ends at the next try. Otherwise the task waits for a message as before. */
@@ -1425,12 +1511,17 @@ void wifi_manager( void * pvParameters ){
 				ESP_LOGI(TAG, "MESSAGE: ORDER_LOAD_AND_RESTORE_STA");
 				if(wifi_manager_fetch_wifi_sta_config()){
 					ESP_LOGI(TAG, "Saved wifi found on startup. Will attempt to connect.");
-					wifi_manager_send_message(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_RESTORE_CONNECTION);
+					/* LOCAL PATCH (2.1.4 C6): this task never waits on its own queue (it is its only
+					 * reader). Should the post not fit, the retry timer connects 5 s later */
+					if(wifi_manager_send_message_wait(WM_ORDER_CONNECT_STA, (void*)CONNECTION_REQUEST_RESTORE_CONNECTION, (TickType_t)0) != pdPASS){
+						ESP_LOGW(TAG, "restore: queue full - the retry timer connects");
+						wifi_manager_start_retry_timer();
+					}
 				}
 				else{
 					/* no wifi saved: start soft AP! This is what should happen during a first run */
 					ESP_LOGI(TAG, "No saved wifi found on startup. Starting access point.");
-					wifi_manager_send_message(WM_ORDER_START_AP, NULL);
+					start_ap_due = true;	/* LOCAL PATCH (2.1.4 C6): owed, not posted */
 				}
 
 				/* callback */
@@ -1623,8 +1714,8 @@ void wifi_manager( void * pvParameters ){
 					/* save NVS memory */
 					wifi_manager_save_sta_config();
 
-					/* start SoftAP */
-					wifi_manager_send_message(WM_ORDER_START_AP, NULL);
+					/* start SoftAP (LOCAL PATCH 2.1.4 C6: owed, not posted to this task's own queue) */
+					start_ap_due = true;
 				}
 				else{
 					/* lost connection ? */
@@ -1647,52 +1738,9 @@ void wifi_manager( void * pvParameters ){
 				break;
 
 			case WM_ORDER_START_AP:
-				ESP_LOGI(TAG, "MESSAGE: ORDER_START_AP");
-
-				/* LOCAL PATCH: stop the auto-reconnect retry timer while the captive
-				 * portal is up. Otherwise it keeps firing ORDER_CONNECT_STA and the
-				 * resulting esp_wifi_connect() races with captive-portal scan requests,
-				 * producing ESP_ERR_WIFI_STATE in WM_ORDER_START_WIFI_SCAN. The timer
-				 * is naturally re-armed by WM_EVENT_STA_DISCONNECTED if a later STA
-				 * attempt fails. (2.1.4 C5: only once the AP is down again; while it is
-				 * up, the app's router retry is the only retry.) */
-				if(xTimerIsTimerActive(wifi_manager_retry_timer) == pdTRUE){
-					xTimerStop(wifi_manager_retry_timer, (TickType_t)0);
-				}
-
-				/* LOCAL PATCH (2.1.4 C2d): logged, not ESP_ERROR_CHECK (a mode switch can fail for heap).
-				 * With no AP nothing else of the portal starts and the callback is not called. The retry
-				 * timer stopped above is armed instead: its attempt, failed or not started, counts towards
-				 * WIFI_MANAGER_MAX_RETRY_START_AP, which brings the hub back here. */
-				esp_err_t ap_err = esp_wifi_set_mode(WIFI_MODE_APSTA);
-				if(ap_err != ESP_OK){
-					ESP_LOGE(TAG, "ORDER_START_AP: esp_wifi_set_mode failed (%s) - no AP, tried again through the retry timer", esp_err_to_name(ap_err));
-					wifi_manager_start_retry_timer();
-					break;
-				}
-
-				/* start HTTP, and DNS
-				 * LOCAL PATCH (2.1.4 C3): HTTP is no longer stopped first. It ran from boot with the
-				 * STA's settings and was restarted here with the AP's; it now runs only while the
-				 * AP is up, so it runs here only at a START_AP with the AP already up (the portal's
-				 * forget), and keeps running, with its sessions, as the DNS does.
-				 * LOCAL PATCH (2.1.4 C4): DNS: nothing to do while it runs (START_AP with the AP up).
-				 * It now runs until STOP_AP: no longer stopped at GOT_IP.
-				 * LOCAL PATCH (2.1.4 WP1): a server that does not start is started again while the
-				 * AP is up (wifi_manager_start_ap_servers()) */
-				wifi_manager_start_ap_servers(false);
-
-				/* LOCAL PATCH (2.1.4 C2b): the network list, for as long as the AP is up.
-				 * LOCAL PATCH (2.1.4 WP1): after the servers, which captive detection needs (plan
-				 * I11): at the AP-start heap dip they have the memory first, and a list that does
-				 * not fit then is allocated at a later SCAN_DONE */
-				ap_list_wanted = true;
-				ap_list_logged = false;
-				wifi_manager_alloc_ap_list();
-
-				/* callback */
-				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])(NULL);
-
+				/* LOCAL PATCH (2.1.4 C6): a function, which the task also runs when it owes itself a
+				 * START_AP (start_ap_due) */
+				wifi_manager_order_start_ap();
 				break;
 
 			case WM_ORDER_STOP_AP:
@@ -1814,8 +1862,10 @@ void wifi_manager( void * pvParameters ){
 						 * The callback below may set this IP's own stop (wifi_manager_ap_stop_in()) */
 						xTimerChangePeriod( wifi_manager_shutdown_ap_timer, t, (TickType_t)0 );
 					}
-					else{
-						wifi_manager_send_message(WM_ORDER_STOP_AP, (void*)NULL);
+					else if(wifi_manager_send_message_wait(WM_ORDER_STOP_AP, (void*)NULL, (TickType_t)0) != pdPASS){
+						/* LOCAL PATCH (2.1.4 C6): never waits on its own queue; the IP + 75 s
+						 * backstop of the app stops the AP then */
+						ESP_LOGW(TAG, "AP stop: queue full - not sent");
 					}
 
 				}

@@ -1286,13 +1286,20 @@ static void router_retry(wifi_task_state_t *st)
     if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != st->retry_mark ||
         (page_open(now) && now - s_attempt_tick < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)))
         return;
+    s_retry_sent++;   // before the order: cb_connect_sta() tells it from a portal submit
+    // The order waits WIFI_MANAGER_POST_WAIT_MS at most for room in wifi_manager's queue (2.1.4
+    // C6); one not taken is not pending, and the next pass tries again.
+    if (!wifi_manager_connect_async())
+    {
+        s_retry_sent--;
+        ESP_LOGW(WIFI_TAG, "router fallback: retry not sent (wifi_manager queue full)");
+        return;
+    }
     st->retry_pending = true;
     st->retries++;
     // "configured", not "saved": after a portal submit that failed, or one made while the STA was
     // connected, the STA config in RAM holds what was typed (see the router retry above).
     ESP_LOGI(WIFI_TAG, "router fallback: retrying the configured network (attempt %u)", st->retries);
-    s_retry_sent++;   // before the order: cb_connect_sta() tells it from a portal submit
-    wifi_manager_connect_async();
 }
 
 // The SoftAP's tail (see there), on every wifi_task pass: one a second while a tail is followed.
@@ -1314,7 +1321,10 @@ static void ap_tail_maintain(wifi_task_state_t *st)
     // portal window it prints the window's old safety-net line.
     if (since >= pdMS_TO_TICKS(AP_TAIL_BACKSTOP_MS))
     {
-        if (st->backstop_for != ip)
+        // The order waits WIFI_MANAGER_POST_WAIT_MS at most (2.1.4 C6); one not taken is sent
+        // again on the next pass.
+        if (st->backstop_for != ip &&
+            wifi_manager_send_message_wait(WM_ORDER_STOP_AP, NULL, pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS)) == pdPASS)
         {
             st->backstop_for = ip;
             unsigned s = (unsigned)(since / configTICK_RATE_HZ);
@@ -1322,7 +1332,6 @@ static void ap_tail_maintain(wifi_task_state_t *st)
                 ESP_LOGW(WIFI_TAG, "portal priority: setup AP still up %u s after Wi-Fi connected - stopping it", s);
             else
                 ESP_LOGW(WIFI_TAG, "SoftAP still up %u s after Wi-Fi connected - stopping it", s);
-            wifi_manager_send_message(WM_ORDER_STOP_AP, NULL);
         }
         return;
     }

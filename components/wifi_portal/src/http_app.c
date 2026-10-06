@@ -42,6 +42,7 @@ function to process requests, decode URLs, serve files, etc. etc.
 #include <esp_system.h>
 #include "esp_netif.h"
 #include <esp_http_server.h>
+#include <esp_heap_caps.h>
 #include <lwip/sockets.h>
 
 #include "wifi_manager.h"
@@ -80,6 +81,24 @@ static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 /* LOCAL PATCH (2.1.4 C2g): the room for a request's Host header, terminator included. A longer
  * Host cannot be the AP's or the STA's address (with a port): it gets the redirect. */
 #define HTTP_HOST_BUF_SIZE			64
+
+/* LOCAL PATCH (2.1.4 C6): the server's bounds (plan 6.2, section 8's E2 laptop flood).
+ * - HTTP_APP_MAX_OPEN_SOCKETS sessions at once (was 10), the least recently used one closed for a
+ *   new one (lru_purge_enable). PROVISIONAL: plan 6.3 sets 5 for the release candidate, and the
+ *   G-CNA S1 run after WP4 decides between 4, 5 and 7 (G1 re-checks page p90 at that value).
+ * - A new session is closed at once while internal DMA-capable heap is below
+ *   HTTP_APP_SESSION_MIN_FREE (http_app_open_fn()).
+ * - A session whose request named another host gets its 302 and is closed (no keep-alive for
+ *   the OS's captive probes, which open a new connection to the portal anyway). */
+#define HTTP_APP_MAX_OPEN_SOCKETS	5
+#define HTTP_APP_SESSION_MIN_FREE	(12 * 1024)
+/* a refused session is logged at most once in this long (with the count since the server start) */
+#define HTTP_APP_REFUSE_LOG_MS		10000
+
+/* LOCAL PATCH (2.1.4 C6): refused sessions since the server start, and when the last W line was
+ * printed (httpd task only) */
+static uint32_t http_app_refused = 0;
+static TickType_t http_app_refuse_log_tick = 0;
 
 /**
  * @brief embedded binary data.
@@ -122,6 +141,8 @@ const static char http_content_encoding_hdr[] = "Content-Encoding";
 const static char http_content_encoding_gzip[] = "gzip";
 const static char http_vary_hdr[] = "Vary";
 const static char http_vary_accept_encoding[] = "Accept-Encoding";
+const static char http_connection_hdr[] = "Connection";
+const static char http_connection_close[] = "close";
 
 /* LOCAL PATCH (2.1.4 C7): the page's assets, matched on the request's path only (a query such as
  * "?v=2" is ignored) */
@@ -362,9 +383,9 @@ static esp_err_t http_server_delete_handler(httpd_req_t *req){
 	/* DELETE /connect.json */
 	if(http_app_path_is(req->uri, http_connect_url)){
 		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip); /* LOCAL PATCH (2.1.4 C10a) */
-		wifi_manager_disconnect_async();
 
-		httpd_resp_set_status(req, http_200_hdr);
+		/* LOCAL PATCH (2.1.4 C6): 503 when wifi_manager's queue has no room within its bound */
+		httpd_resp_set_status(req, wifi_manager_disconnect_async() ? http_200_hdr : http_503_hdr);
 		httpd_resp_set_type(req, http_content_type_json);
 		httpd_resp_send(req, NULL, 0);
 	}
@@ -422,9 +443,8 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 			/* LOCAL PATCH (2.1.4 C1): no credential in the log, the password's length only */
 			ESP_LOGI(TAG, "ssid: %s, pwd_len: %u", ssid, (unsigned)password_len);
 			ESP_LOGD(TAG, "http_server_post_handler: wifi_manager_connect_async() call");
-			wifi_manager_connect_async();
-
-			httpd_resp_set_status(req, http_200_hdr);
+			/* LOCAL PATCH (2.1.4 C6): 503 when wifi_manager's queue has no room within its bound */
+			httpd_resp_set_status(req, wifi_manager_connect_async() ? http_200_hdr : http_503_hdr);
 			httpd_resp_set_type(req, http_content_type_json);
 			httpd_resp_send(req, NULL, 0);
 
@@ -509,7 +529,11 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 		http_app_note_activity(HTTP_APP_ACT_PROBE_302, client_ip); /* LOCAL PATCH (2.1.4 C10a): this and the calls below */
 		httpd_resp_set_status(req, http_302_hdr);
 		httpd_resp_set_hdr(req, http_location_hdr, http_redirect_url);
+		/* LOCAL PATCH (2.1.4 C6): the session is closed after its 302 (said so, then done by the
+		 * server task once this handler has returned and the answer is out) */
+		httpd_resp_set_hdr(req, http_connection_hdr, http_connection_close);
 		httpd_resp_send(req, NULL, 0);
+		httpd_sess_trigger_close(req->handle, httpd_req_to_sockfd(req));
 
 	}
 	else{
@@ -632,6 +656,33 @@ static const httpd_uri_t http_server_head_request = {
 };
 
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C6): httpd's open_fn, for each new session (httpd task). Below
+ * HTTP_APP_SESSION_MIN_FREE of internal DMA-capable heap the session is closed by the server
+ * task's next pass, before any request of it is read (control messages are taken first): a flood
+ * of connections (the E2 laptop) cannot take the heap the Wi-Fi driver needs. ESP_OK either way:
+ * httpd closes a session whose open_fn fails twice (httpd_sess_new(), then httpd_accept_conn()),
+ * and a socket opened by another task between the two closes would be the second one's.
+ * ESP_FAIL only if the close cannot be queued (the control socket's send failed).
+ */
+static esp_err_t http_app_open_fn(httpd_handle_t hd, int sockfd){
+
+	size_t free_dma = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA);
+	if(free_dma >= HTTP_APP_SESSION_MIN_FREE){
+		return ESP_OK;
+	}
+
+	http_app_refused++;
+	TickType_t now = xTaskGetTickCount();
+	if(http_app_refused == 1 || now - http_app_refuse_log_tick >= pdMS_TO_TICKS(HTTP_APP_REFUSE_LOG_MS)){
+		http_app_refuse_log_tick = now;
+		ESP_LOGW(TAG, "session closed: internal DMA free %u B (needs %u) - %lu since the server start",
+				(unsigned)free_dma, (unsigned)HTTP_APP_SESSION_MIN_FREE, (unsigned long)http_app_refused);
+	}
+	return (httpd_sess_trigger_close(hd, sockfd) == ESP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+
 void http_app_stop(){
 
 	if(httpd_handle != NULL){
@@ -658,10 +709,13 @@ bool http_app_start(bool lru_purge_enable){
 
 		/* Captive portals generate many simultaneous requests from the OS
 		 * (probes, DNS, parallel asset loads). Increase socket capacity and
-		 * shorten timeouts so stale connections are recycled quickly. */
-		config.max_open_sockets = 10;
+		 * shorten timeouts so stale connections are recycled quickly.
+		 * LOCAL PATCH (2.1.4 C6): 5 sessions (was 10) and the heap gate on each new one */
+		config.max_open_sockets = HTTP_APP_MAX_OPEN_SOCKETS;
+		config.open_fn = http_app_open_fn;
 		config.recv_wait_timeout = 4;
 		config.send_wait_timeout = 4;
+		http_app_refused = 0;
 
 		err = httpd_start(&httpd_handle, &config);
 
