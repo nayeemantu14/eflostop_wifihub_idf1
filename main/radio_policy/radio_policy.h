@@ -174,8 +174,10 @@ void radio_policy_note_sta_attempt(bool in_flight);
 /** The setup page's Connect (C8, kind USER) started (true) or ended (false: GOT_IP or failure).
  *  wifi_manager task. Starting requests the SUBMIT pulse: always honoured, also under a leak
  *  response, exempt from the 6 s spacing, but counted in I2b's 12 s per 60 s and in I2 (at most
- *  2.8 s, then 1.2 s of Coded), so no pattern of Connects blinds BLE beyond the invariants. The
- *  caller does not wait: BLE stops within one executor wake. */
+ *  2.8 s, then 1.2 s of Coded), so no pattern of Connects blinds BLE beyond the invariants. It
+ *  waits for its grant until the Connect ends (no 2 s limit, no refusal for room). While a leak
+ *  response is pending the valve's claim goes first and keeps 2.5 s of I2b's room. The caller
+ *  does not wait: BLE stops within one executor wake when nothing else runs. */
 void radio_policy_note_submit(bool in_flight);
 
 /** A station joined / left the SoftAP (default event loop: AP_STACONNECTED, AP_STADISCONNECTED).

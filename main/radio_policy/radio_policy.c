@@ -440,6 +440,20 @@ static void req_set(rp_pulse_t kind, rp_grant_t state)
     taskEXIT_CRITICAL(&s_req_lock);
 }
 
+// The executor grants a request only if it is still pending: its requester may have withdrawn it
+// (radio_policy_pulse_end()) since the executor read it. True when granted.
+static bool req_grant(rp_pulse_t kind)
+{
+    taskENTER_CRITICAL(&s_req_lock);
+    bool ok = (s_req[kind].state == RP_GRANT_PENDING);
+    if (ok) {
+        s_req[kind].state = RP_GRANT_ON;
+        s_req[kind].end = false;
+    }
+    taskEXIT_CRITICAL(&s_req_lock);
+    return ok;
+}
+
 void radio_policy_pulse_request(rp_pulse_t kind)
 {
     if (kind != RP_PULSE_RETRY && kind != RP_PULSE_LIST)
@@ -925,7 +939,9 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             req_set(k, RP_GRANT_FREE);
             continue;
         }
-        if ((now - at) >= pdMS_TO_TICKS(RP_GRANT_WAIT_MS)) {
+        // The grant protocol's 2 s, for every kind but SUBMIT: always honoured, it waits until it is
+        // granted or its Connect ends (radio_policy_note_submit(false) withdraws it).
+        if (k != RP_PULSE_SUBMIT && (now - at) >= pdMS_TO_TICKS(RP_GRANT_WAIT_MS)) {
             req_refuse(k, "not granted within 2 s");
             continue;
         }
@@ -936,20 +952,24 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
 
         uint32_t len = 0;
         switch (k) {
-        case RP_PULSE_SUBMIT:
+        case RP_PULSE_SUBMIT: {
             // Always honoured (plan 4.4), but within I2b's budget and I2 (decided for 2.1.4: an
-            // open SoftAP must not let Connects blind BLE beyond the invariants).
+            // open SoftAP must not let Connects blind BLE beyond the invariants). It waits for room
+            // rather than being refused. While a leak response is pending it leaves the claim's
+            // RP_CONNECT_LR_MS of that room (the executor also tries the claim first): Connects on
+            // the open SoftAP, a stranger's included, can delay the valve's RMLEAK / CLOSE by at most
+            // about one I2b window, never hold it off for good.
             if (!s_submit) {
                 req_set(k, RP_GRANT_IDLE);   // its attempt ended before the grant
                 continue;
             }
-            if (room < RP_PULSE_MIN_MS) {
-                req_refuse(k, "12 s of pulses in the last 60 s (I2b)");
-                continue;
-            }
+            uint32_t sroom = room;
+            if (s_lr_trigger)
+                sroom = (room > RP_CONNECT_LR_MS) ? room - RP_CONNECT_LR_MS : 0;
             if (!coded_young)
-                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
+                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), sroom);
             break;
+        }
         case RP_PULSE_JOIN: {
             bool joined = false;
             if (sta >= 0 && sta < RP_STA_MAX) {
@@ -988,7 +1008,8 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             break;
         }
         if (len >= RP_PULSE_MIN_MS) {
-            req_set(k, RP_GRANT_ON);
+            if (!req_grant(k))
+                continue;   // withdrawn meanwhile
             *len_ms = len;
             return k;
         }

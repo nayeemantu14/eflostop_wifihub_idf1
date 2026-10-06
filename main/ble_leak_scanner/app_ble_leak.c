@@ -872,8 +872,9 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * per-minute budget hold every kind (SUBMIT is exempt from the spacing only). A SUBMIT or a JOIN
  * stops the running scan at once, once a Coded scan has covered RP_L_MS (its window then counts);
  * a RETRY or LIST is granted only right after a Coded window's own end, and a CONNECT only right
- * after a scan's own end, each when its whole length fits the budget. SUBMIT goes first, then
- * CONNECT while a leak response is pending, then JOIN, RETRY, LIST, then CONNECT otherwise.
+ * after a scan's own end, each when its whole length fits the budget. While a leak response is
+ * pending the valve's claim goes first (its RMLEAK / CLOSE), then SUBMIT, JOIN, RETRY, LIST;
+ * otherwise SUBMIT, JOIN, RETRY, LIST, then the claim.
  *
  * Every scan is timed, the hold's hunt too: a cancel that meets a scan's own timeout can leave
  * NimBLE's state idle while the controller still scans, and every start then fails until that scan
@@ -1507,22 +1508,21 @@ static TickType_t executor_pass(exec_t *x)
         x->overrun_asked = false;
     }
 
-    // Grants, between pulses, after their recovery: SUBMIT first, then CONNECT while a leak
-    // response is pending, then JOIN, RETRY and LIST, then CONNECT otherwise. In a legacy hold the
-    // radio policy answers Wi-Fi requests FREE (BLE does not scan), and only the hold's hunt claims.
+    // Grants, between pulses, after their recovery. While a leak response is pending the valve's
+    // claim goes first (its RMLEAK / CLOSE outranks a Connect: a stranger's Connects on the open
+    // SoftAP must not hold it off), then SUBMIT, JOIN, RETRY and LIST; otherwise SUBMIT, JOIN, RETRY,
+    // LIST, then the claim. In a legacy hold the radio policy answers Wi-Fi requests FREE (BLE does
+    // not scan), and only the hold's hunt claims.
     if (x->pulse == RP_PULSE_NONE && !x->recovery && synced) {
         bool boundary = !x->scan_on && (x->row == RP_ROW_NONE || x->slot_done);
         bool at_coded_end = boundary && x->slot_done && x->coded_last &&
                             (now - x->ended_at) <= pdMS_TO_TICKS(RP_JITTER_MS) + 1;
         uint32_t budget = coded_budget(x, now);
         bool lr = radio_policy_lr_pending();
-        bool done = exec_wifi_pulse(x, now, 1u << RP_PULSE_SUBMIT, at_coded_end, budget);
-        if (!done && lr) {
-            done = exec_claim(x, now, boundary, budget);
-        }
+        bool done = lr && exec_claim(x, now, boundary, budget);
         if (!done) {
-            done = exec_wifi_pulse(x, now, (1u << RP_PULSE_JOIN) | (1u << RP_PULSE_RETRY) | (1u << RP_PULSE_LIST),
-                                   at_coded_end, budget);
+            done = exec_wifi_pulse(x, now, (1u << RP_PULSE_SUBMIT) | (1u << RP_PULSE_JOIN) |
+                                   (1u << RP_PULSE_RETRY) | (1u << RP_PULSE_LIST), at_coded_end, budget);
         }
         if (!done && !lr) {
             (void)exec_claim(x, now, boundary, budget);
