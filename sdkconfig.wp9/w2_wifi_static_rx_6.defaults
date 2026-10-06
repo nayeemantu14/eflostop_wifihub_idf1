@@ -1,0 +1,25 @@
+# 2.1.4 WP9 line W2 (plan section 8, D14): 6 static Wi-Fi RX buffers, not 10.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w2_wifi_static_rx_6.defaults" build
+# Never put this line in the project's sdkconfig. After the gate passes it moves to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# Frees: 4 of the driver's static RX buffers. esp_wifi_init() allocates them from the internal
+#   DMA heap and keeps them until esp_wifi_deinit(); the hardware receives every 802.11 frame into
+#   them, so fewer means less room for a burst (a page load, a flood) before frames are dropped.
+# Estimate: about 6.4 KB at rest from boot (about 1.6 KB each, the Kconfig help's figure).
+#   Only wifi_manager.c changes among the project's objects (WIFI_INIT_CONFIG_DEFAULT, -4 B code).
+# Gate (G-M): G-CNA S1, P-1 to P-6 and the tail's P-8 and P-9 (SoftAP and STA both receiving), on
+#   an iPhone and an Android phone, 10 runs each, page load (P-5) p90 within +20 % of CP7's and
+#   every step's pass line held; G3 (the E4 replay and the E2 laptop flood, 10 min): 0 failed
+#   allocations, internal DMA >= 8 KB and largest block >= 4.5 KB at every sample; TLS publish
+#   regression (a full snapshot, 10 reconnects); the heap delta recorded.
+# Verified in ESP-IDF 5.5.1: int, range 2-25 on this target (components/esp_wifi/Kconfig line 26);
+#   wifi_init.c's compile-time checks hold (RX_BA_WIN 6 <= DYNAMIC_RX_BUFFER_NUM 16, and
+#   RX_BA_WIN 6 <= 2 x 6); the help's advice "static >= RX_BA_WIN" holds at 6 = 6, and
+#   "dynamic >= static" at 16 >= 6 (and at 12, plan section 8's G3 contingency). kconfgen gives
+#   no warning; the alias ESP32_WIFI_STATIC_RX_BUFFER_NUM follows.
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=6

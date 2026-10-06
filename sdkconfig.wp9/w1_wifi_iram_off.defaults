@@ -1,0 +1,30 @@
+# 2.1.4 WP9 line W1 (plan section 8, D14): the Wi-Fi driver's speed-optimised code moves from IRAM to flash.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w1_wifi_iram_off.defaults" build
+# Never put these lines in the project's sdkconfig. After the gate passes they move to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# Frees: with ESP_WIFI_IRAM_OPT off, libpp's and libnet80211's .wifi0iram sections, libcoexist's
+#   .coexiram and three esp_wifi functions (7,275 B); with ESP_WIFI_RX_IRAM_OPT off, .wifirxiram and
+#   .wifislprxiram (10,305 B; the second moves because ESP_WIFI_SLP_IRAM_OPT is off too). On the
+#   ESP32-S3 the DIRAM this code leaves becomes internal, DMA-capable heap.
+# Estimate: 17,580 B, summed from CP5's map (its IRAM input sections; DIRAM .text is unchanged since):
+#   DIRAM .text 113,387 -> about 95,800 B, heap about +17.5 KB, flash .text about +17.6 KB.
+#   Not the "+27 KB or more" of plan section 8: that is the Kconfig help's figure for every such
+#   function, and only the ones this image links move.
+# Gate (G-M): the IRAM gate re-baselined (record the new DIRAM .text; I10's 113,387 B no longer
+#   applies); G-CNA P-1 to P-6, each step's p90 within +20 % of CP7's (P-5, the page load, above
+#   all), S1 and S2, an iPhone and an Android phone, 10 runs each; TLS and DPS regression (connect
+#   times within +20 %, no esp-tls or mbedTLS error); LS-1's leak -> CLOSE within 200 ms unchanged;
+#   adverts per burst within +-5 % (coexistence code moves too). Fallback if the page gate fails:
+#   ESP_WIFI_IRAM_OPT off alone (7,275 B), built from this file with only that symbol deleted
+#   (README.md).
+# Verified in ESP-IDF 5.5.1: both are bool options with no dependency in components/esp_wifi/Kconfig
+#   (lines 274 and 292; default y on this target); esp_wifi/linker.lf and esp_coex/linker.lf map the
+#   sections; wifi_init.c's boot lines "WiFi IRAM OP enabled" and "WiFi RX IRAM OP enabled" go.
+#   kconfgen gives no warning, and the deprecated aliases ESP32_WIFI_(RX_)IRAM_OPT follow.
+# CONFIG_ESP_WIFI_IRAM_OPT is not set
+# CONFIG_ESP_WIFI_RX_IRAM_OPT is not set
