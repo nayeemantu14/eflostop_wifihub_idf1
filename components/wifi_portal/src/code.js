@@ -287,24 +287,26 @@
 
   var CONNECT_ERRORS = {
     busy: "WiFiHub is busy - try again",
-    ssid: "This network name cannot be used (32 bytes at most)",
+    ssid: "This network name cannot be used",
     pwd: "Password too long",
     enc: "A character cannot be sent"
   };
 
-  // one at a time: a second tap (an open network's row has no button to disable) sends nothing
-  function performConnect(sel, pwd, button, onError) {
+  // one at a time: while one is sent every Connect button is off, and a tap on a row (an open
+  // network's has no button) sends nothing. onError(text, the hub's "err")
+  function connectButtons(off) { $("btn-connect").disabled = $("btn-manual-connect").disabled = off; }
+  function performConnect(sel, pwd, onError) {
     if (sending) return;
     sending = true;
-    if (button) button.disabled = true;
+    connectButtons(true);
     sendConnect(sel, pwd).then(function (res) {
       sending = false;
-      if (button) button.disabled = false;
+      connectButtons(false);
       if (res.ok || res.lost) {
         selected = sel;
         startConnecting(sel.ssid, false);
       } else {
-        onError(CONNECT_ERRORS[res.err] || CONNECT_ERRORS.enc);
+        onError(CONNECT_ERRORS[res.err] || CONNECT_ERRORS.enc, res.err);
       }
     });
   }
@@ -480,7 +482,7 @@
     var sel = { ssid: ap.ssid, raw: ap.raw === 1, chan: ap.chan | 0, auth: ap.auth | 0 };
     if (sel.auth !== 0) return openPassword(sel);
     // an open network: no password
-    performConnect(sel, "", null, function (msg) {
+    performConnect(sel, "", function (msg) {
       selected = sel;
       $("fail-title").textContent = "Connection failed";
       $("fail-text").textContent = msg;
@@ -545,7 +547,7 @@
       var err = passwordError(pwd, selected ? selected.auth : 3);
       if (err) return fieldError("input-pwd", "pwd-error", err);
       clearErr("input-pwd", "pwd-error");
-      performConnect(selected, pwd, $("btn-connect"), function (msg) { $("pwd-error").textContent = msg; });
+      performConnect(selected, pwd, function (msg) { $("pwd-error").textContent = msg; });
     });
     on("input-pwd", "input", function () { clearErr("input-pwd", "pwd-error"); });
     on("input-pwd", "keydown", function (e) { if (e.key === "Enter") $("btn-connect").click(); });
@@ -562,8 +564,8 @@
       if (err) return fieldError("input-manual-pwd", "mpwd-error", err);
       clearErr("input-manual-ssid", "ssid-error");
       clearErr("input-manual-pwd", "mpwd-error");
-      performConnect({ ssid: ssid, raw: false, chan: 0, auth: -1 }, pwd, $("btn-manual-connect"),
-        function (msg) { $("ssid-error").textContent = msg; });
+      performConnect({ ssid: ssid, raw: false, chan: 0, auth: -1 }, pwd,
+        function (msg, err) { $(err === "pwd" ? "mpwd-error" : "ssid-error").textContent = msg; });
     });
     on("input-manual-ssid", "input", function () { clearErr("input-manual-ssid", "ssid-error"); });
     on("input-manual-ssid", "keydown", function (e) { if (e.key === "Enter") $("input-manual-pwd").focus(); });
