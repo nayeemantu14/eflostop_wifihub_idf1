@@ -457,12 +457,14 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms){
 		}
 		return 0;
 	}
-	/* stamped before the post: the wifi_manager task clears it if the scan does not start, and
-	 * may do so before this task would run again */
-	TickType_t before = scan_order_tick;
+	/* stamped before the post: the wifi_manager task moves it back if the scan does not start
+	 * (wifi_manager_scan_failed()), and may do so before this task would run again. A post that
+	 * did not fit is a failed order too: the next may come WIFI_MANAGER_SCAN_RETRY_MS on, so the
+	 * page's polls, while the queue stays full, do not each wait WIFI_MANAGER_POST_WAIT_MS on it */
 	scan_order_tick = (now != 0) ? now : 1;
 	if(!wifi_manager_scan_async()){
-		scan_order_tick = before;
+		TickType_t t = xTaskGetTickCount() - pdMS_TO_TICKS(WIFI_MANAGER_SCAN_GAP_MS - WIFI_MANAGER_SCAN_RETRY_MS);
+		scan_order_tick = (t != 0) ? t : 1;
 		return -1;
 	}
 	return 1;
@@ -1317,9 +1319,9 @@ bool wifi_manager_scan_in_flight(){
 }
 
 bool wifi_manager_ap_list_built(){
-	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. Unlocked reads: a stale one costs one order
+	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. An unlocked read: a stale one costs one order
 	 * too many, or one a poll late */
-	return ap_list_tick != 0 || accessp_json == NULL;
+	return ap_list_tick != 0;
 }
 
 /**

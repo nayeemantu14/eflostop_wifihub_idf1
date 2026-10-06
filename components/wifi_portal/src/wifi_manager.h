@@ -385,8 +385,8 @@ bool wifi_manager_scan_async();
  * @brief LOCAL PATCH (2.1.4 C10b): a scan for the setup page's network list, which GET /ap.json
  * only reads (a cache). rescan false: the page's load, which orders one only when the list is
  * empty or older than 60 s; rescan true: the page's Rescan (POST /scan.json). Either way at least
- * 20 s after the last one ordered here, or 10 s after one that did not start or ended failed.
- * Returns 1 when one was ordered, 0 when none was due
+ * 20 s after the last one ordered here, or 10 s after one that did not start, ended failed, or
+ * did not fit in the queue. Returns 1 when one was ordered, 0 when none was due
  * (*wait_ms, when not NULL: the ms until a Rescan may order one, 0 if the list is fresh), -1 when
  * the order did not fit in the queue. The httpd task only.
  */
@@ -394,14 +394,13 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
 
 /**
  * @brief LOCAL PATCH (2.1.4 C10b): the network list has been rebuilt from a scan since it was
- * allocated, in this AP session, or has no buffer (low heap: a scan cannot build it). Until it
- * has, the page's background reads of GET /ap.json order the scan too
- * (wifi_manager_scan_request(false, ...): 20 s after the last order, or 10 s after one that
- * failed): the order of the page's load can fail (a scan cannot start while a connect attempt
- * runs, ESP_ERR_WIFI_STATE, and an attempt that starts stops a running scan), and nothing else
- * would order it again. With no buffer the polls order nothing; the page's load and Rescan still
- * do, and their SCAN_DONE tries the allocation again. Any task; a stale read costs one order too
- * many, or one a poll late.
+ * allocated, in this AP session. Until it has, the page's background reads of GET /ap.json order
+ * the scan too (wifi_manager_scan_request(false, ...): 20 s after the last order, or 10 s after
+ * one that failed): the order of the page's load can fail (a scan cannot start while a connect
+ * attempt runs, ESP_ERR_WIFI_STATE, and an attempt that starts stops a running scan), and nothing
+ * else would order it again. That holds while the list has no buffer too (low heap): each
+ * SCAN_DONE tries the allocation again before it reads the records. Any task; a stale read costs
+ * one order too many, or one a poll late.
  */
 bool wifi_manager_ap_list_built();
 
