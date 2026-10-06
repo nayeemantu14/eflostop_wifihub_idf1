@@ -126,7 +126,9 @@ static bool is_scanning = false;
 // resolves it. Guards handle_valve_disc() against duplicate advertisement reports
 // queued in the host before ble_gap_disc_cancel() took effect — see the guard
 // there for why this became load-bearing when filter_duplicates was turned off.
-static bool g_connecting = false;
+// Set BEFORE the connect is issued, so a connect in flight with it false is not this module's
+// (link_poll()). Volatile: the command task reads it against ble_gap_conn_active().
+static volatile bool g_connecting = false;
 static bool g_ble_synced = false;
 static bool g_connect_requested = false;
 
@@ -206,6 +208,12 @@ static int g_pending_rmleak_cmd = -1;
 #define CMD_REPLAY_TOKEN          0xFFu
 #define CMD_ITEM_IS_REPLAY(item)  (((item) & 0xFFu) == CMD_REPLAY_TOKEN)
 
+// Internal item, never a ble_valve_cmd_t: wake the command task for its per-pass checks
+// (link_poll()) now rather than at its next PORTAL_POLL_MS timeout. Queued at the BACK, so a
+// replay token keeps the front (replay_token_queued()); a full queue just leaves it to that timeout.
+#define CMD_WAKE_TOKEN            0xFEu
+#define CMD_ITEM_IS_WAKE(item)    (((item) & 0xFFu) == CMD_WAKE_TOKEN)
+
 // ---- Hub-issued command settle barrier -------------------------------------
 // ble_valve_open/close/set_rmleak only ENQUEUE onto ble_cmd_queue; the command
 // task writes the command later, and the cached valve state (g_val_state /
@@ -279,6 +287,22 @@ static bool s_link_dropping = false;
 // (host task). NimBLE keeps that link marked as terminating, so every later
 // ble_gap_terminate() on it returns BLE_HS_EALREADY although no DISCONNECT is coming.
 static bool s_term_failed = false;
+
+// ---- A stale link handle (2.1.4 WP3; plan §4.7, decision D6, red team SR-1) ----------------
+// NimBLE's connect re-attempt (CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT) handles a link that failed
+// to be established (HCI 0x3E) by deleting it and issuing a new connect itself, with NO
+// DISCONNECT event (ble_hs_hci_evt.c, ble_gap_master_connect_reattempt()). valve_conn_handle would
+// then name a link that no longer exists: ble_valve_is_connected() stays true, every command pends
+// on a link that still reads as ready, and every rescan stops at "Already connected", so a pended
+// RMLEAK / CLOSE is never written. BLE_GAP_EVENT_REATTEMPT_COUNT closes that link on the host task
+// (ble_gap_event()), and the command task checks the handle with ble_gap_conn_find() on every pass
+// (link_poll()): a handle NimBLE no longer knows, and still not closed STALE_LINK_CONFIRM_MS later,
+// is closed as if its DISCONNECT had come. The wait covers the legitimate gap: NimBLE deletes a
+// link just before it delivers that link's DISCONNECT (ble_gap_conn_broken()). sdkconfig turns the
+// re-attempt off (I5); this holds either way. Command task only.
+#define STALE_LINK_CONFIRM_MS  1000
+static uint16_t s_stale_handle = BLE_HS_CONN_HANDLE_NONE;   // handle seen with no NimBLE link
+static TickType_t s_stale_since = 0;                        // ... first seen then
 
 // Copies the provisioned valve's MAC; returns false (out = "") when there is none.
 static bool target_copy(char out[18])
@@ -425,6 +449,7 @@ static void discovery_timeout_cb(TimerHandle_t xTimer);
 static void post_connect_timer_cb(TimerHandle_t xTimer);
 static void security_retry_timer_cb(TimerHandle_t xTimer);
 static void initiate_security(void);
+static bool link_stale_check(void);
 
 // -----------------------------------------------------------------------------
 // DEBUG HELPER
@@ -1681,6 +1706,85 @@ static void reset_link_cache(void)
     g_firmware_rev[0] = '\0';
 }
 
+// The module's side of a link that is gone: its GAP DISCONNECT, a link NimBLE's connect
+// re-attempt deleted without one (BLE_GAP_EVENT_REATTEMPT_COUNT), or a stale handle
+// (link_poll()). NimBLE host task for the first two; the command task for the third, only once no
+// event for that link can come any more. A link GAP CONNECT rejected (s_rejecting_conn) leaves as
+// it came, with nothing to the hub or the health engine. Rescans when a link is wanted.
+static void link_closed(void)
+{
+    s_link_dropping = false;   // the dropped link is gone (drop_link_after_failed_write())
+    s_term_failed = false;
+
+    if (s_rejecting_conn)
+    {
+        // The link GAP CONNECT rejected. It never reached the hub or the health
+        // engine, so it leaves the same way: no notify, no health post.
+        s_rejecting_conn = false;
+        valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        reset_link_cache();
+        clear_all_state_bits();
+        taskENTER_CRITICAL(&s_mac_lock);
+        memset(g_valve_mac, 0, sizeof(g_valve_mac));
+        taskEXIT_CRITICAL(&s_mac_lock);
+        if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);   // the terminate backstop
+        ESP_LOGI(BLE_TAG, "[DISCONNECT] Rejected link closed");
+        if (g_connect_requested && ble_valve_has_target_mac())
+            start_scan();
+        return;
+    }
+
+    // Sampled before the link state is cleared. A link whose target was changed or
+    // removed while it was up is no longer the provisioned valve's, and its teardown
+    // must not reach the hub or the health engine either. Its MAC is sampled with it,
+    // for the health engine's DISCONNECTED (g_valve_mac is cleared below).
+    char disc_mac[18];
+    bool was_target = link_is_target_mac(disc_mac);
+
+    valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    reset_link_cache();
+
+    /* DELIBERATELY does NOT clear the health engine's valve leak state here.
+     *
+     * An earlier revision posted health_post_valve_leak(false) on disconnect, on the
+     * reasoning that the probe's state is unknowable once the link is down. That is
+     * true but it is the wrong conclusion: losing the link does not dry the floor.
+     * Because compute_valve_rating() checks `leaking` first, clearing it demoted a
+     * KNOWN flood at the valve from CRITICAL to the WARNING disconnect grace for a
+     * full 3 minutes — under-reporting the single worst state the system has (water
+     * running, and the hub can no longer reach the thing that stops it).
+     *
+     * The two objections that motivated the clear are both already answered:
+     *  - "masks CRITICAL-because-offline": the reason builder now falls through for a
+     *    valve that is leaking AND disconnected, so it reports BOTH "Leak detected:
+     *    valve" and "Valve offline" (telemetry_v2.c).
+     *  - "unclearable": setup step 6 re-reads the flood characteristic on every
+     *    reconnect and posts the truth, so it clears as soon as the link is back.
+     *
+     * Known cost, accepted: since the rating was already CRITICAL while wet, the
+     * disconnect produces no rating transition and therefore no `device_offline`
+     * alert. The state is still fully on the wire — valve.connected:false plus the
+     * "Valve offline" clause in system_health.reason. Under-reporting an alert is a
+     * far better failure than under-reporting the severity of an active flood. */
+
+    clear_all_state_bits();
+    taskENTER_CRITICAL(&s_mac_lock);
+    memset(g_valve_mac, 0, sizeof(g_valve_mac));
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (was_target)
+        notify_hub_update(BLE_UPD_DISCONNECTED, disc_mac);
+    else
+        ESP_LOGW(BLE_TAG, "[DISCONNECT] Link was not the provisioned valve - hub not notified");
+
+    if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);
+    if (post_connect_timer) xTimerStop(post_connect_timer, 0);
+    if (discovery_timeout_timer) xTimerStop(discovery_timeout_timer, 0);
+    if (security_retry_timer) xTimerStop(security_retry_timer, 0);
+
+    if (g_connect_requested)
+        start_scan();
+}
+
 // Common handler for valve discovery from both legacy and extended scan events.
 // Matches the PROVISIONED valve's MAC only; with no provisioned valve nothing is ever
 // linked (P0-a). The advertised name is no longer consulted, so the payload is not parsed.
@@ -1754,8 +1858,6 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     (void)arg;
     struct ble_gap_conn_desc desc;
     int rc;
-    bool was_target = false;   // DISCONNECT only
-    char disc_mac[18];         // DISCONNECT only: the MAC was_target passed
 
     switch (event->type)
     {
@@ -1869,76 +1971,28 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         ESP_LOGI(BLE_TAG, "║            GAP DISCONNECT EVENT                              ║");
         ESP_LOGI(BLE_TAG, "╚══════════════════════════════════════════════════════════════╝");
         ESP_LOGW(BLE_TAG, "[DISCONNECT] reason=0x%02x", event->disconnect.reason);
-        s_link_dropping = false;   // the dropped link is gone (drop_link_after_failed_write())
-        s_term_failed = false;
-
-        if (s_rejecting_conn)
-        {
-            // The link GAP CONNECT rejected. It never reached the hub or the health
-            // engine, so it leaves the same way: no notify, no health post.
-            s_rejecting_conn = false;
-            valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-            reset_link_cache();
-            clear_all_state_bits();
-            taskENTER_CRITICAL(&s_mac_lock);
-            memset(g_valve_mac, 0, sizeof(g_valve_mac));
-            taskEXIT_CRITICAL(&s_mac_lock);
-            if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);   // the terminate backstop
-            ESP_LOGI(BLE_TAG, "[DISCONNECT] Rejected link closed");
-            if (g_connect_requested && ble_valve_has_target_mac())
-                start_scan();
-            return 0;
-        }
-
-        // Sampled before the link state is cleared. A link whose target was changed or
-        // removed while it was up is no longer the provisioned valve's, and its teardown
-        // must not reach the hub or the health engine either. Its MAC is sampled with it,
-        // for the health engine's DISCONNECTED (g_valve_mac is cleared below).
-        was_target = link_is_target_mac(disc_mac);
-
-        valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        reset_link_cache();
-
-        /* DELIBERATELY does NOT clear the health engine's valve leak state here.
-         *
-         * An earlier revision posted health_post_valve_leak(false) on disconnect, on the
-         * reasoning that the probe's state is unknowable once the link is down. That is
-         * true but it is the wrong conclusion: losing the link does not dry the floor.
-         * Because compute_valve_rating() checks `leaking` first, clearing it demoted a
-         * KNOWN flood at the valve from CRITICAL to the WARNING disconnect grace for a
-         * full 3 minutes — under-reporting the single worst state the system has (water
-         * running, and the hub can no longer reach the thing that stops it).
-         *
-         * The two objections that motivated the clear are both already answered:
-         *  - "masks CRITICAL-because-offline": the reason builder now falls through for a
-         *    valve that is leaking AND disconnected, so it reports BOTH "Leak detected:
-         *    valve" and "Valve offline" (telemetry_v2.c).
-         *  - "unclearable": setup step 6 re-reads the flood characteristic on every
-         *    reconnect and posts the truth, so it clears as soon as the link is back.
-         *
-         * Known cost, accepted: since the rating was already CRITICAL while wet, the
-         * disconnect produces no rating transition and therefore no `device_offline`
-         * alert. The state is still fully on the wire — valve.connected:false plus the
-         * "Valve offline" clause in system_health.reason. Under-reporting an alert is a
-         * far better failure than under-reporting the severity of an active flood. */
-
-        clear_all_state_bits();
-        taskENTER_CRITICAL(&s_mac_lock);
-        memset(g_valve_mac, 0, sizeof(g_valve_mac));
-        taskEXIT_CRITICAL(&s_mac_lock);
-        if (was_target)
-            notify_hub_update(BLE_UPD_DISCONNECTED, disc_mac);
-        else
-            ESP_LOGW(BLE_TAG, "[DISCONNECT] Link was not the provisioned valve - hub not notified");
-
-        if (sec_timeout_timer) xTimerStop(sec_timeout_timer, 0);
-        if (post_connect_timer) xTimerStop(post_connect_timer, 0);
-        if (discovery_timeout_timer) xTimerStop(discovery_timeout_timer, 0);
-        if (security_retry_timer) xTimerStop(security_retry_timer, 0);
-
-        if (g_connect_requested)
-            start_scan();
+        link_closed();
         return 0;
+
+#if MYNEWT_VAL(BLE_ENABLE_CONN_REATTEMPT)
+    case BLE_GAP_EVENT_REATTEMPT_COUNT:
+        // Defensive (WP3): sdkconfig turns NimBLE's connect re-attempt off (I5), but a build that
+        // has it on gets here when a link fails to be established (0x3E). Right after this event
+        // NimBLE deletes the link WITHOUT a DISCONNECT and issues a connect of its own (see the
+        // stale-handle note at s_stale_handle). Close the link here as its DISCONNECT would, and
+        // wake the command task, which cancels that connect (link_poll()): every link is then made
+        // by this module's own hunt, and a pended RMLEAK / CLOSE is replayed at its setup.
+        ESP_LOGW(BLE_TAG, "[DISCONNECT] Link failed to be established (0x3E), NimBLE re-attempt %u (handle=%u) - closing it here",
+                 (unsigned)event->reattempt_cnt.count, event->reattempt_cnt.conn_handle);
+        if (event->reattempt_cnt.conn_handle == valve_conn_handle)
+            link_closed();
+        if (ble_cmd_queue != NULL)
+        {
+            uint32_t wake = CMD_ITEM(CMD_WAKE_TOKEN, 0);
+            (void)xQueueSend(ble_cmd_queue, &wake, 0);
+        }
+        return 0;
+#endif
 
     case BLE_GAP_EVENT_TERM_FAILURE:
         // The controller refused a terminate: the link stays up and no DISCONNECT is coming to
@@ -2462,10 +2516,13 @@ static int write_cmd_with_retry(const uint16_t *handle, uint8_t val, uint32_t ge
 
 // A command waits in its pending slot for the provisioned valve's next setup completion:
 // make sure a link comes. With a foreign link still up, its DISCONNECT rescans
-// (g_connect_requested).
+// (g_connect_requested). Command task only. A write answered BLE_HS_ENOTCONN on a handle that
+// NimBLE no longer knows starts the stale-handle check here (link_stale_check()): once it is
+// confirmed, closing the link rescans.
 static void request_valve_link(void)
 {
     g_connect_requested = true;
+    (void)link_stale_check();
     if (valve_conn_handle == BLE_HS_CONN_HANDLE_NONE)
         start_scan();
 }
@@ -2853,8 +2910,8 @@ static void on_stack_sync(void)
 //   NimBLE's own connect re-attempt after a link failed to be established (0x3E,
 //   CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT), which bypasses start_scan() and
 //   handle_valve_disc() and leaves g_connecting false, is cancelled too
-//   (ble_gap_conn_active(): only this module connects). A link already up stays up, and its
-//   commands still run.
+//   (ble_gap_conn_active(): only this module connects; link_poll() cancels that one in any
+//   case). A link already up stays up, and its commands still run.
 //   Once neither holds it (both over, or a leak response was pended): restart a hunt they
 //   held (s_hunt_held), whichever edge this poll saw, and when the pause ends any hunt that
 //   is wanted with no link up or being made.
@@ -2932,6 +2989,56 @@ static void portal_priority_poll(void)
 }
 
 // -----------------------------------------------------------------------------
+// LINK CHECKS (command task)
+// -----------------------------------------------------------------------------
+// The stale-handle check (WP3, see s_stale_handle). The first time valve_conn_handle names no
+// NimBLE link only starts the clock: that link's DISCONNECT may be on its way. Still so
+// STALE_LINK_CONFIRM_MS later, with no connect in flight (whose CONNECT would replace the handle),
+// no event for that link can come any more, and it is closed here. Called on every pass
+// (link_poll()) and where a write or a terminate found no link (BLE_HS_ENOTCONN), before a rescan
+// that would otherwise stop at "Already connected". True when it closed a stale link.
+static bool link_stale_check(void)
+{
+    uint16_t h = valve_conn_handle;
+    if (h == BLE_HS_CONN_HANDLE_NONE || ble_gap_conn_find(h, NULL) == 0)
+    {
+        s_stale_handle = BLE_HS_CONN_HANDLE_NONE;
+        return false;
+    }
+    TickType_t now = xTaskGetTickCount();
+    if (s_stale_handle != h)
+    {
+        s_stale_handle = h;
+        s_stale_since = now;
+        return false;
+    }
+    if ((now - s_stale_since) < pdMS_TO_TICKS(STALE_LINK_CONFIRM_MS) || ble_gap_conn_active())
+        return false;
+    s_stale_handle = BLE_HS_CONN_HANDLE_NONE;
+    ESP_LOGE(BLE_TAG, "[DISCONNECT] Link handle %u is stale (no such NimBLE link for %d ms, no DISCONNECT) - closing it here",
+             h, STALE_LINK_CONFIRM_MS);
+    link_closed();
+    return true;
+}
+
+// Every pass of the command task. The stale-handle check, and a connect in flight that this
+// module did not start (every one of its own sets g_connecting first): NimBLE's connect
+// re-attempt (BLE_GAP_EVENT_REATTEMPT_COUNT). It is cancelled, so no link is made behind the
+// module's back (I5); its CONNECT (status BLE_HS_EAPP) rescans when a link is wanted.
+// ble_gap_conn_active() is read before g_connecting: a connect seen in flight was issued after
+// its own g_connecting was set.
+static void link_poll(void)
+{
+    (void)link_stale_check();
+    if (ble_gap_conn_active() && !g_connecting)
+    {
+        int crc = ble_gap_conn_cancel();
+        if (crc == 0)
+            ESP_LOGW(BLE_TAG, "[CONNECT] Connect not started by this module (NimBLE re-attempt) cancelled");
+    }
+}
+
+// -----------------------------------------------------------------------------
 // BLE COMMAND TASK
 // -----------------------------------------------------------------------------
 static void ble_valve_task(void *pvParameters)
@@ -2943,8 +3050,13 @@ static void ble_valve_task(void *pvParameters)
 
     while (1)
     {
+        link_poll();
         portal_priority_poll();
         if (xQueueReceive(ble_cmd_queue, &item, pdMS_TO_TICKS(PORTAL_POLL_MS)) != pdTRUE)
+            continue;
+
+        // Not a command: run the checks above now (BLE_GAP_EVENT_REATTEMPT_COUNT).
+        if (CMD_ITEM_IS_WAKE(item))
             continue;
 
         // The generation the command was issued under (see s_cmd_gen): a valve write from
@@ -2971,6 +3083,7 @@ static void ble_valve_task(void *pvParameters)
                 break;
             }
             g_connect_requested = true;
+            (void)link_stale_check();   // a stale handle would stop the rescan at "Already connected"
             start_scan();
             break;
 
@@ -3003,8 +3116,9 @@ static void ble_valve_task(void *pvParameters)
                 ble_gap_disc_cancel();
                 is_scanning = false;
             }
-            if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE)
-                ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE &&
+                ble_gap_terminate(valve_conn_handle, BLE_ERR_REM_USER_CONN_TERM) == BLE_HS_ENOTCONN)
+                (void)link_stale_check();   // no such link: closed here once confirmed
             break;
 
         case BLE_CMD_SECURE:
