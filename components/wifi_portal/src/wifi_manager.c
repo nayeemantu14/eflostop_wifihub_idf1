@@ -2573,9 +2573,11 @@ void wifi_manager( void * pvParameters ){
 						on_uncommitted = true;
 					}
 					else if(uxBits & WIFI_MANAGER_REQUEST_DISCONNECT_BIT){
-						/* a forget is under way: what this IP's attempt used is not saved */
+						/* a forget is under way: what this IP's attempt used is not saved, and the
+						 * forget's disconnect leaves it (below) */
 						ESP_LOGW(TAG, "an IP while a forget is under way - nothing saved");
 						on_uncommitted = true;
+						leave = true;
 					}
 					else if(on_uncommitted){
 						/* a new IP (a DHCP renewal) on a network that was not committed: still not */
@@ -2597,14 +2599,19 @@ void wifi_manager( void * pvParameters ){
 				/* reset number of retries */
 				retries = 0;
 
-				/* LOCAL PATCH (2.1.4 C8): an IP not to keep is left now, unless a candidate waits
-				 * (it leaves this link for its own, below) or a disconnect of ours is under way (it
-				 * ends this link): the link is being left either way, unless even our leave could
-				 * not start */
+				/* LOCAL PATCH (2.1.4 C8): an IP not to keep is being left: by a disconnect of ours
+				 * under way already (a forget's, say), whose end is then quiet (leaving_link), or by
+				 * ours now. Only a leave that could not even start keeps the link. A candidate that
+				 * waits goes on once that end has come (user_due, below) */
 				bool leaving = false;
 				if(leave){
-					leaving = abort_tick != 0 || wifi_manager_cand_state() == WM_CAND_WAITING ||
-							wifi_manager_leave_link();
+					if(abort_tick != 0){
+						leaving_link = true;
+						leaving = true;
+					}
+					else{
+						leaving = wifi_manager_leave_link();
+					}
 				}
 
 				/* refresh the status with the new IP (LOCAL PATCH 2.1.4 C8: and the candidate whose
