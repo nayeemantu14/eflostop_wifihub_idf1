@@ -1,7 +1,7 @@
 #include "app_ble_valve.h"
 #include "ble_leak_scanner/app_ble_leak.h"
 #include "health_engine/health_engine.h"
-#include "app_wifi/portal_priority.h"
+#include "radio_policy/radio_policy.h"
 #include "rules_engine/rules_engine.h"
 #include <string.h>
 #include <stdio.h>
@@ -136,10 +136,11 @@ static volatile bool s_hunt_announced = false;
 static volatile bool s_claim_req = false;
 
 // ---- The valve claim policy (2.1.4 WP6; plan §4.4 CONNECT, decision D5) -----------------------
-// Every claim is a CONNECT pulse: no BLE scan runs from its grant until its CONNECT event, at most
-// BLE_VALVE_CLAIM_MS (BLE_VALVE_CLAIM_LR_MS while a leak response is pending), and the executor
-// follows it with a Coded recovery window (I2). The executor also spaces claims by its pulse-rate
-// limit (I2b: 6-7 s of scanning between pulses, at most 12 s of pulses in any 60 s).
+// Every claim is a CONNECT pulse: no BLE scan runs from its grant until its CONNECT event, for the
+// length the radio policy grants (RP_CONNECT_LR_MS while a leak response is pending, otherwise
+// RP_CONNECT_MS to RP_CONNECT_LR_MS within the blind budget, B2), and the executor follows it with a
+// Coded recovery window (I2). The radio policy also spaces claims by its pulse-rate limit (I2b: 6-7 s
+// of scanning between pulses, at most 12 s of pulses in any 60 s).
 // A claim fails when it gives no link: no link within its pulse, or a connect refused or not
 // started. Failures in a row back the next claim off by k_claim_backoff_s[]; a link held
 // CLAIM_HELD_MS resets the count. A link that reached CONNECT and is lost sooner (a 0x3E, a valve
@@ -160,16 +161,14 @@ static TickType_t s_claim_not_before = 0;   // the back-off: no claim before thi
 static bool s_claim_open = false;           // a claim was granted and has no link held yet
 static TickType_t s_link_up_at = 0;         // the current link's CONNECT (s_claim_open only)
 
-// ---- The leak-response trigger and its scanning overlay (2.1.4 WP6; plan §4.1, D5) -----------
-// s_lr_trigger: a leak response is pending (ble_valve_lr_pending()). s_lr_on: the executor runs
-// NORMAL_LR, at most LR_OVERLAY_CAP_MS from the episode's start (s_lr_start, 0 = none): the
-// incident latch stays set until LEAK_RESET, so without the cap a dead valve would keep the hub on
-// the 1M-weighted profile, with its weaker sensor coverage, for good. An episode ends when no
-// RMLEAK / CLOSE is pended and no incident is latched. Command task (lr_poll()) writes them.
-#define LR_OVERLAY_CAP_MS  (10u * 60u * 1000u)
+// ---- The leak-response trigger (2.1.4 WP6; plan §4.1, D5) -------------------------------------
+// s_lr_trigger: a leak response is pending (ble_valve_lr_pending()). Its scanning overlay (NORMAL_LR,
+// LR_AP) and the overlay's cap, RP_LR_OVERLAY_CAP_MS per episode, are the radio policy's (WP8:
+// radio_policy_note_lr(), radio_policy_lr_overlay()): the incident latch stays set until LEAK_RESET,
+// so without the cap a dead valve would keep the hub on the 1M-weighted profile, with its weaker
+// sensor coverage, for good. An episode ends when no RMLEAK / CLOSE is pended and no incident is
+// latched. Command task (lr_poll()) writes them.
 static volatile bool s_lr_trigger = false;
-static volatile bool s_lr_on = false;
-static TickType_t s_lr_start = 0;
 static bool s_interlock_ok = false;         // the valve confirmed RMLEAK=1 + CLOSED in this incident
 
 // True between issuing ble_gap_connect() and the BLE_GAP_EVENT_CONNECT that
@@ -507,8 +506,7 @@ static bool leak_response_pending(void)
 // minutes-long timeouts, and the health engine does not pause for it.
 static bool portal_holds_valve(void)
 {
-    return (app_wifi_portal_priority_active() || app_wifi_radio_hold_active()) &&
-           !leak_response_pending();
+    return radio_policy_legacy_hold() && !leak_response_pending();
 }
 
 // Forward declarations
@@ -2005,10 +2003,10 @@ bool ble_valve_claim_wanted(void)
 
 // The executor's grant (its task, its scan stopped): connect to the valve heard. g_connecting is
 // set BEFORE the connect is issued (link_poll() reads it against ble_gap_conn_active()). The
-// connect is the claim's CONNECT pulse (WP6): it ends at its CONNECT event or after
-// BLE_VALVE_CLAIM_MS (BLE_VALVE_CLAIM_LR_MS while a leak response is pending, s_lr_trigger); the
-// executor starts no scan meanwhile.
-void ble_valve_claim_start(void)
+// connect is the claim's CONNECT pulse (WP6): it ends at its CONNECT event or after pulse_ms, the
+// length the radio policy granted (radio_policy_exec_connect_len()); the executor starts no scan
+// meanwhile.
+void ble_valve_claim_start(uint32_t pulse_ms)
 {
     s_claim_req = false;
     if (!ble_valve_hunt_wanted())
@@ -2021,7 +2019,6 @@ void ble_valve_claim_start(void)
     taskEXIT_CRITICAL(&s_mac_lock);
 
     bool lr = s_lr_trigger;
-    uint32_t pulse_ms = lr ? BLE_VALVE_CLAIM_LR_MS : BLE_VALVE_CLAIM_MS;
     ESP_LOGI(BLE_TAG, "[CLAIM] Connecting to the valve: pulse up to %lu ms%s", (unsigned long)pulse_ms,
              lr ? " (leak response pending)" : "");
     s_hunt_announced = false;   // the hunt ends with its claim
@@ -2042,7 +2039,7 @@ void ble_valve_claim_start(void)
         // poll looked for one to cancel: cancel it here. Its CONNECT (status BLE_HS_EAPP)
         // clears g_connecting, and its rescan is held. Logged for the window only.
         int crc = ble_gap_conn_cancel();
-        if (app_wifi_portal_priority_active())
+        if (radio_policy_legacy_window())
             ESP_LOGI(BLE_TAG, "[PORTAL] Valve connect cancelled - Wi-Fi setup portal opened (rc=%d)", crc);
     }
 }
@@ -2442,8 +2439,8 @@ static void request_hunt(void)
     // ble_valve_hunt_wanted() applies too). g_connect_requested is left as it is, and s_hunt_held
     // has the command task ask for the hunt again once neither holds it (portal_priority_poll()).
     // Only the window logs here, and only it stamps the leak-response hunt below.
-    bool portal = app_wifi_portal_priority_active();
-    if ((portal || app_wifi_radio_hold_active()) && !leak_response_pending())
+    bool portal = radio_policy_legacy_window();
+    if (radio_policy_legacy_hold() && !leak_response_pending())
     {
         s_hunt_held = true;
         if (portal)
@@ -3050,8 +3047,8 @@ static void portal_priority_poll(void)
 {
     static bool s_paused = false;   // command task only: the window as last seen here
     static bool s_radio = false;    // command task only: the window or a radio hold, as last seen
-    bool on = app_wifi_portal_priority_active();
-    bool radio = on || app_wifi_radio_hold_active();
+    bool on = radio_policy_legacy_window();
+    bool radio = on || radio_policy_legacy_hold();
     bool hold = radio && !leak_response_pending();   // portal_holds_valve(), on one read of each
     bool ended_now = s_radio && !radio;              // the pause ended: a wanted hunt restarts
     s_radio = radio;
@@ -3212,7 +3209,8 @@ static void claim_held_poll(void)
 // The leak-response trigger and its overlay (WP6; plan §4.1, D5), every pass:
 //   trigger = valve provisioned AND not linked AND (an RMLEAK / CLOSE pended, OR a leak incident
 //             latched AND the valve has not confirmed the interlock in it);
-//   overlay = trigger AND less than LR_OVERLAY_CAP_MS since the episode began.
+//   overlay = trigger AND less than RP_LR_OVERLAY_CAP_MS since the episode began (the radio
+//             policy's, radio_policy_note_lr(), which this pass feeds).
 // The incident latch is read lock-free, through the rules engine's own mirror of it,
 // health_is_interlock_held(): rules_engine.c stores it with every change of the latch, under its
 // mutex (incident_save_to_nvs(), and rules_engine_reset_all()'s release). NOT
@@ -3225,7 +3223,6 @@ static void claim_held_poll(void)
 // no incident is latched. Pended commands stay pended after the cap: the next claim writes them.
 static void lr_poll(void)
 {
-    TickType_t now = xTaskGetTickCount();
     bool provisioned = ble_valve_has_target_mac();
     bool incident = provisioned && health_is_interlock_held();
     bool pended = leak_response_pending();
@@ -3243,33 +3240,22 @@ static void lr_poll(void)
 
     bool trigger = provisioned && !linked && (pended || (incident && !s_interlock_ok));
     s_lr_trigger = trigger;
-    bool first = false;
-    if (trigger && s_lr_start == 0)
+    rp_lr_t lr = radio_policy_note_lr(trigger, pended || incident, incident);   // wakes the executor on a change
+    if (lr.changed)
     {
-        s_lr_start = now ? now : 1;
-        first = true;
-    }
-    uint32_t ran_s = s_lr_start ? (uint32_t)((now - s_lr_start) / configTICK_RATE_HZ) : 0;
-    bool overlay = trigger && (now - s_lr_start) < pdMS_TO_TICKS(LR_OVERLAY_CAP_MS);
-    if (overlay != s_lr_on)
-    {
-        s_lr_on = overlay;
-        if (overlay && first)
+        if (lr.overlay && lr.started)
             ESP_LOGW(BLE_TAG, "[LR] Leak response pending, valve not linked (%s) - leak-response scanning, at most %u s for this incident",
                      pended ? "RMLEAK/CLOSE pended" : "incident latched, interlock not confirmed",
-                     (unsigned)(LR_OVERLAY_CAP_MS / 1000));
-        else if (overlay)
+                     (unsigned)(RP_LR_OVERLAY_CAP_MS / 1000));
+        else if (lr.overlay)
             ESP_LOGW(BLE_TAG, "[LR] Leak-response scanning resumed (valve not linked), %lu s into this incident's %u s",
-                     (unsigned long)ran_s, (unsigned)(LR_OVERLAY_CAP_MS / 1000));
+                     (unsigned long)lr.ran_s, (unsigned)(RP_LR_OVERLAY_CAP_MS / 1000));
         else
-            ESP_LOGW(BLE_TAG, "[LR] Leak-response scanning ended after %lu s (%s)", (unsigned long)ran_s,
+            ESP_LOGW(BLE_TAG, "[LR] Leak-response scanning ended after %lu s (%s)", (unsigned long)lr.ran_s,
                      linked ? "valve linked"
                             : (trigger ? "the cap per incident - normal scanning, claims go on"
                                        : "leak response written or withdrawn"));
-        app_ble_leak_kick();
     }
-    if (!pended && !incident)
-        s_lr_start = 0;   // the episode is over
 }
 
 // -----------------------------------------------------------------------------
@@ -3795,9 +3781,19 @@ bool ble_valve_is_connected(void)
     return valve_conn_handle != BLE_HS_CONN_HANDLE_NONE;
 }
 
-bool ble_valve_lr_active(void)
+bool ble_valve_link_verified(void)
 {
-    return s_lr_on;
+    uint16_t h = valve_conn_handle;
+    return h != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(h, NULL) == 0;
+}
+
+// The executor (its task): a claim's connect still in flight 2 s past its pulse, so NimBLE neither
+// completed nor cancelled it (no answer to its Create Connection Cancel). As for a connect NimBLE
+// lost (connect_lost_by_host()): end the claim, no failure, and reset the BLE host, the only public
+// way to clear the controller's initiator. Should never print (HANDOFF 15s residual 3).
+void ble_valve_claim_overrun(void)
+{
+    connect_lost_by_host("still in flight 2 s past its pulse");
 }
 
 bool ble_valve_lr_pending(void)

@@ -151,31 +151,28 @@ extern "C"
     bool ble_valve_is_connected(void);
 
     // -------------------------------------------------------------------------
-    // BLE scan executor interface (2.1.4 WP5). For the ble_leak_scan task (app_ble_leak.c),
-    // the only code that starts or stops a BLE scan; nothing else calls these.
+    // BLE scan executor interface (2.1.4 WP5, WP8's core). For the ble_leak_scan task
+    // (app_ble_leak.c), the only code that starts or stops a BLE scan; nothing else calls these.
+    // The leak-response overlay (NORMAL_LR, LR_AP) and its 10 min cap per episode are the radio
+    // policy's (radio_policy_lr_overlay()), fed by this module's trigger on every pass.
     // -------------------------------------------------------------------------
-
-    // A claim's connect (the CONNECT pulse, plan §4.4) ends at its CONNECT event or after this
-    // long, the second while a leak response is pending (ble_valve_lr_pending()). The executor
-    // starts no scan meanwhile and checks the second against its blind budget (I2).
-    #define BLE_VALVE_CLAIM_MS     1500
-    #define BLE_VALVE_CLAIM_LR_MS  2500
-
-    /**
-     * @brief The leak-response scanning overlay (NORMAL_LR, plan §4.1, D5) should run: a leak
-     * response is pending (ble_valve_lr_pending()) and its episode began less than 10 min ago.
-     */
-    bool ble_valve_lr_active(void);
 
     /**
      * @brief A leak response is pending (WP6's widened trigger): the valve is provisioned and
      * not linked, and an RMLEAK or CLOSE is pended for it, or a leak incident is latched and
      * the valve has not confirmed the interlock (RMLEAK=1 and CLOSED) in it. Claims then skip
-     * the back-off (the executor's pulse-rate limit, I2b, still spaces them) and run for
-     * BLE_VALVE_CLAIM_LR_MS. Re-evaluated on every pass of the valve
-     * task (at least once a second); the incident latch is read lock-free.
+     * the back-off (the radio policy's pulse-rate limit, I2b, still spaces them) and run for
+     * RP_CONNECT_LR_MS. Re-evaluated on every pass of the valve task (at least once a second);
+     * the incident latch is read lock-free. The radio policy holds the same trigger
+     * (radio_policy_lr_pending()).
      */
     bool ble_valve_lr_pending(void);
+
+    /**
+     * @brief The valve's link is up and NimBLE knows it (ble_gap_conn_find()): BLE_IDLE's
+     * "link verified" (plan §4.2). Any task.
+     */
+    bool ble_valve_link_verified(void);
     /**
      * @brief The valve module wants its valve found: the provisioned valve is wanted
      * (connect requested), not linked and no connect is in flight, NimBLE is synced, and
@@ -195,9 +192,17 @@ extern "C"
 
     /**
      * @brief The executor's grant: issue the connect to the valve heard, on the executor's
-     * task, with its scan stopped. Re-checks the hunt first; a refused connect rescans.
+     * task, with its scan stopped, for pulse_ms (the CONNECT pulse the radio policy granted:
+     * RP_CONNECT_LR_MS under a leak response, else RP_CONNECT_MS to RP_CONNECT_LR_MS within
+     * the blind budget). Re-checks the hunt first; a refused connect rescans.
      */
-    void ble_valve_claim_start(void);
+    void ble_valve_claim_start(uint32_t pulse_ms);
+
+    /**
+     * @brief The executor: the claim's connect is still in flight 2 s past its pulse (NimBLE
+     * did not end it). Ends the claim, no failure, and resets the BLE host. Should never run.
+     */
+    void ble_valve_claim_overrun(void);
 
     /**
      * @brief Every complete advertising report of the executor's scans (NimBLE host task).

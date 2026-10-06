@@ -47,10 +47,12 @@ void app_ble_leak_reset_tracking(void);
 /**
  * @brief Wake the BLE scan executor (the leak scanner's task) now, rather than at its next
  * poll. The valve module calls it when what it wants from the executor changes (a hunt, a
- * claim, a link up or down). Any task, not an ISR. Ignored before the task exists.
+ * claim, a link up or down), and the radio policy when a fact or a pulse request changes.
+ * Any task, not an ISR. Ignored before the task exists.
  *
  * Since 2.1.4 (WP5) this task is the only code that starts or stops a BLE scan: the valve
- * hunt runs on its scans (ble_valve_hunt_wanted(), ble_valve_note_adv()).
+ * hunt runs on its scans (ble_valve_hunt_wanted(), ble_valve_note_adv()), and since WP8 it
+ * runs the radio policy's rows and pulses (radio_policy.h).
  */
 void app_ble_leak_kick(void);
 
