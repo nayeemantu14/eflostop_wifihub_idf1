@@ -22,9 +22,12 @@
 #include "freertos/queue.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_random.h"
+#include "nvs.h"
 #include "host/ble_hs.h"
 #include "host/ble_gap.h"
 #include "provisioning_manager/provisioning_manager.h"
+#include "nvs_store/nvs_store.h"
 #include "health_engine/health_engine.h"
 #include "app_wifi/portal_priority.h"
 #include "ble_valve/app_ble_valve.h"
@@ -119,7 +122,29 @@ static sensor_state_t s_sensors[MAX_TRACKED_SENSORS];
 // The burst log's times for s_sensors[0 .. BURST_LOG_SLOTS - 1]
 static burst_times_t s_burst_times[BURST_LOG_SLOTS];
 
-/* Guards s_whitelist[], s_whitelist_count, s_sensors[] and s_burst_times[].
+// Adverts heard per tracking slot since the executor's last 60 s summary (WP6), saturating.
+static uint8_t s_adv_n[MAX_TRACKED_SENSORS];
+
+/* Each whitelisted sensor's primary PHY (2.1.4 WP6; plan §4.1, decision D1: some sensors in the
+ * field advertise on 1M, the rest on Coded). Index = the sensor's whitelist index. Learned from
+ * every advert's prim_phy (process_leak_adv()), so it changes only when the sensor is heard on the
+ * other PHY: no time decay. PHY_UNKNOWN = never heard since it was provisioned. A sensor known to
+ * be on 1M makes the executor scan 1M in windows of its own (N_MIXED). Persisted in NVS
+ * (phy_save(), at most 112 B, written only when it changed), carried across whitelist reloads by
+ * MAC (phy_carry()), and dropped with a sensor that leaves the whitelist (decommissioned). */
+#define PHY_UNKNOWN     0
+#define PHY_1M          1
+#define PHY_CODED       2
+static uint8_t s_wl_phy[MAX_TRACKED_SENSORS];
+static volatile bool s_phy_dirty = false;   // RAM differs from what was last saved
+static bool s_phy_loaded = false;           // executor task: NVS read at the first reload
+static uint16_t s_phy_flips = 0;            // known PHYs that changed since the last summary
+static TickType_t s_phy_flip_logged = 0;    // host task: the last change line between known PHYs
+#define PHY_FLIP_LOG_MS 10000
+static const char *const k_phy_name[3] = { "unknown", "1M", "Coded" };
+
+/* Guards s_whitelist[], s_whitelist_count, s_sensors[], s_burst_times[], s_adv_n[], s_wl_phy[]
+ * and s_phy_flips.
  *
  * The whitelist is rewritten by the scan task (every 10 s) while the NimBLE host task
  * reads it for every advertisement, and 2.1.3 published the new count BEFORE the new
@@ -222,6 +247,7 @@ static int sensor_alloc_locked(const uint8_t *mac)
             memset(&s_sensors[i], 0, sizeof(s_sensors[i]));
             memcpy(s_sensors[i].mac, mac, 6);
             s_sensors[i].in_use = true;
+            s_adv_n[i] = 0;
             return i;
         }
     }
@@ -298,6 +324,157 @@ static __attribute__((noinline)) bool read_whitelist(uint8_t wl[][6], uint8_t *c
     return true;
 }
 
+/* ---------------------------------------------------------
+ * The PHY table in NVS (WP6): one blob of 7 B records (MAC as NimBLE stores it, PHY), known
+ * PHYs only, at most MAX_TRACKED_SENSORS of them (112 B, plan §4.1), in the commissioning
+ * partition so a Wi-Fi reset keeps it. Executor task only, each in a frame of its own.
+ * --------------------------------------------------------- */
+#define PHY_NVS_NS      "ble_phy"
+#define PHY_NVS_KEY     "phy"
+#define PHY_SAVE_MIN_MS 60000   // at most one write a minute, however often a sensor changes PHY
+typedef struct __attribute__((packed)) {
+    uint8_t mac[6];
+    uint8_t phy;
+} phy_rec_t;
+_Static_assert(sizeof(phy_rec_t) * MAX_TRACKED_SENSORS <= 112, "plan 4.1: the PHY table takes at most 112 B of NVS");
+
+static int wl_find(const uint8_t wl[][6], uint8_t count, const uint8_t *mac)
+{
+    for (int i = 0; i < count; i++) {
+        if (memcmp(wl[i], mac, 6) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+// The PHYs the new list keeps from the list in RAM, by MAC. True when a known PHY's sensor left.
+static __attribute__((noinline)) bool phy_carry(const uint8_t wl[][6], uint8_t count, uint8_t phy[])
+{
+    uint8_t old_wl[MAX_TRACKED_SENSORS][6];
+    uint8_t old_phy[MAX_TRACKED_SENSORS];
+    taskENTER_CRITICAL(&s_wl_lock);
+    uint8_t old_n = s_whitelist_count;
+    memcpy(old_wl, s_whitelist, sizeof(old_wl));
+    memcpy(old_phy, s_wl_phy, sizeof(old_phy));
+    taskEXIT_CRITICAL(&s_wl_lock);
+
+    memset(phy, PHY_UNKNOWN, MAX_TRACKED_SENSORS);
+    bool dropped = false;
+    for (int j = 0; j < old_n; j++) {
+        int i = wl_find(wl, count, old_wl[j]);
+        if (i >= 0) {
+            phy[i] = old_phy[j];
+        } else if (old_phy[j] != PHY_UNKNOWN) {
+            dropped = true;
+        }
+    }
+    return dropped;
+}
+
+// The PHYs the list gets from NVS at the first reload since boot. True when the stored table holds
+// a sensor no longer listed, or cannot be used as it is: it is then saved again.
+static __attribute__((noinline)) bool phy_load(const uint8_t wl[][6], uint8_t count, uint8_t phy[])
+{
+    phy_rec_t rec[MAX_TRACKED_SENSORS];
+    size_t len = sizeof(rec);
+    memset(phy, PHY_UNKNOWN, MAX_TRACKED_SENSORS);
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, PHY_NVS_NS, NVS_READONLY, &h);
+    if (err == ESP_OK) {
+        err = nvs_get_blob(h, PHY_NVS_KEY, rec, &len);
+        nvs_close(h);
+    }
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return false;   // nothing learned and saved yet
+    }
+    if (err != ESP_OK || len % sizeof(phy_rec_t) != 0) {
+        ESP_LOGW(BLE_LEAK_TAG, "PHY table not read from NVS (%s, %u B) - every sensor's PHY is unknown until heard",
+                 esp_err_to_name(err), (unsigned)len);
+        return err == ESP_OK || err == ESP_ERR_NVS_INVALID_LENGTH;
+    }
+
+    unsigned n = len / sizeof(phy_rec_t), known = 0, on_1m = 0;
+    bool dropped = false;
+    for (unsigned k = 0; k < n; k++) {
+        int i = wl_find(wl, count, rec[k].mac);
+        if (i >= 0 && (rec[k].phy == PHY_1M || rec[k].phy == PHY_CODED)) {
+            phy[i] = rec[k].phy;
+            known++;
+            if (rec[k].phy == PHY_1M) on_1m++;
+        } else {
+            dropped = true;
+        }
+    }
+    ESP_LOGI(BLE_LEAK_TAG, "PHY table loaded: %u of %u sensor(s) known, %u on 1M", known, (unsigned)count, on_1m);
+    return dropped;
+}
+
+// Saves the known PHYs if they differ from what NVS holds (read and compared first: written only
+// on change). A failure leaves the table marked for the next try.
+static __attribute__((noinline)) void phy_save(void)
+{
+    phy_rec_t rec[MAX_TRACKED_SENSORS];
+    phy_rec_t old[MAX_TRACKED_SENSORS];
+    unsigned n = 0, on_1m = 0;
+
+    s_phy_dirty = false;   // a change from here on marks it again
+    taskENTER_CRITICAL(&s_wl_lock);
+    for (int i = 0; i < s_whitelist_count; i++) {
+        if (s_wl_phy[i] != PHY_UNKNOWN) {
+            memcpy(rec[n].mac, s_whitelist[i], 6);
+            rec[n].phy = s_wl_phy[i];
+            n++;
+        }
+    }
+    taskEXIT_CRITICAL(&s_wl_lock);
+    for (unsigned k = 0; k < n; k++) {
+        if (rec[k].phy == PHY_1M) on_1m++;
+    }
+
+    nvs_handle_t h;
+    esp_err_t err = nvs_open_from_partition(NVS_PROV_PARTITION, PHY_NVS_NS, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        s_phy_dirty = true;
+        ESP_LOGW(BLE_LEAK_TAG, "PHY table not saved (%s) - retried later", esp_err_to_name(err));
+        return;
+    }
+    size_t olen = sizeof(old);
+    esp_err_t gerr = nvs_get_blob(h, PHY_NVS_KEY, old, &olen);
+    bool same = (gerr == ESP_OK) ? (olen == n * sizeof(phy_rec_t) && memcmp(old, rec, olen) == 0)
+                                 : (gerr == ESP_ERR_NVS_NOT_FOUND && n == 0);
+    if (!same) {
+        err = (n > 0) ? nvs_set_blob(h, PHY_NVS_KEY, rec, n * sizeof(phy_rec_t))
+                      : nvs_erase_key(h, PHY_NVS_KEY);
+        if (err == ESP_OK) {
+            err = nvs_commit(h);
+        }
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        s_phy_dirty = true;
+        ESP_LOGW(BLE_LEAK_TAG, "PHY table not saved (%s) - retried later", esp_err_to_name(err));
+    } else if (!same) {
+        ESP_LOGI(BLE_LEAK_TAG, "PHY table saved: %u sensor(s) known, %u on 1M", n, on_1m);
+    }
+}
+
+// True when a listed sensor is known to advertise on 1M: the executor then runs N_MIXED.
+static bool phy_any_1m(void)
+{
+    bool any = false;
+    taskENTER_CRITICAL(&s_wl_lock);
+    for (int i = 0; i < s_whitelist_count; i++) {
+        if (s_wl_phy[i] == PHY_1M) {
+            any = true;
+            break;
+        }
+    }
+    taskEXIT_CRITICAL(&s_wl_lock);
+    return any;
+}
+
 static void reload_whitelist(void)
 {
     // Converted OUTSIDE the lock (the parser is not a critical-section call).
@@ -319,18 +496,36 @@ static void reload_whitelist(void)
         for (int b = 0; b < 6; b++) sum = sum * 31u + wl[i][b];
     }
 
+    // Each listed sensor keeps the PHY learned for it (WP6): from the list in RAM, or, at the
+    // first reload since boot, from NVS. A known PHY dropped with its sensor is saved as gone.
+    uint8_t phy[MAX_TRACKED_SENSORS];
+    bool phy_dropped;
+    if (!s_phy_loaded) {
+        phy_dropped = phy_load(wl, count, phy);
+        s_phy_loaded = true;
+    } else {
+        phy_dropped = phy_carry(wl, count, phy);
+    }
+
     /* Swap the list and prune the tracking of every MAC no longer on it, in ONE section,
      * so an advertisement can never see the new count with the old entries, nor find a
-     * slot left over from a removed sensor (a re-added sensor starts from seen=false). */
+     * slot left over from a removed sensor (a re-added sensor starts from seen=false).
+     * A PHY learned between phy_carry()'s copy and this swap is lost here and learned again
+     * from that sensor's next advert. */
     taskENTER_CRITICAL(&s_wl_lock);
     memcpy(s_whitelist, wl, sizeof(s_whitelist));
     s_whitelist_count = count;
+    memcpy(s_wl_phy, phy, sizeof(s_wl_phy));
     for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
         if (s_sensors[i].in_use && whitelist_find_locked(s_sensors[i].mac) < 0) {
             memset(&s_sensors[i], 0, sizeof(s_sensors[i]));
+            s_adv_n[i] = 0;
         }
     }
     taskEXIT_CRITICAL(&s_wl_lock);
+    if (phy_dropped) {
+        s_phy_dirty = true;
+    }
 
     // This runs every 10 s; only log when the whitelist actually changes so
     // the trace isn't flooded with identical "reloaded" lines.
@@ -449,12 +644,27 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     uint8_t phy_bit = (prim_phy == BLE_HCI_LE_PHY_1M)    ? BURST_PHY_1M
                     : (prim_phy == BLE_HCI_LE_PHY_CODED) ? BURST_PHY_CODED
                                                          : BURST_PHY_OTHER;
+    // The sensor's primary PHY (WP6): learned from every advert, kept until it is heard on the
+    // other PHY. Any other PHY teaches nothing.
+    uint8_t phy_heard = (prim_phy == BLE_HCI_LE_PHY_1M)    ? PHY_1M
+                      : (prim_phy == BLE_HCI_LE_PHY_CODED) ? PHY_CODED
+                                                           : PHY_UNKNOWN;
+    uint8_t phy_was = PHY_UNKNOWN;
+    bool phy_learned = false;
     taskENTER_CRITICAL(&s_wl_lock);
-    listed = (whitelist_find_locked(adv_mac) >= 0);
+    int wi = whitelist_find_locked(adv_mac);
+    listed = (wi >= 0);
     if (listed) {
+        if (phy_heard != PHY_UNKNOWN && s_wl_phy[wi] != phy_heard) {
+            phy_was = s_wl_phy[wi];
+            s_wl_phy[wi] = phy_heard;
+            phy_learned = true;
+            if (phy_was != PHY_UNKNOWN && s_phy_flips < UINT16_MAX) s_phy_flips++;
+        }
         slot = sensor_find_locked(adv_mac);
         if (slot < 0) slot = sensor_alloc_locked(adv_mac);
         if (slot >= 0) {
+            if (s_adv_n[slot] < UINT8_MAX) s_adv_n[slot]++;
             if (slot < BURST_LOG_SLOTS) {
                 burst_note_locked(&s_sensors[slot], &s_burst_times[slot], burst_ms, phy_bit);
             }
@@ -462,6 +672,22 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
         }
     }
     taskEXIT_CRITICAL(&s_wl_lock);
+    if (phy_learned) {
+        // The executor saves it (rate-limited) and picks its profile again (N_MIXED on 1M). A
+        // sensor whose known PHY keeps changing is logged at most every PHY_FLIP_LOG_MS; the
+        // summary counts every change.
+        s_phy_dirty = true;
+        TickType_t tnow = xTaskGetTickCount();
+        if (phy_was == PHY_UNKNOWN || (tnow - s_phy_flip_logged) >= pdMS_TO_TICKS(PHY_FLIP_LOG_MS)) {
+            if (phy_was != PHY_UNKNOWN) {
+                s_phy_flip_logged = tnow;
+            }
+            ESP_LOGI(BLE_LEAK_TAG, "eleak %02X:%02X:%02X:%02X:%02X:%02X PHY learned: %s (was %s)",
+                     adv_mac[5], adv_mac[4], adv_mac[3], adv_mac[2], adv_mac[1], adv_mac[0],
+                     k_phy_name[phy_heard], k_phy_name[phy_was]);
+        }
+        app_ble_leak_kick();
+    }
     if (!listed || slot < 0) {
         return;  // Not a commissioned sensor
     }
@@ -576,27 +802,73 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
 }
 
 /* ---------------------------------------------------------
- * The BLE scan executor (2.1.4 WP5; plan §4.7, invariants I3 and I5)
+ * The BLE scan executor (2.1.4 WP5 and WP6; plan §4.1, §4.2 rows 3-4, §4.4, §4.7; I1-I3, I5)
  *
  * This task is the ONLY code that starts or stops a BLE scan (ble_gap_ext_disc,
  * ble_gap_disc_cancel). Until WP5 the valve module ran a scan of its own to hunt for its valve,
  * and the two owners raced: each cancelled the other's scan, and a start could find the other's
  * already running (BLE_HS_EALREADY, "[SCAN] ble_gap_disc rc=2"), which left the hunt dead. Now
- * the valve module only says what it wants, and this task decides:
- *   - a claim (ble_valve_claim_wanted(): its valve was heard) is granted at once: the scan is
- *     stopped and ble_valve_claim_start() issues the connect on this task, so no scan can start
- *     between the grant and the connect;
- *   - no scan starts while a connect is in flight (it would fail with BLE_HS_EBUSY);
- *   - the valve hunt's geometry while a hunt is wanted (ble_valve_hunt_wanted()), the leak scan
- *     otherwise, and none while the portal priority window or a Wi-Fi radio hold has the radio,
- *     exactly as before WP5 (a hunt still runs in them while a leak response is pended);
- *   - every advert of every scan goes to the leak sensors (process_leak_adv()) and to the
- *     valve's MAC hook (ble_valve_note_adv()), so the hunt is passive and costs the sensors
- *     nothing: its scan covers them as the leak scan does.
+ * the valve module only says what it wants (ble_valve_hunt_wanted(), ble_valve_claim_wanted(),
+ * ble_valve_lr_active()), and this task decides. Every advert of every scan goes to the leak
+ * sensors (process_leak_adv()) and to the valve's MAC hook (ble_valve_note_adv()): the valve hunt
+ * is passive and runs on whatever scan covers 1M.
+ *
+ * Modes (first match wins; WP8's radio policy adds the AP modes and replaces the two holds):
+ *   CLAIM      a claim's connect is in flight (the CONNECT pulse): no scan can run.
+ *   PAUSED     the portal priority window or a Wi-Fi radio hold has the radio: no scan, exactly
+ *              as before WP5 ...
+ *   HOLD_HUNT  ... unless a leak response is pended: then the valve hunt's scan runs, as before
+ *              (it covers the sensors too), and a claim is granted at once.
+ *   RECOVERY   1.2 s of Coded after a claim pulse (I2), before the profile resumes.
+ *   NORMAL_LR  a leak response is pending and the valve is not linked, at most 10 min per
+ *              incident (the valve module's overlay): [1M 1.0 s][Coded 0.6 s] in turn.
+ *   N_MIXED    a listed sensor is known to advertise on 1M: [1M 1.0 s][Coded 1.0 s] in turn.
+ *   N_CODED    otherwise: 1M 160/32 + Coded 160/128 (20 % / 80 %) in 1 s scans.
+ * NORMAL's scans last a fixed time (ext_disc's duration) and each next one starts after a random
+ * 0-100 ms (the 1 s dither, from DISC_COMPLETE): before WP6 one continuous scan at 100 ms could
+ * stay phase-locked to a sensor's heartbeat bursts, so about 1.5 % of sensor timings were never
+ * heard (plan §5.1). A claim is granted at the end of a scan that covered Coded, so the pulse is
+ * the only Coded gap (at most BLE_VALVE_CLAIM_LR_MS, I2), and RECOVERY follows it.
+ *
+ * Every scan is timed, the hold's hunt too: a cancel that meets a scan's own timeout can leave
+ * NimBLE's state idle while the controller still scans, and every start then fails until that
+ * scan ends by itself, which a scan with no duration never would.
+ *
  * The GAP handler only stores and notifies (DISC_COMPLETE). The task is woken by it, by the valve
  * module (app_ble_leak_kick()) and at least every EXEC_POLL_MS. A start that fails is retried
- * SCAN_RETRY_MS later. Priority 6 (was 4), so its starts land within milliseconds of an edge.
+ * SCAN_RETRY_MS later. Priority 6 (was 4), so the next scan starts within milliseconds of an
+ * edge; its slow chores (whitelist reload, PHY save, summary) run right after a scan starts, while
+ * the controller scans on, so they do not lengthen the gaps between scans.
  * --------------------------------------------------------- */
+
+/* The sensor-firmware timings the profiles depend on (FW 1.1.0, unchanged in this release; plan
+ * §4.8, documented hub assumptions) and the invariants checked against them. */
+#define ADV_SMAX_MS     448     // longest advert spacing: Ta max 437.5 ms + advDelay 10 ms
+#define JITTER_MS       100     // the start dither: U(0, JITTER_MS) before each NORMAL scan
+#define BURST_MIN_MS   2500     // a heartbeat burst
+#define BURST_EDGE_MS  4000     // a leak-edge burst
+#define L_MS           (ADV_SMAX_MS + JITTER_MS)        // 548
+#define W_MIN_MS       (L_MS + 50)                      // 598: shortest covering window
+#define GAP_MAX_MS     (BURST_MIN_MS - 2 * L_MS)        // 1404: longest gap plus jitter
+#define BLIND_MAX_MS   2800     // I2: longest span with no Coded scan
+#define RECOVERY_MS    1200     // I2: the Coded window after a pulse
+#define N_SCAN_MS      1000     // N_CODED's scans
+#define MIX_SLOT_MS    1000     // N_MIXED's 1M and Coded scans
+#define LR_1M_MS       1000     // NORMAL_LR's 1M scan
+#define LR_CODED_MS     600     // NORMAL_LR's Coded scan
+_Static_assert(BLIND_MAX_MS + RECOVERY_MS <= BURST_EDGE_MS, "I2: a pulse and its recovery fit in an edge burst");
+_Static_assert(RECOVERY_MS >= 2 * L_MS, "I2: the recovery spans two advert intervals");
+_Static_assert(BLE_VALVE_CLAIM_LR_MS <= BLIND_MAX_MS && BLE_VALVE_CLAIM_MS <= BLE_VALVE_CLAIM_LR_MS,
+               "I2: a claim pulse fits the blind budget");
+_Static_assert(N_SCAN_MS >= W_MIN_MS && JITTER_MS <= GAP_MAX_MS, "I1: N_CODED");
+_Static_assert(MIX_SLOT_MS >= W_MIN_MS && MIX_SLOT_MS + 2 * JITTER_MS <= GAP_MAX_MS, "I1: N_MIXED, both PHYs");
+_Static_assert(LR_CODED_MS >= W_MIN_MS && LR_1M_MS + 2 * JITTER_MS <= GAP_MAX_MS, "I1: NORMAL_LR's Coded");
+
+#define SCAN_GONE_MS        1000    // a scan NimBLE dropped with no DISC_COMPLETE is restarted after this
+#define CHORES_LATE_MS      5000    // the executor's slow chores run at least this often
+#define SUMMARY_MS          60000   // the summary line's period
+#define DUTY_WARN_PCT       80      // the duty watchdog: BLE scanning below this share of the
+#define DUTY_WARN_RUNS      2       // ... expected time in this many summaries in a row warns
 
 // A scan geometry. Interval and window in 0.625 ms units (both 0: that PHY is not scanned);
 // duration in 10 ms units (0: until cancelled). Every scan is passive with filter_duplicates
@@ -607,31 +879,93 @@ typedef struct {
     uint16_t dur;
 } scan_geo_t;
 
-enum { SCAN_GEO_NONE = 0, SCAN_GEO_LEAK, SCAN_GEO_HUNT, SCAN_GEO_COUNT };
-
-static const scan_geo_t k_scan_geo[SCAN_GEO_COUNT] = {
-    [SCAN_GEO_NONE] = { 0, 0, 0, 0, 0 },
-    // The leak scan: 1M (WB sensors, WBA sensors in 1M mode, the valve) and Coded (WBA long
-    // range), each 100 ms interval / 50 ms window.
-    [SCAN_GEO_LEAK] = { 160, 80, 160, 80, 0 },
-    // The valve hunt (the valve module's own scan until WP5): 110 ms / 55 ms on each PHY.
-    // Deliberately NOT 100 ms: the valve advertises every 500-700 ms, and 100 ms against
-    // 500 ms is a 5:1 harmonic lock in which escape depends solely on the 0-10 ms per-event
-    // advDelay drifting the phase; 110 ms breaks the lock at the same duty (50 %). Passive now
-    // (it was active on 1M): the valve is matched by its MAC alone, so no scan request is
-    // needed, and the leak sensors are covered as by the leak scan.
-    [SCAN_GEO_HUNT] = { 176, 88, 176, 88, 0 },
+enum {
+    GEO_NONE = 0, GEO_N_CODED, GEO_1M, GEO_CODED_MIX, GEO_CODED_LR, GEO_RECOVERY, GEO_HUNT, GEO_COUNT
 };
+
+static const scan_geo_t k_scan_geo[GEO_COUNT] = {
+    [GEO_NONE]      = { 0, 0, 0, 0, 0 },
+    // N_CODED: 20 ms of 1M and 80 ms of Coded in every 100 ms, for 1 s.
+    [GEO_N_CODED]   = { 160, 32, 160, 128, N_SCAN_MS / 10 },
+    // One PHY at full duty: N_MIXED's and NORMAL_LR's 1M scan (the valve, 1M sensors) ...
+    [GEO_1M]        = { 160, 160, 0, 0, MIX_SLOT_MS / 10 },
+    // ... N_MIXED's and NORMAL_LR's Coded scans, and the recovery window.
+    [GEO_CODED_MIX] = { 0, 0, 160, 160, MIX_SLOT_MS / 10 },
+    [GEO_CODED_LR]  = { 0, 0, 160, 160, LR_CODED_MS / 10 },
+    [GEO_RECOVERY]  = { 0, 0, 160, 160, RECOVERY_MS / 10 },
+    // The valve hunt in a hold (as before WP6): 110 ms / 55 ms on each PHY, in 1 s scans.
+    // Deliberately NOT 100 ms: the valve advertises every 500-700 ms, and 100 ms against 500 ms
+    // is a 5:1 harmonic lock in which escape depends solely on the 0-10 ms per-event advDelay
+    // drifting the phase; 110 ms breaks the lock at the same duty (50 %). Passive (it was active
+    // on 1M until WP5): the valve is matched by its MAC alone.
+    [GEO_HUNT]      = { 176, 88, 176, 88, N_SCAN_MS / 10 },
+};
+_Static_assert(LR_1M_MS == MIX_SLOT_MS, "GEO_1M serves N_MIXED and NORMAL_LR");
+
+typedef enum {
+    MODE_PAUSED = 0, MODE_HOLD_HUNT, MODE_N_CODED, MODE_N_MIXED, MODE_NORMAL_LR, MODE_RECOVERY,
+    MODE_CLAIM, MODE_COUNT
+} scan_mode_t;
+
+typedef struct {
+    const uint8_t *geo;     // the scans, in turn
+    uint8_t n;
+} scan_prof_t;
+
+static const uint8_t k_p_hunt[] = { GEO_HUNT };
+static const uint8_t k_p_n_coded[] = { GEO_N_CODED };
+static const uint8_t k_p_n_mixed[] = { GEO_1M, GEO_CODED_MIX };
+static const uint8_t k_p_lr[] = { GEO_1M, GEO_CODED_LR };
+static const uint8_t k_p_recovery[] = { GEO_RECOVERY };
+
+static const scan_prof_t k_prof[MODE_COUNT] = {
+    [MODE_PAUSED]    = { NULL, 0 },
+    [MODE_HOLD_HUNT] = { k_p_hunt, 1 },
+    [MODE_N_CODED]   = { k_p_n_coded, 1 },
+    [MODE_N_MIXED]   = { k_p_n_mixed, 2 },
+    [MODE_NORMAL_LR] = { k_p_lr, 2 },
+    [MODE_RECOVERY]  = { k_p_recovery, 1 },
+    [MODE_CLAIM]     = { NULL, 0 },
+};
+
+static bool geo_has_coded(uint8_t geo)
+{
+    return k_scan_geo[geo].win_c != 0;
+}
+
+// NORMAL's modes, and RECOVERY: switched only at a scan's end.
+static bool mode_is_normal(uint8_t mode)
+{
+    return mode == MODE_N_CODED || mode == MODE_N_MIXED || mode == MODE_NORMAL_LR ||
+           mode == MODE_RECOVERY;
+}
 
 // The executor's own state, on its stack: only its task reads or writes it.
 typedef struct {
     bool scan_on;               // our scan runs (started, no DISC_COMPLETE or cancel since)
-    uint8_t geo;                // ... with this geometry
-    bool paused;                // the window or a radio hold has the radio (leak scan held)
+    bool slot_ended;            // the last scan ran to its end: the profile's next is due
+    bool coded_last;            // the last scan that ended covered Coded
+    bool recovery;              // a claim pulse ended: RECOVERY is due
+    bool claim_inflight;        // a granted claim's connect may still be in flight
+    bool just_started;          // this pass started a timed scan: time for the slow chores
+    bool paused;                // the window or a radio hold has the radio
     bool portal_paused;         // ... the window itself, for its log lines
+    uint8_t geo;                // the geometry running, or that ran last
+    uint8_t mode;               // the mode now
+    uint8_t slot_mode;          // the mode whose profile the last scan belonged to (MODE_COUNT: none)
+    uint8_t slot;               // ... and its place in that profile
+    uint8_t announced;          // the scanning mode last announced (MODE_COUNT: none)
+    uint8_t low_duty;           // summaries in a row below DUTY_WARN_PCT
     uint16_t start_fails;       // scan starts failed in a row
+    uint16_t claims;            // claim pulses since the last summary
     TickType_t retry_at;        // no scan start before this tick
+    TickType_t coded_end_at;    // when the last scan that covered Coded ended
+    TickType_t gone_at;         // our scan was first seen gone without its DISC_COMPLETE (0: no)
     TickType_t paused_since;    // when the pause began, for the heartbeat line
+    TickType_t acct_at;         // time accounted up to here
+    uint32_t mode_ms[MODE_COUNT];   // time per mode since the last summary
+    uint32_t want_ms;           // ... in modes that should scan
+    uint32_t on_ms;             // ... of it with our scan running
 } exec_t;
 
 /* ---------------------------------------------------------
@@ -731,8 +1065,8 @@ static int scan_start(uint8_t geo)
 #endif
 }
 
-// Stops our scan (executor task only). A cancel the controller refuses leaves it marked running,
-// and the next pass tries again.
+// Stops our scan before its end (executor task only): the profile then restarts with Coded. A
+// cancel the controller refuses leaves it marked running, and the next pass tries again.
 static void scan_stop(exec_t *x)
 {
     if (!x->scan_on) {
@@ -744,15 +1078,77 @@ static void scan_stop(exec_t *x)
         return;
     }
     x->scan_on = false;
+    x->slot_ended = false;
+    x->coded_last = false;
+    x->slot_mode = MODE_COUNT;
 }
 
-// The line for a scan start: the leak scan's is the line it always printed.
-static void scan_started_log(uint8_t geo)
+// Our scan ended (executor task only): its DISC_COMPLETE, or (lost) NimBLE dropped it with none.
+// A timed scan's end makes the profile's next one due after the dither; a continuous one (none in
+// WP6's geometries) is not expected to end, and starts again SCAN_RESTART_DELAY_MS later.
+static void scan_ended(exec_t *x, TickType_t now, bool lost)
 {
-    if (geo == SCAN_GEO_HUNT) {
+    x->scan_on = false;
+    x->gone_at = 0;
+    if (k_scan_geo[x->geo].dur == 0) {
+        if (!lost) {
+            ESP_LOGW(BLE_LEAK_TAG, "Scan complete (reason=%d) — will restart", s_scan_end_reason);
+        }
+        x->retry_at = now + pdMS_TO_TICKS(SCAN_RESTART_DELAY_MS);
+        x->coded_last = false;
+        return;
+    }
+    x->slot_ended = true;
+    x->coded_last = geo_has_coded(x->geo);
+    if (x->coded_last) {
+        x->coded_end_at = now;
+    }
+    if (x->geo == GEO_RECOVERY) {
+        x->recovery = false;
+    }
+    x->retry_at = now + pdMS_TO_TICKS(esp_random() % (JITTER_MS + 1));
+}
+
+// The lines for a scanning mode, when its first scan starts. The leak scan's start line is the one
+// it always printed (after a pause, at boot); a NORMAL mode prints its own once per change. The
+// transient RECOVERY and CLAIM print nothing.
+static void exec_announce(exec_t *x, uint8_t mode)
+{
+    if (mode == x->announced || mode == MODE_RECOVERY || mode == MODE_CLAIM) {
+        return;
+    }
+    if (mode == MODE_HOLD_HUNT) {
         ESP_LOGI(BLE_LEAK_TAG, "Valve hunt scan started (1M + Coded PHY, passive)");
     } else {
-        ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
+        if (!mode_is_normal(x->announced)) {
+            ESP_LOGI(BLE_LEAK_TAG, "Extended passive scan started (1M + Coded PHY)");
+        }
+        if (mode == MODE_N_CODED) {
+            ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED: 1M 20 %% + Coded 80 %%, 1 s scans, each next after 0-%d ms",
+                     JITTER_MS);
+        } else if (mode == MODE_N_MIXED) {
+            ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_MIXED (a sensor is on 1M): 1 s on 1M and 1 s on Coded in turn, each next after 0-%d ms",
+                     JITTER_MS);
+        } else {
+            ESP_LOGI(BLE_LEAK_TAG, "Scan mode NORMAL_LR (leak response, valve not linked): 1 s on 1M and 0.6 s on Coded in turn, each next after 0-%d ms",
+                     JITTER_MS);
+        }
+    }
+    x->announced = mode;
+}
+
+// Time spent since the last pass goes to the mode it was spent in (for the summary and the duty
+// watchdog). The state is the one the last pass left, which is what ran meanwhile.
+static void exec_account(exec_t *x, TickType_t now)
+{
+    uint32_t dt = (uint32_t)(now - x->acct_at) * portTICK_PERIOD_MS;
+    x->acct_at = now;
+    x->mode_ms[x->mode] += dt;
+    if (x->mode == MODE_HOLD_HUNT || mode_is_normal(x->mode)) {
+        x->want_ms += dt;
+        if (x->scan_on) {
+            x->on_ms += dt;
+        }
     }
 }
 
@@ -763,21 +1159,27 @@ static void scan_started_log(uint8_t geo)
 static TickType_t executor_pass(exec_t *x)
 {
     TickType_t now = xTaskGetTickCount();
+    exec_account(x, now);
+    x->just_started = false;
 
-    // A scan that ended by itself (DISC_COMPLETE). WP5's geometries run until cancelled, so this
-    // is not expected: logged, and started again SCAN_RESTART_DELAY_MS later as before.
     if (s_scan_ended) {
         s_scan_ended = false;
         if (x->scan_on) {
-            x->scan_on = false;
-            ESP_LOGW(BLE_LEAK_TAG, "Scan complete (reason=%d) — will restart", s_scan_end_reason);
-            x->retry_at = now + pdMS_TO_TICKS(SCAN_RESTART_DELAY_MS);
+            scan_ended(x, now, false);
         }
     }
-    // Self-healing: our scan is gone with no DISC_COMPLETE (a NimBLE host reset ends it so).
+    // Self-healing: our scan is gone with no DISC_COMPLETE. NimBLE delivers one for every end
+    // but our own cancel (a host reset included), and clears its state just before it does, so
+    // only a scan still gone SCAN_GONE_MS later counts as lost.
     if (x->scan_on && !ble_gap_disc_active()) {
-        x->scan_on = false;
-        ESP_LOGW(BLE_LEAK_TAG, "Scan not active (external cancel?), restarting");
+        if (x->gone_at == 0) {
+            x->gone_at = now ? now : 1;
+        } else if ((now - x->gone_at) >= pdMS_TO_TICKS(SCAN_GONE_MS)) {
+            ESP_LOGW(BLE_LEAK_TAG, "Scan not active (external cancel?), restarting");
+            scan_ended(x, now, true);
+        }
+    } else {
+        x->gone_at = 0;
     }
 
     // Portal priority window or a Wi-Fi radio hold (app_wifi.c): no leak scan while either is on,
@@ -802,38 +1204,95 @@ static TickType_t executor_pass(exec_t *x)
         }
     }
 
-    // The valve module's claim: granted at once, as before WP5, when the connect was issued
-    // from the report itself. Its connect then holds every scan off until its CONNECT event,
-    // which wakes this task.
-    if (ble_valve_claim_wanted()) {
-        scan_stop(x);
-        if (!x->scan_on) {
-            ble_valve_claim_start();
+    // A claim pulse that ended (its CONNECT event wakes this task): the Coded recovery is due.
+    bool conn = ble_gap_conn_active();
+    if (x->claim_inflight && !conn) {
+        x->claim_inflight = false;
+        x->coded_last = false;
+        if (!hold) {
+            x->recovery = true;
+            x->retry_at = now;
         }
     }
 
-    uint8_t want = SCAN_GEO_NONE;
-    if (!ble_hs_synced() || ble_gap_conn_active()) {
-        want = SCAN_GEO_NONE;           // not synced yet, or a connect in flight
-    } else if (ble_valve_hunt_wanted()) {
-        want = SCAN_GEO_HUNT;           // also in a hold, while a leak response is pended
-    } else if (!hold) {
-        want = SCAN_GEO_LEAK;
+    uint8_t mode;
+    if (conn) {
+        mode = MODE_CLAIM;              // a connect in flight: no scan can start
+    } else if (!ble_hs_synced()) {
+        mode = MODE_PAUSED;
+    } else if (hold) {
+        mode = ble_valve_hunt_wanted() ? MODE_HOLD_HUNT : MODE_PAUSED;
+    } else if (x->recovery) {
+        mode = MODE_RECOVERY;
+    } else if (ble_valve_lr_active()) {
+        mode = MODE_NORMAL_LR;
+    } else if (phy_any_1m()) {
+        mode = MODE_N_MIXED;
+    } else {
+        mode = MODE_N_CODED;
     }
 
-    if (x->scan_on && x->geo != want) {
-        scan_stop(x);
+    // The valve module's claim. In a hold's hunt (both PHYs): at once, as before. Otherwise in
+    // the dither right after a scan that covered Coded ended, so the pulse is the only Coded gap
+    // (I2): not after a pause, whose last scan ended long before (the profile scans first).
+    if (ble_valve_claim_wanted()) {
+        bool fresh = x->slot_ended && x->coded_last &&
+                     (now - x->coded_end_at) <= pdMS_TO_TICKS(JITTER_MS) + 1;
+        bool grant = (mode == MODE_HOLD_HUNT) || (mode_is_normal(mode) && !x->scan_on && fresh);
+        if (grant) {
+            scan_stop(x);
+            if (!x->scan_on) {
+                ble_valve_claim_start();
+                if (ble_gap_conn_active()) {
+                    x->claim_inflight = true;
+                    x->slot_ended = false;
+                    x->coded_last = false;
+                    x->slot_mode = MODE_COUNT;
+                    if (x->claims < UINT16_MAX) {
+                        x->claims++;
+                    }
+                    mode = MODE_CLAIM;
+                }
+            }
+        }
     }
-    if (!x->scan_on && want != SCAN_GEO_NONE && (int32_t)(now - x->retry_at) >= 0) {
-        int rc = scan_start(want);
+
+    if (mode != x->mode) {
+        // NORMAL's modes switch at a scan's end; a hold, a hold's hunt and a claim at once.
+        if (x->scan_on && !(mode_is_normal(mode) && mode_is_normal(x->slot_mode))) {
+            scan_stop(x);
+        }
+        if (mode == MODE_PAUSED) {
+            x->announced = MODE_PAUSED;
+        }
+        x->mode = mode;
+    }
+
+    const scan_prof_t *p = &k_prof[mode];
+    if (!x->scan_on && p->n > 0 && (int32_t)(now - x->retry_at) >= 0) {
+        uint8_t slot = 0;
+        if (x->slot_mode == mode) {
+            slot = x->slot_ended ? (uint8_t)((x->slot + 1) % p->n) : x->slot;
+        } else if (!x->coded_last) {
+            // A new profile after a scan with no Coded (or none): its Coded scan first (I1).
+            while (slot < p->n - 1 && !geo_has_coded(p->geo[slot])) {
+                slot++;
+            }
+        }
+        uint8_t geo = p->geo[slot];
+        int rc = scan_start(geo);
         if (rc == 0) {
             x->scan_on = true;
-            x->geo = want;
+            x->geo = geo;
+            x->slot = slot;
+            x->slot_mode = mode;
+            x->slot_ended = false;
+            x->just_started = (k_scan_geo[geo].dur != 0);
             if (x->start_fails > 0) {
                 ESP_LOGI(BLE_LEAK_TAG, "Scan started after %u failed attempt(s)", (unsigned)x->start_fails);
                 x->start_fails = 0;
             }
-            scan_started_log(want);
+            exec_announce(x, mode);
         } else {
             // BLE_HS_EALREADY: a scan runs that this task does not count as its own (it is the
             // only owner, so its count is wrong): stop it and start ours.
@@ -851,7 +1310,7 @@ static TickType_t executor_pass(exec_t *x)
     }
 
     TickType_t wait = pdMS_TO_TICKS(EXEC_POLL_MS);
-    if (!x->scan_on && want != SCAN_GEO_NONE) {
+    if (!x->scan_on && p->n > 0) {
         int32_t until = (int32_t)(x->retry_at - now);
         if (until < 1) {
             until = 1;
@@ -860,7 +1319,77 @@ static TickType_t executor_pass(exec_t *x)
             wait = (TickType_t)until;
         }
     }
+    if (x->gone_at != 0 && pdMS_TO_TICKS(SCAN_GONE_MS) < wait) {
+        wait = pdMS_TO_TICKS(SCAN_GONE_MS);
+    }
     return wait;
+}
+
+// The 60 s summary (plan §4.7, the parts there are before the radio policy) and the duty
+// watchdog. In a frame of its own: its line buffer is off the loop's frame.
+static __attribute__((noinline)) void exec_summary(exec_t *x)
+{
+    // Adverts heard per sensor since the last summary, with its PHY: "9AE6=12C" (the MAC's last
+    // two bytes as printed elsewhere; C Coded, M 1M, ? unknown).
+    uint8_t mac[MAX_TRACKED_SENSORS][2];
+    uint8_t cnt[MAX_TRACKED_SENSORS];
+    uint8_t phy[MAX_TRACKED_SENSORS];
+    int k = 0;
+    taskENTER_CRITICAL(&s_wl_lock);
+    for (int i = 0; i < MAX_TRACKED_SENSORS; i++) {
+        if (s_sensors[i].in_use) {
+            mac[k][0] = s_sensors[i].mac[1];
+            mac[k][1] = s_sensors[i].mac[0];
+            cnt[k] = s_adv_n[i];
+            int w = whitelist_find_locked(s_sensors[i].mac);
+            phy[k] = (w >= 0) ? s_wl_phy[w] : PHY_UNKNOWN;
+            k++;
+        }
+        s_adv_n[i] = 0;
+    }
+    uint16_t flips = s_phy_flips;
+    s_phy_flips = 0;
+    taskEXIT_CRITICAL(&s_wl_lock);
+
+    char adv[MAX_TRACKED_SENSORS * 10 + 1];
+    int at = 0;
+    adv[0] = '\0';
+    for (int i = 0; i < k && at < (int)sizeof(adv) - 1; i++) {
+        at += snprintf(adv + at, sizeof(adv) - at, "%s%02X%02X=%u%c", i ? " " : "", mac[i][0], mac[i][1],
+                       (unsigned)cnt[i], phy[i] == PHY_CODED ? 'C' : (phy[i] == PHY_1M ? 'M' : '?'));
+    }
+
+    unsigned duty = x->want_ms ? (unsigned)((uint64_t)x->on_ms * 100u / x->want_ms) : 100u;
+    ESP_LOGI(BLE_LEAK_TAG, "[SUMMARY] modes N_CODED %lu s, N_MIXED %lu s, NORMAL_LR %lu s, hold hunt %lu s, paused %lu s; "
+             "BLE scanning %lu.%lu of %lu.%lu s (%u %%); claims %u: pulses %lu.%lu s, recovery %lu.%lu s; "
+             "PHY changes %u; adverts %s; stack free %u B",
+             (unsigned long)(x->mode_ms[MODE_N_CODED] / 1000), (unsigned long)(x->mode_ms[MODE_N_MIXED] / 1000),
+             (unsigned long)(x->mode_ms[MODE_NORMAL_LR] / 1000), (unsigned long)(x->mode_ms[MODE_HOLD_HUNT] / 1000),
+             (unsigned long)(x->mode_ms[MODE_PAUSED] / 1000),
+             (unsigned long)(x->on_ms / 1000), (unsigned long)(x->on_ms % 1000 / 100),
+             (unsigned long)(x->want_ms / 1000), (unsigned long)(x->want_ms % 1000 / 100), duty,
+             (unsigned)x->claims,
+             (unsigned long)(x->mode_ms[MODE_CLAIM] / 1000), (unsigned long)(x->mode_ms[MODE_CLAIM] % 1000 / 100),
+             (unsigned long)(x->mode_ms[MODE_RECOVERY] / 1000), (unsigned long)(x->mode_ms[MODE_RECOVERY] % 1000 / 100),
+             (unsigned)flips, k ? adv : "none heard yet", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+
+    // The duty watchdog: judged on minutes with at least half of them meant for scanning.
+    if (x->want_ms >= SUMMARY_MS / 2 && duty < DUTY_WARN_PCT) {
+        if (x->low_duty < UINT8_MAX) {
+            x->low_duty++;
+        }
+        if (x->low_duty >= DUTY_WARN_RUNS && (x->low_duty - DUTY_WARN_RUNS) % 5 == 0) {
+            ESP_LOGW(BLE_LEAK_TAG, "Duty watchdog: BLE scanning ran %u %% of its expected time for %u min (below %d %%)",
+                     duty, (unsigned)x->low_duty, DUTY_WARN_PCT);
+        }
+    } else {
+        x->low_duty = 0;
+    }
+
+    memset(x->mode_ms, 0, sizeof(x->mode_ms));
+    x->want_ms = 0;
+    x->on_ms = 0;
+    x->claims = 0;
 }
 
 // The scan-alive heartbeat line. While the leak scan is held it says so, for how long and for what
@@ -892,38 +1421,72 @@ static void ble_leak_scan_task(void *param)
     }
     ESP_LOGI(BLE_LEAK_TAG, "NimBLE ready, initializing scanner");
 
-    // Load whitelist
+    // Load whitelist (and, the first time, each sensor's PHY from NVS)
     reload_whitelist();
     // Under the lock: the GAP handler can already be feeding process_leak_adv() now that the
     // whitelist is populated.
     taskENTER_CRITICAL(&s_wl_lock);
     memset(s_sensors, 0, sizeof(s_sensors));
+    memset(s_adv_n, 0, sizeof(s_adv_n));
     taskEXIT_CRITICAL(&s_wl_lock);
 
     // The first scan starts on the first pass, once NimBLE is synced: no delay any more. The 2 s
     // the old loop waited let the valve module's own scan start first, so that the two did not
     // race; the hunt is now this task's own scan.
-    exec_t x = {0};
-    TickType_t last_whitelist_reload = xTaskGetTickCount();
-    TickType_t last_heartbeat_log = last_whitelist_reload;
-    x.retry_at = last_whitelist_reload;
+    exec_t x;
+    memset(&x, 0, sizeof(x));
+    TickType_t t0 = xTaskGetTickCount();
+    TickType_t last_whitelist_reload = t0;
+    TickType_t last_heartbeat_log = t0;
+    TickType_t last_summary = t0;
+    TickType_t phy_saved_at = 0;
+    TickType_t last_chores = t0;
+    x.retry_at = t0;
+    x.acct_at = t0;
+    x.mode = MODE_PAUSED;
+    x.slot_mode = MODE_COUNT;
+    x.announced = MODE_COUNT;
 
     for (;;) {
         TickType_t wait = executor_pass(&x);
 
-        // Periodically reload whitelist (handles runtime commissioning)
-        if ((xTaskGetTickCount() - last_whitelist_reload) >= pdMS_TO_TICKS(WHITELIST_RELOAD_MS)) {
-            reload_whitelist();
-            last_whitelist_reload = xTaskGetTickCount();
-        }
+        // The slow chores: right after a timed scan starts (the controller scans on meanwhile,
+        // so a provisioning read that waits, or a flash write, does not widen the gap to the next
+        // scan), while the mode scans nothing, or once they are CHORES_LATE_MS overdue (scan
+        // starts that keep failing). Never in the dither between two scans.
+        TickType_t tnow = xTaskGetTickCount();
+        if (x.just_started || k_prof[x.mode].n == 0 ||
+            (tnow - last_chores) >= pdMS_TO_TICKS(CHORES_LATE_MS)) {
+            TickType_t now = tnow;
+            last_chores = now;
 
-        // The burst log: a line for each sensor's burst that is over (paused or not).
-        burst_log();
+            // Periodically reload whitelist (handles runtime commissioning)
+            if ((now - last_whitelist_reload) >= pdMS_TO_TICKS(WHITELIST_RELOAD_MS)) {
+                reload_whitelist();
+                last_whitelist_reload = xTaskGetTickCount();
+            }
 
-        // Periodic scan-alive heartbeat (every 60s), with the pause if the leak scan is held
-        if ((xTaskGetTickCount() - last_heartbeat_log) >= pdMS_TO_TICKS(60000)) {
-            heartbeat_log(x.paused, x.portal_paused, x.paused_since);
-            last_heartbeat_log = xTaskGetTickCount();
+            // The PHY table: saved when it changed, at most once a minute.
+            if (s_phy_dirty && (phy_saved_at == 0 || (now - phy_saved_at) >= pdMS_TO_TICKS(PHY_SAVE_MIN_MS))) {
+                phy_save();
+                phy_saved_at = now ? now : 1;
+            }
+
+            // The burst log: a line for each sensor's burst that is over (paused or not).
+            burst_log();
+
+            // Periodic scan-alive heartbeat (every 60s), with the pause if the leak scan is held
+            if ((now - last_heartbeat_log) >= pdMS_TO_TICKS(60000)) {
+                heartbeat_log(x.paused, x.portal_paused, x.paused_since);
+                last_heartbeat_log = now;
+            }
+
+            // The 60 s summary and the duty watchdog.
+            if ((now - last_summary) >= pdMS_TO_TICKS(SUMMARY_MS)) {
+                exec_account(&x, now);
+                exec_summary(&x);
+                last_summary = now;
+            }
         }
 
         ulTaskNotifyTake(pdTRUE, wait);
@@ -943,10 +1506,15 @@ void app_ble_leak_init(void)
         return;
     }
 
+    // NimBLE's own log at WARN (plan §4.7): NORMAL starts a scan every second, and NimBLE prints
+    // "GAP procedure initiated: extended discovery" at INFO for each, about 86,000 lines a day.
+    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+
     // Priority 6 (was 4, plan §4.7): the executor's scan starts and claim grants land within
     // milliseconds. Its passes are short; whitelist reloads and log lines are as before. Stack
     // unchanged: the deepest frames are still the whitelist read and the log calls, and a NimBLE
-    // connect (the claim) costs about what the scan start beside it does.
+    // connect (the claim) costs about what the scan start beside it does. The PHY table's NVS
+    // read and write run from a shallow frame; the summary line prints the stack left.
     xTaskCreate(ble_leak_scan_task, "ble_leak_scan", 3072, NULL, 6, &ble_leak_task_handle);
 }
 
