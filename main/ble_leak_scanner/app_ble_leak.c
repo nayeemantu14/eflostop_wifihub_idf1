@@ -921,6 +921,12 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
 #define BLE_LEAK_TASK_PRIO  6       // the executor's priority (plan §4.7)
 #define SUMMARY_PRIO        4       // ... and while it prints the summary, below iothub_task's 5 (15t I-5)
 
+// A Coded scan that covered an advert interval (RP_L_MS, I1 and I2), in whole ticks: rounded up,
+// plus one for the tick a start stamp falls in (a scan stamped late in its tick has run up to one
+// tick less than its stamps say). pdMS_TO_TICKS() truncates: 548 ms gave 54 ticks, and a scan cut
+// for a pulse after about 531 ms counted as a covering window.
+#define L_TICKS             (pdMS_TO_TICKS(RP_L_MS + portTICK_PERIOD_MS - 1) + 1)
+
 // A slot's scan geometry, by kind (radio_policy.h): interval and window in 0.625 ms units (both 0:
 // that PHY is not scanned); its duration is the slot's. Every scan is passive with
 // filter_duplicates off (scan_start()).
@@ -1095,7 +1101,7 @@ static void scan_stop(exec_t *x, TickType_t now)
         ESP_LOGW(BLE_LEAK_TAG, "Scan cancel failed: %d, will retry", rc);
         return;
     }
-    if (kind_coded(x->kind) && (now - x->started_at) >= pdMS_TO_TICKS(RP_L_MS)) {
+    if (kind_coded(x->kind) && (now - x->started_at) >= L_TICKS) {
         x->coded_end_at = now ? now : 1;
         x->gap_from = x->coded_end_at;
     }
@@ -1201,7 +1207,7 @@ static void exec_announce(exec_t *x)
 static uint32_t coded_budget(const exec_t *x, TickType_t now)
 {
     TickType_t ref = x->coded_end_at;
-    if (x->scan_on && kind_coded(x->kind) && (now - x->started_at) >= pdMS_TO_TICKS(RP_L_MS)) {
+    if (x->scan_on && kind_coded(x->kind) && (now - x->started_at) >= L_TICKS) {
         ref = now;
     }
     if (ref == 0) {
@@ -1374,7 +1380,7 @@ static bool exec_claim(exec_t *x, TickType_t now, bool boundary, uint32_t budget
 static bool exec_wifi_pulse(exec_t *x, TickType_t now, uint32_t kinds, bool at_coded_end, uint32_t budget,
                             bool claim_due)
 {
-    bool young = x->scan_on && kind_coded(x->kind) && (now - x->started_at) < pdMS_TO_TICKS(RP_L_MS);
+    bool young = x->scan_on && kind_coded(x->kind) && (now - x->started_at) < L_TICKS;
     uint32_t len = 0;
     rp_pulse_t k = radio_policy_exec_wifi_grant(now, kinds, at_coded_end, budget, young, claim_due, &len);
     if (k == RP_PULSE_NONE) {
@@ -1581,8 +1587,8 @@ static TickType_t executor_pass(exec_t *x)
     } else if (!x->scan_on && want_row != RP_ROW_NONE) {
         until = x->retry_at;
         timed = true;
-    } else if (x->scan_on && kind_coded(x->kind) && (now - x->started_at) < pdMS_TO_TICKS(RP_L_MS)) {
-        until = x->started_at + pdMS_TO_TICKS(RP_L_MS);
+    } else if (x->scan_on && kind_coded(x->kind) && (now - x->started_at) < L_TICKS) {
+        until = x->started_at + L_TICKS;
         timed = true;
     }
     if (timed) {
