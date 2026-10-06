@@ -1553,6 +1553,12 @@ static TickType_t executor_pass(exec_t *x)
     x->idle = (want_row == RP_ROW_NONE && x->pulse == RP_PULSE_NONE);
     if (x->idle) {
         x->gap_from = 0;
+        // The start gate's stamp follows the clock while nothing is to scan. BLE_IDLE or PAUSED
+        // can last 2^31 ticks (248 days at 100 Hz), and a stamp left that far behind reads as
+        // future: no scan would start again until it wrapped. A settle or retry still due is kept.
+        if ((int32_t)(now - x->retry_at) >= 0) {
+            x->retry_at = now;
+        }
         if (!x->scan_on && x->row != RP_ROW_NONE) {
             x->row = RP_ROW_NONE;   // a Wi-Fi slot or a finished scan: the next row starts afresh
         }
