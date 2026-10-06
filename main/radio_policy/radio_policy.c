@@ -286,6 +286,8 @@ typedef struct {
     TickType_t pulse_deadline;  // ... and deadline
     const char *pulse_why;      // ... and why it ended (for its line)
     TickType_t lr_join_at;      // the last assist under a leak response
+    TickType_t submit_at;       // the last SUBMIT pulse's begin (0: none): a Connect this soon after
+                                // is a repeat (RP_SUBMIT_REPEAT_MS, M4)
     uint32_t prof_ms;           // I2b: profile time since the last pulse, at most a window ...
     uint32_t space_ms;          // ... and the spacing the next pulse needs
     uint16_t bucket[RP_I2B_BUCKETS];   // I2b: pulse ms per RP_I2B_BUCKET_MS ...
@@ -1151,6 +1153,7 @@ static void join_reask(TickType_t now)
 }
 
 _Static_assert(RP_GRANT_WAIT_MS == 2000 && RP_JOIN_SETTLE_MS == 10000, "the refusal lines say 2 s and 10 s");
+_Static_assert(RP_SUBMIT_REPEAT_MS == 45000 && RP_RETRY_MS == 1500, "the repeat SUBMIT line says 45 s and 1500 ms");
 
 rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
                                         uint32_t budget_ms, bool coded_young, bool claim_due,
@@ -1164,11 +1167,11 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
     uint32_t room = (used < RP_I2B_BLIND_MAX_MS) ? RP_I2B_BLIND_MAX_MS - used : 0;
     // While a leak response is pending the valve's claim goes first (its RMLEAK / CLOSE). Every
     // Wi-Fi kind leaves it RP_CONNECT_LR_MS of I2b's room, and while the claim is due no Wi-Fi
-    // pulse is granted: each would restart the 6-7 s of profile time the claim needs, and SUBMIT
-    // is exempt from that spacing, so Connects a few seconds apart (a stranger's, on the open
-    // SoftAP) held the claim off for good. Unless the last pulse was a claim: one Wi-Fi pulse may
-    // then go before the next claim, so a Connect still gets its pulse while the claims of a valve
-    // that does not link repeat. Claims and Wi-Fi pulses then alternate.
+    // pulse is granted: each would restart the 6-7 s of profile time the claim needs, and a
+    // person's Connect is exempt from that spacing, so Connects a few seconds apart (a stranger's,
+    // on the open SoftAP) held the claim off for good. Unless the last pulse was a claim: one Wi-Fi
+    // pulse may then go before the next claim, so a Connect still gets its pulse while the claims
+    // of a valve that does not link repeat. Claims and Wi-Fi pulses then alternate.
     bool claim_first = false;
     if (s_lr_trigger) {
         room = (room > RP_CONNECT_LR_MS) ? room - RP_CONNECT_LR_MS : 0;
@@ -1179,11 +1182,12 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
     // and I7's join_settling() is not held true for nothing. Then the first in the order that may
     // run now is granted, or waits; nothing of a lower priority goes ahead of it.
     rp_pulse_t waiting = RP_PULSE_NONE;
-    // SUBMIT and JOIN are unaligned (plan 4.4: the lead-in is one executor wake): granted also into
-    // a Coded scan that has not yet covered RP_L_MS (the executor does not count it, and budget_ms
-    // runs from the last window that did), so the phone's first frames after its join or the
-    // router's after a Connect are not lost in up to 0.55 s of Coded scan. Only with less than
-    // RP_UNALIGNED_MIN_MS of budget left does the scan cover its interval first (then 2.8 s).
+    // A person's SUBMIT and a JOIN are unaligned (plan 4.4: the lead-in is one executor wake; a
+    // repeat SUBMIT is aligned, below): granted also into a Coded scan that has not yet covered
+    // RP_L_MS (the executor does not count it, and budget_ms runs from the last window that did),
+    // so the phone's first frames after its join or the router's after a Connect are not lost in
+    // up to 0.55 s of Coded scan. Only with less than RP_UNALIGNED_MIN_MS of budget left does the
+    // scan cover its interval first (then 2.8 s).
     bool unaligned = !coded_young || budget_ms >= RP_UNALIGNED_MIN_MS;
     for (size_t o = 0; o < sizeof(k_order); o++) {
         rp_pulse_t k = (rp_pulse_t)k_order[o];
@@ -1280,8 +1284,23 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             // rather than being refused, and under a leak response for the valve's claim (above):
             // Connects, a stranger's included, delay its RMLEAK / CLOSE by at most one pulse and
             // the claim's own spacing each time, and never hold it off.
-            if (unaligned && !claim_first)
-                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
+            // A person's Connect (no SUBMIT pulse began in the last RP_SUBMIT_REPEAT_MS) goes at
+            // once. A repeat is paced as the router retry (M4): RP_RETRY_MS from a Coded window's
+            // own end, after I2b's spacing, so a full Coded window precedes it and the recovery
+            // follows it, and at least about 1 s of any 2.5 s heartbeat burst lies in Coded scans.
+            // Immediate 2.8 s pulses let a stranger's Connects, one per heartbeat and timed to one
+            // sensor's bursts by a sniffer, fit I2b and blind those bursts: in the council's leak
+            // model (SERVE-A, p_loss 0.3 / 0.5) that sensor's p99.9 detection was 62 / 135.5 s;
+            // paced, at most 30.5 / 47.5 s at the worst timing.
+            if (claim_first)
+                break;
+            if (!rp_within(s_x.submit_at, now, RP_SUBMIT_REPEAT_MS)) {
+                if (unaligned)
+                    len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
+            } else if (at_coded_end && budget_ms >= RP_RETRY_MS && s_x.prof_ms >= s_x.space_ms &&
+                       RP_RETRY_MS <= room) {
+                len = RP_RETRY_MS;
+            }
             break;
         case RP_PULSE_JOIN:
             if (s_x.prof_ms >= s_x.space_ms && unaligned && !claim_first)
@@ -1309,10 +1328,15 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             return k;
         }
         waiting = k;
-        if (claim_first && !rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
-            s_x.hold_logged = rp_nz(now);
-            ESP_LOGI(RP_TAG, "%s pulse waits: the valve's claim goes first (a leak response is pending)",
-                     k_pulse_names[k]);
+        if (!rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
+            if (claim_first) {
+                s_x.hold_logged = rp_nz(now);
+                ESP_LOGI(RP_TAG, "%s pulse waits: the valve's claim goes first (a leak response is pending)",
+                         k_pulse_names[k]);
+            } else if (k == RP_PULSE_SUBMIT && rp_within(s_x.submit_at, now, RP_SUBMIT_REPEAT_MS)) {
+                s_x.hold_logged = rp_nz(now);
+                ESP_LOGI(RP_TAG, "SUBMIT pulse waits: a Connect's pulse began less than 45 s ago - this one gets 1500 ms at a Coded window's end, after the pulse spacing");
+            }
         }
     }
     return RP_PULSE_NONE;
@@ -1372,6 +1396,8 @@ void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len
     s_x.i2b_noted = false;
     if (s_x.pulse_n[kind] < UINT16_MAX)
         s_x.pulse_n[kind]++;
+    if (kind == RP_PULSE_SUBMIT)
+        s_x.submit_at = rp_nz(now);   // a Connect within RP_SUBMIT_REPEAT_MS is a repeat (M4)
     if (kind == RP_PULSE_CONNECT)
         return;   // the valve module prints its claim
     if (kind == RP_PULSE_JOIN) {
