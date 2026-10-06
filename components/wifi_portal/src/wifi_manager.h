@@ -405,15 +405,6 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
  */
 bool wifi_manager_ap_list_built();
 
-/**
- * @brief LOCAL PATCH (2.1.4 WP1): the largest free block with the caps has room for size bytes
- * and WIFI_MANAGER_HEAP_MARGIN (4 KB) more: the test for an allocation that can do without (the
- * network list, a server's restart, the HTTP server's copy of the list), so a low heap sees no
- * failed allocation (MONITOR's allocfail) from them, and keeps that margin for the Wi-Fi driver.
- * Any task.
- */
-bool wifi_manager_heap_has(uint32_t caps, size_t size);
-
 
 /**
  * @brief saves the current STA wifi config to flash ram storage.

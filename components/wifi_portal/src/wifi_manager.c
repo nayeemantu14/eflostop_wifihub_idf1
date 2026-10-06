@@ -1126,8 +1126,11 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 	}
 }
 
-bool wifi_manager_heap_has(uint32_t caps, size_t size){
-	/* LOCAL PATCH (2.1.4 WP1): see wifi_manager.h */
+/**
+ * @brief LOCAL PATCH (2.1.4 WP1): the largest free block with the caps has room for size bytes
+ * and WIFI_MANAGER_HEAP_MARGIN more (see there).
+ */
+static bool wifi_manager_heap_has(uint32_t caps, size_t size){
 	return heap_caps_get_largest_free_block(caps) >= size + WIFI_MANAGER_HEAP_MARGIN;
 }
 
