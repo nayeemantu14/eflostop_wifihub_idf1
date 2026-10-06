@@ -206,7 +206,8 @@ static volatile TickType_t s_prov_until = 0;     // default event loop: provisio
 typedef struct {
     uint8_t mac[6];
     uint8_t state;            // RP_STA_*
-    bool extra;               // this join's one extra assist was asked
+    uint8_t extra : 1;        // this join's one extra assist was asked
+    uint8_t owed : 1;         // this join's assist waits for another station's JOIN to be over
     uint32_t ip;              // its lease, network byte order (0: none)
     TickType_t join_at;       // this join (0: not seen joining)
     TickType_t lease_at;      // its lease since this join (0: none)
@@ -217,6 +218,15 @@ typedef struct {
 } rp_sta_t;
 static rp_sta_t s_sta[RP_STA_MAX];
 static portMUX_TYPE s_sta_lock = portMUX_INITIALIZER_UNLOCKED;
+
+// A join assist's end rule has passed for this station (plan 4.4): max(lease + 1.5 s, first 302 or
+// page + 0.3 s). Under s_sta_lock, or on a copy.
+static bool sta_settled(const rp_sta_t *s, TickType_t now)
+{
+    return s->lease_at != 0 && s->probe_at != 0 &&
+           (now - s->lease_at) >= pdMS_TO_TICKS(RP_JOIN_LEASE_TAIL_MS) &&
+           (now - s->probe_at) >= pdMS_TO_TICKS(RP_JOIN_PROBE_TAIL_MS);
+}
 static uint16_t s_joins = 0;           // joins since the summary (under s_sta_lock)
 static uint32_t s_lease_ms_max = 0;    // the longest join -> lease since the summary (under s_sta_lock)
 
@@ -610,6 +620,7 @@ void radio_policy_station_joined(const uint8_t mac[6])
         s->probe_at = 0;
         s->ip = 0;
         s->extra = false;
+        s->owed = false;
         ask = (s->assist_at == 0 || (now - s->assist_at) >= s->assist_gap);
     }
     if (s_joins < UINT16_MAX)
@@ -618,10 +629,18 @@ void radio_policy_station_joined(const uint8_t mac[6])
 #if CONFIG_APP_RADIO_LAB
     ask = ask && radio_lab_join_on();   // the lab's join-assist switch (G1)
 #endif
-    if (ask)
-        (void)req_ask(RP_PULSE_JOIN, (int8_t)i);   // one at a time: a second station's join waits its turn
-    else
+    if (!ask) {
         app_ble_leak_kick();
+        return;
+    }
+    if (req_ask(RP_PULSE_JOIN, (int8_t)i))
+        return;
+    // One JOIN at a time: another station's is asked or runs. This one is owed, and asked once that
+    // one is over, while this station still settles (join_reask()).
+    taskENTER_CRITICAL(&s_sta_lock);
+    if (s_sta[i].state == RP_STA_JOINED && memcmp(s_sta[i].mac, mac, 6) == 0)
+        s_sta[i].owed = true;
+    taskEXIT_CRITICAL(&s_sta_lock);
 }
 
 void radio_policy_station_left(const uint8_t mac[6])
@@ -729,18 +748,25 @@ void radio_policy_stations_prune(const wifi_sta_list_t *list)
 bool radio_policy_join_settling(void)
 {
     TickType_t now = xTaskGetTickCount();
-    bool joining = false;
+    taskENTER_CRITICAL(&s_req_lock);
+    uint8_t st = s_req[RP_PULSE_JOIN].state;
+    TickType_t at = s_req[RP_PULSE_JOIN].at;
+    int8_t js = s_req[RP_PULSE_JOIN].sta;
+    taskEXIT_CRITICAL(&s_req_lock);
+    // A JOIN that runs; or one asked, for its wait only (the executor refuses it after
+    // RP_JOIN_SETTLE_MS, but only when its grant step runs: not in a pulse or a recovery), while
+    // its station's end rule has not passed (a JOIN then has nothing left to assist).
+    bool joining = (st == RP_GRANT_ON);
+    bool asked = (st == RP_GRANT_PENDING && rp_within(at, now, RP_JOIN_SETTLE_MS));
     taskENTER_CRITICAL(&s_sta_lock);
     for (int i = 0; i < RP_STA_MAX && !joining; i++) {
-        joining = (s_sta[i].state == RP_STA_JOINED && s_sta[i].lease_at == 0 &&
-                   rp_within(s_sta[i].join_at, now, RP_JOIN_SETTLE_MS));
+        const rp_sta_t *s = &s_sta[i];
+        if (s->state != RP_STA_JOINED)
+            continue;
+        joining = (s->lease_at == 0 && rp_within(s->join_at, now, RP_JOIN_SETTLE_MS)) ||
+                  (asked && i == js && !sta_settled(s, now));
     }
     taskEXIT_CRITICAL(&s_sta_lock);
-    if (!joining) {
-        taskENTER_CRITICAL(&s_req_lock);
-        joining = (s_req[RP_PULSE_JOIN].state == RP_GRANT_PENDING || s_req[RP_PULSE_JOIN].state == RP_GRANT_ON);
-        taskEXIT_CRITICAL(&s_req_lock);
-    }
     return joining;
 }
 
@@ -1025,15 +1051,13 @@ static void req_refuse(rp_pulse_t k, const char *why)
     }
 }
 
-rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
-                                        uint32_t budget_ms, bool coded_young, bool claim_due,
-                                        uint32_t *len_ms)
+// The join assists asked again: a station owed its one extra assist (plan 4.4: the first overlapped
+// a STA attempt and gave no lease) once the pulse spacing allows (it bypasses the per-station
+// spacing, not I2b's), and then a station whose join came while another's JOIN was asked or ran
+// (one JOIN at a time), once none is, while it still settles: joined less than RP_JOIN_SETTLE_MS
+// ago and not assisted since. The first joined goes first.
+static void join_reask(TickType_t now)
 {
-    static const uint8_t k_order[] = { RP_PULSE_SUBMIT, RP_PULSE_JOIN, RP_PULSE_RETRY, RP_PULSE_LIST };
-    *len_ms = 0;
-
-    // A station owed its one extra assist (plan 4.4: the first overlapped a STA attempt and gave no
-    // lease) asks once the spacing allows; it bypasses the per-station spacing, not I2b's.
     if (s_x.extra_sta >= 0 && s_x.prof_ms >= s_x.space_ms) {
         int8_t i = s_x.extra_sta;
         s_x.extra_sta = -1;
@@ -1043,6 +1067,41 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         if (still)
             (void)req_ask(RP_PULSE_JOIN, i);
     }
+    taskENTER_CRITICAL(&s_req_lock);
+    bool busy = (s_req[RP_PULSE_JOIN].state == RP_GRANT_PENDING || s_req[RP_PULSE_JOIN].state == RP_GRANT_ON);
+    taskEXIT_CRITICAL(&s_req_lock);
+    if (busy)
+        return;
+    int ask = -1;
+    taskENTER_CRITICAL(&s_sta_lock);
+    for (int i = 0; i < RP_STA_MAX; i++) {
+        rp_sta_t *s = &s_sta[i];
+        if (!s->owed)
+            continue;
+        if (s->state != RP_STA_JOINED || !rp_within(s->join_at, now, RP_JOIN_SETTLE_MS) ||
+            (s->assist_at != 0 && (now - s->assist_at) < s->assist_gap)) {
+            s->owed = false;   // it left, settled, or had its assist meanwhile
+            continue;
+        }
+        if (ask < 0 || (int32_t)(s->join_at - s_sta[ask].join_at) < 0)
+            ask = i;
+    }
+    if (ask >= 0)
+        s_sta[ask].owed = false;
+    taskEXIT_CRITICAL(&s_sta_lock);
+    if (ask >= 0)
+        (void)req_ask(RP_PULSE_JOIN, (int8_t)ask);
+}
+
+_Static_assert(RP_GRANT_WAIT_MS == 2000 && RP_JOIN_SETTLE_MS == 10000, "the refusal lines say 2 s and 10 s");
+
+rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
+                                        uint32_t budget_ms, bool coded_young, bool claim_due,
+                                        uint32_t *len_ms)
+{
+    static const uint8_t k_order[] = { RP_PULSE_SUBMIT, RP_PULSE_JOIN, RP_PULSE_RETRY, RP_PULSE_LIST };
+    *len_ms = 0;
+    join_reask(now);
 
     uint32_t used = i2b_used();
     uint32_t room = (used < RP_I2B_BLIND_MAX_MS) ? RP_I2B_BLIND_MAX_MS - used : 0;
@@ -1058,6 +1117,11 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         room = (room > RP_CONNECT_LR_MS) ? room - RP_CONNECT_LR_MS : 0;
         claim_first = claim_due && s_x.last_pulse != RP_PULSE_CONNECT;
     }
+    // Every pending request is settled first (FREE, withdrawn, dropped, refused), also behind one
+    // that waits: a request of a lower priority still expires, so its requester is not left waiting
+    // and I7's join_settling() is not held true for nothing. Then the first in the order that may
+    // run now is granted, or waits; nothing of a lower priority goes ahead of it.
+    rp_pulse_t waiting = RP_PULSE_NONE;
     for (size_t o = 0; o < sizeof(k_order); o++) {
         rp_pulse_t k = (rp_pulse_t)k_order[o];
         if (!(kinds & (1u << k)))
@@ -1083,55 +1147,29 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             req_set(k, RP_GRANT_FREE);
             continue;
         }
-        // The grant protocol's 2 s, for every kind but SUBMIT: always honoured, it waits until it is
-        // granted or its Connect ends (radio_policy_note_submit(false) withdraws it).
-        if (k != RP_PULSE_SUBMIT && (now - at) >= pdMS_TO_TICKS(RP_GRANT_WAIT_MS)) {
-            req_refuse(k, "not granted within 2 s");
+        if (k == RP_PULSE_SUBMIT && !s_submit) {
+            req_set(k, RP_GRANT_IDLE);   // its attempt ended before the grant
             continue;
         }
-        if (s_pinned) {
-            req_refuse(k, "the profile self-test failed");
-            continue;
-        }
-
-        uint32_t len = 0;
-        switch (k) {
-        case RP_PULSE_SUBMIT: {
-            // Always honoured (plan 4.4), but within I2b's budget and I2 (decided for 2.1.4: an
-            // open SoftAP must not let Connects blind BLE beyond the invariants). It waits for room
-            // rather than being refused, and under a leak response for the valve's claim (above):
-            // Connects, a stranger's included, delay its RMLEAK / CLOSE by at most one pulse and
-            // the claim's own spacing each time, and never hold it off.
-            if (!s_submit) {
-                req_set(k, RP_GRANT_IDLE);   // its attempt ended before the grant
-                continue;
-            }
-            if (!coded_young && !claim_first)
-                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
-            break;
-        }
-        case RP_PULSE_JOIN: {
-            bool joined = false;
+        if (k == RP_PULSE_JOIN) {
+            // Nothing left to assist: the station left, or its end rule has passed (a pulse now
+            // would end at once, and still restart the pulse spacing a claim or the next pulse
+            // needs).
+            bool gone = true, settled = false;
             if (sta >= 0 && sta < RP_STA_MAX) {
                 taskENTER_CRITICAL(&s_sta_lock);
-                joined = (s_sta[sta].state == RP_STA_JOINED);
+                rp_sta_t s = s_sta[sta];
                 taskEXIT_CRITICAL(&s_sta_lock);
+                gone = (s.state != RP_STA_JOINED);
+                settled = sta_settled(&s, now);
+#if CONFIG_APP_RADIO_LAB
+                settled = settled || (lab_k1 && s.probe_at != 0);   // the lab's K1: its 302 or page came
+#endif
             }
-            if (!joined) {
-                req_set(k, RP_GRANT_IDLE);   // the station left before its assist
+            if (gone || settled) {
+                req_set(k, RP_GRANT_IDLE);
                 continue;
             }
-#if CONFIG_APP_RADIO_LAB
-            if (lab_k1) {
-                taskENTER_CRITICAL(&s_sta_lock);
-                bool served = (s_sta[sta].probe_at != 0);
-                taskEXIT_CRITICAL(&s_sta_lock);
-                if (served) {
-                    req_set(k, RP_GRANT_IDLE);   // the lab's K1: its station had its 302 or page meanwhile
-                    continue;
-                }
-            }
-#endif
             if (s_lr_on) {
                 TickType_t start = s_lr_start;
                 if (start != 0 && (now - start) < pdMS_TO_TICKS(RP_LR_JOIN_HOLDOFF_MS)) {
@@ -1143,6 +1181,44 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
                     continue;
                 }
             }
+        }
+        // LR_AP's first 30 s give Wi-Fi nothing but a SUBMIT (plan 4.2): the 1M and Coded scans
+        // look for the valve. RETRY and LIST are refused at once, so the retry or the scan goes on
+        // beside BLE now (the router's return carries the cloud alert) rather than after 2 s.
+        TickType_t lr_start = s_lr_start;
+        if ((k == RP_PULSE_RETRY || k == RP_PULSE_LIST) && s_x.mode == RP_MODE_LR_AP && lr_start != 0 &&
+            (now - lr_start) < pdMS_TO_TICKS(RP_LR_AP_30_MS)) {
+            req_refuse(k, "a leak response's first 30 s");
+            continue;
+        }
+        // The grant protocol's wait (plan 4.4): RETRY and LIST 2 s, then their requesters go on
+        // without a pulse; a JOIN, which has no requester, while its station settles
+        // (RP_JOIN_SETTLE_MS), so an assist the pulse spacing holds back still comes; a SUBMIT
+        // until its Connect ends (radio_policy_note_submit(false) withdraws it).
+        if (k != RP_PULSE_SUBMIT &&
+            (now - at) >= pdMS_TO_TICKS(k == RP_PULSE_JOIN ? RP_JOIN_SETTLE_MS : RP_GRANT_WAIT_MS)) {
+            req_refuse(k, k == RP_PULSE_JOIN ? "not granted within 10 s" : "not granted within 2 s");
+            continue;
+        }
+        if (s_pinned) {
+            req_refuse(k, "the profile self-test failed");
+            continue;
+        }
+        if (waiting != RP_PULSE_NONE)
+            continue;   // settled only: one of a higher priority waits
+
+        uint32_t len = 0;
+        switch (k) {
+        case RP_PULSE_SUBMIT:
+            // Always honoured (plan 4.4), but within I2b's budget and I2 (decided for 2.1.4: an
+            // open SoftAP must not let Connects blind BLE beyond the invariants). It waits for room
+            // rather than being refused, and under a leak response for the valve's claim (above):
+            // Connects, a stranger's included, delay its RMLEAK / CLOSE by at most one pulse and
+            // the claim's own spacing each time, and never hold it off.
+            if (!coded_young && !claim_first)
+                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
+            break;
+        case RP_PULSE_JOIN:
             if (s_x.prof_ms >= s_x.space_ms && !coded_young && !claim_first)
                 len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);   // clipped to I2b's room
 #if CONFIG_APP_RADIO_LAB
@@ -1150,18 +1226,8 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
                 len = rp_min(len, RP_LAB_K1_MS);   // the lab's K1: 1.5 s at most (plan 4.4)
 #endif
             break;
-        }
         case RP_PULSE_RETRY:
         case RP_PULSE_LIST: {
-            // LR_AP's first 30 s give Wi-Fi nothing but a SUBMIT (plan 4.2): the 1M and Coded scans
-            // look for the valve. Refused at once, so the retry or the scan goes on beside BLE now
-            // (the router's return carries the cloud alert) rather than after a 2 s wait.
-            TickType_t lr_start = s_lr_start;
-            if (s_x.mode == RP_MODE_LR_AP && lr_start != 0 &&
-                (now - lr_start) < pdMS_TO_TICKS(RP_LR_AP_30_MS)) {
-                req_refuse(k, "a leak response's first 30 s");
-                continue;
-            }
             uint32_t need = (k == RP_PULSE_RETRY) ? RP_RETRY_MS : RP_LIST_MAX_MS;
             if (!claim_first && at_coded_end && budget_ms >= need && s_x.prof_ms >= s_x.space_ms &&
                 need <= room)
@@ -1177,13 +1243,12 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             *len_ms = len;
             return k;
         }
-        // It waits; nothing of a lower priority goes ahead of it.
+        waiting = k;
         if (claim_first && !rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
             s_x.hold_logged = rp_nz(now);
             ESP_LOGI(RP_TAG, "%s pulse waits: the valve's claim goes first (a leak response is pending)",
                      k_pulse_names[k]);
         }
-        return RP_PULSE_NONE;
     }
     return RP_PULSE_NONE;
 }
@@ -1324,9 +1389,7 @@ bool radio_policy_exec_pulse_over(TickType_t now)
             return true;
         }
         // max(lease + 1.5 s, first 302 or page + 0.3 s)
-        if (s.lease_at != 0 && s.probe_at != 0 &&
-            (now - s.lease_at) >= pdMS_TO_TICKS(RP_JOIN_LEASE_TAIL_MS) &&
-            (now - s.probe_at) >= pdMS_TO_TICKS(RP_JOIN_PROBE_TAIL_MS)) {
+        if (sta_settled(&s, now)) {
             s_x.pulse_why = "its lease and first page or 302";
             return true;
         }

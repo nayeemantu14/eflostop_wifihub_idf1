@@ -71,14 +71,17 @@ typedef enum {
 #define RP_CONNECT_LR_MS        2500   // ... and at most this, clipped to the blind budget (B2); exactly
                                        // this while a leak response is pending (plan 4.4)
 #define RP_PULSE_MIN_MS          300   // a SUBMIT or JOIN with less budget left than this is not run
-#define RP_GRANT_WAIT_MS        2000   // a request not granted this soon is refused: the requester goes
-                                       // on without a pulse (plan 4.4's grant protocol)
+#define RP_GRANT_WAIT_MS        2000   // a RETRY or LIST not granted this soon is refused: its
+                                       // requester goes on without a pulse (plan 4.4's grant
+                                       // protocol); a JOIN, which has no requester, waits
+                                       // RP_JOIN_SETTLE_MS, a SUBMIT until its Connect ends
 #define RP_JOIN_SPACING_MS     30000   // per station: assists at least this ...
 #define RP_JOIN_SPACING_JIT_MS 10000   // ... + U(0, this) apart
 #define RP_LR_JOIN_HOLDOFF_MS  30000   // under a leak response: no assist in its first 30 s ...
 #define RP_LR_JOIN_EVERY_MS    60000   // ... then at most one per 60 s
 #define RP_JOIN_SETTLE_MS      10000   // I7: no hub list scan or router retry this soon after a join
-                                       // that has no lease yet (radio_policy_join_settling())
+                                       // that has no lease yet (radio_policy_join_settling()); a
+                                       // JOIN asked is refused only after this
 #define RP_STA_PRUNE_MS         2000   // a station the driver no longer lists is marked left only
                                        // once its join is this old (radio_policy_stations_prune())
 #define RP_LR_OVERLAY_CAP_MS   (10u * 60u * 1000u)   // the LR overlay: at most this per episode (D5)
@@ -203,7 +206,10 @@ void radio_policy_note_submit(bool in_flight);
 
 /** A station joined / left the SoftAP (default event loop: AP_STACONNECTED, AP_STADISCONNECTED).
  *  A join requests a JOIN_ASSIST when that station's spacing allows (30 s + U(0, 10 s) per MAC;
- *  under a leak response none in its first 30 s, then one per 60 s); a leave ends its assist. */
+ *  under a leak response none in its first 30 s, then one per 60 s); a leave ends its assist. One
+ *  JOIN at a time: a join while another station's is asked or runs is asked after it, while the
+ *  station still settles. A JOIN waits for the pulse spacing and I2b's room up to
+ *  RP_JOIN_SETTLE_MS, and is dropped once its station left or its end rule passed. */
 void radio_policy_station_joined(const uint8_t mac[6]);
 void radio_policy_station_left(const uint8_t mac[6]);
 
@@ -224,9 +230,10 @@ void radio_policy_portal_activity(http_app_activity_t kind, uint32_t client_ip);
 void radio_policy_stations_prune(const wifi_sta_list_t *list);
 
 /** Plan I7: a station is joining the SoftAP: one joined less than RP_JOIN_SETTLE_MS ago and has
- *  no lease yet, or a JOIN_ASSIST is asked for or runs. The hub's own off-channel work (the router
- *  retry, a network-list scan) waits for it, so the SoftAP stays on its channel for the station's
- *  DHCP. Any task; a short spinlock. */
+ *  no lease yet, or a JOIN_ASSIST runs, or one is asked (for at most RP_JOIN_SETTLE_MS) for a
+ *  station whose end rule has not passed. The hub's own off-channel work (the router retry, a
+ *  network-list scan) waits for it, so the SoftAP stays on its channel for the station's DHCP and
+ *  first captive request. Any task; two short spinlocks. */
 bool radio_policy_join_settling(void);
 
 /* ---- The grant protocol (plan 4.4) for RETRY and LIST --------------------------------------------- */
