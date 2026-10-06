@@ -478,7 +478,8 @@ static const char *http_app_read_cred(httpd_req_t *req, const char *field, bool 
 
 /**
  * @brief LOCAL PATCH (2.1.4 C8): POST /connect.json, the page's Connect: the intake of a candidate.
- * Headers: X-Custom-ssid (1-32 bytes), X-Custom-pwd (0-64 bytes: empty or absent for an open
+ * Headers: X-Custom-ssid (1-32 bytes, no control character: no byte below 0x20, nor 0x7F, which
+ * would reach the UART log raw), X-Custom-pwd (0-64 bytes: empty or absent for an open
  * network; 64 bytes only as 64 hex digits, a WPA PSK), X-Custom-enc: pct (both percent-encoded;
  * absent: both raw, as before), X-Custom-chan (the network's channel, 1-14, a hint only; anything
  * else is ignored). Lengths are checked after decoding. 400 with {"err":"ssid"|"pwd"|"enc"} for a
@@ -510,6 +511,11 @@ static __attribute__((noinline)) esp_err_t http_app_post_connect(httpd_req_t *re
 	}
 	if(err == NULL && ssid_len == 0){
 		err = "ssid";
+	}
+	for(size_t i = 0; err == NULL && i < ssid_len; i++){
+		if(ssid[i] < 0x20 || ssid[i] == 0x7F){
+			err = "ssid";
+		}
 	}
 	if(err == NULL){
 		err = http_app_read_cred(req, "X-Custom-pwd", pct, tmp, pwd, sizeof(pwd), &pwd_len, "pwd");
