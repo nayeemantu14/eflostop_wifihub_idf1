@@ -18,3 +18,21 @@ config APP_BENCH_DIAG
         to its BSSID ("connected with <SSID>, ..., bssid = <MAC>"). With an SSID that contains
         "mac", the production tool's boot-log parse (a line with "wifi", "mac" and a colon-MAC)
         would take the router's BSSID for the hub's Wi-Fi MAC.
+
+config APP_RADIO_LAB
+    bool "Radio lab image for the G1 bench (not for release)"
+    default n
+    help
+        The 2.1.4 G1 lab ladder (plan sections 4.3, 4.9 C11, 11 WP7, 12 G1; main/radio_policy/
+        radio_lab.c). The console keys that lora_task polls then switch, at run time and kept in
+        NVS across reboots, the radio policy's open choices: the SERVE rung (AP_IDLE density,
+        SERVE-A-thin, SERVE-A, SERVE-C, SERVE-B), AP_IDLE's Wi-Fi slot (0.3 or 0.6 s), the join
+        assist, contingency K1, and C11's two Wi-Fi knobs. The defaults are the production values.
+        SERVE-C breaks invariant I8 and the period rule: lab data only.
+
+        Without it (the default) nothing of the lab is compiled in, and every object is the same
+        byte for byte. Unlike APP_BENCH_DIAG it has a prompt, so that a separate sdkconfig can set
+        it: the G1 procedure builds the lab image in a build folder of its own, with a copy of the
+        project's sdkconfig. Never set it in the project's sdkconfig: kconfgen would keep the y for
+        every later build. A lab image also needs APP_BENCH_DIAG (radio_lab.c stops the build
+        otherwise), so it cannot reach a release once WP10 turns that off.

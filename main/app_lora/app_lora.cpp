@@ -197,6 +197,11 @@ static bool lora_uart_keys_init(void) {
     return installed;
 }
 
+// The G1 lab image (APP_RADIO_LAB) adds its own keys, radio_lab_key(): digits and lower-case
+// letters that none of the four above uses. Its header comes here, below the lines of this file's
+// known compiler warnings, which the build checkpoints list by line.
+#include "radio_policy/radio_lab.h"
+
 // lora_task only, between two radio passes.
 static void lora_uart_keys_poll(void) {
     uint8_t dtmp[1];
@@ -232,6 +237,11 @@ static void lora_uart_keys_poll(void) {
             lora_state.sendAck = !lora_state.sendAck;
             ESP_LOGI(TAG, "ACK %s", lora_state.sendAck ? "ENABLED" : "DISABLED");
         }
+#if CONFIG_APP_RADIO_LAB
+        else {
+            (void)radio_lab_key(cmd);   // the radio lab's keys (lab image only)
+        }
+#endif
     }
 }
 

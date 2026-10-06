@@ -4,6 +4,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "esp_wifi_types.h"
 #include "http_app.h"
@@ -143,6 +144,12 @@ typedef struct {
 #define RP_RUNG_SERVE_A_THIN   1   // SERVE-A for RP_HOT_MS after a hot event, AP_IDLE density otherwise
 #define RP_RUNG_SERVE_B        2   // [C 0.6][W 1.2] (the council's)
 #define RP_SERVE_RUNG          RP_RUNG_SERVE_A
+#if CONFIG_APP_RADIO_LAB
+/* The lab image's two more rungs (radio_lab.h, G1): there the rung is chosen at run time. */
+#define RP_RUNG_SERVE_C        3   // [C 1.0][W 1.0] (lab only: breaks I8 and the period rule)
+#define RP_RUNG_APIDLE         4   // AP_IDLE density: SERVE runs AP_IDLE's rows (D8 (c))
+#define RP_RUNG_COUNT          5
+#endif
 
 /* ---- Modes (plan 4.2; first match wins) ------------------------------------------------------------ */
 typedef enum {

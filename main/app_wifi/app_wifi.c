@@ -14,6 +14,7 @@
 #include "provisioning_manager/provisioning_manager.h"
 #include "hub_identity/hub_identity.h"
 #include "radio_policy/radio_policy.h"
+#include "radio_policy/radio_lab.h"
 
 TaskHandle_t wifiTaskHandle = NULL;
 
@@ -764,6 +765,10 @@ void app_wifi_start()
     http_app_set_finish_hook(&portal_finish);
     // The network list's scan gate (2.1.4 WP8: the LIST pulse, above). A plain store too.
     wifi_manager_set_scan_gate(&list_scan_gate);
+#if CONFIG_APP_RADIO_LAB
+    // The G1 lab image (main/Kconfig.projbuild): its settings, before the Wi-Fi task starts.
+    radio_lab_init();
+#endif
     wifi_manager_start();
     // The SoftAP's and the STA's callbacks first (the radio policy's facts): with no credentials
     // saved, START_AP comes about 0.7 s after the start (network and Wi-Fi init, the HTTP server),
