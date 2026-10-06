@@ -2080,6 +2080,11 @@ static volatile uint32_t     s_mqtt_stop_req  = 0;      // stops asked; iothub_t
 static volatile uint32_t     s_mqtt_stop_done = 0;      // the last one served; wifi_task only
 static volatile TaskHandle_t s_mqtt_stopper   = NULL;   // wifi_task's handle; wifi_task only
 static uint32_t              s_mqtt_stop_wait_logged = 0;   // wifi_task only
+// A stop esp-mqtt refuses is tried again this often, this far apart (iothub_mqtt_stop_service()):
+// at most 4 waits of 20 ms on wifi_task, with the publish gate held, so cloud_tx sends nothing
+// meanwhile (a stop is pending: its messages take the offline path).
+#define MQTT_STOP_TRIES     5
+#define MQTT_STOP_RETRY_MS  20
 // Created by initialize_iothub(), before any task can ask for or run a stop.
 static StaticSemaphore_t     s_pub_gate_buf;
 static SemaphoreHandle_t     s_pub_gate = NULL;
@@ -2159,14 +2164,37 @@ void iothub_mqtt_stop_service(void)
         return;
     }
     int64_t t0 = esp_timer_get_time();
-    esp_mqtt_client_stop(mqtt_client);   // a request implies a client, and it is never cleared
+    // A request implies a client, and it is never cleared. A stop esp-mqtt refuses is not a stop
+    // (2.1.4 WP3: HANDOFF 15n R18, 15m residuals 3 and 6). In IDF 5.5.1 esp_mqtt_client_stop()
+    // returns ESP_FAIL with a client's task still to come in one reachable case: a client
+    // started so recently that its task has not run its first line, which sets the `run` flag
+    // the stop tests ("Client asked to stop, but was not started", mqtt_client.c). Taken as
+    // stopped, that client then ran unseen, its TLS beside a SoftAP, and the next start failed
+    // ("Client has started"). A short wait lets its task run, and the stop is tried again. A
+    // client that is not running at all (its start failed, 15i residual 6) refuses every try
+    // and is taken as stopped after the last. A failed DISCONNECT write is no such case: the
+    // stop goes on and ends the task (send_disconnect_msg() returns ESP_OK).
+    esp_err_t err = esp_mqtt_client_stop(mqtt_client);
+    int tries = 1;
+    while (err != ESP_OK && tries < MQTT_STOP_TRIES) {
+        vTaskDelay(pdMS_TO_TICKS(MQTT_STOP_RETRY_MS));
+        err = esp_mqtt_client_stop(mqtt_client);
+        tries++;
+    }
     // A connect that ended as the stop was asked may have marked MQTT connected again
     // (MQTT_EVENT_CONNECTED); the client's task has ended now, so this mark stays.
     if (telemetry_v2_is_connected())
         mark_mqtt_disconnected();
     xSemaphoreGive(s_pub_gate);      // a publish now finds the stop still pending: offline
     unsigned long ms = (unsigned long)((esp_timer_get_time() - t0) / 1000);
-    ESP_LOGI(IOTHUB_TAG, "MQTT client stopped on wifi_task in %lu.%lu s", ms / 1000, (ms % 1000) / 100);
+    if (err == ESP_OK) {
+        if (tries > 1)
+            ESP_LOGW(IOTHUB_TAG, "MQTT stop refused %d time(s) - the client had just started", tries - 1);
+        ESP_LOGI(IOTHUB_TAG, "MQTT client stopped on wifi_task in %lu.%lu s", ms / 1000, (ms % 1000) / 100);
+    } else {
+        ESP_LOGW(IOTHUB_TAG, "MQTT stop refused %d times (%s) - the client was not running, taken as stopped",
+                 tries, esp_err_to_name(err));
+    }
     s_mqtt_stop_done = req;          // last: iothub_task may start the client from here on
     telemetry_v2_wake_snapshot();    // its next pass, not its 1 s poll
 }
