@@ -134,6 +134,12 @@ static uint16_t valve_conn_handle = BLE_HS_CONN_HANDLE_NONE;
 static volatile bool s_hunt_announced = false;
 // The valve was heard while the hunt wants it: a claim is due (host task sets, executor clears).
 static volatile bool s_claim_req = false;
+// When the valve was last heard while the hunt wanted it, or last claimed (0: never): the radio
+// policy's hunt slot (B2) is left out for VALVE_HEARD_HOLD_MS after it, the claim then following
+// on what the plain profile hears (ble_valve_hunt_slot_wanted()). Host task and executor write a
+// tick, the executor reads it.
+#define VALVE_HEARD_HOLD_MS  7000   // one I2b spacing at its longest: a claim may follow in it
+static volatile TickType_t s_valve_heard_at = 0;
 
 // ---- The valve claim policy (2.1.4 WP6; plan §4.4 CONNECT, decision D5) -----------------------
 // Every claim is a CONNECT pulse: no BLE scan runs from its grant until its CONNECT event, for the
@@ -1990,6 +1996,9 @@ void ble_valve_note_adv(const void *adv_addr)
     if (portal_holds_valve())
         return;
 
+    TickType_t heard = xTaskGetTickCount();
+    s_valve_heard_at = heard ? heard : 1;   // the hunt slot has done its part (B2)
+
     // The claim back-off (WP6): the valve keeps advertising, and its first report after the
     // back-off asks for the claim. Not while a leak response is pending.
     if (!claim_backoff_over())
@@ -2004,6 +2013,23 @@ void ble_valve_note_adv(const void *adv_addr)
     taskEXIT_CRITICAL(&s_mac_lock);
     s_claim_req = true;
     app_ble_leak_kick();   // the executor grants the claim (ble_valve_claim_start())
+}
+
+// B2's hunt slot (the radio policy's N_HUNT row, and the AP modes' valve discovery) is worth its
+// Coded time only while it can find the valve for a claim: the hunt wants it, no claim is due, the
+// valve has not been heard (or claimed) in the last VALVE_HEARD_HOLD_MS, and the back-off lets a
+// claim follow. A valve that is heard but does not link (marginal RF, empty pulses) is then claimed
+// on what the plain profile hears, and its claims no longer run beside the slot: the council's model
+// gave the other sensors p99.9 75.5 s with both, 32.5 s with the claims alone (p_loss 0.3, a leak
+// response pending past the overlay's cap, 2.5 s claims every 7-8 s). Executor task.
+bool ble_valve_hunt_slot_wanted(void)
+{
+    if (s_claim_req || !ble_valve_hunt_wanted())
+        return false;
+    TickType_t h = s_valve_heard_at;
+    if (h != 0 && (xTaskGetTickCount() - h) < pdMS_TO_TICKS(VALVE_HEARD_HOLD_MS))
+        return false;
+    return claim_backoff_over();
 }
 
 // The executor's question before it grants a claim: the valve was heard and the hunt still
@@ -2027,6 +2053,8 @@ bool ble_valve_claim_wanted(void)
 void ble_valve_claim_start(uint32_t pulse_ms)
 {
     s_claim_req = false;
+    TickType_t claimed = xTaskGetTickCount();
+    s_valve_heard_at = claimed ? claimed : 1;   // its claim: the hunt slot waits VALVE_HEARD_HOLD_MS
     if (!ble_valve_hunt_wanted())
         return;   // re-checked: linked, held, unprovisioned or no longer wanted since the report
 

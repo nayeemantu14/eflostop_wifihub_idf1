@@ -281,6 +281,7 @@ typedef struct {
     bool valve;               // a valve is provisioned
     bool valve_linked;        // its link is up, verified by ble_gap_conn_find()
     bool valve_hunt;          // it is wanted, not linked, and no connect is in flight
+    bool valve_slot;          // ... and B2's hunt slot can help (ble_valve_hunt_slot_wanted())
 } rp_ble_facts_t;
 
 /** Every pass (I6): the facts in, the mode out. */

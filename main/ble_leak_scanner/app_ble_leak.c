@@ -1236,6 +1236,7 @@ static void exec_facts(rp_ble_facts_t *f, bool synced, TickType_t now)
     // handle is enough (the valve module closes a stale one within a second, link_poll()).
     f->valve_linked = (n == 0) ? ble_valve_link_verified() : ble_valve_is_connected();
     f->valve_hunt = ble_valve_hunt_wanted();
+    f->valve_slot = f->valve_hunt && ble_valve_hunt_slot_wanted();
 }
 
 // Starts a row (a switch, a restart, or the first): at its Coded window, or right after it when

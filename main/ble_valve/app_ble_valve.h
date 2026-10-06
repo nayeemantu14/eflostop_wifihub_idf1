@@ -182,6 +182,13 @@ extern "C"
     bool ble_valve_hunt_wanted(void);
 
     /**
+     * @brief B2's hunt slot is worth running: the hunt is wanted, no claim is due, the valve was
+     * not heard or claimed in the last 7 s, and the claim back-off allows a claim. The radio
+     * policy runs N_HUNT (and the AP modes' valve discovery) only then. Executor task.
+     */
+    bool ble_valve_hunt_slot_wanted(void);
+
+    /**
      * @brief The provisioned valve was heard while the hunt is wanted, and the claim back-off
      * allows a claim: a claim (connect) is due. The executor grants it at the end of a scan
      * that covered Coded, in NORMAL and in a hold's hunt alike, when its pulse-rate limit (I2b)

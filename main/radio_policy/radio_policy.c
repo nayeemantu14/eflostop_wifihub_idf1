@@ -843,7 +843,7 @@ static uint8_t ap_row(TickType_t now, bool new_period, bool k1m)
     }
     unsigned every = serve ? (bo ? RP_DISC_EVERY_SERVE_BO : RP_DISC_EVERY_SERVE)
                            : (bo ? RP_DISC_EVERY_AP_BO : RP_DISC_EVERY_AP);
-    bool want_disc = s_x.f.any_unknown || s_x.f.valve_hunt;
+    bool want_disc = s_x.f.any_unknown || s_x.f.valve_slot;
     if (s_x.period_row != plain && s_x.period_row != disc) {
         s_x.period_row = plain;   // a new row set: its plain row first
         s_x.period_n = 0;
@@ -871,10 +871,11 @@ uint8_t radio_policy_exec_row(TickType_t now, bool new_period)
     }
     case RP_MODE_NORMAL:
         // B2: while the valve is wanted and unlinked outside the LR overlay, a 1M slot finds it in
-        // about 1-3 s (N_MIXED's 1M slots do the same).
+        // about 1-3 s (N_MIXED's 1M slots do the same); not once it was heard, while its claim is
+        // due or backed off (ble_valve_hunt_slot_wanted()).
         if (s_pinned)
             return RP_ROW_N_CODED;
-        return k1m ? RP_ROW_N_MIXED : (f->valve_hunt ? RP_ROW_N_HUNT : RP_ROW_N_CODED);
+        return k1m ? RP_ROW_N_MIXED : (f->valve_slot ? RP_ROW_N_HUNT : RP_ROW_N_CODED);
     case RP_MODE_SERVE:
     case RP_MODE_AP_IDLE:
         return ap_row(now, new_period, k1m);
