@@ -890,9 +890,19 @@ static void mode_line(uint8_t m)
     }
 }
 
+// The guard's row is AP_K1M, not AP_IDLE density, also while a leak response is pending and the
+// valve is hunted: AP_IDLE density has no 1M slot, the guard comes before discovery, and its 110 s
+// would hold the valve's claim, and the pended RMLEAK / CLOSE, off (a starved sensor may be the
+// leaking one, submerged). AP_K1M still has a Coded window every 1.8 s (I1).
+static bool guard_k1m(void)
+{
+    return s_x.starve_kind == RP_STARVED_K1M || (s_lr_trigger && s_x.f.valve_hunt);
+}
+
 // The sensor-starvation guard (plan 4.2): a sensor unheard >= 250 s gets AP_IDLE density with
-// discovery suspended (AP_K1M for a 1M or unknown-PHY sensor) for 110 s, at most once per 600 s.
-// AP modes only: NORMAL scans Coded at 80 % anyway.
+// discovery suspended (AP_K1M for a 1M or unknown-PHY sensor, or for the valve under a leak
+// response: guard_k1m()) for 110 s, at most once per 600 s. AP modes only: NORMAL scans Coded at
+// 80 % anyway.
 static void guard_update(TickType_t now, uint8_t m)
 {
     if (s_x.starve_until != 0 && (int32_t)(now - s_x.starve_until) >= 0) {
@@ -906,7 +916,8 @@ static void guard_update(TickType_t now, uint8_t m)
         s_x.starve_kind = s_x.f.starved;
         ESP_LOGW(RP_TAG, "Sensor-starvation guard: a sensor unheard 250 s or more (%s) - %s for %d s",
                  s_x.starve_kind == RP_STARVED_K1M ? "on 1M, or its PHY unknown" : "on Coded",
-                 s_x.starve_kind == RP_STARVED_K1M ? "AP_K1M" : "AP_IDLE density, no discovery",
+                 s_x.starve_kind == RP_STARVED_K1M ? "AP_K1M" :
+                 guard_k1m() ? "AP_K1M (a leak response: the valve's 1M slot stays)" : "AP_IDLE density, no discovery",
                  RP_STARVE_FOR_MS / 1000);
     }
 }
@@ -981,7 +992,7 @@ static bool disc_backoff(TickType_t now)
 static uint8_t ap_row(TickType_t now, bool new_period, bool k1m)
 {
     if (s_x.starve_until != 0)
-        return (s_x.starve_kind == RP_STARVED_K1M) ? RP_ROW_AP_K1M : RP_ROW_APIDLE;
+        return guard_k1m() ? RP_ROW_AP_K1M : RP_ROW_APIDLE;
     if (k1m)
         return RP_ROW_AP_K1M;
     bool serve = (s_x.mode == RP_MODE_SERVE);
