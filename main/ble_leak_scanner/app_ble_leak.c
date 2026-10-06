@@ -843,7 +843,10 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
 
 /* The sensor-firmware timings the profiles depend on (FW 1.1.0, unchanged in this release; plan
  * §4.8, documented hub assumptions) and the invariants checked against them. */
-#define ADV_SMAX_MS     448     // longest advert spacing: Ta max 437.5 ms + advDelay 10 ms
+#define ADV_SMAX_MS     448     // longest advert spacing: Ta max 437.5 ms + advDelay 10 ms.
+                                // PROVISIONAL until G0 measures Ta per sensor (the burst lines'
+                                // shortest dT): a longer Ta raises L_MS, and the asserts below
+                                // then say which profile no longer covers a burst.
 #define JITTER_MS       100     // the start dither: U(0, JITTER_MS) before each NORMAL scan
 #define BURST_MIN_MS   2500     // a heartbeat burst
 #define BURST_EDGE_MS  4000     // a leak-edge burst
@@ -852,7 +855,9 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
 #define GAP_MAX_MS     (BURST_MIN_MS - 2 * L_MS)        // 1404: longest gap plus jitter
 #define BLIND_MAX_MS   2800     // I2: longest span with no Coded scan
 #define RECOVERY_MS    1200     // I2: the Coded window after a pulse
-#define N_SCAN_MS      1000     // N_CODED's scans
+#define N_SCAN_MS      1000     // N_CODED's scans: the dither period D. PROVISIONAL: G4 (24 h
+                                // NORMAL soak, about 86,000 restarts a day) decides 1 s or 3 s
+                                // (plan §2.4, §11 WP6 fallback); the hold's hunt uses it too.
 #define MIX_SLOT_MS    1000     // N_MIXED's 1M and Coded scans
 #define LR_1M_MS       1000     // NORMAL_LR's 1M scan
 #define LR_CODED_MS     600     // NORMAL_LR's Coded scan
