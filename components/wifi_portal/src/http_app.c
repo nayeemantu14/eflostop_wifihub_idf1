@@ -266,8 +266,8 @@ static bool http_app_query_has(const char *uri, const char *param){
  *  - gzip or x-gzip refused: 406, whatever else is listed (an explicit refusal wins over "*");
  *  - gzip or x-gzip listed: gzip;
  *  - otherwise "*": gzip, or 406 for "*;q=0";
- *  - otherwise another coding (br, deflate): gzip, the only copy there is (the request is not
- *    identity-only);
+ *  - otherwise another coding (br, deflate), or identity refused (identity;q=0): gzip, the only
+ *    copy there is (the request is not identity-only);
  *  - identity alone, or an empty list: 406.
  */
 static bool http_app_gzip_accepted(httpd_req_t *req){
@@ -324,8 +324,8 @@ static bool http_app_gzip_accepted(httpd_req_t *req){
 		else if(is_star){
 			star = q_zero ? 0 : 1;
 		}
-		else if(!is_identity && name_len > 0){
-			other = true;
+		else if(name_len > 0 && !(is_identity && !q_zero)){
+			other = true;	/* identity;q=0 too: a client that refuses identity is not identity-only */
 		}
 	}
 	if(gzip >= 0){
