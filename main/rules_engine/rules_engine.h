@@ -98,7 +98,10 @@ bool rules_engine_init(void);
  * wet one, waits behind it. A report of the valve's flood probe is kept like a wet one,
  * dry ones included (2.1.4 WP3). A sensor's dry report that meets a busy rules mutex is
  * kept too when its source has a report kept, so the pair is replayed in order; any other
- * is dropped as before (its source stays wet: fail-safe).
+ * is dropped as before (its source stays wet: fail-safe). With the 4 slots full (2.1.4
+ * WP3) a wet report replaces its source's last kept dry one, or else the newest kept dry
+ * one of another source (which then stays wet: fail-safe); it is lost only when all 4 kept
+ * reports are wet. A dry report meeting a full list is lost (its source stays wet).
  *
  * iothub_task only.
  *
@@ -114,6 +117,14 @@ void rules_engine_evaluate_leak(leak_source_t source, bool leak_active, const ch
  *        evaluates it. iothub_task only.
  */
 bool rules_engine_has_kept_reports(void);
+
+/**
+ * @brief True while a valve swap's purge is owed (rules_engine_on_valve_replaced() met a busy
+ *        rules mutex; 2.1.4 WP3). iothub_task polls at 100 ms meanwhile, so its next hold
+ *        of the mutex runs the purge soon: until then LEAK_RESET and override_cancel (esp-mqtt
+ *        task) and a snapshot still count the old valve's flood source. iothub_task only.
+ */
+bool rules_engine_valve_purge_owed(void);
 
 /**
  * @brief Evaluate the reports kept while the rules mutex was busy (WP2d), oldest first.

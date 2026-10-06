@@ -14,6 +14,7 @@
 #include "app_ble_valve.h"
 #include "sensor_meta.h"
 #include "health_engine.h"   /* health_set_interlock_held — YELLOW floor while holding the valve shut */
+#include "telemetry_v2.h"    /* telemetry_v2_printable() — how every message prints a label */
 
 #define RULES_TAG "RULES_ENGINE"
 #define AUTO_CLOSE_COOLDOWN_MS 10000   // 10s cooldown between auto-closes
@@ -113,7 +114,9 @@ static bool g_tick_ran = false;                 // this pass's tick took the rul
 /* A valve swap's purge whose rules-lock take timed out (rules_engine_on_valve_replaced()),
  * run first in this task's next hold of the lock (valve_purge_if_owed()). iothub_task only,
  * like every caller that holds the lock and reads the active-leak set, so no lock. */
-static bool g_valve_purge_owed = false;
+#define PURGE_OWED          0x01
+#define PURGE_KEPT_DROPPED  0x02   // the swap dropped an old valve's kept report
+static uint8_t g_valve_purge_owed = 0;
 
 // 24h override window state
 static override_state_t g_override_state = OVERRIDE_STATE_INACTIVE;
@@ -725,13 +728,10 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
     if (source_id && source != LEAK_SOURCE_VALVE) {
         sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
         if (sensor_meta_get(source_to_sensor_type(source), source_id, &meta)) {
-            // A control character prints as a space, as in every message telemetry_v2.c
-            // builds (2.1.4 WP3, printable_in_place()): cJSON writes it as a six-byte escape,
-            // and this event must stay within the offline buffer's 512 B entry.
-            for (char *c = meta.label; *c != '\0'; c++) {
-                if ((unsigned char)*c < 0x20)
-                    *c = ' ';
-            }
+            // A control character prints as a space, as in every message (2.1.4 WP3): cJSON
+            // writes it as a six-byte escape, and this event must stay within the offline
+            // buffer's 512 B entry.
+            telemetry_v2_printable(meta.label);
             // Created attached: cJSON_AddItemToObject() neither attaches nor frees the
             // child when its key copy fails, so a detached object leaked at low heap.
             cJSON *loc = cJSON_AddObjectToObject(root, "location");
@@ -760,10 +760,16 @@ static void valve_replaced_locked(bool kept_dropped);
 // any of them can act on it, or a new valve's report is tracked (2.1.4 WP3, 15o residual 3).
 static void valve_purge_if_owed(void)
 {
-    if (g_valve_purge_owed) {
-        g_valve_purge_owed = false;
-        valve_replaced_locked(false);
+    if (g_valve_purge_owed != 0) {
+        bool kept_dropped = (g_valve_purge_owed & PURGE_KEPT_DROPPED) != 0;
+        g_valve_purge_owed = 0;
+        valve_replaced_locked(kept_dropped);
     }
+}
+
+bool rules_engine_valve_purge_owed(void)
+{
+    return g_valve_purge_owed != 0;   // iothub_task's own state, read on iothub_task
 }
 
 // ─── Public API ─────────────────────────────────────────────────────────────
@@ -1138,9 +1144,29 @@ static void keep_report(leak_source_t source, bool leak_active, const char *sour
                      KEPT_MAX, leak_source_to_str(source), source_id);
             return;
         }
-        ESP_LOGE(RULES_TAG, "Rules lock busy - %d leak reports already kept, the %s one from %s sensor %s is lost",
-                 KEPT_MAX, leak_active ? "wet" : "dry", leak_source_to_str(source), source_id);
-        return;
+        // Nor is a wet report lost while another source's dry one is kept (2.1.4 WP3 review):
+        // the newest kept dry report makes room. Its source then stays wet in the engine until
+        // its next report, which fails safe; for the valve that is how a dry report on a busy
+        // lock fared before WP3 kept them. Without this, the valve's dry reports, kept since
+        // WP3 whether or not a wet one is (a flapping flood probe fills the 4 slots), could
+        // cost a sensor's first wet report, which its scanner does not send again.
+        int dry = -1;
+        for (int i = g_kept_n - 1; leak_active && i >= 0; i--) {
+            if (!g_kept[i].leak) {
+                dry = i;
+                break;
+            }
+        }
+        if (dry < 0) {
+            ESP_LOGE(RULES_TAG, "Rules lock busy - %d leak reports already kept, the %s one from %s sensor %s is lost",
+                     KEPT_MAX, leak_active ? "wet" : "dry", leak_source_to_str(source), source_id);
+            return;
+        }
+        ESP_LOGW(RULES_TAG, "Rules lock busy - %d leak reports already kept, the dry one from %s sensor %s gives way to the wet one from %s sensor %s",
+                 KEPT_MAX, leak_source_to_str(g_kept[dry].source), g_kept[dry].id,
+                 leak_source_to_str(source), source_id);
+        g_kept_n--;
+        memmove(&g_kept[dry], &g_kept[dry + 1], (g_kept_n - dry) * sizeof(g_kept[0]));
     }
     g_kept[g_kept_n].source = source;
     g_kept[g_kept_n].leak = leak_active;
@@ -2356,11 +2382,14 @@ void rules_engine_on_valve_replaced(void)
         // anything there reads the active-leak set (valve_purge_if_owed(); 2.1.4 WP3, 15o
         // residual 3). Until then the old valve's flood source could close the new valve at
         // its first link (E-04).
-        g_valve_purge_owed = true;
+        // iothub_task polls at 100 ms while it is owed (rules_engine_valve_purge_owed()).
+        g_valve_purge_owed |= PURGE_OWED | (kept_dropped ? PURGE_KEPT_DROPPED : 0);
         ESP_LOGW(RULES_TAG, "Failed to take mutex (valve replaced)");
         return;
     }
-    g_valve_purge_owed = false;   // a purge still owed from an earlier swap: this one covers it
+    // A purge still owed from an earlier swap: this one covers it, and says what that one dropped.
+    kept_dropped = kept_dropped || (g_valve_purge_owed & PURGE_KEPT_DROPPED) != 0;
+    g_valve_purge_owed = 0;
     valve_replaced_locked(kept_dropped);
     xSemaphoreGive(g_mutex);
 }

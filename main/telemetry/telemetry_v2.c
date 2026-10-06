@@ -121,7 +121,7 @@ const char *telemetry_v2_fw_version(void)
 // hub's snapshot could pass the MQTT outbox limit and be refused for ever (13.9 KB against
 // 12,288 B), and an event pass the offline buffer's 512 B entry. A quote or a backslash costs
 // 2 B and stays. In place, on the caller's copy.
-static void printable_in_place(char *s)
+void telemetry_v2_printable(char *s)
 {
     for (; *s != '\0'; s++) {
         if ((unsigned char)*s < 0x20)
@@ -182,7 +182,7 @@ static cJSON *build_envelope(const char *type)
     cJSON_AddStringToObject(gw, "short_id", hub_identity_get_short_id());
     char hub_name[HUB_NAME_MAX_LEN + 1];
     snprintf(hub_name, sizeof(hub_name), "%s", hub_identity_get_name());
-    printable_in_place(hub_name);
+    telemetry_v2_printable(hub_name);
     if (hub_name[0])
         cJSON_AddStringToObject(gw, "name", hub_name);
     cJSON_AddStringToObject(gw, "fw", telemetry_v2_fw_version());
@@ -475,7 +475,7 @@ static bool add_location_obj(cJSON *parent, sensor_type_t type,
     sensor_meta_entry_t meta;   // a copy, never a pointer into the table (L16)
     bool have_meta = sensor_meta_get(type, sensor_id, &meta);
     if (have_meta)
-        printable_in_place(meta.label);   // 2.1.4 WP3: the copy, as every label is printed
+        telemetry_v2_printable(meta.label);   // 2.1.4 WP3: the copy, as every label is printed
     cJSON *loc = cJSON_AddObjectToObject(parent, "location");   // created + attached, or NULL
     if (!loc) return false;
     if (!cJSON_AddStringToObject(loc, "code",
@@ -562,7 +562,7 @@ static void leak_label_for(const health_device_status_t *d, char *out, size_t ou
         out[i] = (src[i] == ',') ? ';' : src[i];
     }
     out[i] = '\0';
-    printable_in_place(out);   // as every label is printed (2.1.4 WP3)
+    telemetry_v2_printable(out);   // as every label is printed (2.1.4 WP3)
 }
 
 static void build_system_health_reason(const health_device_status_t *health,
@@ -1125,7 +1125,7 @@ static bool build_snapshot(const char *trigger, telem_msg_t *out)
 
             char valve_fw[32];
             if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw))) {
-                printable_in_place(valve_fw);   // 2.1.4 WP3: the valve's own string
+                telemetry_v2_printable(valve_fw);   // 2.1.4 WP3: the valve's own string
                 SNAP_ADD(cJSON_AddStringToObject(valve, "fw_version", valve_fw));
             } else {
                 SNAP_ADD(cJSON_AddNullToObject(valve, "fw_version"));
@@ -1437,7 +1437,7 @@ void telemetry_v2_publish_valve_event(const char *event_name, const char *valve_
 
     char valve_fw[32];
     if (ble_valve_get_firmware_rev(valve_fw, sizeof(valve_fw))) {
-        printable_in_place(valve_fw);   // 2.1.4 WP3: the valve's own string
+        telemetry_v2_printable(valve_fw);   // 2.1.4 WP3: the valve's own string
         cJSON_AddStringToObject(data, "fw_version", valve_fw);
     }
 
@@ -1480,7 +1480,7 @@ void telemetry_v2_publish_leak_event(const telem_leak_event_t *ev)
         if (ev->fw_version && ev->fw_version[0]) {
             char fw[32];   // the valve's string (ble_valve_get_firmware_rev(), 32 B)
             snprintf(fw, sizeof(fw), "%s", ev->fw_version);
-            printable_in_place(fw);   // 2.1.4 WP3
+            telemetry_v2_printable(fw);   // 2.1.4 WP3
             cJSON_AddStringToObject(data, "fw_version", fw);
         }
     }

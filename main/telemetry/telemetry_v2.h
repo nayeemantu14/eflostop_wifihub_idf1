@@ -29,6 +29,16 @@ extern "C" {
 // app descriptor. To bump the hub version, edit PROJECT_VER only.
 const char *telemetry_v2_fw_version(void);
 
+/**
+ * @brief A user-supplied string (a sensor label, the hub name, a valve's firmware string) as
+ *        every message prints it: each control character (below 0x20) becomes a space, in
+ *        place, on the caller's copy (2.1.4 WP3). cJSON writes a control character as a
+ *        six-byte \u00XX escape, which let a full hub's snapshot pass the MQTT outbox limit
+ *        and an event pass the offline buffer's 512 B entry. The one definition of the rule;
+ *        the rules engine's auto_close uses it too.
+ */
+void telemetry_v2_printable(char *s);
+
 // ---------------------------------------------------------------------------
 // Cache types — shared between telemetry module and app_iothub for state
 // ---------------------------------------------------------------------------
