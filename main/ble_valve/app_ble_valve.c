@@ -3677,13 +3677,32 @@ bool ble_valve_link_verified(void)
     return h != BLE_HS_CONN_HANDLE_NONE && ble_gap_conn_find(h, NULL) == 0;
 }
 
-// The executor (its task): a claim's connect still in flight 2 s past its pulse, so NimBLE neither
-// completed nor cancelled it (no answer to its Create Connection Cancel). As for a connect NimBLE
-// lost (connect_lost_by_host()): end the claim, no failure, and reset the BLE host, the only public
-// way to clear the controller's initiator. Should never print (HANDOFF 15s residual 3).
+// The executor (its task): a connect NimBLE still runs 2 s past the claim's pulse, so NimBLE
+// neither completed nor cancelled it (no answer to its Create Connection Cancel). Ours, or one with
+// g_connecting already clear: a connect this module cancelled itself (BLE_CMD_DISCONNECT clears
+// g_connecting whatever the cancel's answer) or one NimBLE started. Either way, as for a connect
+// NimBLE lost (connect_lost_by_host()): end the claim, no failure, and reset the BLE host, the only
+// public way to clear the controller's initiator, one reset at a time. Without the reset a connect
+// that is not ours held the executor's CONNECT pulse, and with it every BLE scan, until a reboot.
+// Should never print (HANDOFF 15s residual 3).
 void ble_valve_claim_overrun(void)
 {
-    connect_lost_by_host("still in flight 2 s past its pulse");
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool ours = g_connecting;
+    g_connecting = false;
+    bool reset = !s_host_reset_asked;
+    if (reset)
+        s_host_reset_asked = true;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (ours)
+        ESP_LOGE(BLE_TAG, "[CLAIM] NimBLE lost the valve connect in flight (still in flight 2 s past its pulse) - %s",
+                 reset ? "resetting the BLE host" : "a BLE host reset is on its way");
+    else
+        ESP_LOGE(BLE_TAG, "[CLAIM] A connect this module no longer tracks (cancelled, or NimBLE's own) still runs 2 s past its pulse - %s",
+                 reset ? "resetting the BLE host" : "a BLE host reset is on its way");
+    claim_end(false, NULL);   // not the valve's failure
+    if (reset)
+        ble_hs_sched_reset(BLE_HS_ECONTROLLER);
 }
 
 bool ble_valve_lr_pending(void)

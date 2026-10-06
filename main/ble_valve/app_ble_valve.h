@@ -205,8 +205,9 @@ extern "C"
     void ble_valve_claim_start(uint32_t pulse_ms);
 
     /**
-     * @brief The executor: the claim's connect is still in flight 2 s past its pulse (NimBLE
-     * did not end it). Ends the claim, no failure, and resets the BLE host. Should never run.
+     * @brief The executor: a connect NimBLE still runs 2 s past the claim's pulse (NimBLE did
+     * not end it), the claim's own or one this module no longer tracks. Ends the claim, no
+     * failure, and resets the BLE host (one reset at a time). Should never run.
      */
     void ble_valve_claim_overrun(void);
 

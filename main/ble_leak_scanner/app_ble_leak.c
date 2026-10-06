@@ -1539,10 +1539,15 @@ static TickType_t executor_pass(exec_t *x)
     bool timed = false;
     if (x->pulse != RP_PULSE_NONE) {
         until = radio_policy_exec_pulse_wake();
-        if (x->pulse == RP_PULSE_CONNECT && !x->overrun_asked) {
-            until += pdMS_TO_TICKS(CLAIM_OVERRUN_MS);
-        }
         timed = (radio_policy_exec_pulse_deadline() != 0);
+        if (x->pulse == RP_PULSE_CONNECT) {
+            if (!x->overrun_asked) {
+                until += pdMS_TO_TICKS(CLAIM_OVERRUN_MS);
+            } else {
+                timed = false;   // the host reset is asked: every EXEC_POLL_MS until the connect is
+                                 // gone, not every tick against a deadline long past
+            }
+        }
     } else if (!x->scan_on && x->row != RP_ROW_NONE && x->kind == RP_K_W && !x->slot_done) {
         until = x->w_end_at;
         timed = true;
