@@ -357,6 +357,24 @@ static bool s_term_failed = false;
 static uint16_t s_stale_handle = BLE_HS_CONN_HANDLE_NONE;   // handle seen with no NimBLE link
 static TickType_t s_stale_since = 0;                        // ... first seen then
 
+// ---- A claim's connect that NimBLE lost in flight (2.1.4, review of WP5/WP6) ------------------
+// A scan's own end (LE Scan Timeout) that NimBLE processes after a claim's ble_gap_connect() began
+// takes the connect with it: ble_gap_disc_complete() resets NimBLE's master state whatever it
+// holds, and hands DISC_COMPLETE to the procedure's handler, this module's. No CONNECT follows:
+// g_connecting would stay true for good, so the hunt would never be wanted again and a pended
+// RMLEAK / CLOSE never written. The controller keeps initiating with no host timeout, and a link it
+// makes is refused by the host (ble_gap_accept_master_conn(): ENOENT) and lives in the controller
+// only, with the valve no longer advertising. Only a host reset clears that (ble_hs_sched_reset():
+// HCI reset and resync, after which on_stack_sync() asks for the hunt again). The executor grants a
+// claim only at a scan's own end, so no late end should meet a connect; this is the backstop:
+// DISC_COMPLETE on this module's handler while its connect is in flight (host task), or that
+// connect still not run by NimBLE ORPHAN_CONFIRM_MS after it was first seen so (link_poll()).
+#define ORPHAN_CONFIRM_MS  1000
+static volatile uint8_t s_connect_seq = 0;  // connects issued (ble_valve_claim_start())
+static uint8_t s_orphan_seq = 0;            // link_poll(): the connect first seen lost ...
+static TickType_t s_orphan_since = 0;       // ... and when (0: none)
+static bool s_host_reset_asked = false;     // a host reset is on its way (under s_mac_lock)
+
 // Copies the provisioned valve's MAC; returns false (out = "") when there is none.
 static bool target_copy(char out[18])
 {
@@ -1881,6 +1899,27 @@ static bool claim_backoff_over(void)
     return over;
 }
 
+// A claim's connect is gone from NimBLE without its CONNECT event (see s_connect_seq): end it here
+// and reset the BLE host, which clears the controller's initiator, or the link the host never took.
+// One reset at a time. Host task (DISC_COMPLETE) or command task (link_poll()).
+static void connect_lost_by_host(const char *how)
+{
+    taskENTER_CRITICAL(&s_mac_lock);
+    bool was = g_connecting;
+    g_connecting = false;
+    bool reset = was && !s_host_reset_asked;
+    if (reset)
+        s_host_reset_asked = true;
+    taskEXIT_CRITICAL(&s_mac_lock);
+    if (!was)
+        return;
+    ESP_LOGE(BLE_TAG, "[CLAIM] NimBLE lost the valve connect in flight (%s) - %s", how,
+             reset ? "resetting the BLE host" : "a BLE host reset is on its way");
+    claim_end(false, NULL);   // not the valve's failure
+    if (reset)
+        ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+}
+
 // ---- The valve hunt, as the BLE scan executor sees it (WP5) -----------------------------------
 // The hunt is wanted while the provisioned valve is wanted (g_connect_requested), not linked and
 // no connect is in flight, and neither the portal priority window nor a Wi-Fi radio hold holds it
@@ -1986,6 +2025,7 @@ void ble_valve_claim_start(void)
     ESP_LOGI(BLE_TAG, "[CLAIM] Connecting to the valve: pulse up to %lu ms%s", (unsigned long)pulse_ms,
              lr ? " (leak response pending)" : "");
     s_hunt_announced = false;   // the hunt ends with its claim
+    s_connect_seq++;
     g_connecting = true;
     int rc = ble_gap_connect(g_own_addr_type, &peer, (int32_t)pulse_ms, NULL, ble_gap_event, NULL);
     if (rc != 0)
@@ -2153,6 +2193,14 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         }
         return 0;
 #endif
+
+    case BLE_GAP_EVENT_DISC_COMPLETE:
+        // A scan's end reaches this handler only when this module's connect was the GAP procedure
+        // NimBLE ran as it processed that end, which reset the connect (see s_connect_seq). With
+        // no connect of ours in flight it is harmless.
+        if (g_connecting)
+            connect_lost_by_host("a scan's late end reset it");
+        return 0;
 
     case BLE_GAP_EVENT_TERM_FAILURE:
         // The controller refused a terminate: the link stays up and no DISCONNECT is coming to
@@ -2924,6 +2972,7 @@ static void on_stack_reset(int reason)
 {
     ESP_LOGE(BLE_TAG, "[HOST] NimBLE stack reset: reason=%d", reason);
     g_ble_synced = false;
+    g_connecting = false;   // a reset ends every connect: none of ours can be in flight now
     clear_all_state_bits();
 }
 
@@ -2957,6 +3006,9 @@ static void on_stack_sync(void)
              ble_hs_cfg.sm_io_cap, ble_hs_cfg.sm_bonding,
              ble_hs_cfg.sm_mitm, ble_hs_cfg.sm_sc);
 
+    taskENTER_CRITICAL(&s_mac_lock);
+    s_host_reset_asked = false;   // a reset connect_lost_by_host() asked for is done
+    taskEXIT_CRITICAL(&s_mac_lock);
     g_ble_synced = true;
 
     if (g_connect_requested)
@@ -3100,6 +3152,10 @@ static bool link_stale_check(void)
 // module's back (I5); its CONNECT (status BLE_HS_EAPP) rescans when a link is wanted.
 // ble_gap_conn_active() is read before g_connecting: a connect seen in flight was issued after
 // its own g_connecting was set.
+// And the reverse: a connect of ours that NimBLE does not run (connect_lost_by_host()), still so
+// ORPHAN_CONFIRM_MS later for the same connect. Between ble_valve_claim_start()'s g_connecting and
+// its ble_gap_connect(), and between NimBLE's end of a connect and its CONNECT event, the two
+// disagree for microseconds only.
 static void link_poll(void)
 {
     (void)link_stale_check();
@@ -3108,6 +3164,25 @@ static void link_poll(void)
         int crc = ble_gap_conn_cancel();
         if (crc == 0)
             ESP_LOGW(BLE_TAG, "[CONNECT] Connect not started by this module (NimBLE re-attempt) cancelled");
+    }
+    if (g_connecting && !ble_gap_conn_active())
+    {
+        TickType_t now = xTaskGetTickCount();
+        uint8_t seq = s_connect_seq;
+        if (s_orphan_since == 0 || s_orphan_seq != seq)
+        {
+            s_orphan_seq = seq;
+            s_orphan_since = now ? now : 1;
+        }
+        else if ((now - s_orphan_since) >= pdMS_TO_TICKS(ORPHAN_CONFIRM_MS))
+        {
+            s_orphan_since = 0;
+            connect_lost_by_host("NimBLE has run no connect for 1 s");
+        }
+    }
+    else
+    {
+        s_orphan_since = 0;
     }
 }
 
