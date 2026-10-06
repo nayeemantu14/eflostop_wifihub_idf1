@@ -219,6 +219,8 @@ static volatile bool s_lr_incident = false;     // an incident is latched
 static volatile TickType_t s_lr_start = 0;      // the episode's start (0: none)
 
 static bool s_pinned = false;                   // the self-test failed: N_CODED only (init, then read-only)
+static volatile bool s_live = false;            // the executor runs (radio_policy_init() done): until then
+                                                // no BLE scan runs, and every request is answered FREE
 
 /* ---------------------------------------------------------
  * The executor's side: the ble_leak_scan task only, so nothing here locks.
@@ -359,12 +361,13 @@ void radio_policy_init(void)
         s_pinned = true;
         ESP_LOGE(RP_TAG, "Profile self-test FAILED (%s: %s) - pinned to NORMAL (N_CODED), no Wi-Fi pulses",
                  row, why);
-        return;
+    } else {
+        ESP_LOGI(RP_TAG, "Profile self-test passed: %d rows hold I1, I2, I8 and the period rule (SERVE rung %s)",
+                 (int)RP_ROW_COUNT,
+                 RP_SERVE_RUNG == RP_RUNG_SERVE_B ? "SERVE-B" :
+                 RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN ? "SERVE-A-thin" : "SERVE-A");
     }
-    ESP_LOGI(RP_TAG, "Profile self-test passed: %d rows hold I1, I2, I8 and the period rule (SERVE rung %s)",
-             (int)RP_ROW_COUNT,
-             RP_SERVE_RUNG == RP_RUNG_SERVE_B ? "SERVE-B" :
-             RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN ? "SERVE-A-thin" : "SERVE-A");
+    s_live = true;   // last: requests from now on wait for the executor's answer
 }
 
 bool radio_policy_pinned(void)
@@ -413,20 +416,22 @@ bool radio_policy_legacy_hold(void)
  * Requests (any task)
  * ========================================================= */
 // Asks for a pulse of `kind` (for JOIN: station `sta`), unless one of that kind is pending or on.
-// True when it asked.
+// True when it asked. Before the executor runs (no BLE device, NimBLE not started or failed) no
+// BLE scan runs and nobody would answer: FREE at once, so a requester never waits for nothing.
 static bool req_ask(rp_pulse_t kind, int8_t sta)
 {
     TickType_t now = rp_nz(xTaskGetTickCount());
+    bool live = s_live;
     taskENTER_CRITICAL(&s_req_lock);
     bool busy = (s_req[kind].state == RP_GRANT_PENDING || s_req[kind].state == RP_GRANT_ON);
     if (!busy) {
-        s_req[kind].state = RP_GRANT_PENDING;
+        s_req[kind].state = live ? RP_GRANT_PENDING : RP_GRANT_FREE;
         s_req[kind].end = false;
         s_req[kind].sta = sta;
         s_req[kind].at = now;
     }
     taskEXIT_CRITICAL(&s_req_lock);
-    if (!busy)
+    if (!busy && live)
         app_ble_leak_kick();
     return !busy;
 }
@@ -618,10 +623,19 @@ void radio_policy_portal_activity(http_app_activity_t kind, uint32_t client_ip)
     if (kind == HTTP_APP_ACT_DNS || (unsigned)kind >= HTTP_APP_ACT_COUNT)
         return;   // the dns_server task: nothing here keys on DNS (contingency K1 is not built)
     TickType_t now = rp_nz(xTaskGetTickCount());
-    if (kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_API_USER || kind == HTTP_APP_ACT_API_BG)
+    // The executor is woken when the mode or the SERVE rung's row may change (the page in use
+    // again: AP_IDLE -> SERVE; a hot event for SERVE-A-thin), not at every request.
+    bool wake = false;
+    if (kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_API_USER || kind == HTTP_APP_ACT_API_BG) {
+        wake = !rp_within(s_page_tick, now, RP_PAGE_ACTIVE_MS);
         s_page_tick = now;
-    if (kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_API_USER || kind == HTTP_APP_ACT_PROBE_302)
+    }
+    if (kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_API_USER || kind == HTTP_APP_ACT_PROBE_302) {
+        wake = wake || (RP_SERVE_RUNG == RP_RUNG_SERVE_A_THIN && !rp_within(s_hot_tick, now, RP_HOT_MS));
         s_hot_tick = now;
+    }
+    if (wake)
+        app_ble_leak_kick();
     if ((kind == HTTP_APP_ACT_PAGE || kind == HTTP_APP_ACT_PROBE_302) && client_ip != 0) {
         bool first = false;
         taskENTER_CRITICAL(&s_sta_lock);
@@ -635,6 +649,49 @@ void radio_policy_portal_activity(http_app_activity_t kind, uint32_t client_ip)
         if (first)
             app_ble_leak_kick();
     }
+}
+
+void radio_policy_stations_prune(const wifi_sta_list_t *list)
+{
+    TickType_t now = xTaskGetTickCount();
+    bool gone = false;
+    taskENTER_CRITICAL(&s_sta_lock);
+    for (int i = 0; i < RP_STA_MAX; i++) {
+        rp_sta_t *s = &s_sta[i];
+        if (s->state != RP_STA_JOINED)
+            continue;
+        TickType_t seen = s->join_at ? s->join_at : s->lease_at;   // a station whose join was not seen
+        if (seen != 0 && (now - seen) < pdMS_TO_TICKS(RP_STA_PRUNE_MS))
+            continue;
+        bool listed = false;
+        for (int k = 0; list != NULL && k < list->num && k < ESP_WIFI_MAX_CONN_NUM && !listed; k++)
+            listed = (memcmp(list->sta[k].mac, s->mac, 6) == 0);
+        if (!listed) {
+            s->state = RP_STA_LEFT;
+            gone = true;
+        }
+    }
+    taskEXIT_CRITICAL(&s_sta_lock);
+    if (gone)
+        app_ble_leak_kick();
+}
+
+bool radio_policy_join_settling(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    bool joining = false;
+    taskENTER_CRITICAL(&s_sta_lock);
+    for (int i = 0; i < RP_STA_MAX && !joining; i++) {
+        joining = (s_sta[i].state == RP_STA_JOINED && s_sta[i].lease_at == 0 &&
+                   rp_within(s_sta[i].join_at, now, RP_JOIN_SETTLE_MS));
+    }
+    taskEXIT_CRITICAL(&s_sta_lock);
+    if (!joining) {
+        taskENTER_CRITICAL(&s_req_lock);
+        joining = (s_req[RP_PULSE_JOIN].state == RP_GRANT_PENDING || s_req[RP_PULSE_JOIN].state == RP_GRANT_ON);
+        taskEXIT_CRITICAL(&s_req_lock);
+    }
+    return joining;
 }
 
 /* =========================================================

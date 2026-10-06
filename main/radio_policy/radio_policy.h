@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "freertos/FreeRTOS.h"
+#include "esp_wifi_types.h"
 #include "http_app.h"
 
 #ifdef __cplusplus
@@ -74,6 +75,10 @@ typedef enum {
 #define RP_JOIN_SPACING_JIT_MS 10000   // ... + U(0, this) apart
 #define RP_LR_JOIN_HOLDOFF_MS  30000   // under a leak response: no assist in its first 30 s ...
 #define RP_LR_JOIN_EVERY_MS    60000   // ... then at most one per 60 s
+#define RP_JOIN_SETTLE_MS      10000   // I7: no hub list scan or router retry this soon after a join
+                                       // that has no lease yet (radio_policy_join_settling())
+#define RP_STA_PRUNE_MS         2000   // a station the driver no longer lists is marked left only
+                                       // once its join is this old (radio_policy_stations_prune())
 #define RP_LR_OVERLAY_CAP_MS   (10u * 60u * 1000u)   // the LR overlay: at most this per episode (D5)
 
 /* ---- The profile table (plan 4.8): one row is one scan pattern, its slots run in turn --------------
@@ -196,13 +201,26 @@ void radio_policy_station_leased(const uint8_t mac[6], uint32_t ip);
  *  first 302 or page (by its address) ends its join assist 0.3 s later. */
 void radio_policy_portal_activity(http_app_activity_t kind, uint32_t client_ip);
 
+/** The SoftAP's stations as the driver lists them now (wifi_task, every pass; NULL: the SoftAP is
+ *  down). A station of the table that is not in the list, and joined RP_STA_PRUNE_MS ago or more
+ *  (a list read just before a join must not undo it), left with no event: it is marked left, which
+ *  ends its join assist. */
+void radio_policy_stations_prune(const wifi_sta_list_t *list);
+
+/** Plan I7: a station is joining the SoftAP: one joined less than RP_JOIN_SETTLE_MS ago and has
+ *  no lease yet, or a JOIN_ASSIST is asked for or runs. The hub's own off-channel work (the router
+ *  retry, a network-list scan) waits for it, so the SoftAP stays on its channel for the station's
+ *  DHCP. Any task; a short spinlock. */
+bool radio_policy_join_settling(void);
+
 /* ---- The grant protocol (plan 4.4) for RETRY and LIST --------------------------------------------- */
 typedef enum {
     RP_GRANT_IDLE = 0,    // nothing asked, or the pulse is over
     RP_GRANT_PENDING,     // asked, waiting for the executor
     RP_GRANT_ON,          // BLE is off for this pulse now, until radio_policy_pulse_end() or its deadline
     RP_GRANT_FREE,        // no pulse is needed: BLE is not scanning (a legacy hold, BLE_IDLE, not
-                          // synced) or the SoftAP is down (RETRY/LIST are pulses only while it is up)
+                          // synced, or the executor not started: no BLE device, NimBLE not up) or
+                          // the SoftAP is down (RETRY/LIST are pulses only while it is up)
     RP_GRANT_REFUSED,     // not granted (limits, or RP_GRANT_WAIT_MS passed): go on without a pulse
 } rp_grant_t;
 

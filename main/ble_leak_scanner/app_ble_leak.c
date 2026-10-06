@@ -1513,8 +1513,9 @@ static TickType_t executor_pass(exec_t *x)
     // claim goes first (its RMLEAK / CLOSE outranks a Connect: a stranger's Connects on the open
     // SoftAP must not hold it off), then SUBMIT, JOIN, RETRY and LIST; otherwise SUBMIT, JOIN, RETRY,
     // LIST, then the claim. In a legacy hold the radio policy answers Wi-Fi requests FREE (BLE does
-    // not scan), and only the hold's hunt claims.
-    if (x->pulse == RP_PULSE_NONE && !x->recovery && synced) {
+    // not scan), and only the hold's hunt claims. Not synced: the same (PAUSED), and no claim
+    // (radio_policy_exec_connect_len() answers 0), so a requester never waits out its 2 s for nothing.
+    if (x->pulse == RP_PULSE_NONE && !x->recovery) {
         bool boundary = !x->scan_on && (x->row == RP_ROW_NONE || x->slot_done);
         bool at_coded_end = boundary && x->slot_done && x->coded_last &&
                             (now - x->ended_at) <= pdMS_TO_TICKS(RP_JITTER_MS) + 1;
