@@ -91,6 +91,9 @@ static bool ap_list_wanted = false;
  * clears it): once per AP session, not at every SCAN_DONE that finds no room. wifi_manager task
  * only. */
 static bool ap_list_logged = false;
+/* LOCAL PATCH (2.1.4 C10b): the last try at the list's allocation from the task's loop (see
+ * there); wifi_manager task only */
+static TickType_t ap_list_try_tick = 0;
 /* LOCAL PATCH (2.1.4 C10b): the network list is a cache. GET /ap.json only reads it (it ordered an
  * all-channel scan at every 3.8 s poll); a scan is ordered by the page's load when the list is
  * empty or older than WIFI_MANAGER_LIST_STALE_MS, and by the page's Rescan (POST /scan.json), at
@@ -1102,6 +1105,7 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 
 	if(err != ESP_OK && err != ESP_FAIL){
 		ESP_LOGW(TAG, "esp_wifi_scan_get_ap_record failed (%s) - network list kept", esp_err_to_name(err));
+		wifi_manager_scan_failed();	/* LOCAL PATCH (2.1.4 C10b): the page may order another 10 s on */
 		return;
 	}
 
@@ -1144,8 +1148,8 @@ bool wifi_manager_heap_has(uint32_t caps, size_t size){
 }
 
 /**
- * @brief LOCAL PATCH (2.1.4 C2b): allocates the network list (START_AP, or a SCAN_DONE after a
- * failed allocation while the AP is up). wifi_manager task only.
+ * @brief LOCAL PATCH (2.1.4 C2b): allocates the network list (START_AP, or a SCAN_DONE or the task
+ * loop's retry after a failed allocation while the AP is up). wifi_manager task only.
  * LOCAL PATCH (2.1.4 WP1): only while the heap has room to spare (wifi_manager_heap_has()), so
  * a heap that stays low (the AP-start dip, a laptop flood) is not met with a failed malloc() at
  * every scan the page orders, and its "no memory" line is printed once per AP start.
@@ -1328,8 +1332,7 @@ bool wifi_manager_scan_in_flight(){
 bool wifi_manager_ap_list_built(){
 	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. Unlocked reads: a stale one costs one order
 	 * too many, or one a poll late */
-	return ap_list_tick != 0 ||
-			(accessp_json == NULL && !wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ACCESSP_JSON_SIZE));
+	return ap_list_tick != 0 || accessp_json == NULL;
 }
 
 /**
@@ -2267,6 +2270,23 @@ void wifi_manager( void * pvParameters ){
 			}
 		}
 
+		/* LOCAL PATCH (2.1.4 C10b): a list the AP's start found no room for is tried again every
+		 * WIFI_MANAGER_AP_SERVERS_RETRY_MS while the AP is up, not only at a SCAN_DONE: the page's
+		 * polls order the list's scan only once it has its buffer (wifi_manager_ap_list_built()),
+		 * so no scan is ordered just to allocate it. Each try needs WP1's margin and prints
+		 * nothing (the "no memory" line is once per AP start) */
+		if(ap_list_wanted && accessp_json == NULL){
+			TickType_t since = xTaskGetTickCount() - ap_list_try_tick;
+			if(since >= pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS)){
+				ap_list_try_tick = xTaskGetTickCount();
+				wifi_manager_alloc_ap_list();
+				since = 0;
+			}
+			if(accessp_json == NULL && pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS) - since < wait){
+				wait = pdMS_TO_TICKS(WIFI_MANAGER_AP_SERVERS_RETRY_MS) - since;
+			}
+		}
+
 		xStatus = xQueueReceive( wifi_manager_queue, &msg, wait );
 
 		if( xStatus == pdPASS ){
@@ -2575,16 +2595,18 @@ void wifi_manager( void * pvParameters ){
 						on_uncommitted = true;
 						leave = true;
 					}
-					else if(kind == CONNECTION_REQUEST_USER && (state == WM_CAND_POSTED || state == WM_CAND_WAITING)){
-						ESP_LOGW(TAG, "user connect: a candidate a newer Connect replaced got its IP - not saved, left next");
-						on_uncommitted = true;
-					}
 					else if(uxBits & WIFI_MANAGER_REQUEST_DISCONNECT_BIT){
-						/* a forget is under way: what this IP's attempt used is not saved, and the
-						 * forget's disconnect leaves it (below) */
+						/* a forget is under way (before a candidate a newer Connect posted, which the
+						 * forget drops): what this IP's attempt used is not saved, and the forget's
+						 * disconnect leaves it (below). A forget whose disconnect call failed is
+						 * dropped at its expiry instead, the link kept, as WP1 drops any such forget */
 						ESP_LOGW(TAG, "an IP while a forget is under way - nothing saved");
 						on_uncommitted = true;
 						leave = true;
+					}
+					else if(kind == CONNECTION_REQUEST_USER && (state == WM_CAND_POSTED || state == WM_CAND_WAITING)){
+						ESP_LOGW(TAG, "user connect: a candidate a newer Connect replaced got its IP - not saved, left next");
+						on_uncommitted = true;
 					}
 					else if(on_uncommitted){
 						/* a new IP (a DHCP renewal) on a network that was not committed: still not */

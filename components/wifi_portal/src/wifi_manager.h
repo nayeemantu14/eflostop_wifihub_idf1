@@ -398,10 +398,10 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
  * the scan too (wifi_manager_scan_request(false, ...): 20 s after the last order, or 10 s after
  * one that failed): the order of the page's load can fail (a scan cannot start while a connect
  * attempt runs, ESP_ERR_WIFI_STATE, and an attempt that starts stops a running scan), and nothing
- * else would order it again. While the list has no buffer (low heap) it reads as built unless
- * the heap now has room for one (wifi_manager_heap_has()): a poll's scan then gets its SCAN_DONE
- * to allocate it before it reads the records, and no scan is ordered that could not build it.
- * Any task; a stale read costs one order too many, or one a poll late.
+ * else would order it again. While the list has no buffer (low heap) it reads as built: no scan is
+ * ordered that could not build it; the task's loop tries the allocation again every 5 s (WP1's
+ * margin), and the polls order the scan once it has succeeded. Any task; a stale read costs one
+ * order too many, or one a poll late.
  */
 bool wifi_manager_ap_list_built();
 

@@ -801,22 +801,23 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				 * as before C6: the page still gets it, and a scan whose rebuild finds the lock held
 				 * over 1 s counts as failed (the page may order another 10 s on). With no list
 				 * buffer (the AP-start heap dip) an empty list is sent, the lock given back first */
-				size_t ap_len = (ap_buf != NULL) ? strlen(ap_buf) : 0;
-				char *copy = (ap_buf != NULL && wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ap_len + 1)) ?
-						malloc(ap_len + 1) : NULL;
 				if(ap_buf == NULL){
 					wifi_manager_unlock_json_buffer();
 					http_app_send(req, "[]\n", 3);	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
 				}
-				else if(copy != NULL){
-					memcpy(copy, ap_buf, ap_len + 1);
-					wifi_manager_unlock_json_buffer();
-					http_app_send(req, copy, ap_len);	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
-					free(copy);
-				}
 				else{
-					http_app_send(req, ap_buf, ap_len);
-					wifi_manager_unlock_json_buffer();
+					size_t ap_len = strlen(ap_buf);
+					char *copy = wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ap_len + 1) ? malloc(ap_len + 1) : NULL;
+					if(copy != NULL){
+						memcpy(copy, ap_buf, ap_len + 1);
+						wifi_manager_unlock_json_buffer();
+						http_app_send(req, copy, ap_len);	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
+						free(copy);
+					}
+					else{
+						http_app_send(req, ap_buf, ap_len);
+						wifi_manager_unlock_json_buffer();
+					}
 				}
 			}
 			else{
