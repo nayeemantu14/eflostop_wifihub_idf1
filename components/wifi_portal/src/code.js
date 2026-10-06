@@ -12,9 +12,11 @@
   var IDLE_MS = 60000, POLL_MS = 3800, POLL_CONNECT_MS = 950;
   var CONNECT_TIMEOUT_MS = 30000, EMPTY_LIST_MS = 8000, RESCAN_GAP_MS = 20000;
 
-  // status.json "reason": ESP-IDF disconnect reasons; 250: no IP
+  // status.json "reason": ESP-IDF disconnect reasons; 250: no IP. 210, 211: found, but its
+  // security does not match (Enterprise, OWE, WPA1/WEP, a password typed for an open network)
   var WRONG_PASSWORD = [2, 14, 15, 23, 202, 204];
-  var NOT_FOUND = [201, 210, 211, 212];
+  var NOT_FOUND = [201, 212];
+  var SECURITY = [210, 211];
   var NO_IP = 250;
 
   var views = ["view-scan", "view-password", "view-manual", "view-connecting", "view-details"];
@@ -285,7 +287,7 @@
 
   var CONNECT_ERRORS = {
     busy: "WiFiHub is busy - try again",
-    ssid: "Network name too long (32 bytes at most)",
+    ssid: "This network name cannot be used (32 bytes at most)",
     pwd: "Password too long",
     enc: "A character cannot be sent"
   };
@@ -359,6 +361,9 @@
       ["Wrong password", "The password for " + q + " was not accepted."] :
       NOT_FOUND.indexOf(reason) >= 0 ?
       ["Network not found", q + " not found - is it 2.4 GHz and in range?"] :
+      SECURITY.indexOf(reason) >= 0 ?
+      ["Security not supported", "WiFiHub cannot use the security of " + q +
+        " - check the password, or whether the network needs one."] :
       reason === NO_IP ?
       ["No IP address", q + " gave WiFiHub no IP address."] :
       ["Connection failed", "WiFiHub could not connect to " + q + "."];
@@ -465,6 +470,7 @@
     $("input-manual-ssid").value = ssid;
     $("input-manual-pwd").value = "";
     clearErr("input-manual-ssid", "ssid-error");
+    clearErr("input-manual-pwd", "mpwd-error");
     setStep(2);
     showView("view-manual");
     setTimeout(function () { $(ssid ? "input-manual-pwd" : "input-manual-ssid").focus(); }, 100);
@@ -553,13 +559,15 @@
         byteLen(enc) > 32 ? "The network name is too long (32 bytes at most)" : null;
       if (err) return fieldError("input-manual-ssid", "ssid-error", err);
       err = passwordError(pwd, -1);
-      if (err) return fieldError("input-manual-pwd", "ssid-error", err);
+      if (err) return fieldError("input-manual-pwd", "mpwd-error", err);
       clearErr("input-manual-ssid", "ssid-error");
+      clearErr("input-manual-pwd", "mpwd-error");
       performConnect({ ssid: ssid, raw: false, chan: 0, auth: -1 }, pwd, $("btn-manual-connect"),
         function (msg) { $("ssid-error").textContent = msg; });
     });
     on("input-manual-ssid", "input", function () { clearErr("input-manual-ssid", "ssid-error"); });
     on("input-manual-ssid", "keydown", function (e) { if (e.key === "Enter") $("input-manual-pwd").focus(); });
+    on("input-manual-pwd", "input", function () { clearErr("input-manual-pwd", "mpwd-error"); });
     on("input-manual-pwd", "keydown", function (e) { if (e.key === "Enter") $("btn-manual-connect").click(); });
 
     on("btn-done", "click", function () { selected = null; toScan(); });
