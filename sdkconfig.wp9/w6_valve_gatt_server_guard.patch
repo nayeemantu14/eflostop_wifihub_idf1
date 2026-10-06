@@ -1,0 +1,16 @@
+diff --git a/main/ble_valve/app_ble_valve.c b/main/ble_valve/app_ble_valve.c
+index 4ce0d05..da5c65f 100644
+--- a/main/ble_valve/app_ble_valve.c
++++ b/main/ble_valve/app_ble_valve.c
+@@ -3294,9 +3294,11 @@ static void ble_starter_task(void *param)
+         return;
+     }
+ 
++#if MYNEWT_VAL(BLE_GATTS)
+     ble_svc_gap_init();
+     ble_svc_gatt_init();
+     ble_svc_gap_device_name_set("eFloStopHub");
++#endif
+ 
+     ble_hs_cfg.sync_cb = on_stack_sync;
+     ble_hs_cfg.reset_cb = on_stack_reset;

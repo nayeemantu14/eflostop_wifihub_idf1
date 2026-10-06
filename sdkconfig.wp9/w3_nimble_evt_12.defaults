@@ -1,0 +1,25 @@
+# 2.1.4 WP9 line W3 (plan section 8, D14): 12 high-priority NimBLE HCI event buffers, not 30.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w3_nimble_evt_12.defaults" build
+# Never put this line in the project's sdkconfig. After the gate passes it moves to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# Frees: 18 of the buffers that carry every HCI event except advertising reports (those use the
+#   8 discardable ones, BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT, unchanged): 260 B each, allocated
+#   at nimble_port_init() and kept; and the NimBLE port's static event entries sized from them.
+# Estimate: 4,968 B: heap 4,680 B (transport_pool_evt 7,800 -> 3,120 B) and .bss 288 B
+#   (npl_os_freertos.c 216 B, ble_hs.c 72 B), both from scratch compiles of IDF 5.5.1's sources.
+# Risk: an event that finds these 12 and the 8 discardable buffers all taken is not dropped:
+#   esp_nimble_hci.c's host_rcv_pkt() asserts (assert(evbuf != NULL)) and the hub reboots.
+# Gate (G-M): VAL-01 and G6b (0x3E induced x20); P11 and P14 (leak -> RMLEAK -> CLOSE, the valve
+#   unpowered, then linked); 0 asserts in host_rcv_pkt over them and over a 24 h G4 NORMAL soak;
+#   secondary, adverts per burst within +-5 % of CP7's in the same setup (plan: G0's). Margin, on
+#   the pool-diagnostic image (README.md): "evt" lowest free >= 4 of 12 after the runs.
+# Verified in ESP-IDF 5.5.1: int, no range (components/bt/host/nimble/Kconfig.in line 377), read
+#   as MYNEWT_VAL(BLE_TRANSPORT_EVT_COUNT) by transport.c and npl_os_freertos.c; the 81 NimBLE
+#   sources compile with no warning, and the project's 32 objects are byte-identical. kconfgen
+#   gives no warning; the alias BT_NIMBLE_HCI_EVT_HI_BUF_COUNT follows.
+CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=12

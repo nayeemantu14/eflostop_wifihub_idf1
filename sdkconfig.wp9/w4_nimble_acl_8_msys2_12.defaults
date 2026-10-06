@@ -1,0 +1,35 @@
+# 2.1.4 WP9 line W4 (plan section 8, D14): 8 NimBLE ACL buffers from the controller, not 24, and
+# 12 msys_2 mbufs, not 24.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w4_nimble_acl_8_msys2_12.defaults" build
+# Never put these lines in the project's sdkconfig. After the gate passes they move to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# Frees: 16 of the buffers that receive the valve link's ACL data (GATT responses and
+#   notifications; 304 B each) and 12 of the larger msys mbufs (320 B each; the host takes one
+#   only for a buffer that does not fit an msys_1 block). Both pools are allocated at
+#   nimble_port_init() and kept. msys_1 (12 x 256 B), where the hub's short GATT writes go, is
+#   unchanged.
+# Estimate: 8,704 B of heap: transport_pool_acl 7,296 -> 2,432 B, msys_2 7,680 -> 3,840 B (exact
+#   pool sizes from a scratch compile against IDF 5.5.1's headers). No static or code change.
+# Risk: no host flow control on this target (BT_NIMBLE_HS_FLOW_CTRL off), so an ACL packet that
+#   finds the pool empty waits up to 29 ticks in the controller's callback ("ACL buf alloc failed
+#   N times", "Free ACL mbufs: N" from esp_rom_printf, no log tag) and is then dropped ("MBUF alloc
+#   stuck"): a lost GATT response, a GATT timeout. msys_2 serves only buffers larger than an
+#   msys_1 block, and msys never falls through to another pool: if it is empty, a GATT write
+#   returns BLE_HS_ENOMEM, which the valve module retries as a busy GATT pool (every 250 ms, at
+#   most 5 s): RMLEAK and CLOSE delayed, not dropped.
+# Gate (G-M): G6b (0x3E induced x20) and VAL-01; P11 and P14 with the leak -> CLOSE time
+#   unchanged (LS-1: within 200 ms with the valve linked); none of the three lines above, and no
+#   "busy GATT pool" retry, over the runs and a 24 h G4 NORMAL soak. Margin, on the
+#   pool-diagnostic image (README.md): "acl" lowest free >= 3 of 8 and "msys_2" >= 4 of 12.
+# Verified in ESP-IDF 5.5.1: both int, no range (components/bt/host/nimble/Kconfig.in lines 331
+#   and 352); on this target the ACL pool holds ACL_FROM_LL_COUNT buffers (transport.c: the host
+#   transport native, the controller's not). The 81 NimBLE sources compile with no warning and
+#   unchanged sizes; the project's 32 objects are byte-identical. kconfgen gives no warning; the
+#   alias BT_NIMBLE_ACL_BUF_COUNT follows.
+CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=8
+CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=12

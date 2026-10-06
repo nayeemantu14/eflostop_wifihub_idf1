@@ -1,0 +1,34 @@
+# 2.1.4 WP9 line W6 (plan section 8, D14): NimBLE without the peripheral and broadcaster roles.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w6_nimble_central_observer_only.defaults" build
+# Never put these lines in the project's sdkconfig. After the gate passes they move to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# DOES NOT LINK WITH TODAY'S SOURCES. BT_NIMBLE_GATT_SERVER depends on the peripheral role, so it
+#   goes too, and with it NimBLE's GAP and GATT services: app_ble_valve.c's ble_svc_gap_init(),
+#   ble_svc_gatt_init() and ble_svc_gap_device_name_set() are left undefined (scratch compile,
+#   nm). The variant needs w6_valve_gatt_server_guard.patch here (the three calls under
+#   #if MYNEWT_VAL(BLE_GATTS); with today's config the object is byte-identical), applied in a
+#   worktree; the patch lands with the line.
+# Frees: the GATT server and the ATT server, the GAP and GATT services and their attribute tables,
+#   and the advertising code. The hub keeps no GATT database: an ATT request from the valve (for
+#   example a read of the hub's device name, "eFloStopHub") gets an ATT error instead.
+# Estimate: 1,226 B static in the objects the image links (.bss 914 B: ble_att_svr.c 846,
+#   ble_gatts.c 54, the two services 14; .data 312 B), plus the attribute tables
+#   ble_gatts_start() allocates on the heap; flash about -18 to -20 KB. The other twelve services
+#   that go are not linked today.
+# Gate (G-M): VAL-01 in full (pairing with the passkey, bonding, encryption, discovery, the RMLEAK
+#   and CLOSE writes and their read-backs) on a valve paired before and on one paired afresh; G6b
+#   (0x3E induced x20); P11 and P14. Any ATT error or pairing failure on the valve's side fails it.
+# Verified in ESP-IDF 5.5.1: bool options (components/bt/host/nimble/Kconfig.in lines 147 and 154);
+#   the services menu depends on BT_NIMBLE_GATT_SERVER, so kconfgen also drops it and its options
+#   from sdkconfig (no warning); central, observer, extended scanning and the GATT client stay.
+#   The 81 NimBLE sources compile with no warning; the four NimBLE-internal references left
+#   undefined are in API functions nothing calls (ble_gap_host_check_status,
+#   ble_gatts_notify_custom and the like), which --gc-sections should drop: the variant's link
+#   confirms it.
+# CONFIG_BT_NIMBLE_ROLE_PERIPHERAL is not set
+# CONFIG_BT_NIMBLE_ROLE_BROADCASTER is not set

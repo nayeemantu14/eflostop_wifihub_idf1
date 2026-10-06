@@ -1,0 +1,29 @@
+# 2.1.4 WP9 line W5 (plan section 8, D14): one NimBLE host connection, not 3.
+#
+# STAGED, OFF BY DEFAULT: no build reads this file unless it names it, so CP7's image is unchanged.
+# Built only as a G-M variant, in a build folder and with an sdkconfig of its own (README.md here):
+#   idf.py -B <folder> -D SDKCONFIG=<folder>\sdkconfig.wp9
+#          -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.wp9/w5_nimble_one_connection.defaults" build
+# Never put this line in the project's sdkconfig. After the gate passes it moves to
+# sdkconfig.defaults with an I14 guard in main/main.c (README.md has the guard).
+#
+# Frees: two of the host's connection slots: ble_hs_conn's pool, three L2CAP channels per slot,
+#   ble_gap.c's per-connection arrays and the NimBLE port's per-connection events, all static.
+#   The controller's own limit (BT_CTRL_BLE_MAX_ACT 6) is not touched.
+# Estimate: 528 B of .bss in the objects the image links (ble_hs_conn.c 264, ble_l2cap.c 168,
+#   npl_os_freertos.c 72, ble_gap.c 24; scratch compiles of IDF 5.5.1's sources) and a few bytes of
+#   heap. Small: plan section 8 ships it only if exactly one valve is ever linked.
+# Precondition, true in the code at d0d2bd3: one ble_gap_connect() call (app_ble_valve.c,
+#   ble_valve_claim_start(), granted by the executor's exec_claim(); I5) to the provisioned valve;
+#   BLE leak sensors are only scanned; the hub never advertises.
+# Risk: ble_gap_connect() refuses with BLE_HS_ENOMEM (rc=6) when no slot is free, before the
+#   controller sees it. With one slot, a link NimBLE still holds but the valve module no longer
+#   tracks (an orphan connect that completes after its cancel) makes every claim fail at once
+#   ("[SCAN] ble_gap_connect rc=6") until that link is closed.
+# Gate (G-M): G6b (0x3E induced x20) and the 100 valve power cycles (B2's statistical gate), with 0
+#   "[SCAN] ble_gap_connect rc=6"; VAL-01; P11 and P14.
+# Verified in ESP-IDF 5.5.1: int, range 1-9 on this target (components/bt/host/nimble/Kconfig.in
+#   line 65), reaching MYNEWT_VAL(BLE_MAX_CONNECTIONS) through the alias NIMBLE_MAX_CONNECTIONS
+#   (esp_nimble_cfg.h); the 81 NimBLE sources compile with no warning; the project's 32 objects are
+#   byte-identical, and none of them uses the value. kconfgen gives no warning.
+CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
