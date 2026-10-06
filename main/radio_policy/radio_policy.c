@@ -237,6 +237,7 @@ typedef struct {
     uint8_t state;        // rp_grant_t
     bool end;             // the requester ended its pulse
     int8_t sta;           // JOIN: the station's index
+    bool reask;           // SUBMIT: a new Connect asked while its predecessor's pulse was ending
 #if CONFIG_APP_RADIO_LAB
     bool k1;              // JOIN: asked by the lab's K1 (a station's first DNS query): RP_LAB_K1_MS at most
 #endif
@@ -476,11 +477,16 @@ static bool req_ask(rp_pulse_t kind, int8_t sta)
     if (!busy) {
         s_req[kind].state = live ? RP_GRANT_PENDING : RP_GRANT_FREE;
         s_req[kind].end = false;
+        s_req[kind].reask = false;
         s_req[kind].sta = sta;
         s_req[kind].at = now;
 #if CONFIG_APP_RADIO_LAB
         s_req[kind].k1 = false;
 #endif
+    } else if (kind == RP_PULSE_SUBMIT && s_req[kind].state == RP_GRANT_ON && s_req[kind].end) {
+        // A Connect that starts while its predecessor's pulse is ended but the executor has not yet
+        // seen that end: asked again at that end (radio_policy_exec_pulse_end()), not dropped.
+        s_req[kind].reask = true;
     }
     taskEXIT_CRITICAL(&s_req_lock);
     if (!busy && live)
@@ -494,6 +500,7 @@ static void req_set(rp_pulse_t kind, rp_grant_t state)
     taskENTER_CRITICAL(&s_req_lock);
     s_req[kind].state = state;
     s_req[kind].end = false;
+    s_req[kind].reask = false;
     taskEXIT_CRITICAL(&s_req_lock);
 }
 
@@ -1416,7 +1423,16 @@ void radio_policy_exec_pulse_end(TickType_t now)
         s_x.i2b_peak = used;
     if (k == RP_PULSE_CONNECT)
         return;
-    req_set(k, RP_GRANT_IDLE);
+    // A Connect that started as this SUBMIT's Connect ended asked again (req_ask()): pending from
+    // now, while it still runs (always honoured).
+    taskENTER_CRITICAL(&s_req_lock);
+    bool again = (k == RP_PULSE_SUBMIT && s_req[k].reask && s_submit);
+    s_req[k].state = again ? RP_GRANT_PENDING : RP_GRANT_IDLE;
+    s_req[k].end = false;
+    s_req[k].reask = false;
+    if (again)
+        s_req[k].at = rp_nz(now);
+    taskEXIT_CRITICAL(&s_req_lock);
     uint32_t ms = rp_ms(now - s_x.pulse_at);
     if (k == RP_PULSE_JOIN) {
         int8_t i = s_x.join_sta;
@@ -1607,6 +1623,7 @@ static bool lab_k1_ask(int8_t sta)
     if (!busy) {
         s_req[RP_PULSE_JOIN].state = RP_GRANT_PENDING;
         s_req[RP_PULSE_JOIN].end = false;
+        s_req[RP_PULSE_JOIN].reask = false;
         s_req[RP_PULSE_JOIN].sta = sta;
         s_req[RP_PULSE_JOIN].at = now;
         s_req[RP_PULSE_JOIN].k1 = true;
