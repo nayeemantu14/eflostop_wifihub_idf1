@@ -442,7 +442,8 @@
     }
     if (idle) return;
     if (!statusBusy && t - lastStatusPoll >= POLL_MS) pollStatus(true);
-    if (t - lastListPoll >= POLL_MS) refreshList(true);
+    // not in a result view: its list polls would count as page use and hold off the router retry
+    if (currentView !== "view-connecting" && t - lastListPoll >= POLL_MS) refreshList(true);
   }
 
   function clearErr(input, errEl) {
