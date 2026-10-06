@@ -956,10 +956,15 @@ bool provisioning_get_device_set(prov_device_set_t *out)
 // After a timeout, provisioning_get_summary() answers "busy" at once for this long (2.1.4 WP3
 // review): on one iothub_task pass the lifecycle, the session's twin and an owed twin each
 // read it, and each 1 s wait held that task, which also evaluates the leaks; all three are
-// built again later. iothub_task only (the summary's callers), so no lock.
+// built again later. The hold-off is the timed-out task's own (review F6): only that task
+// reads or writes this state while it holds it, and any other caller waits as usual and leaves
+// it alone, so a caller on another task can neither skip a read it should have waited for nor
+// cut this one short. Both of today's callers run on iothub_task. No lock: a 32-bit handle and
+// tick, written by one task at a time; two first timeouts at once leave either owner, which is
+// harmless (one more 1 s wait).
 #define SUMMARY_BUSY_HOLDOFF_MS 2000
-static bool       s_summary_busy      = false;
-static TickType_t s_summary_busy_tick = 0;
+static TaskHandle_t s_summary_busy_task = NULL;   // the task whose read timed out; NULL: none
+static TickType_t   s_summary_busy_tick = 0;
 
 bool provisioning_get_summary(prov_summary_t *out)
 {
@@ -970,17 +975,23 @@ bool provisioning_get_summary(prov_summary_t *out)
     if (!g_initialized || g_prov_mutex == NULL) {
         return false;
     }
-    if (s_summary_busy &&
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    bool mine = (s_summary_busy_task == self);
+    if (mine &&
         (xTaskGetTickCount() - s_summary_busy_tick) < pdMS_TO_TICKS(SUMMARY_BUSY_HOLDOFF_MS)) {
         return false;
     }
-    s_summary_busy = false;
 
     // Silent on a timeout: the caller says what it does instead.
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        s_summary_busy      = true;
-        s_summary_busy_tick = xTaskGetTickCount();
+        if (mine || s_summary_busy_task == NULL) {
+            s_summary_busy_tick = xTaskGetTickCount();
+            s_summary_busy_task = self;
+        }
         return false;
+    }
+    if (mine) {
+        s_summary_busy_task = NULL;   // read: the hold-off is over
     }
     // Each value as its own getter reads it (provisioning_get_valve_mac(),
     // provisioning_get_lora_sensors(), provisioning_get_ble_leak_sensors(),
