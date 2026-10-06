@@ -1772,19 +1772,20 @@ static int64_t           s_twin_retry_ms     = 0;   // iothub_task only
 // provisioned false, valve_id null, counts 0). A busy read builds nothing: both callers
 // leave the report owed and build it again (post_twin_reported(), post_session_twin()).
 // iothub_task only. The caller frees it.
-static bool s_twin_prov_busy_logged = false;   // iothub_task only: one W line per busy episode
+#define PROV_BUSY_LOG_S 60   // at most one "provisioning busy" W line a minute
+static uint32_t s_twin_prov_busy_log_s = 0;   // iothub_task only: the next one allowed from (uptime s)
 
 static char *build_twin_reported(void)
 {
     prov_summary_t prov;
     if (!provisioning_get_summary(&prov)) {
-        if (!s_twin_prov_busy_logged) {
-            s_twin_prov_busy_logged = true;
+        uint32_t now_s = (uint32_t)(snap_now_ms() / 1000);
+        if (now_s >= s_twin_prov_busy_log_s) {
+            s_twin_prov_busy_log_s = now_s + PROV_BUSY_LOG_S;
             ESP_LOGW(IOTHUB_TAG, "Twin report not built - provisioning busy for 1 s, built again later");
         }
         return NULL;
     }
-    s_twin_prov_busy_logged = false;
 
     cJSON *root = cJSON_CreateObject();
     if (!root) return NULL;
@@ -1908,6 +1909,14 @@ static void post_twin_reported(void)
 {
     // mqtt_client is NULL until cloud_bringup() succeeds.
     if (mqtt_client == NULL || !telemetry_v2_is_connected()) return;
+    // Within TWIN_REPORT_RETRY_MS of a report not built (provisioning busy) or refused: owed,
+    // and built when that time is up (the loop's owed post). A device-set change's report waits
+    // too, so a busy provisioning mutex is not waited for again on every retry of that change
+    // (2.1.4 WP3 review).
+    if (snap_now_ms() < s_twin_retry_ms) {
+        s_twin_due = true;
+        return;
+    }
 
     uint32_t gen = telemetry_v2_session_gen();
     uint16_t seq = 0;

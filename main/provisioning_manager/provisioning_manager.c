@@ -953,6 +953,14 @@ bool provisioning_get_device_set(prov_device_set_t *out)
     return true;
 }
 
+// After a timeout, provisioning_get_summary() answers "busy" at once for this long (2.1.4 WP3
+// review): on one iothub_task pass the lifecycle, the session's twin and an owed twin each
+// read it, and each 1 s wait held that task, which also evaluates the leaks; all three are
+// built again later. iothub_task only (the summary's callers), so no lock.
+#define SUMMARY_BUSY_HOLDOFF_MS 2000
+static bool       s_summary_busy      = false;
+static TickType_t s_summary_busy_tick = 0;
+
 bool provisioning_get_summary(prov_summary_t *out)
 {
     if (!out) {
@@ -962,9 +970,16 @@ bool provisioning_get_summary(prov_summary_t *out)
     if (!g_initialized || g_prov_mutex == NULL) {
         return false;
     }
+    if (s_summary_busy &&
+        (xTaskGetTickCount() - s_summary_busy_tick) < pdMS_TO_TICKS(SUMMARY_BUSY_HOLDOFF_MS)) {
+        return false;
+    }
+    s_summary_busy = false;
 
     // Silent on a timeout: the caller says what it does instead.
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        s_summary_busy      = true;
+        s_summary_busy_tick = xTaskGetTickCount();
         return false;
     }
     // Each value as its own getter reads it (provisioning_get_valve_mac(),

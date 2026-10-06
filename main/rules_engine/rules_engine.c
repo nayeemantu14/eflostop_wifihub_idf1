@@ -1145,16 +1145,20 @@ static void keep_report(leak_source_t source, bool leak_active, const char *sour
             return;
         }
         // Nor is a wet report lost while another source's dry one is kept (2.1.4 WP3 review):
-        // the newest kept dry report makes room. Its source then stays wet in the engine until
-        // its next report, which fails safe; for the valve that is how a dry report on a busy
-        // lock fared before WP3 kept them. Without this, the valve's dry reports, kept since
-        // WP3 whether or not a wet one is (a flapping flood probe fills the 4 slots), could
-        // cost a sensor's first wet report, which its scanner does not send again.
+        // a kept dry report makes room, a sensor's first (the newest of them), since a sensor
+        // sends its state again, and the valve's only when no sensor's is kept, since the valve
+        // never repeats a steady state. Its source then stays wet in the engine until its next
+        // report, which fails safe; for the valve that is how a dry report on a busy lock fared
+        // before WP3 kept them. Without this, the valve's dry reports, kept since WP3 whether
+        // or not a wet one is (a flapping flood probe fills the 4 slots), could cost a sensor's
+        // first wet report, which its scanner does not send again.
         int dry = -1;
-        for (int i = g_kept_n - 1; leak_active && i >= 0; i--) {
-            if (!g_kept[i].leak) {
-                dry = i;
-                break;
+        for (int pass = 0; leak_active && dry < 0 && pass < 2; pass++) {
+            for (int i = g_kept_n - 1; i >= 0; i--) {
+                if (!g_kept[i].leak && (pass == 1 || g_kept[i].source != LEAK_SOURCE_VALVE)) {
+                    dry = i;
+                    break;
+                }
             }
         }
         if (dry < 0) {
