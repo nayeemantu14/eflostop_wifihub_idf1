@@ -1927,6 +1927,12 @@ static void wifi_manager_abort_expired(uint8_t *retries){
 	if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
 		ESP_LOGW(TAG, "no STA_DISCONNECTED %d ms after esp_wifi_disconnect() - still connected, nothing changed", WIFI_MANAGER_ABORT_WAIT_MS);
 		xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_REQUEST_DISCONNECT_BIT);
+		/* the status is the link's (an IP being left kept the result before it: WM_EVENT_STA_GOT_IP),
+		 * then a waiting candidate's failure */
+		wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_NONE);
+		if(on_uncommitted){
+			wifi_manager_status_driver_ssid();
+		}
 		wifi_manager_cand_fail(WM_CAND_WAITING, 0);
 		return;
 	}
@@ -2063,16 +2069,16 @@ static __attribute__((noinline)) bool wifi_manager_commit_driver_config(bool ado
  * @brief leaves the link the STA is on: an IP not to keep (WM_EVENT_STA_GOT_IP). Our disconnect's
  * STA_DISCONNECTED is awaited like any other (abort_tick), and ends the link as a lost one: the
  * network in use is tried again as after any link loss (the router retry while the AP is up),
- * and after a forget there is none.
+ * and after a forget there is none. Returns whether the disconnect went out.
  */
-static void wifi_manager_leave_link(){
+static bool wifi_manager_leave_link(){
 	esp_err_t err = esp_wifi_disconnect();
 	if(err == ESP_OK){
 		wifi_manager_abort_mark(0);
+		return true;
 	}
-	else{
-		ESP_LOGW(TAG, "esp_wifi_disconnect failed (%s) - the network not saved stays until its link ends", esp_err_to_name(err));
-	}
+	ESP_LOGW(TAG, "esp_wifi_disconnect failed (%s) - the network not saved stays until its link ends", esp_err_to_name(err));
+	return false;
 }
 
 /**
@@ -2558,11 +2564,20 @@ void wifi_manager( void * pvParameters ){
 				/* reset number of retries */
 				retries = 0;
 
+				/* LOCAL PATCH (2.1.4 C8): an IP not to keep is left now, unless a candidate waits
+				 * (it leaves this link for its own, below) or a disconnect of ours is under way */
+				bool left = leave && abort_tick == 0 && wifi_manager_cand_state() != WM_CAND_WAITING &&
+						wifi_manager_leave_link();
+
 				/* refresh the status with the new IP (LOCAL PATCH 2.1.4 C8: and the candidate whose
-				 * attempt got it ends, in the same lock; on a network not committed, its own SSID) */
-				wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_ACTIVE);
-				if(on_uncommitted){
-					wifi_manager_status_driver_ssid();
+				 * attempt got it ends, in the same lock; on a network not committed, its own SSID).
+				 * Not for a link being left: the result decided before it (a forget, a failure)
+				 * stands, and the page never reads this IP's network as connected */
+				if(!left){
+					wifi_manager_status_set(UPDATE_CONNECTION_OK, WM_CAND_ACTIVE);
+					if(on_uncommitted){
+						wifi_manager_status_driver_ssid();
+					}
 				}
 
 				/* LOCAL PATCH (2.1.4 C4): the DNS hijack is no longer brought down here. It stays up with
@@ -2574,7 +2589,7 @@ void wifi_manager( void * pvParameters ){
 				 * We check first that it's actually running because in case of a boot and restore connection
 				 * the AP is not even started to begin with.
 				 */
-				if(uxBits & WIFI_MANAGER_AP_STARTED_BIT){
+				if((uxBits & WIFI_MANAGER_AP_STARTED_BIT) && !left){	/* LOCAL PATCH (2.1.4 C8): not for a link being left */
 					TickType_t t = pdMS_TO_TICKS( WIFI_MANAGER_SHUTDOWN_AP_TIMER );
 
 					/* if for whatever reason user configured the shutdown timer to be less than 1 tick, the AP is stopped straight away */
@@ -2597,13 +2612,11 @@ void wifi_manager( void * pvParameters ){
 				if(cb_ptr_arr[msg.code]) (*cb_ptr_arr[msg.code])( msg.param );
 
 				/* LOCAL PATCH (2.1.4 C8): a candidate that waited for this attempt goes on now (it
-				 * leaves this network for its own), after the callback. Otherwise an IP not to keep
-				 * is left now, unless an esp_wifi_disconnect() of ours is under way already */
+				 * leaves this network for its own), after the callback. The app is told of every IP,
+				 * one being left included: its STA_DISCONNECTED callback follows, and should our
+				 * disconnect's event never come, the app's view of a link that stays is right */
 				if(wifi_manager_cand_state() == WM_CAND_WAITING){
 					user_due = true;
-				}
-				else if(leave && abort_tick == 0){
-					wifi_manager_leave_link();
 				}
 
 				break;
