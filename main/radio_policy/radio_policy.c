@@ -1321,10 +1321,17 @@ void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len
     ESP_LOGI(RP_TAG, "%s pulse: BLE off for up to %lu ms", k_pulse_names[kind], (unsigned long)len_ms);
 }
 
+// A grant BLE could not honour (the scan's cancel refused). The requester of a RETRY or LIST may
+// already have read ON and gone ahead (radio_policy_pulse_wait() returns at once), and a retry's
+// requester never ends its pulse: so the answer is final, REFUSED, and its work runs beside BLE as
+// after any refusal; no later grant pauses BLE for a retry already sent. A JOIN or SUBMIT, which
+// no requester acts on, is pending again (its asked time is kept).
 void radio_policy_exec_pulse_retract(rp_pulse_t kind)
 {
-    if (kind > RP_PULSE_NONE && kind < RP_PULSE_CONNECT)
-        req_set(kind, RP_GRANT_PENDING);   // its asked time is kept: RP_GRANT_WAIT_MS still runs
+    if (kind == RP_PULSE_RETRY || kind == RP_PULSE_LIST)
+        req_refuse(kind, "BLE could not stop its scan");
+    else if (kind == RP_PULSE_JOIN || kind == RP_PULSE_SUBMIT)
+        req_set(kind, RP_GRANT_PENDING);
 }
 
 TickType_t radio_policy_exec_pulse_deadline(void)

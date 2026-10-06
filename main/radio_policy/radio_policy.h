@@ -339,7 +339,9 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
 uint32_t radio_policy_exec_connect_len(TickType_t now, uint32_t budget_ms);
 
 void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len_ms);
-void radio_policy_exec_pulse_retract(rp_pulse_t kind);      // a grant BLE could not honour: pending again
+void radio_policy_exec_pulse_retract(rp_pulse_t kind);      // a grant BLE could not honour: REFUSED
+                                                            // (RETRY, LIST) or pending again (JOIN,
+                                                            // SUBMIT)
 bool radio_policy_exec_pulse_over(TickType_t now);          // a Wi-Fi pulse's end is due
 TickType_t radio_policy_exec_pulse_deadline(void);
 TickType_t radio_policy_exec_pulse_wake(void);              // the deadline, or a join assist's own

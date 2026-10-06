@@ -1356,8 +1356,9 @@ static bool exec_wifi_pulse(exec_t *x, TickType_t now, uint32_t kinds, bool at_c
     if (x->scan_on) {
         scan_stop(x, now);
         if (x->scan_on) {
-            // The controller refused the cancel: BLE stays on, the request waits again (its 2 s
-            // still count), and the next pass tries the cancel again.
+            // The controller refused the cancel: BLE stays on. A RETRY or LIST is refused (its
+            // requester may have read ON already), a JOIN or SUBMIT waits again, and the next pass
+            // tries the cancel again.
             radio_policy_exec_pulse_retract(k);
             return false;
         }
