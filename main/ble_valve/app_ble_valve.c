@@ -142,11 +142,14 @@ static volatile bool s_claim_req = false;
 // Coded recovery window (I2). The radio policy also spaces claims by its pulse-rate limit (I2b: 6-7 s
 // of scanning between pulses, at most 12 s of pulses in any 60 s).
 // A claim fails when it gives no link: no link within its pulse, or a connect refused or not
-// started. Failures in a row back the next claim off by k_claim_backoff_s[]; a link held
-// CLAIM_HELD_MS resets the count. A link that reached CONNECT and is lost sooner (a 0x3E, a valve
-// power-cycled, a failed pairing, or a link this module drops) neither counts nor resets: the next
-// claim may follow at once, within I2b, as 2.1.3 relinked at once (plan §12 G6b and D6: relink
-// within 10 s after a 0x3E, with no CLOSE pended).
+// started. Failures in a row back the next claim off by k_claim_backoff_s[], from the SECOND in a
+// row on (B2 of WP8's core stage: a powered valve whose few adverts in one pulse were all lost is
+// claimed again after the pulse spacing alone, so a single empty pulse no longer costs a 10 s
+// back-off on top of it); a link held CLAIM_HELD_MS resets the back-off. A link that reached
+// CONNECT ends the run of empty claims, and otherwise, lost sooner (a 0x3E, a valve power-cycled, a
+// failed pairing, or a link this module drops), neither counts nor resets: the next claim may follow
+// at once, within I2b, as 2.1.3 relinked at once (plan §12 G6b and D6: relink within 10 s after a
+// 0x3E, with no CLOSE pended).
 // While a leak response is pending (s_lr_trigger) no back-off applies: claims are spaced by I2b
 // only, so a pended RMLEAK / CLOSE reaches a valve within about 6-7 s of scanning once it is heard
 // (D5: shutoff delayed, never dropped). A claim cancelled by this module (a hold, a DISCONNECT
@@ -154,9 +157,12 @@ static volatile bool s_claim_req = false;
 // Under s_mac_lock: written on the executor's task (grant), the host task (CONNECT, link loss)
 // and the command task (link held).
 #define CLAIM_HELD_MS  60000
-static const uint16_t k_claim_backoff_s[] = { 10, 30, 60, 300 };   // after 1, 2, 3, 4+ failures
+#define CLAIM_EMPTY_FREE  1                 // empty claims in a row with no back-off (B2)
+static const uint16_t k_claim_backoff_s[] = { 10, 30, 60, 300 };   // after 2, 3, 4, 5+ empty claims
 #define CLAIM_FAILS_MAX  ((uint8_t)(sizeof(k_claim_backoff_s) / sizeof(k_claim_backoff_s[0])))
-static uint8_t s_claim_fails = 0;           // failed claims in a row (0 .. CLAIM_FAILS_MAX)
+static uint8_t s_claim_empty = 0;           // claims in a row with no link at all, since the last CONNECT
+static uint8_t s_claim_fails = 0;           // the back-off's step (0 .. CLAIM_FAILS_MAX): empty claims
+                                            // in a row past CLAIM_EMPTY_FREE
 static TickType_t s_claim_not_before = 0;   // the back-off: no claim before this tick
 static bool s_claim_open = false;           // a claim was granted and has no link held yet
 static TickType_t s_link_up_at = 0;         // the current link's CONNECT (s_claim_open only)
@@ -1871,18 +1877,30 @@ static void claim_end(bool failed, const char *why)
     taskENTER_CRITICAL(&s_mac_lock);
     bool counted = s_claim_open && failed;
     s_claim_open = false;
+    uint8_t empty = s_claim_empty;
     uint8_t n = s_claim_fails;
+    bool backoff = false;
     if (counted)
     {
-        if (n < CLAIM_FAILS_MAX)
-            n++;
-        s_claim_fails = n;
-        s_claim_not_before = now + pdMS_TO_TICKS((uint32_t)k_claim_backoff_s[n - 1] * 1000u);
+        if (empty < UINT8_MAX)
+            empty++;
+        s_claim_empty = empty;
+        if (empty > CLAIM_EMPTY_FREE)
+        {
+            if (n < CLAIM_FAILS_MAX)
+                n++;
+            s_claim_fails = n;
+            s_claim_not_before = now + pdMS_TO_TICKS((uint32_t)k_claim_backoff_s[n - 1] * 1000u);
+            backoff = true;
+        }
     }
     taskEXIT_CRITICAL(&s_mac_lock);
-    if (counted)
+    if (counted && backoff)
         ESP_LOGW(BLE_TAG, "[CLAIM] Valve claim failed (%s), %u in a row - next claim in %u s (no back-off while a leak response is pending)",
-                 why, (unsigned)n, (unsigned)k_claim_backoff_s[n - 1]);
+                 why, (unsigned)empty, (unsigned)k_claim_backoff_s[n - 1]);
+    else if (counted)
+        ESP_LOGW(BLE_TAG, "[CLAIM] Valve claim failed (%s), %u in a row - the next needs only the pulse spacing, no back-off",
+                 why, (unsigned)empty);
 }
 
 // No claim before the back-off has run out, unless a leak response is pending. Any task.
@@ -2077,6 +2095,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
             s_rejecting_conn = false;
             taskENTER_CRITICAL(&s_mac_lock);
             s_link_up_at = xTaskGetTickCount();   // the claim's link: held from now (claim_held_poll())
+            s_claim_empty = 0;                    // the run of empty claims is over (B2)
             taskEXIT_CRITICAL(&s_mac_lock);
 
             clear_all_state_bits();
@@ -3202,8 +3221,8 @@ static void claim_held_poll(void)
     }
     taskEXIT_CRITICAL(&s_mac_lock);
     if (held && had > 0)
-        ESP_LOGI(BLE_TAG, "[CLAIM] Valve link held %d s - claim back-off reset (%u failures in a row before)",
-                 CLAIM_HELD_MS / 1000, (unsigned)had);
+        ESP_LOGI(BLE_TAG, "[CLAIM] Valve link held %d s - claim back-off reset (it was at step %u of %u)",
+                 CLAIM_HELD_MS / 1000, (unsigned)had, (unsigned)CLAIM_FAILS_MAX);
 }
 
 // The leak-response trigger and its overlay (WP6; plan §4.1, D5), every pass:
@@ -3716,6 +3735,7 @@ void ble_valve_set_target_mac(const char *mac_str)
     s_claim_req = false;
     taskENTER_CRITICAL(&s_mac_lock);
     s_claim_fails = 0;
+    s_claim_empty = 0;
     s_claim_open = false;
     taskEXIT_CRITICAL(&s_mac_lock);
     app_ble_leak_kick();
