@@ -162,12 +162,9 @@ static TickType_t s_link_up_at = 0;         // the current link's CONNECT (s_cla
 // the 1M-weighted profile, with its weaker sensor coverage, for good. An episode ends when no
 // RMLEAK / CLOSE is pended and no incident is latched. Command task (lr_poll()) writes them.
 #define LR_OVERLAY_CAP_MS  (10u * 60u * 1000u)
-#define LR_POLL_MS         1000
 static volatile bool s_lr_trigger = false;
 static volatile bool s_lr_on = false;
 static TickType_t s_lr_start = 0;
-static TickType_t s_lr_polled = 0;          // lr_poll()'s last read of the incident latch
-static bool s_incident = false;             // ... and what it read
 static bool s_interlock_ok = false;         // the valve confirmed RMLEAK=1 + CLOSED in this incident
 
 // True between issuing ble_gap_connect() and the BLE_GAP_EVENT_CONNECT that
@@ -3123,26 +3120,25 @@ static void claim_held_poll(void)
                  CLAIM_HELD_MS / 1000, (unsigned)had);
 }
 
-// The leak-response trigger and its overlay (WP6; plan §4.1, D5), every pass (the incident latch
-// is read at most every LR_POLL_MS, the pended commands every pass):
+// The leak-response trigger and its overlay (WP6; plan §4.1, D5), every pass:
 //   trigger = valve provisioned AND not linked AND (an RMLEAK / CLOSE pended, OR a leak incident
 //             latched AND the valve has not confirmed the interlock in it);
 //   overlay = trigger AND less than LR_OVERLAY_CAP_MS since the episode began.
-// The incident latch is the rules engine's (its mutex, up to 1 s: a read that times out reads
-// "no incident", which can only end an episode early and start a new one, with a new cap). The
-// interlock is confirmed, for the rest of the incident, when the provisioned valve's own reports
-// on a set-up link read RMLEAK=1 and CLOSED. The episode ends when nothing is pended and no
-// incident is latched. Pended commands stay pended after the cap: the next claim writes them.
+// The incident latch is read lock-free, through the rules engine's own mirror of it,
+// health_is_interlock_held(): rules_engine.c stores it with every change of the latch, under its
+// mutex (incident_save_to_nvs(), and rules_engine_reset_all()'s release). NOT
+// rules_engine_is_leak_incident_active(), which takes the rules mutex for up to 1 s: this task
+// writes RMLEAK and CLOSE, and would wait behind a rules hold (provisioning reads under it take up
+// to 1 s each) on every pass; and that read answers "no incident" when it times out, which dropped
+// the interlock confirmation and restarted the 10 min overlay for a valve already confirmed.
+// The interlock is confirmed, for the rest of the incident, when the provisioned valve's own
+// reports on a set-up link read RMLEAK=1 and CLOSED. The episode ends when nothing is pended and
+// no incident is latched. Pended commands stay pended after the cap: the next claim writes them.
 static void lr_poll(void)
 {
     TickType_t now = xTaskGetTickCount();
     bool provisioned = ble_valve_has_target_mac();
-    if (s_lr_polled == 0 || (now - s_lr_polled) >= pdMS_TO_TICKS(LR_POLL_MS))
-    {
-        s_lr_polled = now ? now : 1;
-        s_incident = provisioned && rules_engine_is_leak_incident_active();
-    }
-    bool incident = provisioned && s_incident;
+    bool incident = provisioned && health_is_interlock_held();
     bool pended = leak_response_pending();
     bool linked = (valve_conn_handle != BLE_HS_CONN_HANDLE_NONE);
 
