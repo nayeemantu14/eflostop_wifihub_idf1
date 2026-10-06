@@ -792,20 +792,23 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				httpd_resp_set_type(req, http_content_type_json);
 				/* LOCAL PATCH (2.1.4 C2b): no list while the AP is down: an empty one */
 				const char* ap_buf = wifi_manager_get_ap_list_json();
-				if(ap_buf == NULL){
-					ap_buf = "[]\n";
-				}
 				/* LOCAL PATCH (2.1.4 C6): copied out, and sent with the lock given back: a send to a
 				 * slow phone (up to send_wait_timeout, 4 s) held it, and the wifi_manager task, which
 				 * waited 1 s for it, dropped a fresh scan. The copy (about 1.5 KB, freed once sent)
 				 * is made only with WP1's margin to spare (wifi_manager_heap_has()): below it the
 				 * copy would take what this answer's own pbuf and the Wi-Fi driver's buffers need,
 				 * and their allocations would fail instead. There the list is sent under the lock,
-				 * as before C6: the page still gets it, and a scan's rebuild waits out a stalled send
-				 * (WIFI_MANAGER_LIST_LOCK_MS, 5 s) */
-				size_t ap_len = strlen(ap_buf);
-				char *copy = wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ap_len + 1) ? malloc(ap_len + 1) : NULL;
-				if(copy != NULL){
+				 * as before C6: the page still gets it, and a scan whose rebuild finds the lock held
+				 * over 1 s counts as failed (the page may order another 10 s on). With no list
+				 * buffer (the AP-start heap dip) an empty list is sent, the lock given back first */
+				size_t ap_len = (ap_buf != NULL) ? strlen(ap_buf) : 0;
+				char *copy = (ap_buf != NULL && wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ap_len + 1)) ?
+						malloc(ap_len + 1) : NULL;
+				if(ap_buf == NULL){
+					wifi_manager_unlock_json_buffer();
+					http_app_send(req, "[]\n", 3);	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
+				}
+				else if(copy != NULL){
 					memcpy(copy, ap_buf, ap_len + 1);
 					wifi_manager_unlock_json_buffer();
 					http_app_send(req, copy, ap_len);	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
@@ -822,9 +825,10 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				ESP_LOGE(TAG, "http_server_netconn_serve: GET /ap.json failed to obtain mutex");
 			}
 
-			/* LOCAL PATCH (2.1.4 C10b): no scan here any more. It ordered an all-channel scan at
-			 * every poll (each one off the SoftAP's channel, plan I7): the list is a cache, filled
-			 * by the page's load and its Rescan (POST /scan.json) */
+			/* LOCAL PATCH (2.1.4 C10b): no scan at every poll any more. It ordered an all-channel
+			 * scan at each one (each off the SoftAP's channel, plan I7): the list is a cache, filled
+			 * by the page's load, its Rescan (POST /scan.json), and its polls only until a list is
+			 * built (above) */
 		}
 		/* GET /status.json */
 		else if(http_app_path_is(req->uri, http_status_url)){

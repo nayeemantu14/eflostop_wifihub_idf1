@@ -98,8 +98,9 @@ static bool ap_list_logged = false;
  * policy's LIST pulse requests.
  * ap_list_tick: the list's last rebuild from a scan, 0 = none since it was allocated (wifi_manager
  * task writes it, the httpd task reads it); scan_order_tick: the last scan ordered for the page,
- * 0 = none (the httpd task sets it; the wifi_manager task moves it back when that scan did not
- * start or ended failed, wifi_manager_scan_failed(), so the next order may come
+ * 0 = none (the httpd task sets it, and puts the one before back when its post does not fit;
+ * the wifi_manager task moves it back when that scan did not start, ended failed or found the
+ * list locked too long, wifi_manager_scan_failed(), so the next order may come
  * WIFI_MANAGER_SCAN_RETRY_MS later: a Rescan is not refused for 20 s after a scan that never ran,
  * and a failure that repeats, a connect attempt in flight, does not order a scan at every poll;
  * a scan that succeeded with no list allocated, low heap, keeps the 20 s gap). STOP_AP clears
@@ -111,7 +112,7 @@ static volatile TickType_t ap_list_tick = 0;
 static volatile TickType_t scan_order_tick = 0;
 #define WIFI_MANAGER_SCAN_GAP_MS		20000
 #define WIFI_MANAGER_SCAN_RETRY_MS		10000
-#define WIFI_MANAGER_LIST_LOCK_MS		5000	/* a scan's rebuild waits this long for the list's lock */
+#define WIFI_MANAGER_LIST_LOCK_MS		1000	/* a scan's rebuild waits this long for the list's lock */
 #define WIFI_MANAGER_LIST_STALE_MS		60000
 /* LOCAL PATCH (2.1.4 WP1): an allocation that can wait (the network list) is tried only while the
  * largest free block exceeds it by this much. One that fails is counted as a failed allocation
@@ -460,12 +461,12 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms){
 	}
 	/* stamped before the post: the wifi_manager task moves it back if the scan does not start
 	 * (wifi_manager_scan_failed()), and may do so before this task would run again. A post that
-	 * did not fit is a failed order too: the next may come WIFI_MANAGER_SCAN_RETRY_MS on, so the
-	 * page's polls, while the queue stays full, do not each wait WIFI_MANAGER_POST_WAIT_MS on it */
+	 * did not fit puts the order before it back, so a Rescan may follow at once (the queue is
+	 * full only while the task is busy, a second or so) */
+	TickType_t before = scan_order_tick;
 	scan_order_tick = (now != 0) ? now : 1;
 	if(!wifi_manager_scan_async()){
-		TickType_t t = xTaskGetTickCount() - pdMS_TO_TICKS(WIFI_MANAGER_SCAN_GAP_MS - WIFI_MANAGER_SCAN_RETRY_MS);
-		scan_order_tick = (t != 0) ? t : 1;
+		scan_order_tick = before;
 		return -1;
 	}
 	return 1;
@@ -1024,6 +1025,8 @@ static unsigned wifi_manager_generate_acess_points_json(const wifi_manager_ap_t 
 	return left_out;
 }
 
+static void wifi_manager_scan_failed();	/* LOCAL PATCH (2.1.4 C10b): defined below */
+
 /**
  * @brief LOCAL PATCH (2.1.4 C2b, C2 (b)): reads the last scan's records and rebuilds the network
  * list. Called on a successful SCAN_DONE while the list exists.
@@ -1114,9 +1117,11 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 	}
 
 	/* make sure the http server isn't trying to access the list while it gets refreshed
-	 * LOCAL PATCH (2.1.4 C6): for up to WIFI_MANAGER_LIST_LOCK_MS, past the HTTP server's 4 s send
-	 * timeout: at low heap GET /ap.json sends the list under this lock, and a send stalled for
-	 * want of memory held it past the 1 s waited before, which dropped this scan's records */
+	 * LOCAL PATCH (2.1.4 C6): WIFI_MANAGER_LIST_LOCK_MS at most. At low heap GET /ap.json sends the
+	 * list under this lock, and a send stalled for want of memory can hold it for several of its
+	 * writes, 4 s each: this task, which owns every connect attempt, does not wait that out. The
+	 * scan counts as failed instead (wifi_manager_scan_failed()): the page may order another
+	 * 10 s on */
 	if(wifi_manager_lock_json_buffer( pdMS_TO_TICKS(WIFI_MANAGER_LIST_LOCK_MS) )){
 		unsigned left_out = wifi_manager_generate_acess_points_json(aps, count);
 		/* LOCAL PATCH (2.1.4 C10b): the list's age, for the page load's scan */
@@ -1129,6 +1134,7 @@ static __attribute__((noinline)) void wifi_manager_read_ap_records(){
 	}
 	else{
 		ESP_LOGE(TAG, "could not get access to json mutex in wifi_scan");
+		wifi_manager_scan_failed();
 	}
 }
 
@@ -1320,9 +1326,10 @@ bool wifi_manager_scan_in_flight(){
 }
 
 bool wifi_manager_ap_list_built(){
-	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. An unlocked read: a stale one costs one order
+	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. Unlocked reads: a stale one costs one order
 	 * too many, or one a poll late */
-	return ap_list_tick != 0;
+	return ap_list_tick != 0 ||
+			(accessp_json == NULL && !wifi_manager_heap_has(MALLOC_CAP_DEFAULT, ACCESSP_JSON_SIZE));
 }
 
 /**

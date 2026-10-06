@@ -385,8 +385,8 @@ bool wifi_manager_scan_async();
  * @brief LOCAL PATCH (2.1.4 C10b): a scan for the setup page's network list, which GET /ap.json
  * only reads (a cache). rescan false: the page's load, which orders one only when the list is
  * empty or older than 60 s; rescan true: the page's Rescan (POST /scan.json). Either way at least
- * 20 s after the last one ordered here, or 10 s after one that did not start, ended failed, or
- * did not fit in the queue. Returns 1 when one was ordered, 0 when none was due
+ * 20 s after the last one ordered here, or 10 s after one that did not start or ended failed.
+ * Returns 1 when one was ordered, 0 when none was due
  * (*wait_ms, when not NULL: the ms until a Rescan may order one, 0 if the list is fresh), -1 when
  * the order did not fit in the queue. The httpd task only.
  */
@@ -398,9 +398,10 @@ int wifi_manager_scan_request(bool rescan, uint32_t *wait_ms);
  * the scan too (wifi_manager_scan_request(false, ...): 20 s after the last order, or 10 s after
  * one that failed): the order of the page's load can fail (a scan cannot start while a connect
  * attempt runs, ESP_ERR_WIFI_STATE, and an attempt that starts stops a running scan), and nothing
- * else would order it again. That holds while the list has no buffer too (low heap): each
- * SCAN_DONE tries the allocation again before it reads the records. Any task; a stale read costs
- * one order too many, or one a poll late.
+ * else would order it again. While the list has no buffer (low heap) it reads as built unless
+ * the heap now has room for one (wifi_manager_heap_has()): a poll's scan then gets its SCAN_DONE
+ * to allocate it before it reads the records, and no scan is ordered that could not build it.
+ * Any task; a stale read costs one order too many, or one a poll late.
  */
 bool wifi_manager_ap_list_built();
 
