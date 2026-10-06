@@ -221,13 +221,14 @@ typedef struct {
 static rp_sta_t s_sta[RP_STA_MAX];
 static portMUX_TYPE s_sta_lock = portMUX_INITIALIZER_UNLOCKED;
 
-// A join assist's end rule has passed for this station (plan 4.4): max(lease + 1.5 s, first 302 or
-// page + 0.3 s). Under s_sta_lock, or on a copy.
-static bool sta_settled(const rp_sta_t *s, TickType_t now)
+// A join assist's end rule has passed for this station at `at` (plan 4.4): max(lease + 1.5 s, first
+// 302 or page + 0.3 s). Under s_sta_lock, or on a copy. Signed: a lease or page stamped by another
+// task after the caller read its tick is not passed yet (unsigned, it read as 2^32 ticks old).
+static bool sta_settled(const rp_sta_t *s, TickType_t at)
 {
     return s->lease_at != 0 && s->probe_at != 0 &&
-           (now - s->lease_at) >= pdMS_TO_TICKS(RP_JOIN_LEASE_TAIL_MS) &&
-           (now - s->probe_at) >= pdMS_TO_TICKS(RP_JOIN_PROBE_TAIL_MS);
+           (int32_t)(at - s->lease_at) >= (int32_t)pdMS_TO_TICKS(RP_JOIN_LEASE_TAIL_MS) &&
+           (int32_t)(at - s->probe_at) >= (int32_t)pdMS_TO_TICKS(RP_JOIN_PROBE_TAIL_MS);
 }
 static uint16_t s_joins = 0;           // joins since the summary (under s_sta_lock)
 static uint32_t s_lease_ms_max = 0;    // the longest join -> lease since the summary (under s_sta_lock)
@@ -1214,16 +1215,18 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             continue;
         }
         if (k == RP_PULSE_JOIN) {
-            // Nothing left to assist: the station left, or its end rule has passed (a pulse now
-            // would end at once, and still restart the pulse spacing a claim or the next pulse
-            // needs).
+            // Nothing left to assist: the station left, or its end rule has passed or passes within
+            // RP_PULSE_MIN_MS. A pulse granted then ends one or two ticks later (the executor wakes
+            // at the end rule), yet it still restarts the pulse spacing a claim or the next pulse
+            // needs, counts in I2b and is followed by the 1.2 s recovery: dropped, with no line, as
+            // a JOIN with less budget than RP_PULSE_MIN_MS is not run.
             bool gone = true, settled = false;
             if (sta >= 0 && sta < RP_STA_MAX) {
                 taskENTER_CRITICAL(&s_sta_lock);
                 rp_sta_t s = s_sta[sta];
                 taskEXIT_CRITICAL(&s_sta_lock);
                 gone = (s.state != RP_STA_JOINED);
-                settled = sta_settled(&s, now);
+                settled = sta_settled(&s, now + pdMS_TO_TICKS(RP_PULSE_MIN_MS));
 #if CONFIG_APP_RADIO_LAB
                 settled = settled || (lab_k1 && s.probe_at != 0);   // the lab's K1: its 302 or page came
 #endif

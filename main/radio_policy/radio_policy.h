@@ -72,7 +72,8 @@ typedef enum {
 #define RP_CONNECT_LR_MS        2500   // ... and in NORMAL at most this, clipped to the blind
                                        // budget (B2); exactly this while a leak response is pending
                                        // (plan 4.4)
-#define RP_PULSE_MIN_MS          300   // a SUBMIT or JOIN with less budget left than this is not run
+#define RP_PULSE_MIN_MS          300   // a SUBMIT or JOIN with less budget left than this is not run,
+                                       // and a JOIN whose end rule passes this soon is dropped
 #define RP_UNALIGNED_MIN_MS     1500   // PROVISIONAL: a SUBMIT or JOIN goes into a Coded scan that
                                        // has not covered RP_L_MS yet only with this much budget
                                        // left; with less it waits for the scan to cover it (0.55 s)
@@ -216,7 +217,8 @@ void radio_policy_note_submit(bool in_flight);
  *  under a leak response none in its first 30 s, then one per 60 s); a leave ends its assist. One
  *  JOIN at a time: a join while another station's is asked or runs is asked after it, while the
  *  station still settles. A JOIN waits for the pulse spacing and I2b's room up to
- *  RP_JOIN_SETTLE_MS, and is dropped once its station left or its end rule passed. */
+ *  RP_JOIN_SETTLE_MS, and is dropped once its station left or its end rule passed or passes
+ *  within RP_PULSE_MIN_MS. */
 void radio_policy_station_joined(const uint8_t mac[6]);
 void radio_policy_station_left(const uint8_t mac[6]);
 
