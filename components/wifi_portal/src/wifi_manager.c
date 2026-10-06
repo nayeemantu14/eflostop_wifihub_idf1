@@ -2568,7 +2568,7 @@ void wifi_manager( void * pvParameters ){
 				/* LOCAL PATCH (2.1.4 C2a): the parameter is the IPv4 address (network byte order), not a pointer */
 				uint32_t got_ip = (uint32_t)(uintptr_t)msg.param;
 				uxBits = xEventGroupGetBits(wifi_manager_event_group);
-				bool leave = false;		/* LOCAL PATCH (2.1.4 C8): an IP not to keep, left after the callback */
+				bool leave = false;		/* LOCAL PATCH (2.1.4 C8): an IP not to keep: left before the status (below) */
 
 				/* LOCAL PATCH (2.1.4 C8): the attempt is over. An esp_wifi_disconnect() of ours that
 				 * crossed this IP still has its STA_DISCONNECTED to come (abort_tick stays). */
