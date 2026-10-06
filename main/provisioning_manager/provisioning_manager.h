@@ -270,8 +270,8 @@ typedef struct {
  *
  * @return false (out zeroed) when out is NULL, the manager is not initialised or the
  *         mutex (1000 ms) timed out: "unknown", never "unprovisioned". For 2 s after a
- *         timeout it answers false at once, without waiting, to the task that timed out
- *         (any other task's call waits as usual). Logs nothing. Any task; today iothub_task.
+ *         timeout it answers false at once, without waiting, to the first task that called
+ *         it (iothub_task); any other task's call waits as usual. Logs nothing. Any task.
  */
 bool provisioning_get_summary(prov_summary_t *out);
 

@@ -956,16 +956,15 @@ bool provisioning_get_device_set(prov_device_set_t *out)
 // After a timeout, provisioning_get_summary() answers "busy" at once for this long (2.1.4 WP3
 // review): on one iothub_task pass the lifecycle, the session's twin and an owed twin each
 // read it, and each 1 s wait held that task, which also evaluates the leaks; all three are
-// built again later. The hold-off is the timed-out task's own (review F6): while it runs, only
-// that task honours or renews it, and any other caller waits as usual and leaves it alone, so a
-// caller on another task can neither skip a read it should have waited for nor cut this one
-// short. Once it has run out, the next task to time out takes it over, so an owner that never
-// calls again cannot keep it from the task that does. Both of today's callers run on
-// iothub_task. No lock: a 32-bit handle and tick; two timeouts at once leave either owner, which
-// is harmless (one more 1 s wait).
+// built again later. The hold-off serves one task, the first to call, set once (review F6):
+// both of today's callers run on iothub_task. A call from any other task waits for the mutex
+// as usual and never reads or writes the hold-off, so it can neither skip a read it should have
+// waited for nor end iothub_task's early, and the two values below have a single reader and
+// writer and need no lock.
 #define SUMMARY_BUSY_HOLDOFF_MS 2000
-static TaskHandle_t s_summary_busy_task = NULL;   // the task whose read timed out; NULL: none
-static TickType_t   s_summary_busy_tick = 0;
+static TaskHandle_t s_summary_task      = NULL;    // the task the hold-off serves; set once
+static bool         s_summary_busy      = false;   // s_summary_task only
+static TickType_t   s_summary_busy_tick = 0;       // s_summary_task only
 
 bool provisioning_get_summary(prov_summary_t *out)
 {
@@ -977,23 +976,25 @@ bool provisioning_get_summary(prov_summary_t *out)
         return false;
     }
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
-    TaskHandle_t owner = s_summary_busy_task;
-    bool held = (owner != NULL) &&
-        (xTaskGetTickCount() - s_summary_busy_tick) < pdMS_TO_TICKS(SUMMARY_BUSY_HOLDOFF_MS);
-    if (held && owner == self) {
-        return false;
+    TaskHandle_t owner = NULL;   // the CAS leaves the current owner here when it fails
+    bool own = __atomic_compare_exchange_n(&s_summary_task, &owner, self, false,
+                                           __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE) ||
+               owner == self;
+    if (own) {
+        if (s_summary_busy &&
+            (xTaskGetTickCount() - s_summary_busy_tick) < pdMS_TO_TICKS(SUMMARY_BUSY_HOLDOFF_MS)) {
+            return false;
+        }
+        s_summary_busy = false;
     }
 
     // Silent on a timeout: the caller says what it does instead.
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        if (!held || owner == self) {
+        if (own) {
+            s_summary_busy      = true;
             s_summary_busy_tick = xTaskGetTickCount();
-            s_summary_busy_task = self;
         }
         return false;
-    }
-    if (owner == self) {
-        s_summary_busy_task = NULL;   // read: the hold-off is over
     }
     // Each value as its own getter reads it (provisioning_get_valve_mac(),
     // provisioning_get_lora_sensors(), provisioning_get_ble_leak_sensors(),
