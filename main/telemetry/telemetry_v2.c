@@ -1004,13 +1004,18 @@ static bool snapshot_envelope_complete(const cJSON *root)
 // the whole build. Events do not use it - an event ships with whatever it has.
 #define SNAP_ADD(x) do { if (!(x)) goto fail; } while (0)
 
-// The snapshot's print buffer, sized once from the device count (2.1.4 WP3; build_snapshot()):
-// the longest snapshot, every label, the hub name and the valve's firmware string 31 quotes
+// The snapshot's print buffer, sized from the device count (2.1.4 WP3; build_snapshot()).
+// The longest snapshot, every label, the hub name and the valve's firmware string 31 quotes
 // (2 B each printed; control characters print as spaces), is 937 B for the valve alone, plus
-// 258 B per LoRa sensor and 280 B per BLE sensor: 9,575 B for a full hub. Capped at
-// MQTT_TX_MAX_MESSAGE + 1 (app_iothub.h). A realistic full hub prints about 7.5 KB.
-#define SNAP_PRINT_BASE_BYTES    1024
-#define SNAP_PRINT_DEVICE_BYTES  280
+// 258 B per LoRa sensor and 280 B per BLE sensor: 9,575 B for a full hub. That sizes the
+// second try (DEVICE). A realistic full hub prints about 7.5 KB (16-character labels), and
+// one with every label 31 plain characters 8,490 B: both fit the first try (TYPICAL), 8,614 B
+// for 33 devices. Review F2: a first block sized for the worst case asked such a hub for
+// 10,241 B, more than the 8,254 B block cJSON's own growth ends at for 7.5 KB. Both capped
+// at MQTT_TX_MAX_MESSAGE + 1 (app_iothub.h). From a host model; not measured on a full hub.
+#define SNAP_PRINT_BASE_BYTES     1024
+#define SNAP_PRINT_TYPICAL_BYTES  230
+#define SNAP_PRINT_DEVICE_BYTES   280
 
 // The snapshot's build: prints it into *out (2.1.4 WP2c: built apart from its send, like
 // every message). false = not built (see telemetry_v2_post_snapshot() in the header), and
@@ -1346,14 +1351,23 @@ static bool build_snapshot(const char *trigger, telem_msg_t *out)
     // time it fills, so an 8.5 KB snapshot asked for one block of about 16.5 KB, and for a
     // moment the old one beside it, on top of the tree (about 27 KB for a full hub): the
     // largest internal block connected is about 16 KB (E4), so such a hub's snapshot could
-    // fail to build for ever ("Snapshot not built - out of memory"). The estimate covers the
-    // longest snapshot of this many devices (SNAP_PRINT_*), so the buffer never grows; if it
-    // ever must, cJSON grows it as before. A snapshot is never pre-sync (build_envelope()).
+    // fail to build for ever ("Snapshot not built - out of memory"). First into a block sized
+    // for this many devices with typical labels (SNAP_PRINT_TYPICAL_BYTES), never grown; a
+    // snapshot that does not fit, labels full of quotes or backslashes, is printed again into
+    // one sized for the longest snapshot of this many devices (SNAP_PRINT_DEVICE_BYTES); if
+    // that must grow, cJSON grows it as before. A snapshot is never pre-sync (build_envelope()).
     {
+        size_t typ = SNAP_PRINT_BASE_BYTES + SNAP_PRINT_TYPICAL_BYTES * (size_t)health_count;
         size_t est = SNAP_PRINT_BASE_BYTES + SNAP_PRINT_DEVICE_BYTES * (size_t)health_count;
+        if (typ > MQTT_TX_MAX_MESSAGE + 1)
+            typ = MQTT_TX_MAX_MESSAGE + 1;
         if (est > MQTT_TX_MAX_MESSAGE + 1)
             est = MQTT_TX_MAX_MESSAGE + 1;
-        char *json = cJSON_PrintBuffered(root, (int)est, false);
+        char *json = malloc(typ);
+        if (json != NULL && !cJSON_PrintPreallocated(root, json, (int)typ, false)) {
+            free(json);   // too long for it: the worst-case block
+            json = cJSON_PrintBuffered(root, (int)est, false);
+        }
         cJSON_Delete(root);
         if (json == NULL) {
             ESP_LOGE(TELEM_TAG, "Snapshot not built - out of memory");
