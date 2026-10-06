@@ -98,16 +98,19 @@ static bool ap_list_logged = false;
  * policy's LIST pulse requests.
  * ap_list_tick: the list's last rebuild from a scan, 0 = none since it was allocated (wifi_manager
  * task writes it, the httpd task reads it); scan_order_tick: the last scan ordered for the page,
- * 0 = none (the httpd task sets it; the wifi_manager task clears it when that scan did not start
- * or ended failed, so a Rescan is not refused for 20 s after a scan that never ran, with an empty
- * list; not for a scan that succeeded with no list allocated, low heap, which keeps the 20 s
- * gap). STOP_AP clears both once the HTTP server is stopped: the next AP session's page is a new
+ * 0 = none (the httpd task sets it; the wifi_manager task moves it back when that scan did not
+ * start or ended failed, wifi_manager_scan_failed(), so the next order may come
+ * WIFI_MANAGER_SCAN_RETRY_MS later: a Rescan is not refused for 20 s after a scan that never ran,
+ * and a failure that repeats, a connect attempt in flight, does not order a scan at every poll;
+ * a scan that succeeded with no list allocated, low heap, keeps the 20 s gap). STOP_AP clears
+ * both once the HTTP server is stopped: the next AP session's page is a new
  * one, and a list that cannot be allocated at its START_AP must not read as fresh, or the page's
  * load would order no scan, and no SCAN_DONE would retry the allocation. A stale read of either
  * costs one scan too many, or one refused. */
 static volatile TickType_t ap_list_tick = 0;
 static volatile TickType_t scan_order_tick = 0;
 #define WIFI_MANAGER_SCAN_GAP_MS		20000
+#define WIFI_MANAGER_SCAN_RETRY_MS		10000
 #define WIFI_MANAGER_LIST_STALE_MS		60000
 /* LOCAL PATCH (2.1.4 WP1): an allocation that can wait (the network list) is tried only while the
  * largest free block exceeds it by this much. One that fails is counted as a failed allocation
@@ -1311,8 +1314,21 @@ bool wifi_manager_scan_in_flight(){
 }
 
 bool wifi_manager_ap_list_built(){
-	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h */
-	return ap_list_tick != 0;
+	/* LOCAL PATCH (2.1.4 C10b): see wifi_manager.h. Unlocked reads: a stale one costs one order
+	 * too many, or one a poll late */
+	return ap_list_tick != 0 || accessp_json == NULL;
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C10b): a scan ordered for the page did not start or ended failed: the
+ * next order may come WIFI_MANAGER_SCAN_RETRY_MS from now (see scan_order_tick). wifi_manager
+ * task only.
+ */
+static void wifi_manager_scan_failed(){
+	if(scan_order_tick != 0){
+		TickType_t t = xTaskGetTickCount() - pdMS_TO_TICKS(WIFI_MANAGER_SCAN_GAP_MS - WIFI_MANAGER_SCAN_RETRY_MS);
+		scan_order_tick = (t != 0) ? t : 1;
+	}
 }
 
 bool wifi_manager_ap_stop_done(uint32_t *ms_since){
@@ -2260,10 +2276,11 @@ void wifi_manager( void * pvParameters ){
 				else{
 					/* a failed scan, or no list: free whatever the driver keeps of it */
 					esp_wifi_clear_ap_list();
-					/* LOCAL PATCH (2.1.4 C10b): after a failed scan the page may order another;
-					 * a scan that succeeded with no list (low heap) keeps the 20 s gap */
+					/* LOCAL PATCH (2.1.4 C10b): after a failed scan the page may order another,
+					 * WIFI_MANAGER_SCAN_RETRY_MS on; a scan that succeeded with no list (low heap)
+					 * keeps the 20 s gap */
 					if(scan_status != 0){
-						scan_order_tick = 0;
+						wifi_manager_scan_failed();
 					}
 				}
 
@@ -2286,7 +2303,7 @@ void wifi_manager( void * pvParameters ){
 					if(scan_err != ESP_OK){
 						ESP_LOGW(TAG, "esp_wifi_scan_start failed (%s) — skipping scan", esp_err_to_name(scan_err));
 						xEventGroupClearBits(wifi_manager_event_group, WIFI_MANAGER_SCAN_BIT);
-						scan_order_tick = 0;	/* LOCAL PATCH (2.1.4 C10b): the page may order another */
+						wifi_manager_scan_failed();	/* LOCAL PATCH (2.1.4 C10b): the page may order another, 10 s on */
 					}
 					else{
 						scan_in_flight = true;	/* LOCAL PATCH (2.1.4 WP1) */
