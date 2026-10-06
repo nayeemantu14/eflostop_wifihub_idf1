@@ -767,12 +767,13 @@ static void valve_replaced_locked(bool kept_dropped);
 // valve's MAC-less flood source is gone before any of them can act on it, or a new valve's
 // report is tracked (2.1.4 WP3, 15o residual 3). valve_replaced_locked() touches only state
 // under g_mutex (not the kept reports, iothub_task's own), so it runs on either task.
-static void valve_purge_if_owed(void)
+// True when it ran: a value read before this hold may have counted the old valve's source.
+static bool valve_purge_if_owed(void)
 {
     uint8_t owed = __atomic_exchange_n(&g_valve_purge_owed, 0, __ATOMIC_ACQ_REL);
-    if (owed != 0) {
-        valve_replaced_locked((owed & PURGE_KEPT_DROPPED) != 0);
-    }
+    if (owed == 0) return false;
+    valve_replaced_locked((owed & PURGE_KEPT_DROPPED) != 0);
+    return true;
 }
 
 bool rules_engine_valve_purge_owed(void)
@@ -1132,7 +1133,9 @@ static bool keepable(const char *source_id)
 // (the valve, which can start dry) drops the first D and follows the W (it still latches and
 // closes, and the replay ends dry). A source flapping inside one busy hold so never fills
 // the slots with repeats of one fact, and a wet report meeting a full list is lost only
-// with 4 different sources wet.
+// with 4 different sources wet. The dry report so moves behind reports of other sources kept
+// after the dropped one; its source's wet one is still replayed first, and the latch, the
+// close and the end state do not depend on that order.
 static void keep_report(leak_source_t source, bool leak_active, const char *source_id)
 {
     if (!keepable(source_id)) {
@@ -1152,8 +1155,8 @@ static void keep_report(leak_source_t source, bool leak_active, const char *sour
         }
     }
     if (prev >= 0) {
-        // Its dry one goes. A wet report then ends at the kept wet one; a dry one follows it,
-        // in the slot just freed.
+        // Its dry one goes. A wet report then ends at the kept wet one; a dry one is appended,
+        // at the end of the list like any new report (the slot just freed makes the room).
         int dry = leak_active ? last : prev;
         g_kept_n--;
         memmove(&g_kept[dry], &g_kept[dry + 1], (g_kept_n - dry) * sizeof(g_kept[0]));
@@ -1636,7 +1639,15 @@ override_enable_result_t rules_engine_enable_override_remote(void)
         ESP_LOGW(RULES_TAG, "override_enable: mutex timeout");
         return OVERRIDE_ENABLE_ERR_INTERNAL;
     }
-    valve_purge_if_owed();   // before the clear owed below, which a later purge would undo
+    // The purge first: before the clear owed below, which a later purge would undo. If it ran,
+    // precondition 3 read the incident latch before it, while the swapped-out valve's source
+    // still held it: checked again, so no 24 h window starts with nothing to override (review).
+    if (valve_purge_if_owed() && g_override_state != OVERRIDE_STATE_ACTIVE &&
+        !g_leak_incident_active && !ble_valve_get_rmleak_state()) {
+        xSemaphoreGive(g_mutex);
+        ESP_LOGW(RULES_TAG, "override_enable: no active incident to override");
+        return OVERRIDE_ENABLE_ERR_NO_INCIDENT;
+    }
     g_leak_incident_active = false;
     incident_save_to_nvs();
     g_auto_close_triggered = false;
@@ -2355,7 +2366,9 @@ bool rules_engine_forget_unprovisioned(void)
 }
 
 // The rules side of a valve swap or removal (rules_engine_on_valve_replaced()), with g_mutex
-// held; iothub_task only. kept_dropped: an old valve's kept report went with it.
+// held, on iothub_task or, for a purge owed (valve_purge_if_owed()), on the esp-mqtt task:
+// it touches only state under g_mutex, never the kept reports (iothub_task's own, unlocked).
+// kept_dropped: an old valve's kept report went with it.
 static void valve_replaced_locked(bool kept_dropped)
 {
     /* VALVE_SOURCE_ID is MAC-less, so forget_unprovisioned() keeps it while any valve is
