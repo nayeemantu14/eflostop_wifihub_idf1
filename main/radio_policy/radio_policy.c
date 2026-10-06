@@ -85,6 +85,8 @@
 #define RP_ASSERT_ROW_(name, fl, k0, m0, k1, m1, k2, m2, k3, m3)                                   \
     _Static_assert(RP_COMPACT(k0, k1, k2, k3) && RP_SLOT_OK(k0, m0) && RP_SLOT_OK(k1, m1) &&      \
                    RP_SLOT_OK(k2, m2) && RP_SLOT_OK(k3, m3), "table: " #name "'s slots in order"); \
+    _Static_assert(((fl) & RP_F_I1) || RP_ROW_##name == RP_ROW_RECOVERY,                          \
+                   "I1: " #name " must carry RP_F_I1 (every row but RECOVERY is checked)");       \
     _Static_assert(!((fl) & RP_F_I1) || RP_CNT4(RP_KC, k0, k1, k2, k3) == 1,                       \
                    "I1: " #name " has one Coded window");                                          \
     _Static_assert(!((fl) & RP_F_I1) || RP_MS4(RP_KC, k0, m0, k1, m1, k2, m2, k3, m3) >= RP_W_MIN_MS, \
@@ -393,6 +395,8 @@ void radio_policy_init(void)
     const char *row = NULL;
     for (int i = 0; i < RP_ROW_COUNT && why == NULL; i++) {
         why = row_check(&k_rows[i]);
+        if (why == NULL && i != RP_ROW_RECOVERY && !(k_rows[i].flags & RP_F_I1))
+            why = "I1 not checked (no RP_F_I1)";   // only the recovery row is exempt
         row = k_row_names[i];
     }
     if (why == NULL) {
