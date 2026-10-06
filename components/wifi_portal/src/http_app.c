@@ -702,7 +702,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 	 * LOCAL PATCH (2.1.4 C3): a request to the STA's address is refused above, so this now only
 	 * spares a request to the SoftAP whose Host names the STA's address the redirect */
 	bool access_from_sta_ip = false;
-	if(has_host && wifi_manager_lock_sta_ip_string(portMAX_DELAY)){
+	if(has_host && wifi_manager_lock_sta_ip_string(pdMS_TO_TICKS(WIFI_MANAGER_POST_WAIT_MS))){	/* LOCAL PATCH (2.1.4 C6): bounded */
 		const char *sta_ip = wifi_manager_get_sta_ip_string();
 		access_from_sta_ip = (sta_ip != NULL && strstr(host, sta_ip) != NULL);
 		wifi_manager_unlock_sta_ip_string();
@@ -736,18 +736,19 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 		if(asset != NULL){
 			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
-			/* LOCAL PATCH (2.1.4 C10b): the page's load orders a scan when the list is empty or
-			 * stale (and none was ordered in the last 20 s), before the page goes out */
-			if(asset->path == http_root_url && req->method == HTTP_GET){
-				wifi_manager_scan_request(false, NULL);
-			}
 			http_app_send_asset(req, asset);
 		}
 		/* GET /ap.json */
 		else if(http_app_path_is(req->uri, http_ap_url)){
 
-			/* LOCAL PATCH (2.1.4 C10b): the page's own polls carry "bg=1" */
-			http_app_note_activity(http_app_query_has(req->uri, "bg=1") ? HTTP_APP_ACT_API_BG : HTTP_APP_ACT_API_USER, client_ip);
+			/* LOCAL PATCH (2.1.4 C10b): the page's own polls carry "bg=1". Its first read, once
+			 * the page has loaded (not GET /, whose assets then had the radio to themselves), orders
+			 * a scan when the list is empty or stale and none was ordered in the last 20 s */
+			bool bg = http_app_query_has(req->uri, "bg=1");
+			http_app_note_activity(bg ? HTTP_APP_ACT_API_BG : HTTP_APP_ACT_API_USER, client_ip);
+			if(!bg && req->method == HTTP_GET){
+				wifi_manager_scan_request(false, NULL);
+			}
 
 			/* if we can get the mutex, write the last version of the AP list */
 			if(wifi_manager_lock_json_buffer(( TickType_t ) 10)){
@@ -759,8 +760,22 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				if(ap_buf == NULL){
 					ap_buf = "[]\n";
 				}
-				http_app_send(req, ap_buf, strlen(ap_buf));	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
-				wifi_manager_unlock_json_buffer();
+				/* LOCAL PATCH (2.1.4 C6): copied out, and sent with the lock given back: a send to a
+				 * slow phone (up to send_wait_timeout, 4 s) held it, and the wifi_manager task, which
+				 * waits 1 s for it, dropped a fresh scan. Sent under the lock as before only when
+				 * the heap has no room for the copy (about 1.5 KB, freed at once). */
+				size_t ap_len = strlen(ap_buf);
+				char *copy = malloc(ap_len + 1);
+				if(copy != NULL){
+					memcpy(copy, ap_buf, ap_len + 1);
+					wifi_manager_unlock_json_buffer();
+					http_app_send(req, copy, ap_len);	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
+					free(copy);
+				}
+				else{
+					http_app_send(req, ap_buf, ap_len);
+					wifi_manager_unlock_json_buffer();
+				}
 			}
 			else{
 				httpd_resp_set_status(req, http_503_hdr);
@@ -835,12 +850,14 @@ static const httpd_uri_t http_server_head_request = {
 
 /**
  * @brief LOCAL PATCH (2.1.4 C6): httpd's open_fn, for each new session (httpd task). Below
- * HTTP_APP_SESSION_MIN_FREE of internal DMA-capable heap the session is closed by the server
- * task's next pass, before any request of it is read (control messages are taken first): a flood
- * of connections (the E2 laptop) cannot take the heap the Wi-Fi driver needs. ESP_OK either way:
- * httpd closes a session whose open_fn fails twice (httpd_sess_new(), then httpd_accept_conn()),
- * and a socket opened by another task between the two closes would be the second one's.
- * ESP_FAIL only if the close cannot be queued (the control socket's send failed).
+ * HTTP_APP_SESSION_MIN_FREE of internal DMA-capable heap the session's socket is shut down
+ * (shutdown(SHUT_RDWR)): its first read fails, and httpd deletes the session itself on its next
+ * pass, before any request is served, so a flood of connections (the E2 laptop) cannot take the
+ * heap the Wi-Fi driver needs. ESP_OK either way: httpd closes a session whose open_fn fails twice
+ * (httpd_sess_new(), then httpd_accept_conn()), and a socket opened by another task between the
+ * two closes would be the second one's. httpd_sess_trigger_close() would not do: httpd skips the
+ * close of a session that has served no request yet (lru_counter 0, "race condition").
+ * ESP_FAIL only if the shutdown itself fails.
  */
 static esp_err_t http_app_open_fn(httpd_handle_t hd, int sockfd){
 
@@ -856,7 +873,7 @@ static esp_err_t http_app_open_fn(httpd_handle_t hd, int sockfd){
 		ESP_LOGW(TAG, "session closed: internal DMA free %u B (needs %u) - %lu since the server start",
 				(unsigned)free_dma, (unsigned)HTTP_APP_SESSION_MIN_FREE, (unsigned long)http_app_refused);
 	}
-	return (httpd_sess_trigger_close(hd, sockfd) == ESP_OK) ? ESP_OK : ESP_FAIL;
+	return (shutdown(sockfd, SHUT_RDWR) == 0) ? ESP_OK : ESP_FAIL;
 }
 
 
