@@ -939,8 +939,14 @@ static void guard_update(TickType_t now, uint8_t m)
         s_x.starve_until = 0;
         ESP_LOGI(RP_TAG, "Sensor-starvation guard over");
     }
+    // The spacing is cleared once it has run out (this runs on every executor pass): kept through
+    // a NORMAL stretch of 2^31 ticks (248 days at 100 Hz), it would read as future and hold the
+    // guard off for as long again.
+    if (s_x.starve_next != 0 && (int32_t)(now - s_x.starve_next) >= 0) {
+        s_x.starve_next = 0;
+    }
     if ((m == RP_MODE_SERVE || m == RP_MODE_AP_IDLE) && s_x.f.starved != RP_STARVED_NONE &&
-        s_x.starve_until == 0 && (s_x.starve_next == 0 || (int32_t)(now - s_x.starve_next) >= 0)) {
+        s_x.starve_until == 0 && s_x.starve_next == 0) {
         s_x.starve_until = rp_nz(now + pdMS_TO_TICKS(RP_STARVE_FOR_MS));
         s_x.starve_next = rp_nz(now + pdMS_TO_TICKS(RP_STARVE_EVERY_MS));
         s_x.starve_kind = s_x.f.starved;
