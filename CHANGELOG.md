@@ -12,14 +12,141 @@ Wire-level detail for the entries below is in:
 
 ---
 
-## 2.1.4 — 2026-09-25
+## 2.1.4 — release candidate, 2026-10-07 (first cut 2026-09-25)
 
 This is a bug-fix and safety release on top of 2.1.3. It fixes the field defects found on 2.1.3, a group of
 valve-safety defects found while analysing them, and the defects found in the release review. The root-cause
 analysis is in `docs/field_logs/2.1.3/ROOT_CAUSE.md`.
 
-The telemetry schema is still `eflostop.v2`. No key is renamed or removed, and no NVS data changes. Some values
-and shapes are new, and parsers must accept them (see *Wire changes*).
+The telemetry schema is still `eflostop.v2`. No key is renamed or removed, and no existing NVS data changes (one
+NVS entry is added, see *Upgrade notes*). Some values and shapes are new, and parsers must accept them (see *Wire
+changes*).
+
+### Release candidate: what 2.1.4 changes, for each reader (2026-10-07)
+
+**Status.** The release candidate is the firmware at `b651701`, built as Build checkpoint 7
+(`docs/field_logs/2.1.4/HANDOFF.md` §15t). **It has not been benched yet.** The radio policy's timings are the
+plan's provisional values until bench gates G0, G1 and G-CNA measure them (`MANUAL_TEST_PLAN.md` section 7), and
+the decisions still open are listed in HANDOFF §15x. This summary is the short version: the sections after it keep
+the detail, and **where they disagree, this summary and the *Development builds* entries win.** In particular,
+since WP8 the portal priority window (*Safety*), the Wi-Fi radio holds (*Fixed*) and the portal-pause and
+radio-hold limitations (*Upgrade notes*, Known limitations) no longer exist: those paragraphs describe development
+builds of 2026-09-29 and 2026-09-30, and each now says so.
+
+**For the people who live with the hub**
+- **Leak protection does not wait for Wi-Fi.** From power-on the hub listens to its leak sensors and closes the
+  valve on a leak, with or without Wi-Fi or internet (2.1.3 started protecting only after Wi-Fi and the cloud were
+  up). The leak, the close and any health alert are kept and sent once the hub is back online.
+- **It keeps protecting while Wi-Fi is being set up**, also after the 10-second Wi-Fi reset: BLE leak sensors and
+  the valve are watched throughout, and a leak during setup closes the valve as at any other time.
+- **The hub only ever controls its own valve.** 2.1.3 could link to, and close or open, a neighbour's eFloStop
+  valve; 2.1.4 matches the valve by its provisioned address only.
+- **A hub with sensors and no valve now hears its BLE leak sensors** (2.1.3 never started BLE there).
+- **After a leak, the valve stays closed, and its lock (RMLEAK) is released 10 s after every sensor is dry** (it was
+  30-60 s). The valve never reopens by itself: the app's Open Valve or the valve's button opens it.
+- **A valve with a flat battery** (10 % or less) is reported critical, and the app's Open Valve is refused with a
+  "replace the batteries" message, because the valve would not open anyway.
+- **Wi-Fi setup works on iPhones and Android phones:** the setup page opens by itself after joining the hub's
+  network, lists the nearby networks (with Rescan), says why a Connect failed (for example a wrong password), keeps
+  the hub's working network when a Connect fails, and ends with **Finish**, which closes the setup network so the
+  phone returns to its own Wi-Fi. Nothing a phone or the setup page sends can reboot the hub any more.
+- **After a router outage the hub rejoins by itself**, within about 40 s of the router's Wi-Fi coming back (2.1.3
+  could stay offline until it was power-cycled).
+
+**For installers**
+- **Setting up Wi-Fi:** hold the Wi-Fi button 10 s (it erases only the saved Wi-Fi: the valve, sensors, rules and
+  sensor names stay); join `WiFi-Hub-<id>` from the phone (an open network, on channel 11); the sign-in page opens
+  by itself (the bench targets: an iPhone within 8 s, most Android phones within 10 s, older Android as a
+  notification);
+  pick the network, enter the password, Connect, then tap Finish. The setup network closes about 2 s after Finish
+  (never sooner than 5 s after the hub joined), or by itself 15-60 s after the join. The hub reaches the cloud about
+  1-3 s after the setup network closes.
+- **The setup page may take a moment longer than on 2.1.3** to list networks or to finish a Connect, because the hub
+  keeps listening to its leak sensors between the phone's turns (provisional timings, measured by G1 and G-CNA). A
+  second Connect, or a Connect soon after the phone joined, is given its radio time a little later (up to a few
+  seconds; HANDOFF §15w). If a Connect fails with the right password, try it once more.
+- **First boot after the upgrade:** the hub learns which radio mode (Coded or 1M) each BLE leak sensor uses and
+  remembers it. Until every sensor has been heard once, and for at most 10 min, it scans both modes in turn. Sensors
+  set to 1M mode are supported (some field sensors are).
+- **The valve after a power cut or a battery change** is normally found and linked again within a few seconds. A
+  valve at the edge of range can take minutes (the hub spaces out failed attempts: 10 s, 30 s, 60 s, then 300 s, but
+  never while a leak is waiting to close it), and the app shows "Valve offline" after 3 minutes without it.
+- **Upgrading from 2.1.3 keeps everything** (provisioning, sensor names, rules, the leak and override state, Wi-Fi)
+  when only the app image is written (`idf.py app-flash`, or a full `idf.py flash`, which leaves both NVS partitions
+  alone). **Never erase the flash.** Rolling back to 2.1.3 keeps provisioning too (*Upgrade notes*).
+
+**For the app and cloud team** (the wire contract is still `eflostop.v2`; the full list is in *Wire changes* and
+*Upgrade notes*; the app-requirements delta, with the V5 document's places and corrected wording, is
+`docs/field_logs/2.1.4/V5_DELTA_FOR_APP_DOC.md`)
+- **Delivery is at least once.** A message can arrive twice, the second copy possibly after newer ones: drop a
+  message only when it is byte-identical to one already received (`C2D_COMMANDS.md` §3.5).
+- **Events raised offline arrive late, in order, with their real time:** events from a Wi-Fi setup, a router outage
+  or before the first clock sync are kept (up to 16) and go out after the connect, before that connection's
+  lifecycle, stamped with the time they happened (never below 1704067200).
+- **Lifecycle and twin reported never carry placeholder values** (provisioned false, no valve, counts 0) and always
+  carry the rules; when the hub's device list is busy they come about 5 s later instead. A snapshot can still leave
+  out `data.rules` when the hub is busy.
+- **Order:** a command's `cmd_ack` normally goes out before the twin report and the snapshot it causes, and twin
+  reports go out in order, newest last. Two exceptions: a `cmd_ack` that MQTT refuses (its outbox full) is sent again
+  within about 10 s, after its twin report and snapshot (WB-CLOUD-1, open: `C2D_COMMANDS.md` §3.5 promises more);
+  and on a slow or reconnecting link MQTT's QoS 1 resend can put an older twin report on the wire after a newer one.
+  Do not depend on either order.
+- **`override_enable` right after the hub has released the lock itself** (`rmleak_auto_cleared`, or an accepted
+  `leak_reset`), before the valve has confirmed it, is refused with "No active leak to override. Use the normal Open
+  Valve control." The app should hide "Open with 24h Override" once one of those has arrived.
+- **Control characters** (tab, line break) in a sensor label, the hub name or the valve's firmware string are sent
+  as spaces in telemetry; twin reported `hub_name` keeps the exact value. The app should not send them.
+- **Snapshots** stay under about 10 KB on a full hub, and a full hub's snapshot always builds now.
+- **The setup network** can close 5 s after the hub joined (Finish), and the hub reaches the cloud only after it
+  closes.
+- Unchanged and verified at the release candidate: all 27 `cmd_ack` error texts, the RMLEAK auto-clear (10 s), the
+  trigger mask, the event shapes, the health-event rules and the offline buffer.
+
+**For the field (support and service)**
+- **The serial log has a new tag, `RADIO`,** with two `[SUMMARY]` lines every 60 s: the time spent in each radio
+  mode, the share of time BLE scanned (90 % or more in normal operation), adverts heard per sensor, the radio pulses
+  given to Wi-Fi, and the longest gap in leak scanning (`0 over 2900 ms` is normal). `RADIO: I2: BLE went N ms with no
+  Coded scan … - send this log` and `Profile self-test FAILED` mean: send the log.
+- **The production tool's boot-log markers are unchanged** (`Firmware version: v2.1.4`, `Gateway ID :`, `WiFi STA
+  MAC:`, `Initializing LoRa Driver...`, `BLE_VALVE: [HOST] NimBLE host task started`).
+- **A release build prints no `bench build (APP_BENCH_DIAG)` warning at boot.** One that does is a development
+  build and must not go to a customer (*Before release*).
+- **The Wi-Fi password and the valve's passkey are never printed** on the serial log.
+- **Flash:** 2.1.4 adds one small NVS entry in the commissioning partition (namespace `ble_phy`: each BLE sensor's
+  radio mode). A rollback to 2.1.3 leaves it unused and harmless; a later 2.1.4 reads it back.
+
+**Known limitations of the release candidate** (each in HANDOFF §15w/§15x with its owner)
+1. **No bench data yet** for the radio policy, the setup portal's phone timings or the memory figures: every timing
+   above is the model's or the plan's until G0, G1, G2 and G-CNA run.
+2. **While a phone uses the setup page,** the hub shares the radio with Wi-Fi: a leak that lasts is still detected
+   (bench gates: within 20 s in the idle setup network, 35 s while a page is used, never over 60 s), but a very short
+   wetting of about 1 s is caught less often than in normal operation (model: about 64-81 % instead of 77-90 %).
+3. **A Connect on the setup page is usually given 1.5 s of radio time, a little later** (it comes soon after the
+   phone's own join), instead of up to 2.8 s at once: the price of keeping a stranger on the open setup network
+   from blinding the leak sensors. G-CNA measures whether it costs setups.
+4. **The setup network is open** (no password; WPA2 was excluded): anyone in range can join it, submit Wi-Fi
+   credentials or make the hub forget its Wi-Fi. Leak protection keeps running in every case; the hub can drop off
+   the cloud until Wi-Fi is set up again.
+5. **A valve that is out of reach when a leak happens** is closed as soon as it links again: the hub searches for
+   it intensively for up to 10 minutes per leak, then at the normal rate. RMLEAK and CLOSE wait for it and are never
+   dropped.
+6. **A 1M-mode BLE sensor first powered more than 10 minutes after the hub booted or was provisioned** is found by
+   the normal scan only (typically within 60-90 s) until it is first heard.
+7. **The cloud order caveats** above (WB-CLOUD-1, the QoS 1 twin resend).
+8. **A live DPS registration** (first boot, after a decommission-all or a provisioning-epoch change) still holds the
+   hub's main task for up to 60 s per attempt.
+9. **Open review findings, small, for after the bench** (HANDOFF §15x item 21): a failed valve-connect attempt can
+   leave leak scanning off about 0.5 s longer than its 2.8 s limit (WB-CONC-1); a valve swapped during a live leak is
+   not searched for intensively until another wet report (LEAK-WB-1); on a hub with no BLE leak sensor the first
+   reconnect attempt to a dropped valve waits 6-7 s (LEAK-WB-2).
+10. The limitations listed under *Upgrade notes* that are not marked superseded still apply.
+
+**Before release (not in the release candidate)**
+- Run the bench campaign (`MANUAL_TEST_PLAN.md`: VAL-01, the smoke subset, section 7's gates, then the rest).
+- `CONFIG_APP_BENCH_DIAG` default to n (the development builds' bench diagnostics off), which changes the
+  `sdkconfig` hash once; re-run the production tool's boot-log parse on that build.
+- The user's decisions in HANDOFF §15x, including the history rewrite before any push (a Wi-Fi password in
+  `6b84ae3`).
 
 ### Development builds (2.1.4 plan, from 2026-10-01)
 
@@ -38,7 +165,10 @@ checks, and closes the busy-lock and twin items left from WP2d and WP2e; WP4 reb
 server; WP5 and WP6 give BLE scanning one owner and a de-locked normal scan, and bound the valve's claims
 (HANDOFF §15q-§15s). WP7 adds the G1 lab image, and WP8 puts the radio policy in production: BLE leak scanning
 keeps running in the setup portal, and every Wi-Fi need gets a short, bounded BLE pause (HANDOFF §15u). They are
-all built and benched as Build checkpoint 7, of `52ef6a2` (HANDOFF §15t), then G1 on the lab image (§15v).
+all built and benched as Build checkpoint 7, now of `b651701` with phase 3 (HANDOFF §15t, §15w), then G1 on the lab
+image (§15v). Phase 3 paces a setup-page Connect or a phone's join that comes soon after another (M4), fixes three
+time stamps that misread after 248.5 days of uptime, and stages WP9's memory set off by default; WP10 is this
+section's release-candidate summary and the documents (HANDOFF §15w).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -581,6 +711,54 @@ all built and benched as Build checkpoint 7, of `52ef6a2` (HANDOFF §15t), then 
     for release.
   - With the option off nothing of it is compiled in: every production object is the same byte for byte. The
     regenerated `sdkconfig` gains `# CONFIG_APP_RADIO_LAB is not set`.
+- **A Connect or a join soon after another is paced (phase 3, M4), and three long-uptime fixes.** Commits
+  `d6c8b69`, `509e6b6`, `4e8a8cd`, `384affc` (`main/radio_policy`; `main/app_wifi` in comments only) and `1ec70c7`,
+  `dbaae0f`, `b651701` (`main/ble_leak_scanner`, `main/radio_policy`); details in HANDOFF §15w. Two adversarial
+  reviews of the pacing, a whole-branch review by seven lenses, fixers, and a 3/3 SHIP council (leak safety, RTOS,
+  build). These seven commits are why Build checkpoint 7 is of `b651701`.
+  - **The Connect flood (M4) is closed in the leak model.** A setup-page Connect (SUBMIT) or a phone's join (JOIN)
+    whose radio pulse would begin less than 45 s after the last SUBMIT or JOIN pulse began is now *paced*: 1.5 s,
+    given at the end of a Coded scan window, after the usual 6-7 s of scanning between pulses. A first one is
+    unchanged (a Connect still gets up to 2.8 s at once). One stamp covers both kinds, so neither a Connect flood
+    nor a join flood with new phone addresses buys immediate pulses. Under the worst flood the leak model tried (a
+    stranger timing Connects or joins to the sensors' 15 s heartbeats), a persistent leak is detected within 30.5 /
+    47.5 s (p99.9 at p_loss 0.3 / 0.5), where it was 62.0 / 135.5 s. 45 s rather than 30 s, because 30 s is a multiple of
+    the 15 s heartbeat (60.5 s at p_loss 0.5).
+  - **The cost, for the user to ratify:** a person's Connect usually comes within 45 s of their own phone's join,
+    so it is paced: its pulse starts 0.4-1.2 s later and lasts 1.5 s instead of up to 2.8 s (model: grant latency
+    p90 4.3 s; 6 of 288 Connects got no pulse and ran beside BLE). G-CNA S2 measures what this does to setups.
+  - **A join assist whose end has already come** (its lease and first page within 0.3 s) is dropped instead of
+    granted as a pulse of a few milliseconds that still cost the 1.2 s recovery (`d6c8b69`).
+  - **Three stale time stamps that misread after 248.5 days of uptime** are fixed: in BLE_IDLE (no BLE sensor, valve
+    linked) the scan gate's stamp went stale, and **after 248.5 days no BLE scan, valve relink or RMLEAK/CLOSE
+    delivery would have run until a reboot** (`1ec70c7`, the review's one major finding); provisional SERVE's end
+    stamp and the sensor-starvation guard's spacing could keep the setup portal in the wrong mode for as long
+    (`b651701`, `dbaae0f`). Below 248.5 days nothing changes.
+  - Log lines (`RADIO`): a paced pulse line ends ` (paced: a SUBMIT or JOIN pulse began less than 45 s before)`;
+    new `SUBMIT pulse waits for the pulse spacing (x.x of y.y s): paced, …` and `SUBMIT pulse waits for I2b's room:
+    x.x s of pulses in the last 60 s` (one of them per 10 s at most), and `SUBMIT pulse not granted before its
+    Connect ended (asked N ms before) - the attempt ran beside BLE` (once per 10 s at most). None prints a
+    credential; the production tool's markers are unchanged.
+  - Memory (objects against `52ef6a2`): code +753 B, `.rodata` +445 B, `.bss` +12 B, `.data` 0; no IRAM (DIRAM
+    `.text` stays 113,387 B), no new task, timer, queue or heap; the `sdkconfig` and its hash are unchanged.
+  - **Open, for after the bench (HANDOFF §15x):** a failed valve claim's scan gap can pass 2.8 s by up to about
+    0.5 s (WB-CONC-1); a valve swapped during a live incident is not given the leak response's intensive search
+    until another wet report (LEAK-WB-1); on a hub with no BLE leak sensor a relink claim waits 6-7 s (LEAK-WB-2);
+    the cloud contract's `cmd_ack` order (WB-CLOUD-1).
+- **The memory set, staged and off by default (WP9).** Commits `ca8ed64` … `e3cad30` (`sdkconfig.wp9/` only); the
+  bench procedure is `docs/field_logs/2.1.4/WP9_GM_PROCEDURE.md`. One build-settings fragment per line of plan §8,
+  two staged patches and a bench-only NimBLE pool diagnostic; no build reads them unless its command names one, so
+  **no image changes.** Each line is built and benched alone (gate G-M) and lands only if it pays and passes, with
+  the user's approval. Measured on this image: the Wi-Fi IRAM options 17,580 B (not "more than 27 KB"), 6 static
+  Wi-Fi RX buffers about 6.4 KB, 12 HCI event buffers 4,968 B, ACL 8 and msys 12 8,704 B, one NimBLE connection
+  528 B, `cloud_tx`'s stack 1,024 B (after T6-11): about 38.2 KB, 39.2 KB with the stack. **The NimBLE roles line
+  (W6) must never ship:** in ESP-IDF 5.5.1 it would remove the hub's receipt of every valve notification, which its
+  own gate cannot see. The mbedTLS line frees nothing here and is not recommended.
+- **The documents (WP10).** This release-candidate section; `MANUAL_TEST_PLAN.md` re-baselined for CP7 (T4-10
+  rewritten for the radio policy; section 7 with G-CNA, G-FAULT, G8x, G6b, G3b, G1 and the valve power cycles);
+  the component change register `components/wifi_portal/CHANGES.md`; the sensor timings the hub depends on,
+  `docs/field_logs/2.1.4/SENSOR_FW_1_1_0_TIMINGS.md`; the app-requirements delta,
+  `docs/field_logs/2.1.4/V5_DELTA_FOR_APP_DOC.md`; HANDOFF §15t (CP7 of `b651701`), §15w and §15x.
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and
@@ -588,7 +766,8 @@ all built and benched as Build checkpoint 7, of `52ef6a2` (HANDOFF §15t), then 
   safety net at about 75-80 s in the portal window only, and MQTT restarting at the IP address (*Fixed*'s router
   retry, *Safety*'s portal window, *Upgrade notes*' serial-log lines); WP10 rewrites them. Since WP8 the portal
   window, its health hold and the Wi-Fi radio holds those sections describe are gone: the radio policy above
-  replaces them.
+  replaces them. WP10 marks each such paragraph below as superseded and keeps it as the record of those builds;
+  the release-candidate summary at the top of this section is the current statement.
 
 ### Fixed (2.1.3 field defects)
 
@@ -663,6 +842,10 @@ all built and benched as Build checkpoint 7, of `52ef6a2` (HANDOFF §15t), then 
     network-list request), for at most 5 min after the last attempt. A failed retry starts no Wi-Fi manager
     retry and changes nothing in NVS; a successful one saves the credentials only if they changed (the Wi-Fi
     manager's rule).
+  - **Superseded since WP8 (`dd19d6b`): the Wi-Fi radio holds below, and their trade-off, are gone.** BLE now
+    gives Wi-Fi short, bounded pulses instead (a router retry 1.5 s, a list scan at most 2.5 s, each followed by
+    1.2 s of leak scanning; *Development builds*, WP8). The router retry itself stays: about every 30-35 s after
+    the last attempt, deferred while the setup page is in use and for at most 10 s while a phone joins.
   - **Wi-Fi radio holds.** While Wi-Fi is not connected, BLE scanning (the leak scan and the valve hunt) pauses
     around each Wi-Fi scan and each connect attempt, then resumes:
     - a connect attempt holds from its start until it fails or gets its IP, for at most 2.5 s; the rest of a
@@ -726,6 +909,10 @@ all built and benched as Build checkpoint 7, of `52ef6a2` (HANDOFF §15t), then 
     pre-sync events is tracked in RAM only.
   - Snapshots and lifecycle are still not sent before the first sync; they are regenerated after connect.
 - **N1 follow-up: a phone could not join the Wi-Fi setup portal (found on the 2.1.4 bench, 2026-09-29).**
+  - **Superseded since WP8 (`dd19d6b`, decision D2): the portal priority window, its health hold and the task
+    priority raise described below are gone.** The setup portal keeps BLE leak scanning on beside the SoftAP
+    (*Development builds*, WP8), so a leak during setup closes the valve as at any time, and the sensors' and the
+    valve's health timeouts are never held. The 10 s reset's erase (below) is unchanged.
   - On the 2.1.4 development builds, after the 10 s Wi-Fi reset (or at first setup) on a hub with a valve or a
     BLE sensor, the phone listed the `WiFi-Hub-<short id>` network but could not join it (iOS: "Unable to join
     the network"), and the hub never gave a DHCP lease. BLE now starts at boot (N1, P0-b). Its continuous 1M +
@@ -1022,12 +1209,16 @@ next snapshot) confirms it.
 
 ### Upgrade notes
 
-- **Upgrading from 2.1.3 keeps provisioning.** There is no change to any NVS namespace, key or layout, nor to
-  the partition table. (Neither 2.1.3 nor 2.1.4 contains an OTA client; an upgrade that rewrites only the app
+- **Upgrading from 2.1.3 keeps provisioning.** No existing NVS namespace, key or layout changes, nor does the
+  partition table. One entry is added: since `f04f2db` (WP6) 2.1.4 keeps each BLE sensor's radio mode in the
+  commissioning partition (`nvs_prov`, namespace `ble_phy`, key `phy`, one blob of at most 112 B, written only when
+  it changes). The first 2.1.4 boot has none (`PHY table loaded` prints only from the second boot) and learns it
+  within 10 minutes. A lab image (never shipped) also adds `rp_lab` in `nvs`. (Neither 2.1.3 nor 2.1.4 contains an OTA client; an upgrade that rewrites only the app
   image, such as `idf.py app-flash` or a full `idf.py flash`, which leaves the `nvs` and `nvs_prov`
   partitions alone, keeps everything. Never `erase-flash`.) The valve, sensors, sensor metadata, rules, hub name, DPS cache and snapshot interval all
   carry over.
-- **Rolling back to 2.1.3 keeps provisioning too,** for the same reason. The 2.1.3 behaviour returns with it,
+- **Rolling back to 2.1.3 keeps provisioning too:** 2.1.3 reads none of the added entries and ignores them, and a
+  later upgrade to 2.1.4 reads `ble_phy` back. The 2.1.3 behaviour returns with it,
   including P0-a. A pre-sync event still in the offline buffer at the rollback and not yet time-stamped (the
   clock never synced, the entry was too close to 512 B to be stamped in flash, or its stamp could not be
   written) is replayed by 2.1.3 unchanged, with a `ts` in 1970; one already stamped keeps its real
@@ -1128,6 +1319,12 @@ next snapshot) confirms it.
 
     `GATT busy - waiting` is normal when a reconnect replays commands while new ones are queued. None of
     these should repeat for long.
+  - **Gone since WP8 (`dd19d6b`):** every line of the next two lists that belongs to the portal window or the radio
+    holds (`portal priority …`, `HEALTH_ENGINE: BLE scanning paused/resumed …`, `Valve hunt for a pended leak
+    response during the scan pause …`, `BLE_LEAK: Scan paused/resumed - Wi-Fi setup portal …`, `[SCAN] Valve scan
+    held …`, `[PORTAL] …`, `Wi-Fi radio hold …`). Kept: `SoftAP up with saved Wi-Fi credentials (router fallback) -
+    BLE scanning stays on`, the station join and leave lines, and the `router fallback: …` lines. New in their
+    place: the `RADIO` lines (*Development builds*, WP8 and phase 3).
   - New, Wi-Fi setup portal (the portal priority window, see *Safety*):
     - `APP_WIFI`: `portal priority ON (no Wi-Fi credentials) - BLE scanning paused` (warning), then `portal
       priority: wifi_manager task prio %u -> %u (httpd, dns_server not raised)` (`5 -> 8`)
@@ -1307,6 +1504,9 @@ next snapshot) confirms it.
     off.
   - Captive portal after a Wi-Fi reset: on a hub with a valve or a BLE sensor, NimBLE now starts at boot and
     stays up beside the SoftAP portal, which therefore has less free heap than on 2.1.3.
+    - **Superseded since WP8: the pause, the holds and the setup-time exceptions in the sub-items below no longer
+      exist.** BLE scanning and the valve hunt run throughout the setup portal; the release-candidate summary's
+      known limitations 2-4 replace these items.
     - While no Wi-Fi credentials are saved, and for about a minute after Wi-Fi is set up, BLE scanning pauses
       so a phone can join and finish (see *Safety*). During that pause BLE leak sensors are not heard, and a
       lost valve link is not re-found unless a leak close is pended for it. LoRa sensors and an established
@@ -1340,6 +1540,11 @@ next snapshot) confirms it.
       Wi-Fi erases them and opens the setup portal. Use the 10 s reset there.
   - **Router outage: BLE pauses for Wi-Fi (the router-rejoin fix, see *Fixed*; accepted, user decisions
     2026-09-29 and 2026-09-30).**
+    - **Superseded since WP8 (radio holds) and WP4 (the setup page): the pauses, chains and listening times below
+      are gone,** BLE gives Wi-Fi bounded pulses instead; a portal submit can no longer reboot the hub (WP1, WP4: a
+      Connect waits for, or aborts, a running attempt); a failed Connect keeps the network in use, and a mistyped
+      password no longer replaces it (WP4 C8). The sensor timings in the first sub-item still hold
+      (`docs/field_logs/2.1.4/SENSOR_FW_1_1_0_TIMINGS.md`).
     - The BLE leak sensor (firmware 1.1.0) advertises in bursts: for 4 s when it turns wet, then for 2.5 s
       every 15 s while wet (every 100 s while dry), about one advertisement every 0.3-0.45 s. A connect
       attempt's pause keeps BLE off about 3 s at most and leaves at least about 1 s of the 4 s burst outside
