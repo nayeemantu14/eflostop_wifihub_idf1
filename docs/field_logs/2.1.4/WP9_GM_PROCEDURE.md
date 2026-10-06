@@ -82,7 +82,7 @@ run whether W3's 12 and W4's 8 and 12 have room), then W4 and W3 (BLE bench), W2
 - CP7 built and VAL-01 passed (HANDOFF 15t); the project's `sdkconfig` is CP7's, SHA256
   `9E13270C4A2D05B0781A88841318160C588683CE06D1574935C17308AAE0412D`. A different hash: stop, every expected
   figure below assumes CP7's. **A variant is the project folder's commit plus one line** (WP9-ADV-3): run
-  `git diff --stat b651701 HEAD -- main components sdkconfig.defaults CMakeLists.txt partitions.csv dependencies.lock`
+  `git diff --stat b651701 HEAD -- main components sdkconfig.defaults CMakeLists.txt partitions.csv dependencies.lock ':(exclude)*.md'`
   before every variant build; it must print nothing. If it prints anything, the firmware is no longer CP7's: build
   and bench the production image of that commit first, take the baselines below from it, and give a worktree that
   same commit. The variant hashes below hold only while `sdkconfig.defaults` and the Kconfig files are as at

@@ -252,7 +252,7 @@ Every log line and JSON shape quoted in this plan was checked against the firmwa
 
 ```powershell
 git log --oneline -1
-git diff --stat b651701 HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock
+git diff --stat b651701 HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock ':(exclude)*.md'
 (Get-Item build\eFloStop_WiFiHub_idf1.bin).LastWriteTime
 (Get-Item build\eFloStop_WiFiHub_idf1.bin).Length
 git log -1 --format=%ci b651701
@@ -261,7 +261,7 @@ Get-FileHash build\eFloStop_WiFiHub_idf1.elf
 Select-String -Path build\eFloStop_WiFiHub_idf1.bin -SimpleMatch -Quiet -Pattern 'paced: a SUBMIT or JOIN pulse began less than 45 s before'
 ```
 
-- The `git diff` must print nothing: HEAD differs from `b651701` in docs only. The pathspec includes `components` and `dependencies.lock`: the Wi-Fi manager is the local component `components/wifi_portal` since WP-V.
+- The `git diff` must print nothing: HEAD differs from `b651701` in docs only (the `':(exclude)*.md'` pathspec skips docs inside the source folders, such as `components/wifi_portal/CHANGES.md`, added after `b651701`). The pathspec includes `components` and `dependencies.lock`: the Wi-Fi manager is the local component `components/wifi_portal` since WP-V.
 - `sdkconfig` is **git-ignored and untracked** (`.gitignore`), so no `git diff` can show a change to it. **From CP7 on its SHA256 is `9E13270C4A2D05B0781A88841318160C588683CE06D1574935C17308AAE0412D`** (after VAL-01 step 2's one-time regeneration; HANDOFF §15t): record it on the results sheet. It is no longer the CP5/CP6 file (`98F3B2CC…AE759767`), which is kept as `..\sdkconfig.pre_cp7` for the 2.1.3 baseline (0.4).
 - The `.bin` must be **newer** than the `b651701` commit time (2026-10-07 06:37:11 +1100), the `Select-String` line must print `True` (phase 3 is in the image), and the boot banner's `app_init: ELF file SHA256:` must print the first 9 hex digits of the ELF hash above. No earlier build (CP4's `46a1f0a`, CP5's `31b4c9f`, CP6's `545b8f2`, or a build of `52ef6a2`) is the build under test. VAL-01 does one full rebuild, to capture all four warning lines: an incremental build prints only the warnings of the files it recompiles.
 
@@ -7427,7 +7427,7 @@ Command block 1 (step 1):
 
 ```powershell
 git log --oneline -1
-git diff --stat b651701 HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock
+git diff --stat b651701 HEAD -- main components CMakeLists.txt partitions.csv sdkconfig.defaults dependencies.lock ':(exclude)*.md'
 Get-FileHash sdkconfig
 (Get-Content sdkconfig).Count
 ```
