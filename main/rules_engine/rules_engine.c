@@ -110,6 +110,10 @@ static struct { leak_source_t source; bool leak; char id[18]; } g_kept[KEPT_MAX]
 static uint8_t g_kept_n = 0;
 static bool g_lock_busy_logged = false;         // one W line per busy episode
 static bool g_tick_ran = false;                 // this pass's tick took the rules lock
+/* A valve swap's purge whose rules-lock take timed out (rules_engine_on_valve_replaced()),
+ * run first in this task's next hold of the lock (valve_purge_if_owed()). iothub_task only,
+ * like every caller that holds the lock and reads the active-leak set, so no lock. */
+static bool g_valve_purge_owed = false;
 
 // 24h override window state
 static override_state_t g_override_state = OVERRIDE_STATE_INACTIVE;
@@ -740,6 +744,21 @@ static void build_auto_close_telemetry(leak_source_t source, const char *source_
     cJSON_Delete(root);
 }
 
+static void valve_replaced_locked(bool kept_dropped);
+
+// iothub_task, with g_mutex held: first in every hold of that task that reads the active-leak
+// set or decides on a leak (evaluate_leak_once(), the kept reports' retry, the tick, the valve
+// reconnect's reconciliation, forget_unprovisioned()). Runs the purge a valve swap could not
+// (rules_engine_on_valve_replaced()), so the old valve's MAC-less flood source is gone before
+// any of them can act on it, or a new valve's report is tracked (2.1.4 WP3, 15o residual 3).
+static void valve_purge_if_owed(void)
+{
+    if (g_valve_purge_owed) {
+        g_valve_purge_owed = false;
+        valve_replaced_locked(false);
+    }
+}
+
 // ─── Public API ─────────────────────────────────────────────────────────────
 
 bool rules_engine_init(void)
@@ -1024,6 +1043,7 @@ static void evaluate_leak_locked(leak_source_t source, bool leak_active, const c
 static bool evaluate_leak_once(leak_source_t source, bool leak_active, const char *source_id)
 {
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return false;
+    valve_purge_if_owed();
     evaluate_leak_locked(source, leak_active, source_id);
     return true;
 }
@@ -1043,6 +1063,7 @@ bool rules_engine_retry_kept_reports(void)
         // just before it.
         if (set_has_source(&g_last_set, g_kept[0].id)) {
             if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return evaluated;
+            valve_purge_if_owed();
             // An event not taken yet (a C2D command's, raised since the loop's take) goes out
             // first: the slot holds one, and this report's own would replace it (F-08).
             if (g_pending_telemetry) {
@@ -1084,13 +1105,31 @@ static void keep_report(leak_source_t source, bool leak_active, const char *sour
         ESP_LOGW(RULES_TAG, "Failed to take mutex");
         return;
     }
+    int last = -1;   // this source's last kept report
     for (int i = g_kept_n - 1; i >= 0; i--) {
         if (g_kept[i].source == source && strcmp(g_kept[i].id, source_id) == 0) {
             if (g_kept[i].leak == leak_active) return;   // same as its last kept: one evaluation covers both
+            last = i;
             break;
         }
     }
     if (g_kept_n == KEPT_MAX) {
+        // Full, the new report wet, and this source's last kept one dry (2.1.4 WP3, 15o
+        // residual 2): the wet one replaces it, so the replay ends wet, as the source is. A
+        // source flapping inside one busy hold (W, D, W, D, then W) otherwise lost its last
+        // wet report and ended dry in the engine while wet: the all-clear then cleared RMLEAK
+        // 10 s later, and the valve's flood source does not report again. Only the dry state
+        // between the two is not replayed, and every wet report kept stays. Never the other
+        // way round: a dry report never replaces a kept wet one, which may be the only report
+        // left to latch and close (a wetting that dried inside the hold would then close
+        // nothing). That dry one is lost as before, and its source stays wet in the engine:
+        // fail-safe, until its next report.
+        if (last >= 0 && leak_active) {
+            g_kept[last].leak = true;
+            ESP_LOGW(RULES_TAG, "Rules lock busy - %d leak reports already kept, the wet one from %s sensor %s replaces its last kept dry one",
+                     KEPT_MAX, leak_source_to_str(source), source_id);
+            return;
+        }
         ESP_LOGE(RULES_TAG, "Rules lock busy - %d leak reports already kept, the %s one from %s sensor %s is lost",
                  KEPT_MAX, leak_active ? "wet" : "dry", leak_source_to_str(source), source_id);
         return;
@@ -1558,6 +1597,7 @@ void rules_engine_on_valve_connected(void)
     if (!g_initialized) return;
 
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) return;
+    valve_purge_if_owed();
 
     // Read actual valve characteristics for reconciliation logging
     int valve_state = ble_valve_get_state();
@@ -1821,6 +1861,7 @@ void rules_engine_tick(void)
     g_tick_ran = false;
     if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
     g_tick_ran = true;
+    valve_purge_if_owed();
 
     // ── Override window expiry check ──────────────────────────────────────
     // Runs regardless of incident state — the window can expire even if all
@@ -2197,6 +2238,7 @@ bool rules_engine_forget_unprovisioned(void)
         ESP_LOGW(RULES_TAG, "Failed to take mutex (forget_unprovisioned)");
         return false;
     }
+    valve_purge_if_owed();
 
     // The copies a leak is decided on while provisioning is busy (WP2d). Every device-set
     // change passes here, a provision's rules and an emptying removal's reset of them
@@ -2238,31 +2280,10 @@ bool rules_engine_forget_unprovisioned(void)
     return rules_ok;   // false: the (idempotent) change is retried, and the rules read with it
 }
 
-void rules_engine_on_valve_replaced(void)
+// The rules side of a valve swap or removal (rules_engine_on_valve_replaced()), with g_mutex
+// held; iothub_task only. kept_dropped: an old valve's kept report went with it.
+static void valve_replaced_locked(bool kept_dropped)
 {
-    // Not initialised: nothing is tracked or latched yet.
-    if (!g_initialized) return;
-
-    /* A report from the old valve still kept since the rules lock refused it (WP2d) goes
-     * too, for the same reason as the tracked source below: kept under the MAC-less
-     * VALVE_SOURCE_ID, the retry would replay it against the new valve. The kept list is
-     * this task's own, so before the lock, and even if the lock stays busy. */
-    bool kept_dropped = false;
-    for (int i = 0; i < g_kept_n; ) {
-        if (strcmp(g_kept[i].id, VALVE_SOURCE_ID) == 0) {
-            g_kept_n--;
-            memmove(&g_kept[i], &g_kept[i + 1], (g_kept_n - i) * sizeof(g_kept[0]));
-            kept_dropped = true;
-        } else {
-            i++;
-        }
-    }
-
-    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGW(RULES_TAG, "Failed to take mutex (valve replaced)");
-        return;
-    }
-
     /* VALVE_SOURCE_ID is MAC-less, so forget_unprovisioned() keeps it while any valve is
      * provisioned: the old valve's flood reading used to survive the swap and close the
      * new, dry valve on its first link. If the new valve is wet, its own link-up LEAK
@@ -2296,6 +2317,42 @@ void rules_engine_on_valve_replaced(void)
     ESP_LOGW(RULES_TAG, "Valve replaced: old valve leak source %s, %u source(s) still wet, incident %s",
              dropped ? "dropped" : "not tracked", (unsigned)g_active_leak_count,
              released ? "released" : (g_leak_incident_active ? "kept" : "not latched"));
+}
 
+void rules_engine_on_valve_replaced(void)
+{
+    // Not initialised: nothing is tracked or latched yet.
+    if (!g_initialized) return;
+
+    /* A report from the old valve still kept since the rules lock refused it (WP2d) goes
+     * too, for the same reason as the tracked source below: kept under the MAC-less
+     * VALVE_SOURCE_ID, the retry would replay it against the new valve. The kept list is
+     * this task's own, so before the lock, and even if the lock stays busy. */
+    bool kept_dropped = false;
+    for (int i = 0; i < g_kept_n; ) {
+        if (strcmp(g_kept[i].id, VALVE_SOURCE_ID) == 0) {
+            g_kept_n--;
+            memmove(&g_kept[i], &g_kept[i + 1], (g_kept_n - i) * sizeof(g_kept[0]));
+            kept_dropped = true;
+        } else {
+            i++;
+        }
+    }
+    if (g_kept_n == 0) {
+        g_lock_busy_logged = false;   // the busy episode's line prints again next time (15o residual 6)
+    }
+
+    if (xSemaphoreTake(g_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        // sync_valve_detectors() commits the new valve anyway, so this purge is not asked for
+        // again: owed instead, and run first in this task's next hold of the lock, before
+        // anything there reads the active-leak set (valve_purge_if_owed(); 2.1.4 WP3, 15o
+        // residual 3). Until then the old valve's flood source could close the new valve at
+        // its first link (E-04).
+        g_valve_purge_owed = true;
+        ESP_LOGW(RULES_TAG, "Failed to take mutex (valve replaced)");
+        return;
+    }
+    g_valve_purge_owed = false;   // a purge still owed from an earlier swap: this one covers it
+    valve_replaced_locked(kept_dropped);
     xSemaphoreGive(g_mutex);
 }

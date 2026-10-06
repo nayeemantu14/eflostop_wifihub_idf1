@@ -334,7 +334,10 @@ bool rules_engine_forget_unprovisioned(void);
  * Call from iothub_task when the provisioned valve MAC changes from one valve to another,
  * or when the valve is removed (not on a first provision): forget_unprovisioned() drops
  * the source on a removal but leaves the latch to the all-clear timer. Takes the rules
- * mutex (1 s); on a timeout it logs and changes nothing.
+ * mutex (1 s); on a timeout it logs, and the rest is owed: it runs first in iothub_task's
+ * next hold of the mutex (the tick, a leak evaluation, the kept reports' retry, the valve
+ * reconnect's reconciliation or a device-set change), before any of them reads the
+ * active-leak set (2.1.4 WP3).
  */
 void rules_engine_on_valve_replaced(void);
 
