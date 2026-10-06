@@ -87,14 +87,18 @@ bool rules_engine_init(void);
  *        During a 24h override window, the incident is latched and leak events
  *        are reported to the cloud, but automatic valve closure is blocked.
  *
+ * The decision reads this source's membership and the rules in one provisioning hold
+ * (2.1.4 WP3, WP2D-C4): a report from a device not in the set, a removed one included, is
+ * ignored with a W line.
  * A lock timeout never drops a wet report (2.1.4 WP2d). Provisioning busy for 1 s: it is
  * decided on the last rules and device set read, for a sensor in that set only. Rules
  * mutex busy for 1 s: it is kept (sensors in that set, up to 4 reports) and evaluated
  * again, in arrival order, on the next pass after its tick
  * (rules_engine_retry_kept_reports()); a later report from the same source, or a later
- * wet one, waits behind it. A dry report that meets a busy rules mutex is kept too when
- * its source's wet report is kept, so the pair is replayed in order; any other is dropped
- * as before (its source stays wet: fail-safe).
+ * wet one, waits behind it. A report of the valve's flood probe is kept like a wet one,
+ * dry ones included (2.1.4 WP3). A sensor's dry report that meets a busy rules mutex is
+ * kept too when its source has a report kept, so the pair is replayed in order; any other
+ * is dropped as before (its source stays wet: fail-safe).
  *
  * iothub_task only.
  *

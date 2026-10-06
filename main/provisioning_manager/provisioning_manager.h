@@ -293,15 +293,37 @@ prov_member_t provisioning_ble_sensor_membership(const char *mac);
  */
 bool provisioning_get_rules_config(rules_config_t *rules_out);
 
+// The device a leak report names, for provisioning_get_rules_and_state(): the list its
+// membership is read from, in the same mutex hold as the rules.
+typedef enum {
+    PROV_DEV_NONE = 0,   // no device: *member is the hub's state alone
+    PROV_DEV_VALVE,      // the provisioned valve (id unused)
+    PROV_DEV_LORA,       // a LoRa sensor; id "0x%08lX", as the rules engine tracks it
+    PROV_DEV_BLE,        // a BLE leak sensor; id its MAC, case-insensitive
+} prov_dev_kind_t;
+
 /**
- * @brief Read the provisioned state and the rules config within ONE mutex hold.
+ * @brief Read the provisioned state, one device's membership and the rules config within
+ *        ONE mutex hold.
  *
- * Returns false ONLY when an argument is NULL, the manager is not initialised or the
- * mutex (1000 ms) timed out: that is "unknown", never "unprovisioned".
+ * 2.1.4 WP3 (WP2D-C4, the user's decision of 2026-10-02): a leak is decided on the
+ * membership read with its rules, not on the hub's state alone. A device removed after
+ * the event loop's membership gate let its report through, or a report the gate passed
+ * as UNKNOWN (provisioning busy), is then judged by the set as it is at the decision.
+ *
+ * *provisioned: the hub is PROVISIONED. *member (may be NULL): it is, and `kind` / `id`
+ * name a device in its set; for PROV_DEV_NONE the hub's state; false for a sensor kind
+ * with a NULL or unparsable id. The same answer as provisioning_*_membership() gives
+ * YES to, and provisioning_get_device_set() lists.
+ *
+ * Returns false ONLY when provisioned or rules_out is NULL, the manager is not initialised
+ * or the mutex (1000 ms) timed out: that is "unknown", never "unprovisioned".
  * provisioning_is_provisioned() answers false for both, which a leak decision must tell
  * apart (the rules engine then decides on its last copy). Logs nothing on a timeout.
  */
-bool provisioning_get_rules_and_state(bool *provisioned, rules_config_t *rules_out);
+bool provisioning_get_rules_and_state(prov_dev_kind_t kind, const char *id,
+                                      bool *provisioned, bool *member,
+                                      rules_config_t *rules_out);
 
 /**
  * @brief Set rules engine configuration and persist to NVS. RAM takes the new rules

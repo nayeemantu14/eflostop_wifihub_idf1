@@ -803,6 +803,28 @@ bool provisioning_get_valve_mac(char *mac_out)
     return result;
 }
 
+// The sensor lists, with g_prov_mutex held; the hub's state is the caller's to check. One
+// definition each for the membership reads below and provisioning_get_rules_and_state().
+static bool lora_listed_locked(uint32_t sensor_id)
+{
+    for (int i = 0; i < g_config.lora_sensor_count && i < MAX_LORA_SENSORS; i++) {
+        if (g_config.lora_sensor_ids[i] == sensor_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ble_listed_locked(const char *mac)
+{
+    for (int i = 0; i < g_config.ble_leak_sensor_count && i < MAX_BLE_LEAK_SENSORS; i++) {
+        if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // UNKNOWN is logged here, distinctly, because the caller acts on it as if provisioned: a
 // packet from a sensor that is really gone would otherwise be handled with no trace of why.
 prov_member_t provisioning_lora_sensor_membership(uint32_t sensor_id)
@@ -815,13 +837,8 @@ prov_member_t provisioning_lora_sensor_membership(uint32_t sensor_id)
 
     prov_member_t result = PROV_MEMBER_NO;
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        if (g_config.state == PROV_STATE_PROVISIONED) {
-            for (int i = 0; i < g_config.lora_sensor_count && i < MAX_LORA_SENSORS; i++) {
-                if (g_config.lora_sensor_ids[i] == sensor_id) {
-                    result = PROV_MEMBER_YES;
-                    break;
-                }
-            }
+        if (g_config.state == PROV_STATE_PROVISIONED && lora_listed_locked(sensor_id)) {
+            result = PROV_MEMBER_YES;
         }
         xSemaphoreGive(g_prov_mutex);
     } else {
@@ -982,13 +999,8 @@ prov_member_t provisioning_ble_sensor_membership(const char *mac)
 
     prov_member_t result = PROV_MEMBER_NO;
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        if (g_config.state == PROV_STATE_PROVISIONED) {
-            for (int i = 0; i < g_config.ble_leak_sensor_count && i < MAX_BLE_LEAK_SENSORS; i++) {
-                if (strcasecmp(g_config.ble_leak_sensors[i], mac) == 0) {
-                    result = PROV_MEMBER_YES;
-                    break;
-                }
-            }
+        if (g_config.state == PROV_STATE_PROVISIONED && ble_listed_locked(mac)) {
+            result = PROV_MEMBER_YES;
         }
         xSemaphoreGive(g_prov_mutex);
     } else {
@@ -1419,17 +1431,32 @@ bool provisioning_get_rules_config(rules_config_t *rules_out)
     return false;
 }
 
-bool provisioning_get_rules_and_state(bool *provisioned, rules_config_t *rules_out)
+bool provisioning_get_rules_and_state(prov_dev_kind_t kind, const char *id,
+                                      bool *provisioned, bool *member,
+                                      rules_config_t *rules_out)
 {
     if (!provisioned || !rules_out || !g_initialized || g_prov_mutex == NULL) {
         return false;
     }
+    uint32_t lora_id = 0;
+    bool id_ok = (kind != PROV_DEV_LORA) || parse_hex_id(id, &lora_id);   // before the hold
 
     // Silent on a timeout: the caller says what it does instead (once per busy episode).
     if (xSemaphoreTake(g_prov_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return false;
     }
-    *provisioned = (g_config.state == PROV_STATE_PROVISIONED);
+    bool prov = (g_config.state == PROV_STATE_PROVISIONED);
+    bool listed;
+    switch (kind) {
+        case PROV_DEV_VALVE: listed = (g_config.valve_mac[0] != '\0');           break;
+        case PROV_DEV_LORA:  listed = id_ok && lora_listed_locked(lora_id);      break;
+        case PROV_DEV_BLE:   listed = (id != NULL) && ble_listed_locked(id);     break;
+        default:             listed = true;                                      break;
+    }
+    *provisioned = prov;
+    if (member) {
+        *member = prov && listed;
+    }
     *rules_out = g_config.rules;
     xSemaphoreGive(g_prov_mutex);
     return true;
