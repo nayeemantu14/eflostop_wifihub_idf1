@@ -401,7 +401,11 @@ static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end
  *   - a setup-page Connect: AP_TAIL_SUBMIT_MS (60 s) after the IP, or AP_TAIL_SUBMIT_LEFT_MS
  *     (15 s) after the last station left, never sooner than AP_TAIL_SUBMIT_MIN_MS (15 s) after
  *     the IP: a phone the SoftAP's channel switch dropped has that long to re-join and read the
- *     result. (WP4's Finish button adds a stop of its own.)
+ *     result;
+ *   - the page's Finish (2.1.4 C12, POST /finish.json, in any tail): max(IP +
+ *     AP_TAIL_FINISH_MIN_MS, Finish + AP_TAIL_FINISH_MS), i.e. 5 s after the IP at the soonest and
+ *     2 s after the tap, when that is sooner than the rules above (portal_finish()). The phone's
+ *     sign-in window closes when the SoftAP goes, and the phone returns to its own Wi-Fi.
  * "Left" is when wifi_task first saw the SoftAP with no station: the driver's station list
  * (esp_wifi_ap_get_sta_list()), read on each pass, so at most about a second late. A station
  * that joins again moves the stop back to the 20 s or 60 s cap. cb_connection_ok() sets the
@@ -429,6 +433,8 @@ static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end
 #define AP_TAIL_SUBMIT_LEFT_MS   15000    // ... or this long after the last station left,
 #define AP_TAIL_SUBMIT_MIN_MS    15000    //     never sooner than this after the IP
 #define AP_TAIL_BACKSTOP_MS      75000    // still up this long after the IP: wifi_task stops it
+#define AP_TAIL_FINISH_MS        2000     // the page's Finish: the SoftAP stops this long after it ...
+#define AP_TAIL_FINISH_MIN_MS    5000     // ... and never sooner than this after the IP (plan 4.6)
 
 static volatile bool s_attempt_submit = false;   // the tracked attempt is the page's Connect; wifi_manager task only
 static volatile TickType_t s_ip_tick = 0;        // the STA's last IP (forced non-zero), 0 = none since a loss; wifi_manager task only
@@ -436,6 +442,8 @@ static volatile bool s_tail_submit = false;      // that IP's tail follows the p
 static volatile uint32_t s_tail_cap_ms = 0;      // its first stop, ms after the IP; 0 = the SoftAP was down then; wifi_manager task only
 static volatile bool s_tail_armed = false;       // that first stop was taken (wifi_manager_ap_stop_in()); wifi_manager task only
 static TickType_t s_ap_stop_seen = 0;            // the IP whose SoftAP stop was printed; wifi_manager task only
+static volatile TickType_t s_finish_stop = 0;    // the page's Finish: its stop, in ticks after the IP; httpd task only
+static volatile TickType_t s_finish_ip = 0;      // the IP (s_ip_tick) that Finish was for, 0 = none; httpd task only
 
 // wifi_task's tail_stop for a first stop ap_tail_start() could not set: no real stop has this
 // value, so the next pass sets it.
@@ -526,6 +534,34 @@ static __attribute__((noinline)) uint8_t router_channel(void)
 static const char *scan_note(void)
 {
     return wifi_manager_scan_in_flight() ? ", Wi-Fi scan in flight" : "";
+}
+
+// The setup page's Finish (POST /finish.json; the httpd task; 2.1.4 C12, plan 4.6's Finish row):
+// the SoftAP stops at max(IP + AP_TAIL_FINISH_MIN_MS, now + AP_TAIL_FINISH_MS), or sooner if the
+// tail's own rules say so. Only with the STA connected and the SoftAP up after an IP: false
+// otherwise, and the page gets 409. The stop is set here (wifi_manager_ap_stop_in() never waits)
+// and recorded for wifi_task (s_finish_stop, then s_finish_ip), whose next pass, woken here, keeps
+// it whatever the stations do (ap_tail_maintain()). A stop the timer did not take is false too:
+// nothing is recorded, and the page can tap Finish again.
+static bool portal_finish(void)
+{
+    TickType_t ip = s_ip_tick;
+    if (ip == 0 || !s_sta_connected || !softap_up())
+        return false;
+    TickType_t since = xTaskGetTickCount() - ip;
+    TickType_t stop = since + pdMS_TO_TICKS(AP_TAIL_FINISH_MS);
+    if (stop < pdMS_TO_TICKS(AP_TAIL_FINISH_MIN_MS))
+        stop = pdMS_TO_TICKS(AP_TAIL_FINISH_MIN_MS);
+    if (!wifi_manager_ap_stop_in((uint32_t)(stop - since) * portTICK_PERIOD_MS))
+        return false;
+    s_finish_stop = stop;
+    s_finish_ip = ip;   // last: wifi_task reads it first
+    uint32_t stop_ms = (uint32_t)stop * portTICK_PERIOD_MS;
+    ESP_LOGI(WIFI_TAG, "Wi-Fi setup page: Finish - the SoftAP stops %lu.%lu s after the IP",
+             (unsigned long)(stop_ms / 1000), (unsigned long)((stop_ms % 1000) / 100));
+    if (wifiTaskHandle != NULL)
+        xTaskNotifyGive(wifiTaskHandle);
+    return true;
 }
 
 // WM_ORDER_START_AP (wifi_manager task), once the SoftAP, HTTP and DNS servers are up. The STA
@@ -941,6 +977,8 @@ void app_wifi_start()
     // The portal client log's activity hook: a plain store, so before the start, ahead of the
     // portal's first request.
     http_app_set_activity_hook(&portal_activity);
+    // The page's Finish (2.1.4 C12): the AP-tail policy's, below. A plain store too.
+    http_app_set_finish_hook(&portal_finish);
     wifi_manager_start();
     // The portal priority window's callbacks first: with no credentials saved, START_AP comes
     // about 0.7 s after the start (network and Wi-Fi init, the HTTP server), while these calls
@@ -1275,6 +1313,15 @@ static void ap_tail_maintain(wifi_task_state_t *st)
 
     // The stop: the cap, or sooner once no station is left (never before the Connect's minimum).
     TickType_t stop = cap;
+    // The page's Finish for this IP (portal_finish()), when it is sooner; no station rule below
+    // moves a stop later than it. Its IP first: the stop is written before it.
+    TickType_t finish_stop = 0;
+    if (s_finish_ip == ip)
+    {
+        finish_stop = s_finish_stop;
+        if (finish_stop < stop)
+            stop = finish_stop;
+    }
     if (stations > 0)
         st->tail_empty = 0;
     else
@@ -1291,6 +1338,7 @@ static void ap_tail_maintain(wifi_task_state_t *st)
     if (stop == st->tail_stop)
         return;
     const char *why = (st->tail_stop == AP_TAIL_STOP_UNSET) ? "its stop not set at the IP, set now" :
+                      (finish_stop != 0 && stop == finish_stop) ? "Finish on the setup page" :
                       (stations > 0) ? "a station on it again" : "no station left on it";
     TickType_t in = (stop > since) ? stop - since : 0;
     if (!wifi_manager_ap_stop_in((uint32_t)in * portTICK_PERIOD_MS))

@@ -63,6 +63,14 @@ esp_err_t (*custom_post_httpd_uri_handler)(httpd_req_t *r) = NULL;
  * Set once by the app; read by the httpd and dns_server tasks. */
 static http_app_activity_hook_t volatile activity_hook = NULL;
 
+/* LOCAL PATCH (2.1.4 C12): the Finish hook (http_app_set_finish_hook()), NULL = none. Set once by
+ * the app; read by the httpd task. */
+static http_app_finish_hook_t volatile finish_hook = NULL;
+
+/* LOCAL PATCH (2.1.4 C12): with no Finish hook set, a Finish stops the SoftAP this long after it
+ * (the STA connected only, as every stop) */
+#define HTTP_APP_FINISH_STOP_MS		2000
+
 /* strings holding the URLs of the wifi manager.
  * LOCAL PATCH (2.1.4 C2g): string literals (CONFIG_WEBAPP_LOCATION is one), where http_app_start()
  * malloc()ed a copy of each, unchecked, and http_app_stop() freed them while a request could still
@@ -75,6 +83,7 @@ static const char http_connect_url[] = WEBAPP_LOCATION "connect.json";
 static const char http_ap_url[] = WEBAPP_LOCATION "ap.json";
 static const char http_status_url[] = WEBAPP_LOCATION "status.json";
 static const char http_scan_url[] = WEBAPP_LOCATION "scan.json";		/* LOCAL PATCH (2.1.4 C10b) */
+static const char http_finish_url[] = WEBAPP_LOCATION "finish.json";	/* LOCAL PATCH (2.1.4 C12) */
 static const char http_watts_logo_url[] = WEBAPP_LOCATION "Watts_Logo.png";
 static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 		"http://" DEFAULT_AP_IP : "http://" DEFAULT_AP_IP WEBAPP_LOCATION;
@@ -130,6 +139,7 @@ const static char http_400_hdr[] = "400 Bad Request";
 const static char http_403_hdr[] = "403 Forbidden";
 const static char http_404_hdr[] = "404 Not Found";
 const static char http_406_hdr[] = "406 Not Acceptable";
+const static char http_409_hdr[] = "409 Conflict";
 const static char http_503_hdr[] = "503 Service Unavailable";
 const static char http_location_hdr[] = "Location";
 const static char http_content_type_html[] = "text/html";
@@ -193,6 +203,11 @@ esp_err_t http_app_set_handler_hook( httpd_method_t method,  esp_err_t (*handler
 /* LOCAL PATCH (2.1.4 C10a): the activity hook */
 void http_app_set_activity_hook(http_app_activity_hook_t hook){
 	activity_hook = hook;
+}
+
+/* LOCAL PATCH (2.1.4 C12): the Finish hook */
+void http_app_set_finish_hook(http_app_finish_hook_t hook){
+	finish_hook = hook;
 }
 
 void http_app_note_activity(http_app_activity_t kind, uint32_t client_ip){
@@ -619,6 +634,21 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 			httpd_resp_set_type(req, http_content_type_json);
 			httpd_resp_send(req, body, (n > 0 && (size_t)n < sizeof(body)) ? n : 0);
 		}
+	}
+	/* POST /finish.json: LOCAL PATCH (2.1.4 C12), the page's Finish. Only with the STA connected:
+	 * the Finish hook (the app's AP-tail policy) sets the SoftAP's stop, about 2 s on, and 200
+	 * {"finish":1} goes out before it; 409 {"err":"not connected"} otherwise (the hook said no, or
+	 * with no hook the stop could not be set). The sign-in windows of iOS and Android close when
+	 * the SoftAP goes. */
+	else if(http_app_path_is(req->uri, http_finish_url)){
+		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip);
+		http_app_finish_hook_t hook = finish_hook;
+		bool done = (hook != NULL) ? hook() : wifi_manager_ap_stop_in(HTTP_APP_FINISH_STOP_MS);
+		static const char finished[] = "{\"finish\":1}";
+		static const char not_connected[] = "{\"err\":\"not connected\"}";
+		httpd_resp_set_status(req, done ? http_200_hdr : http_409_hdr);
+		httpd_resp_set_type(req, http_content_type_json);
+		httpd_resp_send(req, done ? finished : not_connected, HTTPD_RESP_USE_STRLEN);
 	}
 	else{
 

@@ -106,6 +106,21 @@ typedef void (*http_app_activity_hook_t)(http_app_activity_t kind, uint32_t clie
 void http_app_set_activity_hook(http_app_activity_hook_t hook);
 
 /**
+ * @brief LOCAL PATCH (2.1.4 C12): the Finish hook: POST /finish.json (the page's Finish) calls it on
+ * the httpd task. It sets the SoftAP's stop (wifi_manager_ap_stop_in(), which never waits) by the
+ * app's AP-tail policy, and returns true; false when it cannot (the STA not connected): the page
+ * gets 409 then. It must be short and must not block. With none set, a Finish stops the SoftAP
+ * 2 s on, the STA connected only.
+ */
+typedef bool (*http_app_finish_hook_t)(void);
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C12): sets the Finish hook. NULL (the default) disables it. A plain
+ * store: it can be set before wifi_manager_start().
+ */
+void http_app_set_finish_hook(http_app_finish_hook_t hook);
+
+/**
  * @brief reports one activity to the hook, if one is set. For the component's own tasks
  * (the dns_server task, and since 2.1.4 C3 the HTTP handlers, which have the client's address
  * from their own check).
