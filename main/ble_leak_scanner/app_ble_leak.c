@@ -131,13 +131,23 @@ static uint8_t s_adv_n[MAX_TRACKED_SENSORS];
 /* Each whitelisted sensor's primary PHY (2.1.4 WP6; plan §4.1, decision D1: some sensors in the
  * field advertise on 1M, the rest on Coded). Index = the sensor's whitelist index. Learned from
  * every advert's prim_phy (process_leak_adv()), so it changes only when the sensor is heard on the
- * other PHY: no time decay. PHY_UNKNOWN = never heard since it was provisioned. A sensor known to
- * be on 1M makes the executor scan 1M in windows of its own (N_MIXED). Persisted in NVS
- * (phy_save(), at most 112 B, written only when it changed), carried across whitelist reloads by
- * MAC (phy_carry()), and dropped with a sensor that leaves the whitelist (decommissioned). */
+ * other PHY: no time decay. PHY_UNKNOWN = never heard since it was provisioned; the first advert
+ * sets it. A known PHY changes once PHY_FLIP_ADVERTS adverts in a row came on the other PHY (any
+ * advert on its own PHY starts the count over): a sensor heard on both PHYs then keeps one, rather
+ * than switching on every advert, which would flip N_MIXED and N_CODED at each scan's end, print
+ * a mode line each time and rewrite the table every minute. The count lives in the entry's upper
+ * bits (PHY_OF() reads the PHY). A sensor known to be on 1M makes the executor scan 1M in windows
+ * of its own (N_MIXED). Persisted in NVS (phy_save(), at most 112 B, written only when it
+ * changed), carried across whitelist reloads by MAC (phy_carry()), and dropped with a sensor that
+ * leaves the whitelist (decommissioned). */
 #define PHY_UNKNOWN     0
 #define PHY_1M          1
 #define PHY_CODED       2
+#define PHY_MASK        0x03    // s_wl_phy[]: the PHY in bits 0-1 ...
+#define PHY_OTHER_SHIFT 2       // ... and adverts in a row on the other PHY from bit 2
+#define PHY_OF(v)       ((uint8_t)((v) & PHY_MASK))
+#define PHY_FLIP_ADVERTS 4
+_Static_assert(((PHY_FLIP_ADVERTS - 1) << PHY_OTHER_SHIFT) <= 0xFF, "the count fits the entry");
 static uint8_t s_wl_phy[MAX_TRACKED_SENSORS];
 static volatile bool s_phy_dirty = false;   // RAM differs from what was last saved
 static bool s_phy_loaded = false;           // executor task: NVS read at the first reload
@@ -351,7 +361,9 @@ static int wl_find(const uint8_t wl[][6], uint8_t count, const uint8_t *mac)
     return -1;
 }
 
-// The PHYs the new list keeps from the list in RAM, by MAC. True when a known PHY's sensor left.
+// The PHYs the new list keeps from the list in RAM, by MAC, each with its count of adverts on the
+// other PHY (the reload runs every 10 s: a count that started over then could never reach
+// PHY_FLIP_ADVERTS from a few adverts per burst). True when a known PHY's sensor left.
 static __attribute__((noinline)) bool phy_carry(const uint8_t wl[][6], uint8_t count, uint8_t phy[])
 {
     uint8_t old_wl[MAX_TRACKED_SENSORS][6];
@@ -368,7 +380,7 @@ static __attribute__((noinline)) bool phy_carry(const uint8_t wl[][6], uint8_t c
         int i = wl_find(wl, count, old_wl[j]);
         if (i >= 0) {
             phy[i] = old_phy[j];
-        } else if (old_phy[j] != PHY_UNKNOWN) {
+        } else if (PHY_OF(old_phy[j]) != PHY_UNKNOWN) {
             dropped = true;
         }
     }
@@ -425,9 +437,9 @@ static __attribute__((noinline)) void phy_save(void)
     s_phy_dirty = false;   // a change from here on marks it again
     taskENTER_CRITICAL(&s_wl_lock);
     for (int i = 0; i < s_whitelist_count; i++) {
-        if (s_wl_phy[i] != PHY_UNKNOWN) {
+        if (PHY_OF(s_wl_phy[i]) != PHY_UNKNOWN) {
             memcpy(rec[n].mac, s_whitelist[i], 6);
-            rec[n].phy = s_wl_phy[i];
+            rec[n].phy = PHY_OF(s_wl_phy[i]);
             n++;
         }
     }
@@ -469,7 +481,7 @@ static bool phy_any_1m(void)
     bool any = false;
     taskENTER_CRITICAL(&s_wl_lock);
     for (int i = 0; i < s_whitelist_count; i++) {
-        if (s_wl_phy[i] == PHY_1M) {
+        if (PHY_OF(s_wl_phy[i]) == PHY_1M) {
             any = true;
             break;
         }
@@ -647,8 +659,8 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     uint8_t phy_bit = (prim_phy == BLE_HCI_LE_PHY_1M)    ? BURST_PHY_1M
                     : (prim_phy == BLE_HCI_LE_PHY_CODED) ? BURST_PHY_CODED
                                                          : BURST_PHY_OTHER;
-    // The sensor's primary PHY (WP6): learned from every advert, kept until it is heard on the
-    // other PHY. Any other PHY teaches nothing.
+    // The sensor's primary PHY (WP6): learned from its first advert, changed after
+    // PHY_FLIP_ADVERTS in a row on the other PHY (see s_wl_phy). Any other PHY teaches nothing.
     uint8_t phy_heard = (prim_phy == BLE_HCI_LE_PHY_1M)    ? PHY_1M
                       : (prim_phy == BLE_HCI_LE_PHY_CODED) ? PHY_CODED
                                                            : PHY_UNKNOWN;
@@ -658,11 +670,20 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
     int wi = whitelist_find_locked(adv_mac);
     listed = (wi >= 0);
     if (listed) {
-        if (phy_heard != PHY_UNKNOWN && s_wl_phy[wi] != phy_heard) {
-            phy_was = s_wl_phy[wi];
-            s_wl_phy[wi] = phy_heard;
-            phy_learned = true;
-            if (phy_was != PHY_UNKNOWN && s_phy_flips < UINT16_MAX) s_phy_flips++;
+        uint8_t v = s_wl_phy[wi];
+        uint8_t known = PHY_OF(v);
+        if (phy_heard != PHY_UNKNOWN && known != phy_heard) {
+            uint8_t other = (uint8_t)((v >> PHY_OTHER_SHIFT) + 1);
+            if (known == PHY_UNKNOWN || other >= PHY_FLIP_ADVERTS) {
+                phy_was = known;
+                s_wl_phy[wi] = phy_heard;
+                phy_learned = true;
+                if (phy_was != PHY_UNKNOWN && s_phy_flips < UINT16_MAX) s_phy_flips++;
+            } else {
+                s_wl_phy[wi] = (uint8_t)(known | (other << PHY_OTHER_SHIFT));
+            }
+        } else if (phy_heard == known && v != known) {
+            s_wl_phy[wi] = known;   // heard on its own PHY again: the count starts over
         }
         slot = sensor_find_locked(adv_mac);
         if (slot < 0) slot = sensor_alloc_locked(adv_mac);
@@ -1477,7 +1498,7 @@ static __attribute__((noinline)) void exec_summary(exec_t *x)
             mac[k][1] = s_sensors[i].mac[0];
             cnt[k] = s_adv_n[i];
             int w = whitelist_find_locked(s_sensors[i].mac);
-            phy[k] = (w >= 0) ? s_wl_phy[w] : PHY_UNKNOWN;
+            phy[k] = (w >= 0) ? PHY_OF(s_wl_phy[w]) : PHY_UNKNOWN;
             k++;
         }
         s_adv_n[i] = 0;
