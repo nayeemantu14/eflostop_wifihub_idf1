@@ -121,8 +121,10 @@ static volatile TickType_t s_attempt_tick = 0;      // an attempt's start or end
  *   - the setup page's Connect in flight (radio_policy_note_submit()): from the CONNECT_STA
  *     callback of a USER attempt that started (2.1.4 C8) to that attempt's IP, its disconnect, or
  *     the start of an attempt of another kind (s_submit_noted). It asks for the SUBMIT pulse,
- *     which the policy always grants, within the blind budget and the pulse-rate limit (I2, I2b),
- *     so no pattern of Connects on the open SoftAP blinds BLE beyond them.
+ *     which the policy grants within the blind budget and the pulse-rate limit (I2, I2b), and
+ *     paces (1.5 s from a Coded window's end, after the pulse spacing) within 45 s of another
+ *     SUBMIT or JOIN pulse (M4), so no pattern of Connects or joins on the open SoftAP blinds BLE
+ *     beyond them.
  * The default event loop gives the stations (joins, leaves and leases: ap_station_event_handler(),
  * ap_lease_event_handler()), wifi_task prunes them against the driver's list, and the httpd task
  * the page's activity (portal_activity()). */

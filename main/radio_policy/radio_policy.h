@@ -46,8 +46,8 @@ extern "C" {
 #define RP_RECOVERY_MS       1200    // I2: the Coded window after a pulse
 #define RP_I8_BLE_MAX_MS      600    // I8: the longest BLE run in an AP row ...
 #define RP_I8_WIFI_MIN_MS     300    // ... and the shortest Wi-Fi slot
-#define RP_I2B_SPACING_MS    6000    // I2b: profile time between two pulses (a person's Connect
-                                     // exempt, not a repeat: RP_SUBMIT_REPEAT_MS), at least ...
+#define RP_I2B_SPACING_MS    6000    // I2b: profile time between two pulses (a SUBMIT exempt
+                                     // unless it is paced: RP_REPEAT_MS), at least ...
 #define RP_I2B_JITTER_MS     1000    // ... plus U(0, this): every re-arm is jittered
 #define RP_I2B_BLIND_MAX_MS 12000    // I2b: pulse time in any rolling ...
 #define RP_I2B_WINDOW_MS    60000    // ... 60 s, every pulse counted (SUBMIT too)
@@ -67,12 +67,15 @@ typedef enum {
 #define RP_JOIN_PROBE_TAIL_MS    300   // ... first 302 or page served to that station + this), the budget,
                                        // or the station leaving
 #define RP_RETRY_MS             1500   // the router retry's pulse
-#define RP_SUBMIT_REPEAT_MS    45000   // M4: a Connect whose pulse would begin less than this
-                                       // after the last SUBMIT pulse began is a repeat, paced as
-                                       // the router retry: RP_RETRY_MS from a Coded window's own
-                                       // end, after I2b's spacing. Not 30 s: at a multiple of the
-                                       // sensors' 15 s heartbeat a Connect every 30 s keeps its
-                                       // immediate 2.8 s pulse on every 2nd burst of one sensor
+#define RP_REPEAT_MS           45000   // M4: a SUBMIT or JOIN whose pulse would begin less than this
+                                       // after the last SUBMIT or JOIN pulse began (one stamp for
+                                       // both kinds) is paced: RP_RETRY_MS from a Coded window's own
+                                       // end, after I2b's spacing. This window sets the share of one
+                                       // sensor's 15 s heartbeat bursts that a stranger on the open
+                                       // SoftAP, timing Connects or joins with a sniffer, can cover
+                                       // with immediate 2.8 s pulses: 1 in 3 at 45 s, 1 in 2 at 30 s
+                                       // (past G2's 60 s in the leak model), 2 in 3 with a stamp per
+                                       // kind. Any change: re-run that model
 #define RP_LIST_MAX_MS          2500   // a list scan's pulse: its SCAN_DONE, at most this
 #define RP_CONNECT_MS           1500   // a valve claim's connect outside a leak response: at least
                                        // this (exactly this in AP_IDLE, plan 4.4) ...
@@ -211,15 +214,16 @@ void radio_policy_note_sta_attempt(bool in_flight);
 /** The setup page's Connect (C8, kind USER) started (true) or ended (false: GOT_IP or failure).
  *  wifi_manager task. Starting requests the SUBMIT pulse: always honoured, also under a leak
  *  response, and counted in I2b's 12 s per 60 s and in I2 (at most 2.8 s, then 1.2 s of Coded).
- *  A person's Connect (no SUBMIT pulse began in the last RP_SUBMIT_REPEAT_MS) is exempt from the
- *  6 s spacing and stops BLE at once; a repeat is paced as the router retry (RP_RETRY_MS from a
- *  Coded window's own end, after the spacing; M4), so no pattern of Connects blinds BLE beyond
- *  the invariants, nor, timed to a sensor's heartbeats, its every burst. It waits for its grant
- *  until the Connect ends (no 2 s limit, no refusal for room). While a leak response is pending
- *  the valve's claim goes first: every Wi-Fi pulse leaves it 2.5 s of I2b's room, and while it is
- *  due no Wi-Fi pulse goes before it unless the last pulse was a claim, so Connects cannot hold
- *  its RMLEAK / CLOSE off (radio_policy_exec_wifi_grant()). The caller does not wait: for a
- *  person's Connect BLE stops within one executor wake when nothing else runs. */
+ *  A Connect with no SUBMIT or JOIN pulse begun in the last RP_REPEAT_MS is exempt from the 6 s
+ *  spacing and stops BLE at once; otherwise it is paced (M4): RP_RETRY_MS from a Coded window's
+ *  own end, after the spacing, so no pattern of Connects and joins blinds BLE beyond the
+ *  invariants, nor, timed to a sensor's heartbeats, its every burst. It waits for its grant until
+ *  the Connect ends (no 2 s limit, no refusal for room). While a leak response is pending the
+ *  valve's claim goes first: every Wi-Fi pulse leaves it 2.5 s of I2b's room, and while it is due
+ *  no Wi-Fi pulse goes before it unless the last pulse was a claim, so Connects cannot hold its
+ *  RMLEAK / CLOSE off (radio_policy_exec_wifi_grant()). The caller does not wait: BLE stops
+ *  within one executor wake for a first Connect, at a Coded window's end after the spacing for a
+ *  paced one. */
 void radio_policy_note_submit(bool in_flight);
 
 /** A station joined / left the SoftAP (default event loop: AP_STACONNECTED, AP_STADISCONNECTED).
@@ -228,7 +232,8 @@ void radio_policy_note_submit(bool in_flight);
  *  JOIN at a time: a join while another station's is asked or runs is asked after it, while the
  *  station still settles. A JOIN waits for the pulse spacing and I2b's room up to
  *  RP_JOIN_SETTLE_MS, and is dropped once its station left or its end rule passed or passes
- *  within RP_PULSE_MIN_MS. */
+ *  within RP_PULSE_MIN_MS. It is paced like a Connect (RP_REPEAT_MS, M4): a fresh MAC per join
+ *  must not buy immediate pulses that a paced Connect does not get. */
 void radio_policy_station_joined(const uint8_t mac[6]);
 void radio_policy_station_left(const uint8_t mac[6]);
 

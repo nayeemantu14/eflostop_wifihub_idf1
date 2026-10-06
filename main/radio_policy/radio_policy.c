@@ -286,8 +286,8 @@ typedef struct {
     TickType_t pulse_deadline;  // ... and deadline
     const char *pulse_why;      // ... and why it ended (for its line)
     TickType_t lr_join_at;      // the last assist under a leak response
-    TickType_t submit_at;       // the last SUBMIT pulse's begin (0: none): a Connect this soon after
-                                // is a repeat (RP_SUBMIT_REPEAT_MS, M4)
+    TickType_t sj_at;           // the last SUBMIT or JOIN pulse's begin (0: none): a SUBMIT or JOIN
+                                // this soon after is paced (RP_REPEAT_MS, M4)
     uint32_t prof_ms;           // I2b: profile time since the last pulse, at most a window ...
     uint32_t space_ms;          // ... and the spacing the next pulse needs
     uint16_t bucket[RP_I2B_BUCKETS];   // I2b: pulse ms per RP_I2B_BUCKET_MS ...
@@ -302,6 +302,7 @@ typedef struct {
     uint16_t refused;
     TickType_t refuse_logged;   // the last refusal line (one per RP_REFUSE_LOG_MS at most)
     TickType_t hold_logged;     // the last "waits for the valve's claim" line (the same limit)
+    TickType_t sub_logged;      // the last "SUBMIT pulse waits for ..." line (the same limit)
     uint32_t i2b_peak;          // the most pulse time seen in a window
     uint32_t gap_max;           // the longest Coded gap (I2 monitor) ...
     uint16_t gap_over;          // ... and the gaps over RP_BLIND_MAX_MS + RP_JITTER_MS
@@ -1153,7 +1154,7 @@ static void join_reask(TickType_t now)
 }
 
 _Static_assert(RP_GRANT_WAIT_MS == 2000 && RP_JOIN_SETTLE_MS == 10000, "the refusal lines say 2 s and 10 s");
-_Static_assert(RP_SUBMIT_REPEAT_MS == 45000 && RP_RETRY_MS == 1500, "the repeat SUBMIT line says 45 s and 1500 ms");
+_Static_assert(RP_REPEAT_MS == 45000 && RP_CONNECT_LR_MS == 2500, "the pulse lines say 45 s and 2.5 s");
 
 rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
                                         uint32_t budget_ms, bool coded_young, bool claim_due,
@@ -1167,13 +1168,14 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
     uint32_t room = (used < RP_I2B_BLIND_MAX_MS) ? RP_I2B_BLIND_MAX_MS - used : 0;
     // While a leak response is pending the valve's claim goes first (its RMLEAK / CLOSE). Every
     // Wi-Fi kind leaves it RP_CONNECT_LR_MS of I2b's room, and while the claim is due no Wi-Fi
-    // pulse is granted: each would restart the 6-7 s of profile time the claim needs, and a
-    // person's Connect is exempt from that spacing, so Connects a few seconds apart (a stranger's,
-    // on the open SoftAP) held the claim off for good. Unless the last pulse was a claim: one Wi-Fi
+    // pulse is granted: each would restart the 6-7 s of profile time the claim needs, and a first
+    // SUBMIT is exempt from that spacing, so Connects a few seconds apart (a stranger's, on the
+    // open SoftAP) held the claim off for good. Unless the last pulse was a claim: one Wi-Fi
     // pulse may then go before the next claim, so a Connect still gets its pulse while the claims
     // of a valve that does not link repeat. Claims and Wi-Fi pulses then alternate.
     bool claim_first = false;
-    if (s_lr_trigger) {
+    bool lr = s_lr_trigger;
+    if (lr) {
         room = (room > RP_CONNECT_LR_MS) ? room - RP_CONNECT_LR_MS : 0;
         claim_first = claim_due && s_x.last_pulse != RP_PULSE_CONNECT;
     }
@@ -1182,13 +1184,33 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
     // and I7's join_settling() is not held true for nothing. Then the first in the order that may
     // run now is granted, or waits; nothing of a lower priority goes ahead of it.
     rp_pulse_t waiting = RP_PULSE_NONE;
-    // A person's SUBMIT and a JOIN are unaligned (plan 4.4: the lead-in is one executor wake; a
-    // repeat SUBMIT is aligned, below): granted also into a Coded scan that has not yet covered
-    // RP_L_MS (the executor does not count it, and budget_ms runs from the last window that did),
-    // so the phone's first frames after its join or the router's after a Connect are not lost in
-    // up to 0.55 s of Coded scan. Only with less than RP_UNALIGNED_MIN_MS of budget left does the
-    // scan cover its interval first (then 2.8 s).
+    // A SUBMIT or JOIN with no SUBMIT or JOIN pulse begun in the last RP_REPEAT_MS is unaligned
+    // (plan 4.4: the lead-in is one executor wake): granted also into a Coded scan that has not yet
+    // covered RP_L_MS (the executor does not count it, and budget_ms runs from the last window that
+    // did), so the phone's first frames after its join or the router's after a Connect are not
+    // lost in up to 0.55 s of Coded scan. Only with less than RP_UNALIGNED_MIN_MS of budget left
+    // does the scan cover its interval first (then 2.8 s).
+    // Any other is paced (M4) as the router retry: RP_RETRY_MS from a Coded window's own end, after
+    // I2b's spacing, when all of it fits the budget and I2b's room. A full Coded window precedes it
+    // and the recovery follows it, so part of any 2.5 s heartbeat burst lies in Coded scans
+    // whatever its timing. Immediate pulses of up to 2.8 s let a stranger on the open SoftAP,
+    // timing Connects or joins (a fresh MAC each, never leased, so each assist runs to its
+    // deadline) to one sensor's bursts with a sniffer, fit I2b and blind every burst: in the
+    // council's leak model (SERVE-A, p_loss 0.3 / 0.5) that sensor's p99.9 detection was 62 /
+    // 135.5 s. One stamp for both kinds: with one per kind, joins and Connects in turn left 75.5 s.
+    // The spacing stays for a paced Connect: without it, a paced Connect a few seconds after each
+    // timed join steered the rows' phase so that the next join's pulse met the least Coded scan
+    // (61.5 s); its jitter breaks that. As built, at most 47.5 s in every pattern tried.
     bool unaligned = !coded_young || budget_ms >= RP_UNALIGNED_MIN_MS;
+    bool paced = rp_within(s_x.sj_at, now, RP_REPEAT_MS);
+    bool spaced = s_x.prof_ms >= s_x.space_ms;
+    uint32_t sj_len = 0;
+    if (!paced) {
+        if (unaligned)
+            sj_len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);   // clipped to I2b's room
+    } else if (at_coded_end && spaced && budget_ms >= RP_RETRY_MS && RP_RETRY_MS <= room) {
+        sj_len = RP_RETRY_MS;
+    }
     for (size_t o = 0; o < sizeof(k_order); o++) {
         rp_pulse_t k = (rp_pulse_t)k_order[o];
         if (!(kinds & (1u << k)))
@@ -1283,28 +1305,14 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             // open SoftAP must not let Connects blind BLE beyond the invariants). It waits for room
             // rather than being refused, and under a leak response for the valve's claim (above):
             // Connects, a stranger's included, delay its RMLEAK / CLOSE by at most one pulse and
-            // the claim's own spacing each time, and never hold it off.
-            // A person's Connect (no SUBMIT pulse began in the last RP_SUBMIT_REPEAT_MS) goes at
-            // once. A repeat is paced as the router retry (M4): RP_RETRY_MS from a Coded window's
-            // own end, after I2b's spacing, so a full Coded window precedes it and the recovery
-            // follows it, and at least about 1 s of any 2.5 s heartbeat burst lies in Coded scans.
-            // Immediate 2.8 s pulses let a stranger's Connects, one per heartbeat and timed to one
-            // sensor's bursts by a sniffer, fit I2b and blind those bursts: in the council's leak
-            // model (SERVE-A, p_loss 0.3 / 0.5) that sensor's p99.9 detection was 62 / 135.5 s;
-            // paced, at most 30.5 / 47.5 s at the worst timing.
-            if (claim_first)
-                break;
-            if (!rp_within(s_x.submit_at, now, RP_SUBMIT_REPEAT_MS)) {
-                if (unaligned)
-                    len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
-            } else if (at_coded_end && budget_ms >= RP_RETRY_MS && s_x.prof_ms >= s_x.space_ms &&
-                       RP_RETRY_MS <= room) {
-                len = RP_RETRY_MS;
-            }
+            // the claim's own spacing each time, and never hold it off. A first one is exempt from
+            // the spacing (its attempt is already running), a paced one is not (above).
+            if (!claim_first)
+                len = sj_len;
             break;
         case RP_PULSE_JOIN:
-            if (s_x.prof_ms >= s_x.space_ms && unaligned && !claim_first)
-                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);   // clipped to I2b's room
+            if (!claim_first && spaced)
+                len = sj_len;
 #if CONFIG_APP_RADIO_LAB
             if (lab_k1)
                 len = rp_min(len, RP_LAB_K1_MS);   // the lab's K1: 1.5 s at most (plan 4.4)
@@ -1328,14 +1336,26 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             return k;
         }
         waiting = k;
-        if (!rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
-            if (claim_first) {
+        // Its lines: the claim's, and a Connect's own (one limit each). A Connect's other waits (a
+        // paced one's Coded window end, a young Coded scan) last one row period at most; its pulse
+        // line says when it is paced.
+        if (claim_first) {
+            if (!rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
                 s_x.hold_logged = rp_nz(now);
                 ESP_LOGI(RP_TAG, "%s pulse waits: the valve's claim goes first (a leak response is pending)",
                          k_pulse_names[k]);
-            } else if (k == RP_PULSE_SUBMIT && rp_within(s_x.submit_at, now, RP_SUBMIT_REPEAT_MS)) {
-                s_x.hold_logged = rp_nz(now);
-                ESP_LOGI(RP_TAG, "SUBMIT pulse waits: a Connect's pulse began less than 45 s ago - this one gets 1500 ms at a Coded window's end, after the pulse spacing");
+            }
+        } else if (k == RP_PULSE_SUBMIT && !rp_within(s_x.sub_logged, now, RP_REFUSE_LOG_MS)) {
+            if (room < (paced ? RP_RETRY_MS : RP_PULSE_MIN_MS)) {
+                s_x.sub_logged = rp_nz(now);
+                ESP_LOGI(RP_TAG, "SUBMIT pulse waits for I2b's room: %lu.%lu s of pulses in the last 60 s%s",
+                         (unsigned long)(used / 1000), (unsigned long)(used % 1000 / 100),
+                         lr ? ", 2.5 s kept for the valve's claim" : "");
+            } else if (paced && !spaced) {
+                s_x.sub_logged = rp_nz(now);
+                ESP_LOGI(RP_TAG, "SUBMIT pulse waits for the pulse spacing (%lu.%lu of %lu.%lu s): paced, a SUBMIT or JOIN pulse began less than 45 s before",
+                         (unsigned long)(s_x.prof_ms / 1000), (unsigned long)(s_x.prof_ms % 1000 / 100),
+                         (unsigned long)(s_x.space_ms / 1000), (unsigned long)(s_x.space_ms % 1000 / 100));
             }
         }
     }
@@ -1396,8 +1416,13 @@ void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len
     s_x.i2b_noted = false;
     if (s_x.pulse_n[kind] < UINT16_MAX)
         s_x.pulse_n[kind]++;
-    if (kind == RP_PULSE_SUBMIT)
-        s_x.submit_at = rp_nz(now);   // a Connect within RP_SUBMIT_REPEAT_MS is a repeat (M4)
+    // A SUBMIT or JOIN within RP_REPEAT_MS of the last one's begin is paced (M4): its line says so.
+    const char *paced = "";
+    if (kind == RP_PULSE_SUBMIT || kind == RP_PULSE_JOIN) {
+        if (rp_within(s_x.sj_at, now, RP_REPEAT_MS))
+            paced = " (paced: a SUBMIT or JOIN pulse began less than 45 s before)";
+        s_x.sj_at = rp_nz(now);
+    }
     if (kind == RP_PULSE_CONNECT)
         return;   // the valve module prints its claim
     if (kind == RP_PULSE_JOIN) {
@@ -1416,11 +1441,11 @@ void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len
         s_x.join_attempt = s_sta_attempt;
         if (s_lr_on)
             s_x.lr_join_at = rp_nz(now);
-        ESP_LOGI(RP_TAG, "JOIN pulse for station %02X:%02X:%02X:%02X:%02X:%02X: BLE off for up to %lu ms",
-                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], (unsigned long)len_ms);
+        ESP_LOGI(RP_TAG, "JOIN pulse for station %02X:%02X:%02X:%02X:%02X:%02X: BLE off for up to %lu ms%s",
+                 mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], (unsigned long)len_ms, paced);
         return;
     }
-    ESP_LOGI(RP_TAG, "%s pulse: BLE off for up to %lu ms", k_pulse_names[kind], (unsigned long)len_ms);
+    ESP_LOGI(RP_TAG, "%s pulse: BLE off for up to %lu ms%s", k_pulse_names[kind], (unsigned long)len_ms, paced);
 }
 
 // A grant BLE could not honour (the scan's cancel refused). The requester of a RETRY or LIST may
