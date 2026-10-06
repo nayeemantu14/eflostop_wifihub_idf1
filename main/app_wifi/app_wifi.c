@@ -73,8 +73,8 @@ static bool page_in_use(TickType_t now)
  * window. With the SoftAP down, or no BLE scan running, the answer is FREE at once. Not granted
  * (refused, or no answer in 2 s): the order is sent all the same, with a W line, and the attempt
  * runs beside BLE. While a station joins the SoftAP (no lease yet, or its join assist: plan I7,
- * radio_policy_join_settling()) the retry waits, ROUTER_RETRY_JOIN_MAX_MS at most, so the SoftAP
- * stays on its channel for that station's DHCP.
+ * radio_policy_join_settling()), before the request and again after its wait, the retry waits,
+ * ROUTER_RETRY_JOIN_MAX_MS at most, so the SoftAP stays on its channel for that station's DHCP.
  * The network tried is the one in use: since 2.1.4 C8 a page's Connect writes it only once its
  * candidate has an IP, so after a mistyped password, or a Connect to another network that fails,
  * the retries go on with the working network and rejoin it when the router is back.
@@ -328,14 +328,17 @@ static bool portal_finish(void)
  * task (wifi_manager_set_scan_gate()). It holds no lock there. The gate:
  *   - refuses the scan below LIST_DMA_MIN_FREE of internal DMA-capable heap (a scan's records and
  *     the driver's buffers come from it; plan 4.4), with a W line at most once a minute;
+ *   - refuses it while a station joins the SoftAP (plan I7: one joined less than 10 s ago with no
+ *     lease yet, or its join assist), before it asks and again after the wait (a join meanwhile),
+ *     so the SoftAP stays on its channel for that station's DHCP;
  *   - asks the radio policy for a LIST pulse and waits for its answer, RP_GRANT_WAIT_MS (2 s) at
  *     most: granted at the end of a Coded window with room for RP_LIST_MAX_MS (2.5 s) in the
  *     blind budget and the pulse-rate limit; BLE then stops until the scan's SCAN_DONE
- *     (cb_scan_done()) or 2.5 s. FREE (no BLE scan runs) lets it run at once;
- *   - not granted: while a station joins the SoftAP (I7) the scan is refused (counted as one that
- *     did not start: the page orders it again 10 s later); otherwise it runs beside BLE, with a W
- *     line.
- * A refused scan counts as one that did not start (wifi_manager_scan_failed()). */
+ *     (cb_scan_done()) or 2.5 s. FREE (no BLE scan runs) lets it run at once. Not granted (often
+ *     right after a join assist, whose pulse spacing, 6-7 s, has not run out), the scan runs
+ *     beside BLE, with a W line.
+ * A refused scan counts as one that did not start (wifi_manager_scan_failed(): the page orders it
+ * again 10 s later while it has no list, or at its Rescan). */
 #define LIST_DMA_MIN_FREE   (24 * 1024)   // PROVISIONAL (plan 4.4; G0 re-derives it): internal DMA-capable
                                           // heap free for a list scan
 #define LIST_LOW_LOG_MS     60000         // the low-heap refusal's line at most this often
@@ -355,16 +358,21 @@ static bool list_scan_gate(void)
         }
         return false;
     }
-    radio_policy_pulse_request(RP_PULSE_LIST);
-    rp_grant_t g = radio_policy_pulse_wait(RP_PULSE_LIST, RP_GRANT_WAIT_MS);
-    if (g == RP_GRANT_ON || g == RP_GRANT_FREE)
-        return true;
-    radio_policy_pulse_end(RP_PULSE_LIST);   // a request still pending is withdrawn
+    rp_grant_t g = RP_GRANT_IDLE;
+    if (!radio_policy_join_settling())
+    {
+        radio_policy_pulse_request(RP_PULSE_LIST);
+        g = radio_policy_pulse_wait(RP_PULSE_LIST, RP_GRANT_WAIT_MS);
+    }
     if (radio_policy_join_settling())
     {
+        radio_policy_pulse_end(RP_PULSE_LIST);   // its pulse, granted or pending, ends
         ESP_LOGI(WIFI_TAG, "Wi-Fi list scan not started: a station is joining the SoftAP - the page asks again later");
         return false;
     }
+    if (g == RP_GRANT_ON || g == RP_GRANT_FREE)
+        return true;
+    radio_policy_pulse_end(RP_PULSE_LIST);   // a request still pending is withdrawn
     ESP_LOGW(WIFI_TAG, "Wi-Fi list scan without a BLE pulse (%s) - it runs beside BLE scanning",
              (g == RP_GRANT_REFUSED) ? "not granted" : "no answer in 2 s");
     return true;
@@ -886,6 +894,19 @@ static bool router_fallback(void)
     return sta != NULL && sta->sta.ssid[0] != '\0';
 }
 
+// Plan I7: a station joining the SoftAP (no lease yet, or its join assist) holds the router retry
+// back, so the SoftAP stays on its channel for that station's DHCP; ROUTER_RETRY_JOIN_MAX_MS at
+// most per retry, so stations that keep joining cannot hold the hub off its router. True: wait
+// (the next pass tries again).
+static bool retry_join_wait(wifi_task_state_t *st, TickType_t now)
+{
+    if (!radio_policy_join_settling())
+        return false;
+    if (st->join_defer_at == 0)
+        st->join_defer_at = (now != 0) ? now : 1;
+    return now - st->join_defer_at < pdMS_TO_TICKS(ROUTER_RETRY_JOIN_MAX_MS);
+}
+
 // The router retry (see above), on every wifi_task pass: every second while the STA is down.
 // wifi_manager_retry_async() waits up to WIFI_MANAGER_POST_WAIT_MS for room in wifi_manager's
 // queue, so it is sent from here, never from a wifi_manager callback.
@@ -923,26 +944,19 @@ static void router_retry(wifi_task_state_t *st)
         return;
     }
     st->defer_logged = false;
-    // Plan I7: not while a station joins the SoftAP (no lease yet, or its join assist), so the
-    // SoftAP stays on its channel for that station's DHCP; ROUTER_RETRY_JOIN_MAX_MS at most, so
-    // stations that keep joining cannot hold the hub off its router.
-    if (radio_policy_join_settling())
-    {
-        if (st->join_defer_at == 0)
-            st->join_defer_at = (now != 0) ? now : 1;
-        if (now - st->join_defer_at < pdMS_TO_TICKS(ROUTER_RETRY_JOIN_MAX_MS))
-            return;
-    }
+    if (retry_join_wait(st, now))
+        return;
 
     // The RETRY pulse (see above): asked for, then its answer, 2 s at most. This task holds no lock.
     radio_policy_pulse_request(RP_PULSE_RETRY);
     rp_grant_t g = radio_policy_pulse_wait(RP_PULSE_RETRY, RP_GRANT_WAIT_MS);
     // Again after the wait: an attempt may have started (a portal submit) or ended meanwhile, the
-    // page may be in use again, or the STA or the config changed. Then nothing is sent, and the
-    // pulse, if granted, is ended.
+    // page may be in use again, a station may have started joining, or the STA or the config
+    // changed. Then nothing is sent, and the pulse, if granted, is ended.
     now = xTaskGetTickCount();
     if (!router_fallback() || s_attempt_in_flight || s_attempt_tick != mark ||
-        (page_in_use(now) && now - mark < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)))
+        (page_in_use(now) && now - mark < pdMS_TO_TICKS(ROUTER_RETRY_PAGE_MAX_MS)) ||
+        retry_join_wait(st, now))
     {
         radio_policy_pulse_end(RP_PULSE_RETRY);
         return;
