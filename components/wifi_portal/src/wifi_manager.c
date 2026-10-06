@@ -254,6 +254,9 @@ static bool on_uncommitted = false;			/* connected to a network not committed (a
 static bool late_ip_leave = false;			/* an attempt counted as ended with no event (abort_expired()):
 											 * its IP, should one come, is left; cleared when an attempt
 											 * starts or a STA_DISCONNECTED ends it; wifi_manager task only */
+static bool leaving_link = false;			/* our disconnect of such a link is under way: its end changes
+											 * no status (the result decided before it stands); cleared at
+											 * that end, or its expiry; wifi_manager task only */
 _Static_assert(WIFI_MANAGER_STATUS_JSON_SIZE >= JSON_IP_INFO_SIZE + 21 + JSON_SSID_STR_MAX,
 		"status.json: the status of before, \",\"reason\":255,\"pend\":\" and the candidate's SSID");
 
@@ -1884,9 +1887,9 @@ static void wifi_manager_forget_now(){
  * a user's candidate that failed is reported (no retry after it, by design: the network in use is
  * kept, and the app's router retry rejoins it); a candidate that waited for this end goes on
  * (user_due), and the end is not a lost connection then; otherwise it is one (its status, and
- * the retry timer or the AP, as before).
+ * the retry timer or the AP, as before), its status kept when quiet (a link we left).
  */
-static void wifi_manager_attempt_ended(uint8_t kind, uint8_t reason, EventBits_t uxBits, uint8_t *retries){
+static void wifi_manager_attempt_ended(uint8_t kind, uint8_t reason, EventBits_t uxBits, uint8_t *retries, bool quiet){
 
 	if(uxBits & WIFI_MANAGER_REQUEST_DISCONNECT_BIT){
 		/* user manually requested a disconnect so the lost connection is a normal event. Clear the flag and restart the AP */
@@ -1904,7 +1907,11 @@ static void wifi_manager_attempt_ended(uint8_t kind, uint8_t reason, EventBits_t
 	if(kind == CONNECTION_REQUEST_USER){
 		return;
 	}
-	wifi_manager_status_set(UPDATE_LOST_CONNECTION, WM_CAND_NONE);
+	/* LOCAL PATCH (2.1.4 C8): not for the end of a link we left (quiet: an IP not kept), whose
+	 * result (a forget, a candidate's failure) was decided before it */
+	if(!quiet){
+		wifi_manager_status_set(UPDATE_LOST_CONNECTION, WM_CAND_NONE);
+	}
 	wifi_manager_retry_or_start_ap(uxBits, retries);
 }
 
@@ -1917,8 +1924,10 @@ static void wifi_manager_attempt_ended(uint8_t kind, uint8_t reason, EventBits_t
 static void wifi_manager_abort_expired(uint8_t *retries){
 
 	uint8_t why = abort_reason;
+	bool quiet = leaving_link;
 	abort_tick = 0;
 	abort_reason = 0;
+	leaving_link = false;
 
 	EventBits_t uxBits = xEventGroupGetBits(wifi_manager_event_group);
 	if(uxBits & WIFI_MANAGER_WIFI_CONNECTED_BIT){
@@ -1947,7 +1956,7 @@ static void wifi_manager_abort_expired(uint8_t *retries){
 	}
 	uint8_t kind = attempt_kind;
 	attempt_kind = CONNECTION_REQUEST_NONE;
-	wifi_manager_attempt_ended(kind, why ? why : (uint8_t)WIFI_REASON_ASSOC_LEAVE, uxBits, retries);
+	wifi_manager_attempt_ended(kind, why ? why : (uint8_t)WIFI_REASON_ASSOC_LEAVE, uxBits, retries, quiet);
 	if(cb_ptr_arr[WM_EVENT_STA_DISCONNECTED]) (*cb_ptr_arr[WM_EVENT_STA_DISCONNECTED])( (void*)(uintptr_t)WIFI_REASON_ASSOC_LEAVE );
 }
 
@@ -2064,14 +2073,16 @@ static __attribute__((noinline)) bool wifi_manager_commit_driver_config(bool ado
 
 /**
  * @brief leaves the link the STA is on: an IP not to keep (WM_EVENT_STA_GOT_IP). Our disconnect's
- * STA_DISCONNECTED is awaited like any other (abort_tick), and ends the link as a lost one: the
- * network in use is tried again as after any link loss (the router retry while the AP is up),
- * and after a forget there is none. Returns whether the disconnect went out.
+ * STA_DISCONNECTED is awaited like any other (abort_tick), and ends the link as a lost one,
+ * quietly (leaving_link): status.json keeps the result decided before the IP, and the network in
+ * use is tried again as after any link loss (the router retry while the AP is up; after a forget
+ * there is none). Returns whether the disconnect went out.
  */
 static bool wifi_manager_leave_link(){
 	esp_err_t err = esp_wifi_disconnect();
 	if(err == ESP_OK){
 		wifi_manager_abort_mark(0);
+		leaving_link = true;
 		return true;
 	}
 	ESP_LOGW(TAG, "esp_wifi_disconnect failed (%s) - the network not saved stays until its link ends", esp_err_to_name(err));
@@ -2414,10 +2425,12 @@ void wifi_manager( void * pvParameters ){
 					uxBits = xEventGroupGetBits(wifi_manager_event_group);
 					uint8_t kind = attempt_kind;
 					uint8_t why = (abort_tick != 0 && abort_reason != 0) ? abort_reason : disconnect_reason;
+					bool quiet = leaving_link;
 					attempt_kind = CONNECTION_REQUEST_NONE;
 					abort_tick = 0;
 					abort_reason = 0;
-					wifi_manager_attempt_ended(kind, why, uxBits, &retries);
+					leaving_link = false;
+					wifi_manager_attempt_ended(kind, why, uxBits, &retries, quiet);
 				}
 
 				/* callback */
