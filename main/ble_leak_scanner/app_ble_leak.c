@@ -1181,8 +1181,9 @@ static void exec_announce(exec_t *x)
         ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED: 1M 20 %% + Coded 80 %%, 1 s scans, each next after 0-%d ms",
                  RP_JITTER_MS);
     } else if (row == RP_ROW_N_HUNT) {
-        ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED with a valve hunt (valve not linked): 1 s of 1M 20 %% + Coded 80 %%, then 0.3 s on 1M, each next after 0-%d ms",
-                 RP_JITTER_MS);
+        unsigned m = radio_policy_row(RP_ROW_N_HUNT)->ms[1];
+        ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_CODED with a valve hunt (valve not linked): 1 s of 1M 20 %% + Coded 80 %%, then %u.%02u s on 1M, each next after 0-%d ms",
+                 m / 1000, (m % 1000) / 10, RP_JITTER_MS);
     } else if (row == RP_ROW_N_MIXED) {
         ESP_LOGI(BLE_LEAK_TAG, "Scan mode N_MIXED (a sensor on 1M, or a sensor's PHY not known yet): 1 s on 1M and 1 s on Coded in turn, each next after 0-%d ms",
                  RP_JITTER_MS);

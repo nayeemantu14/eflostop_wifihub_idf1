@@ -98,7 +98,9 @@ typedef enum {
  *   RP_F_DISC    a discovery row: it runs only in turn with its plain row, so the period rule is
  *                checked on that sequence (RP_SEQ_*), not on the row alone;
  *   RP_F_LAB     a lab row (APP_RADIO_LAB only): I1 and I2 hold, I8 and the period rule are waived.
- * N_HUNT is B2's (the valve hunted in NORMAL, see radio_policy.c); RECOVERY follows every pulse (I2).
+ * N_HUNT is B2's (the valve hunted in NORMAL, see radio_policy.c): its 1M slot, 0.45 s, is
+ * PROVISIONAL (the bench's 100 valve power cycles decide it; 0.3 s left about 1 % of relinks over
+ * 10 s at valve p_loss 0.1, the first hearing being the tail). RECOVERY follows every pulse (I2).
  * SERVE_B and SERVE_B_DISC are the council's rung, for SERVE_RUNG (G1 decides). SERVE_C and
  * SERVE_C_DISC exist only in the G1 lab image (plan 4.3: its 2.0 s period is resonant with TCP's
  * 1 s and 3 s retransmits, both in its Wi-Fi slot, and divides 8 s and 100 s). */
@@ -126,7 +128,7 @@ typedef enum {
 #define RP_ROWS(X) \
     /* name          flags                                       slots: kind,ms x 4 */ \
     X(N_CODED,      RP_F_DITHER | RP_F_I1,                       N,1000, _,0,    _,0,   _,0)   \
-    X(N_HUNT,       RP_F_DITHER | RP_F_I1,                       N,1000, M,300,  _,0,   _,0)   \
+    X(N_HUNT,       RP_F_DITHER | RP_F_I1,                       N,1000, M,450,  _,0,   _,0)   \
     X(N_MIXED,      RP_F_DITHER | RP_F_I1 | RP_F_I1M,            M,1000, C,1000, _,0,   _,0)   \
     X(NORMAL_LR,    RP_F_DITHER | RP_F_I1 | RP_F_I1M,            M,1000, C,600,  _,0,   _,0)   \
     X(RECOVERY,     RP_F_DITHER,                                 C,1200, _,0,    _,0,   _,0)   \
