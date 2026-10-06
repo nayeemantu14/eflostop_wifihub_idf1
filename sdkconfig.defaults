@@ -13,3 +13,27 @@ CONFIG_HTTPD_ERR_RESP_NO_DELAY=y
 # so MQTT/TLS can reconnect reliably while the SoftAP captive portal is still up after
 # a button WiFi reset, and relieves the near-OOM heap floor on this memory-tight hub.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+
+# 2.1.4 radio/portal plan 4.9 (D12): the seven lines below are checked by #error guards in main/main.c (I14).
+# sdkconfig is untracked and an existing sdkconfig overrides this file: set each value there too.
+
+# TLS records of at most 2 KB out: the largest block one TLS write takes drops from 4,437 to 2,389 B.
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048
+
+# Free the server's certificate after the handshake: about 4 KB more heap while connected.
+# CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE is not set
+
+# 16 Wi-Fi dynamic RX buffers, not 32: halves what a flood of frames can hold (about 109 to 54 KB).
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=16
+
+# 16 Wi-Fi dynamic TX buffers, not 32: the same bound on the transmit side.
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=16
+
+# No NimBLE connect re-attempt of its own after a failed link (0x3E): the valve module owns every connect (I5).
+# CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT is not set
+
+# At most 4 stations on the setup SoftAP (unchanged): app_wifi.c's station table has that many entries.
+CONFIG_DEFAULT_AP_MAX_CONNECTIONS=4
+
+# The setup SoftAP on channel 11 (was 1), clear of the BLE advertising channels 37 and 38 (D7).
+CONFIG_DEFAULT_AP_CHANNEL=11

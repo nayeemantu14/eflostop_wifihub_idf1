@@ -29,6 +29,38 @@
 #include "systemservices/monitoring.h"
 #include "wifi_reset/reset_button.h"
 #include "hub_identity/hub_identity.h"
+#include "sdkconfig.h"
+
+/* ---------------------------------------------------------
+ * Load-bearing sdkconfig values (2.1.4 plan section 4.9, D12; invariant I14)
+ *
+ * sdkconfig is untracked, and kconfgen loads an existing sdkconfig over sdkconfig.defaults,
+ * so a stale local sdkconfig would build without the lines this release depends on. Each
+ * check below stops that build instead. To pass one, put the value of sdkconfig.defaults
+ * into sdkconfig (idf.py menuconfig, or delete the symbol's line from sdkconfig and run
+ * idf.py reconfigure); change a value here only together with its line there.
+ * --------------------------------------------------------- */
+#if !defined(CONFIG_MBEDTLS_ASYMMETRIC_CONTENT_LEN) || CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN != 2048
+#error "I14: CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN must be 2048 (asymmetric lengths on): one TLS write takes at most a 2,389 B block"
+#endif
+#if defined(CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE)
+#error "I14: CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE must be off: the server certificate is freed after the handshake (about 4 KB)"
+#endif
+#if !defined(CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM) || CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM != 16
+#error "I14: CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM must be 16: the bound on what a frame flood can hold (plan section 8)"
+#endif
+#if !defined(CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER) || CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM != 16
+#error "I14: dynamic Wi-Fi TX buffers with CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM 16 (plan section 8)"
+#endif
+#if defined(CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT)
+#error "I5: NimBLE connect re-attempt must be off (CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT): the valve module owns every connect"
+#endif
+#if CONFIG_DEFAULT_AP_MAX_CONNECTIONS != 4
+#error "I14: CONFIG_DEFAULT_AP_MAX_CONNECTIONS must be 4: app_wifi.c's portal client table and the SoftAP's station cap (plan section 8)"
+#endif
+#if CONFIG_DEFAULT_AP_CHANNEL != 11
+#error "I14: CONFIG_DEFAULT_AP_CHANNEL must be 11 (D7): the setup SoftAP clear of BLE advertising channels 37 and 38"
+#endif
 
 /* ---------------------------------------------------------
  * Tags
