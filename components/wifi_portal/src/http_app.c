@@ -83,15 +83,18 @@ static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 
 /**
  * @brief embedded binary data.
- * @see file "component.mk"
  * @see https://docs.espressif.com/projects/esp-idf/en/latest/api-guides/build-system.html#embedding-binary-data
+ * LOCAL PATCH (2.1.4 C7): the text assets are gzipped at build time (CMakeLists.txt,
+ * tools/gz_asset.py: deterministic, and the build fails rather than embed a stale one) and sent
+ * as they are embedded, with Content-Encoding: gzip: 18.5 KB on the air for the page, where it
+ * was 57.4 KB, and each text asset fits one TCP send buffer. The PNG is embedded as it is.
  */
-extern const uint8_t style_css_start[] asm("_binary_style_css_start");
-extern const uint8_t style_css_end[]   asm("_binary_style_css_end");
-extern const uint8_t code_js_start[] asm("_binary_code_js_start");
-extern const uint8_t code_js_end[] asm("_binary_code_js_end");
-extern const uint8_t index_html_start[] asm("_binary_index_html_start");
-extern const uint8_t index_html_end[] asm("_binary_index_html_end");
+extern const uint8_t style_css_gz_start[] asm("_binary_style_css_gz_start");
+extern const uint8_t style_css_gz_end[]   asm("_binary_style_css_gz_end");
+extern const uint8_t code_js_gz_start[] asm("_binary_code_js_gz_start");
+extern const uint8_t code_js_gz_end[] asm("_binary_code_js_gz_end");
+extern const uint8_t index_html_gz_start[] asm("_binary_index_html_gz_start");
+extern const uint8_t index_html_gz_end[] asm("_binary_index_html_gz_end");
 extern const uint8_t watts_logo_png_start[] asm("_binary_Watts_Logo_png_start");
 extern const uint8_t watts_logo_png_end[] asm("_binary_Watts_Logo_png_end");
 
@@ -102,6 +105,7 @@ const static char http_302_hdr[] = "302 Found";
 const static char http_400_hdr[] = "400 Bad Request";
 const static char http_403_hdr[] = "403 Forbidden";
 const static char http_404_hdr[] = "404 Not Found";
+const static char http_406_hdr[] = "406 Not Acceptable";
 const static char http_503_hdr[] = "503 Service Unavailable";
 const static char http_location_hdr[] = "Location";
 const static char http_content_type_html[] = "text/html";
@@ -109,11 +113,37 @@ const static char http_content_type_js[] = "text/javascript";
 const static char http_content_type_css[] = "text/css";
 const static char http_content_type_json[] = "application/json";
 const static char http_content_type_png[] = "image/png";
+/* LOCAL PATCH (2.1.4 C7): every answer is "no-store" (plan 6.3): httpd has no validators, and the
+ * whole page is 18.5 KB, so nothing is cached, and a re-opened sign-in window always gets the
+ * page and the status of now. */
 const static char http_cache_control_hdr[] = "Cache-Control";
-const static char http_cache_control_no_cache[] = "no-store, no-cache, must-revalidate, max-age=0";
-const static char http_cache_control_cache[] = "public, max-age=31536000";
-const static char http_pragma_hdr[] = "Pragma";
-const static char http_pragma_no_cache[] = "no-cache";
+const static char http_cache_control_no_store[] = "no-store";
+const static char http_content_encoding_hdr[] = "Content-Encoding";
+const static char http_content_encoding_gzip[] = "gzip";
+const static char http_vary_hdr[] = "Vary";
+const static char http_vary_accept_encoding[] = "Accept-Encoding";
+
+/* LOCAL PATCH (2.1.4 C7): the page's assets, matched on the request's path only (a query such as
+ * "?v=2" is ignored) */
+typedef struct {
+	const char *path;
+	const uint8_t *start;
+	const uint8_t *end;
+	const char *type;
+	bool gzip;			/* embedded gzipped: sent with Content-Encoding: gzip */
+} http_app_asset_t;
+
+static const http_app_asset_t http_app_assets[] = {
+	{ http_root_url,		index_html_gz_start,	index_html_gz_end,		http_content_type_html,	true },
+	{ http_js_url,			code_js_gz_start,		code_js_gz_end,			http_content_type_js,	true },
+	{ http_css_url,			style_css_gz_start,		style_css_gz_end,		http_content_type_css,	true },
+	{ http_watts_logo_url,	watts_logo_png_start,	watts_logo_png_end,		http_content_type_png,	false },
+};
+
+/* LOCAL PATCH (2.1.4 C7): the room for a request's Accept-Encoding header, terminator included.
+ * A longer one is taken to accept gzip: it lists many codings, and every browser engine the
+ * portal serves names gzip. */
+#define HTTP_ACCEPT_ENCODING_BUF_SIZE	96
 
 
 
@@ -144,6 +174,99 @@ void http_app_note_activity(http_app_activity_t kind, uint32_t client_ip){
 	if(hook){
 		hook(kind, client_ip);
 	}
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C7): the request's URI is the path, with nothing after it but a query
+ * ("?...") or a fragment ("#..."), which are not matched.
+ */
+static bool http_app_path_is(const char *uri, const char *path){
+	size_t n = strlen(path);
+	return strncmp(uri, path, n) == 0 && (uri[n] == '\0' || uri[n] == '?' || uri[n] == '#');
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C7): sends the answer with its Content-Length: the body for GET (and
+ * every other method), the headers only for HEAD (httpd itself sends the body for HEAD too).
+ */
+static esp_err_t http_app_send(httpd_req_t *req, const char *buf, size_t len){
+	return httpd_resp_send(req, (req->method == HTTP_HEAD) ? NULL : buf, (ssize_t)len);
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C7, plan 6.3): the client takes a gzipped answer: its Accept-Encoding
+ * header is absent (RFC 9110: then any coding is acceptable), or it lists gzip, x-gzip or "*"
+ * with a q-value other than 0. False only for an explicit refusal, an identity-only or empty
+ * list, which gets 406. Codings are compared case-insensitively.
+ */
+static bool http_app_gzip_accepted(httpd_req_t *req){
+
+	char ae[HTTP_ACCEPT_ENCODING_BUF_SIZE];
+	size_t len = httpd_req_get_hdr_value_len(req, "Accept-Encoding");
+	if(len >= sizeof(ae)){
+		return true;
+	}
+	if(httpd_req_get_hdr_value_str(req, "Accept-Encoding", ae, sizeof(ae)) != ESP_OK){
+		return true;	/* absent */
+	}
+
+	const char *p = ae;
+	while(*p){
+		/* one coding: its name, then its parameters up to the next comma */
+		while(*p == ' ' || *p == '\t' || *p == ','){
+			p++;
+		}
+		const char *name = p;
+		while(*p && *p != ';' && *p != ',' && *p != ' ' && *p != '\t'){
+			p++;
+		}
+		size_t name_len = (size_t)(p - name);
+		bool gzip = (name_len == 4 && strncasecmp(name, "gzip", 4) == 0) ||
+				(name_len == 6 && strncasecmp(name, "x-gzip", 6) == 0) ||
+				(name_len == 1 && name[0] == '*');
+		bool q_zero = false;
+		while(*p && *p != ','){
+			if((*p == 'q' || *p == 'Q') && p[1] == '='){
+				/* q=0, q=0., q=0.0, q=0.00 or q=0.000 refuses the coding */
+				const char *q = p + 2;
+				if(*q == '0'){
+					q++;
+					if(*q == '.'){
+						q++;
+						while(*q == '0'){
+							q++;
+						}
+					}
+					q_zero = (*q < '0' || *q > '9');
+				}
+				p = q;
+				continue;
+			}
+			p++;
+		}
+		if(gzip && !q_zero){
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * @brief LOCAL PATCH (2.1.4 C7): serves one of the page's assets (GET or HEAD).
+ */
+static esp_err_t http_app_send_asset(httpd_req_t *req, const http_app_asset_t *asset){
+
+	if(asset->gzip){
+		if(!http_app_gzip_accepted(req)){
+			httpd_resp_set_status(req, http_406_hdr);
+			return httpd_resp_send(req, NULL, 0);
+		}
+		httpd_resp_set_hdr(req, http_content_encoding_hdr, http_content_encoding_gzip);
+		httpd_resp_set_hdr(req, http_vary_hdr, http_vary_accept_encoding);
+	}
+	httpd_resp_set_status(req, http_200_hdr);
+	httpd_resp_set_type(req, asset->type);
+	return http_app_send(req, (const char*)asset->start, (size_t)(asset->end - asset->start));
 }
 
 /* a socket address of the server's: with lwIP IPv6 on (CONFIG_LWIP_IPV6) its socket is IPv6, so
@@ -234,16 +357,15 @@ static esp_err_t http_server_delete_handler(httpd_req_t *req){
 	}
 
 	ESP_LOGI(TAG, "DELETE %s", req->uri);
+	httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_store);	/* LOCAL PATCH (2.1.4 C7) */
 
 	/* DELETE /connect.json */
-	if(strcmp(req->uri, http_connect_url) == 0){
+	if(http_app_path_is(req->uri, http_connect_url)){
 		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip); /* LOCAL PATCH (2.1.4 C10a) */
 		wifi_manager_disconnect_async();
 
 		httpd_resp_set_status(req, http_200_hdr);
 		httpd_resp_set_type(req, http_content_type_json);
-		httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_cache);
-		httpd_resp_set_hdr(req, http_pragma_hdr, http_pragma_no_cache);
 		httpd_resp_send(req, NULL, 0);
 	}
 	else{
@@ -268,9 +390,10 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 	}
 
 	ESP_LOGI(TAG, "POST %s", req->uri);
+	httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_store);	/* LOCAL PATCH (2.1.4 C7) */
 
 	/* POST /connect.json */
-	if(strcmp(req->uri, http_connect_url) == 0){
+	if(http_app_path_is(req->uri, http_connect_url)){
 
 		http_app_note_activity(HTTP_APP_ACT_API_USER, client_ip); /* LOCAL PATCH (2.1.4 C10a) */
 
@@ -303,8 +426,6 @@ static esp_err_t http_server_post_handler(httpd_req_t *req){
 
 			httpd_resp_set_status(req, http_200_hdr);
 			httpd_resp_set_type(req, http_content_type_json);
-			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_cache);
-			httpd_resp_set_hdr(req, http_pragma_hdr, http_pragma_no_cache);
 			httpd_resp_send(req, NULL, 0);
 
 		}
@@ -358,6 +479,8 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
     	return http_app_refuse(req);
     }
 
+    httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_store);	/* LOCAL PATCH (2.1.4 C7) */
+
     host[0] = '\0';
     buf_len = httpd_req_get_hdr_value_len(req, "Host") + 1;
     if (buf_len > 1) {
@@ -391,38 +514,21 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 	}
 	else{
 
-		/* GET /  */
-		if(strcmp(req->uri, http_root_url) == 0){
-			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
-			httpd_resp_set_status(req, http_200_hdr);
-			httpd_resp_set_type(req, http_content_type_html);
-			httpd_resp_send(req, (char*)index_html_start, index_html_end - index_html_start);
+		/* LOCAL PATCH (2.1.4 C7): GET / and the page's assets, from the table */
+		const http_app_asset_t *asset = NULL;
+		for(size_t i = 0; i < sizeof(http_app_assets) / sizeof(http_app_assets[0]); i++){
+			if(http_app_path_is(req->uri, http_app_assets[i].path)){
+				asset = &http_app_assets[i];
+				break;
+			}
 		}
-		/* GET /code.js */
-		else if(strcmp(req->uri, http_js_url) == 0){
+
+		if(asset != NULL){
 			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
-			httpd_resp_set_status(req, http_200_hdr);
-			httpd_resp_set_type(req, http_content_type_js);
-			httpd_resp_send(req, (char*)code_js_start, code_js_end - code_js_start);
-		}
-		/* GET /style.css */
-		else if(strcmp(req->uri, http_css_url) == 0){
-			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
-			httpd_resp_set_status(req, http_200_hdr);
-			httpd_resp_set_type(req, http_content_type_css);
-			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
-			httpd_resp_send(req, (char*)style_css_start, style_css_end - style_css_start);
-		}
-		/* GET /Watts_Logo.png */
-		else if(strcmp(req->uri, http_watts_logo_url) == 0){
-			http_app_note_activity(HTTP_APP_ACT_PAGE, client_ip);
-			httpd_resp_set_status(req, http_200_hdr);
-			httpd_resp_set_type(req, http_content_type_png);
-			httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_cache);
-			httpd_resp_send(req, (char*)watts_logo_png_start, watts_logo_png_end - watts_logo_png_start);
+			http_app_send_asset(req, asset);
 		}
 		/* GET /ap.json */
-		else if(strcmp(req->uri, http_ap_url) == 0){
+		else if(http_app_path_is(req->uri, http_ap_url)){
 
 			http_app_note_activity(HTTP_APP_ACT_API_BG, client_ip);
 
@@ -431,14 +537,12 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 
 				httpd_resp_set_status(req, http_200_hdr);
 				httpd_resp_set_type(req, http_content_type_json);
-				httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_cache);
-				httpd_resp_set_hdr(req, http_pragma_hdr, http_pragma_no_cache);
 				/* LOCAL PATCH (2.1.4 C2b): no list while the AP is down: an empty one */
 				const char* ap_buf = wifi_manager_get_ap_list_json();
 				if(ap_buf == NULL){
 					ap_buf = "[]\n";
 				}
-				httpd_resp_send(req, ap_buf, strlen(ap_buf));
+				http_app_send(req, ap_buf, strlen(ap_buf));	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
 				wifi_manager_unlock_json_buffer();
 			}
 			else{
@@ -451,7 +555,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 			wifi_manager_scan_async();
 		}
 		/* GET /status.json */
-		else if(strcmp(req->uri, http_status_url) == 0){
+		else if(http_app_path_is(req->uri, http_status_url)){
 
 			http_app_note_activity(HTTP_APP_ACT_STATUS, client_ip);
 
@@ -460,9 +564,7 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				if(buff){
 					httpd_resp_set_status(req, http_200_hdr);
 					httpd_resp_set_type(req, http_content_type_json);
-					httpd_resp_set_hdr(req, http_cache_control_hdr, http_cache_control_no_cache);
-					httpd_resp_set_hdr(req, http_pragma_hdr, http_pragma_no_cache);
-					httpd_resp_send(req, buff, strlen(buff));
+					http_app_send(req, buff, strlen(buff));	/* LOCAL PATCH (2.1.4 C7): HEAD aware */
 					wifi_manager_unlock_json_buffer();
 				}
 				else{
@@ -518,7 +620,10 @@ static const httpd_uri_t http_server_delete_request = {
 
 /**
  * @brief HEAD handler – needed for captive portal detection (iOS sends HEAD to probe connectivity).
- * Delegates to the GET handler; ESP-IDF httpd automatically suppresses the response body for HEAD.
+ * Delegates to the GET handler. LOCAL PATCH (2.1.4 C7): httpd does not leave the body out for HEAD
+ * (httpd_resp_send() sends whatever it is given), so on a kept-alive connection the client read it
+ * as the start of the next answer: the GET handler now sends HEAD the headers only, with the
+ * Content-Length a GET gets (http_app_send()).
  */
 static const httpd_uri_t http_server_head_request = {
 	.uri	= "*",
