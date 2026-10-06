@@ -2285,6 +2285,21 @@ The twin GET itself (a request, not a report) is unchanged: the esp-mqtt task se
 10. **`httpd_txrx` W lines** (WP4's `open_fn` `shutdown()`): one `httpd_sock_err: error in recv : 128` per refused session, a tag `main.c` does not cap. Expected on the bench (15r); capping it in `main.c` would add a permanent tag node (I10), so it is left. [WP10 or WP9]
 11. **Docs consistency:** 15j's "`sdkconfig` unchanged" and the untracked `CP6_FULL_TEST_PLAN.md`'s B5 hold for CP6 only; T4-10's and G0's `SoftAP configured 1` and the old activity names (`Connect/Disconnect request`, `network list request`) change at CP7; 15k's "Report at once" list must not count esp-mqtt's `Client asked to stop, but was not started` when the new `MQTT stop refused …` line follows it (15q).
 
+**The streams' requests to each other, and what became of them**
+- WP3 core → the portal owner: force `wifi_settings.ap_channel = DEFAULT_AP_CHANNEL` after the blob load and log the configured channel. **Not applied:** its premise does not hold (finding 1); the AP-start line already prints the configured channel.
+- WP3 core → the valve stream: never reference `event->reattempt_cnt` unguarded. **Already so:** `app_ble_valve.c:2177` is under `#if MYNEWT_VAL(BLE_ENABLE_CONN_REATTEMPT)`; it compiles with the option on and off.
+- WP3 core → `sensor_meta.c` / `hub_identity.c` (optional): reject control characters at intake. **Not applied:** optional, and the output is sanitised (15q residual 9).
+- BLE → the rules engine: a lock-free read of the incident latch. **Done in the BLE stream** through the health engine's existing mirror (`3c65297`); no rules change needed.
+- BLE → `main.c`: move the NimBLE log cap next to `main.c`'s caps. **Not applied:** no functional difference; WP9 replaces the runtime call with `CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING`.
+- BLE → the provisioning owner: a device-set read with a short timeout for the executor's whitelist reload. **Not applied:** not a defect (15s residual 10); for WP8 with the executor's chores.
+- WP4 → the production-tool owner: the `ver` rule against `session closed: … since the server start`. **Checked:** the tool's pattern needs a dotted version after `version`, `ver` or `fw`, and none follows; that line never prints at a production boot anyway.
+- Every request to the docs owner is applied in 15q-15t, the CHANGELOG and the plan's notes; `MANUAL_TEST_PLAN.md` items are in each section's WP10 register.
+
+**For WP8 (phase 2), from the three streams**
+- The CONNECT_STA callback's parameter is `kind | WIFI_MANAGER_CONNECT_NOT_STARTED` (USER 1, AUTO 2, RESTORE 3, APP_RETRY 4; USER starting gives `submit_in_flight`); `wifi_manager_scan_request(rescan, &wait_ms)` is the single hook to turn into LIST pulse requests; the activity hook's `API_USER` covers `GET /ap.json` without `?bg=1`, `POST /scan.json` and `POST /finish.json`, `API_BG` is `GET /ap.json?bg=1` (status polls carry `?bg=1` and stay STATUS); `page_in_use()` keys the router retry's deferral; the page chain's BLE-window code is effectively dead since C10b's 20 s gap: delete it with the holds (15r).
+- Drive the executor through `ble_valve_hunt_wanted()`, `ble_valve_claim_wanted()` / `ble_valve_claim_start()`, `ble_valve_lr_active()` / `ble_valve_lr_pending()` and `app_ble_leak_kick()`; add the AP modes to `app_ble_leak.c`'s profile and mode tables; apply the widened trigger to LR_AP and delete `portal_holds_valve()` with the holds (15s). Kick the executor when a hold starts (finding 4), leave MODE_CLAIM out of the chores' condition (15s residual 4), and bound MODE_CLAIM (15s residual 3).
+- D2 (leak protection in the reset portal) also closes 15r residual 4's reboot case and the open-SoftAP forget of 15r decision 3.
+
 **The gates at this phase's HEAD** (objects; CP7 measures the link)
 
 | | WP3 core | WP4 | BLE (WP3 valve, WP5, WP6) | The `sdkconfig` lines | All, against `545b8f2` |
