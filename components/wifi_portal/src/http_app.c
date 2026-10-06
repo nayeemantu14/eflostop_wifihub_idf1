@@ -104,6 +104,10 @@ static const char *const http_redirect_url = (sizeof(WEBAPP_LOCATION) == 2) ?
 #define HTTP_APP_SESSION_MIN_FREE	(12 * 1024)
 /* a refused session is logged at most once in this long (with the count since the server start) */
 #define HTTP_APP_REFUSE_LOG_MS		10000
+/* GET /ap.json copies the network list out only while the largest free block exceeds the copy by
+ * this much (wifi_manager's WIFI_MANAGER_HEAP_MARGIN, 2.1.4 WP1): an allocation that can do
+ * without is not tried at low heap, where each failure would count in MONITOR's allocfail */
+#define HTTP_APP_COPY_MARGIN		4096
 
 /* LOCAL PATCH (2.1.4 C8): the room for an X-Custom-* credential header's value, terminator
  * included: a 64-byte password percent-encoded is 192 characters. A longer value gets 400. */
@@ -767,9 +771,14 @@ static esp_err_t http_server_get_handler(httpd_req_t *req){
 				/* LOCAL PATCH (2.1.4 C6): copied out, and sent with the lock given back: a send to a
 				 * slow phone (up to send_wait_timeout, 4 s) held it, and the wifi_manager task, which
 				 * waits 1 s for it, dropped a fresh scan. Sent under the lock as before only when
-				 * the heap has no room for the copy (about 1.5 KB, freed at once). */
+				 * the heap has no room for the copy (about 1.5 KB, freed at once): the copy is tried
+				 * only with HTTP_APP_COPY_MARGIN to spare, so a low heap (the E2 flood) sees no
+				 * failed allocation per poll */
 				size_t ap_len = strlen(ap_buf);
-				char *copy = malloc(ap_len + 1);
+				char *copy = NULL;
+				if(heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT) >= ap_len + 1 + HTTP_APP_COPY_MARGIN){
+					copy = malloc(ap_len + 1);
+				}
 				if(copy != NULL){
 					memcpy(copy, ap_buf, ap_len + 1);
 					wifi_manager_unlock_json_buffer();
