@@ -872,7 +872,8 @@ static void process_leak_adv(const ble_addr_t *addr, int8_t rssi,
  * stops the running scan at once, once a Coded scan has covered RP_L_MS (its window then counts);
  * a RETRY or LIST is granted only right after a Coded window's own end, and a CONNECT only right
  * after a scan's own end, each when its whole length fits the budget. While a leak response is
- * pending the valve's claim goes first (its RMLEAK / CLOSE), then SUBMIT, JOIN, RETRY, LIST;
+ * pending the valve's claim goes first (its RMLEAK / CLOSE), then SUBMIT, JOIN, RETRY, LIST, and a
+ * claim that is due holds them back until it has run (one Wi-Fi pulse may go between two claims);
  * otherwise SUBMIT, JOIN, RETRY, LIST, then the claim.
  *
  * Every scan is timed: a cancel that meets a scan's own timeout can leave
@@ -1343,11 +1344,12 @@ static bool exec_claim(exec_t *x, TickType_t now, bool boundary, uint32_t budget
 }
 
 // A Wi-Fi pulse the radio policy grants now (any of `kinds`): the running scan stops at once.
-static bool exec_wifi_pulse(exec_t *x, TickType_t now, uint32_t kinds, bool at_coded_end, uint32_t budget)
+static bool exec_wifi_pulse(exec_t *x, TickType_t now, uint32_t kinds, bool at_coded_end, uint32_t budget,
+                            bool claim_due)
 {
     bool young = x->scan_on && kind_coded(x->kind) && (now - x->started_at) < pdMS_TO_TICKS(RP_L_MS);
     uint32_t len = 0;
-    rp_pulse_t k = radio_policy_exec_wifi_grant(now, kinds, at_coded_end, budget, young, &len);
+    rp_pulse_t k = radio_policy_exec_wifi_grant(now, kinds, at_coded_end, budget, young, claim_due, &len);
     if (k == RP_PULSE_NONE) {
         return false;
     }
@@ -1473,10 +1475,12 @@ static TickType_t executor_pass(exec_t *x)
 
     // Grants, between pulses, after their recovery. While a leak response is pending the valve's
     // claim goes first (its RMLEAK / CLOSE outranks a Connect: a stranger's Connects on the open
-    // SoftAP must not hold it off), then SUBMIT, JOIN, RETRY and LIST; otherwise SUBMIT, JOIN, RETRY,
-    // LIST, then the claim. With no BLE scan to pause (BLE_IDLE, or not synced: PAUSED) the radio
-    // policy answers Wi-Fi requests FREE, so a requester never waits out its 2 s for nothing; no
-    // claim then (radio_policy_exec_connect_len() answers 0).
+    // SoftAP must not hold it off), then SUBMIT, JOIN, RETRY and LIST, and a due claim that cannot
+    // go yet (its boundary, its pulse spacing, I2b's room) holds them back unless the last pulse
+    // was a claim; otherwise SUBMIT, JOIN, RETRY, LIST, then the claim. With no BLE scan to pause
+    // (BLE_IDLE, or not synced: PAUSED) the radio policy answers Wi-Fi requests FREE, so a
+    // requester never waits out its 2 s for nothing; no claim then (radio_policy_exec_connect_len()
+    // answers 0).
     if (x->pulse == RP_PULSE_NONE && !x->recovery) {
         bool boundary = !x->scan_on && (x->row == RP_ROW_NONE || x->slot_done);
         bool at_coded_end = boundary && x->slot_done && x->coded_last &&
@@ -1485,8 +1489,10 @@ static TickType_t executor_pass(exec_t *x)
         bool lr = radio_policy_lr_pending();
         bool done = lr && exec_claim(x, now, boundary, budget);
         if (!done) {
+            bool claim_due = lr && ble_valve_claim_wanted();
             done = exec_wifi_pulse(x, now, (1u << RP_PULSE_SUBMIT) | (1u << RP_PULSE_JOIN) |
-                                   (1u << RP_PULSE_RETRY) | (1u << RP_PULSE_LIST), at_coded_end, budget);
+                                   (1u << RP_PULSE_RETRY) | (1u << RP_PULSE_LIST), at_coded_end, budget,
+                                   claim_due);
         }
         if (!done && !lr) {
             (void)exec_claim(x, now, boundary, budget);

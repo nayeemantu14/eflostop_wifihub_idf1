@@ -258,6 +258,8 @@ typedef struct {
     bool backoff;               // discovery is backed off (for its line)
     bool i2b_noted;             // a claim waits for I2b: printed once per wait
     uint8_t pulse;              // the pulse running (rp_pulse_t)
+    uint8_t last_pulse;         // the last pulse begun (rp_pulse_t): under a leak response one Wi-Fi
+                                // pulse may follow a claim before the next claim
     uint8_t starve_kind;        // the guard's kind (RP_STARVED_*)
     int8_t join_sta;            // the running JOIN's station
     int8_t extra_sta;           // a station owed its one extra assist (-1: none)
@@ -282,6 +284,7 @@ typedef struct {
     uint16_t pulse_n[RP_PULSE_COUNT];
     uint16_t refused;
     TickType_t refuse_logged;   // the last refusal line (one per RP_REFUSE_LOG_MS at most)
+    TickType_t hold_logged;     // the last "waits for the valve's claim" line (the same limit)
     uint32_t i2b_peak;          // the most pulse time seen in a window
     uint32_t gap_max;           // the longest Coded gap (I2 monitor) ...
     uint16_t gap_over;          // ... and the gaps over RP_BLIND_MAX_MS + RP_JITTER_MS
@@ -1023,7 +1026,8 @@ static void req_refuse(rp_pulse_t k, const char *why)
 }
 
 rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
-                                        uint32_t budget_ms, bool coded_young, uint32_t *len_ms)
+                                        uint32_t budget_ms, bool coded_young, bool claim_due,
+                                        uint32_t *len_ms)
 {
     static const uint8_t k_order[] = { RP_PULSE_SUBMIT, RP_PULSE_JOIN, RP_PULSE_RETRY, RP_PULSE_LIST };
     *len_ms = 0;
@@ -1042,6 +1046,18 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
 
     uint32_t used = i2b_used();
     uint32_t room = (used < RP_I2B_BLIND_MAX_MS) ? RP_I2B_BLIND_MAX_MS - used : 0;
+    // While a leak response is pending the valve's claim goes first (its RMLEAK / CLOSE). Every
+    // Wi-Fi kind leaves it RP_CONNECT_LR_MS of I2b's room, and while the claim is due no Wi-Fi
+    // pulse is granted: each would restart the 6-7 s of profile time the claim needs, and SUBMIT
+    // is exempt from that spacing, so Connects a few seconds apart (a stranger's, on the open
+    // SoftAP) held the claim off for good. Unless the last pulse was a claim: one Wi-Fi pulse may
+    // then go before the next claim, so a Connect still gets its pulse while the claims of a valve
+    // that does not link repeat. Claims and Wi-Fi pulses then alternate.
+    bool claim_first = false;
+    if (s_lr_trigger) {
+        room = (room > RP_CONNECT_LR_MS) ? room - RP_CONNECT_LR_MS : 0;
+        claim_first = claim_due && s_x.last_pulse != RP_PULSE_CONNECT;
+    }
     for (size_t o = 0; o < sizeof(k_order); o++) {
         rp_pulse_t k = (rp_pulse_t)k_order[o];
         if (!(kinds & (1u << k)))
@@ -1083,19 +1099,15 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
         case RP_PULSE_SUBMIT: {
             // Always honoured (plan 4.4), but within I2b's budget and I2 (decided for 2.1.4: an
             // open SoftAP must not let Connects blind BLE beyond the invariants). It waits for room
-            // rather than being refused. While a leak response is pending it leaves the claim's
-            // RP_CONNECT_LR_MS of that room (the executor also tries the claim first): Connects on
-            // the open SoftAP, a stranger's included, can delay the valve's RMLEAK / CLOSE by at most
-            // about one I2b window, never hold it off for good.
+            // rather than being refused, and under a leak response for the valve's claim (above):
+            // Connects, a stranger's included, delay its RMLEAK / CLOSE by at most one pulse and
+            // the claim's own spacing each time, and never hold it off.
             if (!s_submit) {
                 req_set(k, RP_GRANT_IDLE);   // its attempt ended before the grant
                 continue;
             }
-            uint32_t sroom = room;
-            if (s_lr_trigger)
-                sroom = (room > RP_CONNECT_LR_MS) ? room - RP_CONNECT_LR_MS : 0;
-            if (!coded_young)
-                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), sroom);
+            if (!coded_young && !claim_first)
+                len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);
             break;
         }
         case RP_PULSE_JOIN: {
@@ -1131,7 +1143,7 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
                     continue;
                 }
             }
-            if (s_x.prof_ms >= s_x.space_ms && !coded_young)
+            if (s_x.prof_ms >= s_x.space_ms && !coded_young && !claim_first)
                 len = rp_min(rp_min(RP_BLIND_MAX_MS, budget_ms), room);   // clipped to I2b's room
 #if CONFIG_APP_RADIO_LAB
             if (lab_k1)
@@ -1151,8 +1163,8 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
                 continue;
             }
             uint32_t need = (k == RP_PULSE_RETRY) ? RP_RETRY_MS : RP_LIST_MAX_MS;
-            if (at_coded_end && budget_ms >= need && s_x.prof_ms >= s_x.space_ms &&
-                used + need <= RP_I2B_BLIND_MAX_MS)
+            if (!claim_first && at_coded_end && budget_ms >= need && s_x.prof_ms >= s_x.space_ms &&
+                need <= room)
                 len = need;
             break;
         }
@@ -1166,6 +1178,11 @@ rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_
             return k;
         }
         // It waits; nothing of a lower priority goes ahead of it.
+        if (claim_first && !rp_within(s_x.hold_logged, now, RP_REFUSE_LOG_MS)) {
+            s_x.hold_logged = rp_nz(now);
+            ESP_LOGI(RP_TAG, "%s pulse waits: the valve's claim goes first (a leak response is pending)",
+                     k_pulse_names[k]);
+        }
         return RP_PULSE_NONE;
     }
     return RP_PULSE_NONE;
@@ -1205,6 +1222,7 @@ uint32_t radio_policy_exec_connect_len(TickType_t now, uint32_t budget_ms)
 void radio_policy_exec_pulse_begin(rp_pulse_t kind, TickType_t now, uint32_t len_ms)
 {
     s_x.pulse = (uint8_t)kind;
+    s_x.last_pulse = (uint8_t)kind;
     s_x.pulse_at = now;
     s_x.pulse_deadline = rp_nz(now + pdMS_TO_TICKS(len_ms));
     s_x.pulse_why = "its deadline";

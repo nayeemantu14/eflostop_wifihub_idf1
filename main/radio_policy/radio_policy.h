@@ -195,8 +195,10 @@ void radio_policy_note_sta_attempt(bool in_flight);
  *  response, exempt from the 6 s spacing, but counted in I2b's 12 s per 60 s and in I2 (at most
  *  2.8 s, then 1.2 s of Coded), so no pattern of Connects blinds BLE beyond the invariants. It
  *  waits for its grant until the Connect ends (no 2 s limit, no refusal for room). While a leak
- *  response is pending the valve's claim goes first and keeps 2.5 s of I2b's room. The caller
- *  does not wait: BLE stops within one executor wake when nothing else runs. */
+ *  response is pending the valve's claim goes first: every Wi-Fi pulse leaves it 2.5 s of I2b's
+ *  room, and while it is due no Wi-Fi pulse goes before it unless the last pulse was a claim, so
+ *  Connects cannot hold its RMLEAK / CLOSE off (radio_policy_exec_wifi_grant()). The caller does
+ *  not wait: BLE stops within one executor wake when nothing else runs. */
 void radio_policy_note_submit(bool in_flight);
 
 /** A station joined / left the SoftAP (default event loop: AP_STACONNECTED, AP_STADISCONNECTED).
@@ -319,9 +321,11 @@ uint8_t radio_policy_exec_row(TickType_t now, bool new_period);
 /** A Wi-Fi pulse to grant now, or RP_PULSE_NONE. kinds: RP_PULSE_* bits (1u << kind) to consider.
  *  at_coded_end: right after a Coded window's own end (aligned kinds need it). budget_ms: I2's
  *  blind budget left now (RP_BLIND_MAX_MS minus the time since the last Coded window). coded_young:
- *  a Coded scan runs that has not yet covered RP_L_MS (unaligned kinds wait for it). */
+ *  a Coded scan runs that has not yet covered RP_L_MS (unaligned kinds wait for it). claim_due: the
+ *  valve's claim is due (ble_valve_claim_wanted()); under a leak response it goes first. */
 rp_pulse_t radio_policy_exec_wifi_grant(TickType_t now, uint32_t kinds, bool at_coded_end,
-                                        uint32_t budget_ms, bool coded_young, uint32_t *len_ms);
+                                        uint32_t budget_ms, bool coded_young, bool claim_due,
+                                        uint32_t *len_ms);
 
 /** The claim's connect length if a CONNECT may be granted now, else 0: the mode, I2b, and I2's
  *  budget (RP_CONNECT_LR_MS under a leak response; otherwise RP_CONNECT_MS to RP_CONNECT_LR_MS). */
