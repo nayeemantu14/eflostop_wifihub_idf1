@@ -33,7 +33,10 @@ MQTT stop off the task that handles leaks, and WP2c moves every cloud publish of
 its own. WP2d makes a busy lock delay a leak decision instead of dropping it. WP2e sends every twin report in
 order, newest last, and keeps 16 of the sender's 24 queue places for leak, valve and rules events. WP1, WP2,
 WP2b, WP2c, WP2d and WP2e are built and benched together as Build checkpoint 6, of `545b8f2` (HANDOFF
-§15h-§15p).
+§15h-§15p). WP3 puts the seven build settings the release depends on into the tracked defaults with compile
+checks, and closes the busy-lock and twin items left from WP2d and WP2e; WP4 rebuilds the setup page and its
+server; WP5 and WP6 give BLE scanning one owner and a de-locked normal scan, and bound the valve's claims
+(HANDOFF §15q-§15s). They are built and benched as Build checkpoint 7 (HANDOFF §15t).
 
 - **The Wi-Fi manager is now part of this repository (WP-V, user decision D11).**
   - The component moved from `managed_components/ankayca__esp32-wifi-manager` (registry 0.0.4 with this
@@ -393,6 +396,124 @@ WP2b, WP2c, WP2d and WP2e are built and benched together as Build checkpoint 6, 
     timer or allocation.
   - **Known, for the user's decision (HANDOFF §15p):** twin reports go at QoS 1, so on a slow or reconnecting link
     the MQTT client's own resend can still deliver an older report after a newer one (pre-existing).
+- **Build settings the release depends on, now in the tracked defaults and checked at compile time (WP3, plan
+  §4.9, D12).** Commit `fa05390` (`sdkconfig.defaults`, `main/main.c`); details in HANDOFF §15q and §15t.
+  - `sdkconfig.defaults` gains seven lines: TLS records of at most 2 KB out
+    (`CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=2048`), the server certificate freed after the handshake
+    (`CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` off), 16 Wi-Fi dynamic RX and 16 TX buffers (32 each before),
+    NimBLE's own connect re-attempt off (`CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT`; the valve module owns every
+    connect), at most 4 stations on the setup SoftAP (unchanged) and the setup SoftAP on channel 11
+    (`CONFIG_DEFAULT_AP_CHANNEL`, 1 before, D7: clear of the BLE advertising channels 37 and 38).
+  - `main.c` stops the build with an `#error` when the local `sdkconfig` (untracked) disagrees. **An existing
+    `sdkconfig` must be regenerated once** (delete the eight affected lines, `idf.py reconfigure`; HANDOFF §15t),
+    or six of the guards stop the build. Do not delete `sdkconfig` itself: `sdkconfig.defaults` does not hold the
+    target, the flash size, the partition table or the BT settings.
+  - Channel 11 applies to every hub at its next boot, commissioned or not (the Wi-Fi manager configures the
+    SoftAP before it reads its stored settings). Memory: the re-attempt tables, 2,008 B of static RAM, are gone;
+    flash about −1.8 KB; while connected, about 4 KB more free heap without the stored certificate (the plan's
+    estimate), and a TLS write needs a block of about 2.4 KB instead of 4.4 KB.
+- **Leak decisions read device membership in the same hold as the rules, and a busy lock keeps more (WP3, the
+  user's decisions of 2026-10-02).** Commits `1afb368` … `fdb8c28` and review fixes `f639297` … `f649193`
+  (`main/rules_engine`, `main/provisioning_manager`, `main/iothub`, `main/telemetry`); details in HANDOFF §15q.
+  Reviewed, fixed, and voted 3/3 SHIP by the council (rtos, leak safety, cloud and build).
+  - **Membership (WP2D-C4).** A leak is decided on the device's membership read in the same provisioning hold as
+    the rules, with the same definition as the event loop's gate. A sensor removed between the gate and the
+    decision, a neighbour's sensor passed while provisioning was busy, and a kept report replayed after its
+    sensor's removal are now ignored: W `Leak from %s sensor %s ignored - not in this hub's device list`.
+  - **Kept reports on a busy rules lock.** The valve's dry flood reports are kept like wet ones. Each source
+    keeps at most one report of each state; a wet report replaces a kept dry one (its own source's first, the
+    valve's last), and a wet report is lost only when four different sources' wet reports are already kept. A
+    source flapping wet and dry no longer ends dry while it is wet.
+  - **A valve swap that meets a busy rules lock** owes its purge of the old valve's flood state; the purge runs
+    first in the next rules-lock hold on any task (leak evaluation, the tick, `leak_reset`, `override_cancel`,
+    `override_enable`, the full reset), exactly once. `override_enable` re-checks its incident under the lock, and
+    can now answer `NO_INCIDENT` while the hub's own RMLEAK clear is still in flight after an auto-clear or a
+    `leak_reset`.
+  - **Twin report and lifecycle.** Each reads provisioning once (one locked summary). While provisioning is busy
+    nothing is built with defaults: W `Twin report not built - provisioning busy for 1 s, built again later` (and
+    the lifecycle's equivalent, each at most once a minute); the report follows about 5 s later. An owed twin
+    goes out after the pass's leak events.
+  - **MQTT stop.** A stop esp-mqtt refuses (a client whose task had not yet run) is tried again, up to 10 times
+    20 ms apart, and every stop is followed by a 20 ms settle: W `MQTT stop refused %d time(s) - the client had
+    just started`, or `... taken as stopped, no client task seen`.
+  - **Snapshot size.** Labels, the hub name and the valve firmware string print control characters as spaces
+    (the twin's `hub_name` keeps the exact value), so a full hub's worst snapshot is about 9.6 KB, under the MQTT
+    outbox limit (12,288 B, unchanged; 10,240 B for a message plus 2,048 B of backlog). The snapshot is printed
+    into one block (8.6 KB for a full hub, 10.2 KB at most) instead of a buffer that grew to about 16.5 KB. New: W
+    `Snapshot is %u B, over the %u B the MQTT outbox is sized for ...`, E `Snapshot is %u B, over the %u B MQTT
+    outbox limit - it will be refused`.
+  - Memory (objects): `.bss` +19 B, flash about +3.9 KB; no IRAM, no new task, timer or heap at rest.
+  - **Still open (HANDOFF §15q):** a QoS 0 twin report (15p W1, the user's decision), D4's leak-path reordering
+    (only if CP7 measures a leak → CLOSE over 200 ms), `network.timeout_ms`, and the valve half of 15o residual 1
+    (a MAC-tagged valve source).
+- **The setup page: smaller, faster, and a Connect that never loses the working network (WP4: C6, C7, C8, C9,
+  C10b, C12, C13; D9 kept).** Commits `146498c` … `6c82af4` and review fixes `3392935` … `9ba8e9c`
+  (`components/wifi_portal`, `main/app_wifi`, `main/wifi_reset`); details in HANDOFF §15r. Reviewed, fixed, and
+  voted 3/3 SHIP by the council (robustness, phones, build).
+  - **Gzipped page (C7).** `index.html`, `code.js` and `style.css` are gzipped at build time
+    (`components/wifi_portal/tools/gz_asset.py`, run with the build's Python; it fails the build rather than embed
+    a stale asset) and served with `Content-Encoding: gzip`: 57.4 KB → 20.2 KB in flash and on the air. Every
+    answer carries `Cache-Control: no-store`; `HEAD` gets headers only; `406` only for a client that refuses gzip.
+    `src/compress.bat` is gone.
+  - **Bounded server (C6).** At most 5 HTTP sessions; a session is refused while internal DMA-capable heap is
+    under 12 KB; a connection from the home LAN is closed at accept; every post to the Wi-Fi manager's queue waits
+    at most 200 ms (`503` when full).
+  - **The Wi-Fi manager owns every connect (C8).** A page Connect is saved only when it gets its IP; a wrong
+    password, a missing network or no DHCP (25 s) keeps the network in use. A Connect waits up to 8 s for an
+    attempt in flight, then ends it. Credentials may be percent-encoded (`X-Custom-enc: pct`), an empty password
+    joins an open network, a bad request gets `400 {"err":...}`, and password copies are wiped. The forget
+    (`DELETE /connect.json`, kept per D9) is handled inside the component in every station state. `status.json`
+    gains `reason` and `pend`.
+  - **Network list from a cache (C10b).** `GET /ap.json` serves the last list; `POST /scan.json` (Rescan) orders a
+    scan, at most every 20 s (a failed scan is retried after 10 s); the page's first read orders one when the list
+    is empty or older than 60 s.
+  - **Finish (C12).** `POST /finish.json` stops the setup SoftAP 2 s after the tap (never sooner than 5 s after
+    the IP; `409` when not connected), so the phone's sign-in window closes and the phone returns to its own Wi-Fi.
+  - **The SoftAP announces its channel switch (C13)** 3 beacons ahead (CSA) with DTIM 1, station scans dwell
+    60 ms per channel (100 ms home dwell), and the router's channel is kept in RAM as a hint for the next attempt.
+  - **The page (C9)** reads `status.json` first, handles open networks, UTF-8 and raw SSIDs, shows a reason for a
+    failed Connect (wrong password, not found, security not supported, no IP), a 30 s timeout with Retry, Rescan,
+    Disconnect and Finish, and sends one request of each kind at a time.
+  - Log lines: the portal client line's kinds are now `user request (list, Rescan, Connect, Disconnect or
+    Finish)` and `background poll (list)` (were `Connect/Disconnect request` and `network list request`); new
+    `APP_WIFI` lines for a Connect and for Finish; new `wifi_manager` W lines (`user connect: ...`, a forget's
+    fallbacks) and `http_server` W lines (`session closed: internal DMA free ...`, `POST connect.json refused
+    (400): ...`). None prints a credential, and the production tool matches none of them.
+  - Memory (objects): `.bss` +57 B, `.data` +8 B, code about +7.5 KB, `.rodata` +2.7 KB; heap at rest −151 B;
+    no IRAM, no new task, timer or queue.
+  - **Known (HANDOFF §15r):** "Other Network" after a success can start a switch late in the SoftAP's 60 s tail
+    (PH-7, the user's decision); Enterprise and OWE networks are not marked in the list; a switch during the
+    first-setup tail resumes BLE scanning (by design until WP8).
+- **One BLE scan owner, a de-locked normal scan, bounded valve claims and remembered sensor PHYs (WP3's valve
+  items, WP5, WP6).** Commits `4e22719` … `2be0d4f` and review fixes `3c65297` … `cc2a09b`
+  (`main/ble_leak_scanner`, `main/ble_valve`); details in HANDOFF §15s. Reviewed, fixed, and voted 3/3 SHIP by the
+  council (NimBLE and RTOS, leak safety, RTOS and memory).
+  - **A dead valve link is always closed (WP3, red team SR-1).** A valve link NimBLE removed without a
+    DISCONNECT (a failed establishment, 0x3E) is closed after 1 s, so a pended RMLEAK and CLOSE are written at the
+    next link; a DISCONNECT for a handle the module does not track is ignored.
+  - **One scan owner (WP5).** Only the leak scanner's task starts or stops a BLE scan; the valve hunt runs on its
+    scans, and a valve connect is granted by it at the end of a scan. The old two-owner race (`rc=2`) is gone.
+    The task runs at priority 6 (was 4).
+  - **Normal scanning (WP6).** Timed 1 s scans, each next one after a random 0-100 ms: `N_CODED` (1M 20 %, Coded
+    80 %), `N_MIXED` when a sensor is known to be on 1M, and `NORMAL_LR` (1M and Coded in turn) for at most 10 min
+    of a leak response with the valve not linked. A scan that runs 1 s past its time is restarted.
+  - **Valve claims.** A claim's connect lasts 1.5 s (2.5 s while a leak response is pending; it was 30 s), then a
+    1.2 s Coded recovery scan. Claims that give no link back off 10, 30, 60 then 300 s, except while a leak
+    response is pending; every claim is spaced by at least 6 s of scanning, with at most 12 s of claims in any
+    60 s (plan I2b). The leak-response trigger now also covers a latched incident the valve has not confirmed
+    (RMLEAK=1 and CLOSED).
+  - **Each sensor's PHY** (1M or Coded) is learned from its adverts (changed only after 4 in a row on the other
+    PHY) and kept in the commissioning NVS partition (namespace `ble_phy`, 7 B a sensor), so a Wi-Fi reset keeps
+    it.
+  - Log lines: new `BLE_LEAK` lines (`Scan mode ...`, `PHY learned`, `PHY table loaded` / `saved`, a 60 s
+    `[SUMMARY]` with the scanning duty and adverts per sensor, `Duty watchdog`, `Scan overdue`, `[CLAIM] ...`) and
+    `BLE_VALVE` `[CLAIM]` and `[LR]` lines; `Extended passive scan started` now prints only when scanning resumes.
+    NimBLE's own log is capped at WARN (one INFO line per scan start otherwise). `BLE_VALVE: [HOST] NimBLE host
+    task started`, which the production tool matches, is unchanged.
+  - Memory (objects): `.bss` +79 B, `.data` +2 B, flash about +10.6 KB; no IRAM, no new task. Heap at rest:
+    NimBLE's log-level entry and the `ble_phy` namespace, about 60 B (an I10 exception for the user).
+  - **For the user (HANDOFF §15s):** a powered valve may take longer to find than the plan's 1-3 s under
+    `N_CODED` (a change needs approval); keep or drop the back-off exemption during a leak response.
 - **Not yet folded in below:** the setup-page round of 2026-09-30 (`695283a` … `520b17a`: the page polls its
   network list only while it is used, an open page's scans leave BLE a 4 s window every 12 s, and the page's
   forget erases Wi-Fi with the station idle). The sections below still describe the 30 s / 15 s page chain and

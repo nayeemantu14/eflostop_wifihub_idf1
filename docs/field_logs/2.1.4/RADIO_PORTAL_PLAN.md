@@ -6,6 +6,8 @@
 >
 > **Update 2026-10-02 (WP2c and WP2d; WP2e's `.bss` decision).** Two dated notes are added below, and nothing else: after §3's invariant table (I10: the user approved a task swap as an exception, WP2c's decision D1 (i)) and after §10's table (the `.bss` gate). Details: `HANDOFF.md` §15n and §15o.
 
+> **Update 2026-10-06 (WP3, WP4, WP5 and WP6 committed).** Two more dated notes are added below, and nothing else: after §4.9's guard example (where the seven lines landed, and what the integrator measured) and after §10's `.bss` note (the gate with WP3-WP6). Details: `HANDOFF.md` §15q-§15t.
+
 **Status.** This is a proposal for your approval (answer 8). Nothing has been edited, built or flashed. The only files written are model runs in the scratchpad.
 
 **Scope.** Branch `fix/2.1.4` at `520b17a`, ESP32-S3, ESP-IDF 5.5.1. Every item lands in 2.1.4.
@@ -423,6 +425,8 @@ Each line gets a compile guard, for example:
 #error "I5: NimBLE connect re-attempt must be off"
 #endif
 ```
+
+> **Update 2026-10-06: the seven lines are in (`HANDOFF.md` §15q, §15t).** All seven, the channel line included, landed together in WP3's `fa05390` (`sdkconfig.defaults`, and six `#error` guards plus the unchanged connection count's in `main/main.c`); WP4 then set the component's Kconfig default for `CONFIG_DEFAULT_AP_CHANNEL` to 11 as well. A local `sdkconfig` written before then still holds the old values and stops the build at six of the guards, by design: `HANDOFF.md` §15t gives the regeneration (delete the eight affected lines, `idf.py reconfigure`), which the integrator ran with kconfgen in a scratch folder: the result differs from the old file in exactly those values, plus `CONFIG_BT_NIMBLE_MAX_CONN_REATTEMPT` and the `TLS1_3` comment line, which drop with their dependencies. Measured on the IDF objects compiled both ways: the re-attempt line also removes NimBLE's `ble_adv_reattempt` (1,900 B), `ble_conn_reattempt` (100 B) and `reattempt_conn` (8 B), so the table in §10 understates this row's `.bss` by about 2 KB (−2,008 B, not about −40 B); flash about −1.8 KB (code −1,491 B, `.rodata` −287 B), with `ssl_tls.c` 274 B larger without the kept peer certificate. D7's channel reaches every hub, commissioned or not: the component configures the SoftAP once, at its task's start and from the RAM default, before it reads the NVS settings blob (whose stored channel, 1 on older hubs, is read but never applied).
 
 Lab-only (Kconfig `APP_RADIO_LAB`, default n), C11:
 - `esp_wifi_config_11b_rate(WIFI_IF_AP, true)`;
@@ -899,6 +903,8 @@ If every line ships, the set frees an estimated **+40-50 KB**; the two IRAM line
 - Free heap at rest while connected: about +12 KB.
 
 > **Update 2026-10-02: the `.bss` gate (`HANDOFF.md` §15n, §15o).** Two packages that are not in the table above were added before CP6. WP2c's +6,301 B (`cloud_tx`'s static stack and TCB, its two static queues, the busy mutex and the publish gate, the snapshot's flight context) is outside the ≤ +450 B gate: the I10 exception the user approved (§3). WP2d's +477 B (the rules engine's copy of the last applied device set, about 376 B, its four kept leak reports and flags; the user's decision D5: a busy lock no longer drops a wet report) counts against it. Recorded per package against `520b17a`: WP0 +121, WP1 −38, WP2 +86, WP2b −75, WP2c +6,301, WP2d +477 B (object figures; CP6 measures the link). Without WP2c that is **+571 B, 121 B over the gate** before WP3-WP8's planned ≈ +340 B: whether WP2d's copy counts under D5's approval, or WP9 recovers it, is the user's call (`HANDOFF.md` §15o). Flash, also outside the table: WP2c about +7.7 KB, WP2d about +2.7 KB (objects, `.text` and `.rodata`). **Decided by the user on 2026-10-02: WP2d's +477 B is recorded under D5's approval, like WP2c's under I10's exception.** With WP2e's +29 B (the twin report's counters and flags, the user's TW-1 decision of the same day; flash about +0.8 KB; `HANDOFF.md` §15p) the gate stands at **+123 B**, so WP3-WP8's ≈ +340 B would end about 13 B over: for WP9.
+
+> **Update 2026-10-06: the `.bss` gate with WP3-WP6 (`HANDOFF.md` §15q-§15t).** Object figures at `-Og` against `545b8f2`, the same regenerated `sdkconfig.h` on both sides: WP3 core +19 B (`app_iothub.c` +5, `telemetry_v2.c` +4, `provisioning_manager.c` +9, `rules_engine.c` +1), WP4 +57 B (`wifi_manager.c` +36, `http_app.c` +12, `app_wifi.c` +9; `.data` +8 B, the status spinlock), the BLE stream (WP3's valve items, WP5, WP6) +79 B (`app_ble_leak.c` +50, `app_ble_valve.c` +29; `.data` +2 B): **+155 B**, so the gate reads **+278 B** before the `sdkconfig` lines. The re-attempt line's NimBLE tables, −2,008 B (§4.9's note), bring it to **about −1.73 KB against `520b17a`**: the 13 B shortfall foreseen for WP9 is gone, with about 2.2 KB of room for WP7-WP8's planned `radio_policy` (+190 B) and the rest of the table. Flash against `545b8f2` (objects; CP7 measures the link): code +18.2 KB, `.rodata` +6.5 KB, the gzipped page −37.2 KB (57,399 → 20,204 B embedded), newly linked library code about +0.75 KB, the `sdkconfig` lines about −1.8 KB: about **−13.5 KB** in all. IRAM 0: no changed object has an IRAM, DRAM or RTC section, and every newly linked function is in flash or was linked already (`calloc`, `realloc`, `esp_random` in IRAM since CP5).
 
 ---
 
