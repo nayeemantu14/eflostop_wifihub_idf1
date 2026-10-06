@@ -1639,11 +1639,14 @@ override_enable_result_t rules_engine_enable_override_remote(void)
         ESP_LOGW(RULES_TAG, "override_enable: mutex timeout");
         return OVERRIDE_ENABLE_ERR_INTERNAL;
     }
-    // The purge first: before the clear owed below, which a later purge would undo. If it ran,
-    // precondition 3 read the incident latch before it, while the swapped-out valve's source
-    // still held it: checked again, so no 24 h window starts with nothing to override (review).
-    if (valve_purge_if_owed() && g_override_state != OVERRIDE_STATE_ACTIVE &&
-        !g_leak_incident_active && !ble_valve_get_rmleak_state()) {
+    // The purge first: before the clear owed below, which a later purge would undo. Then
+    // precondition 3 again, under the lock: read before it, the latch may since have been
+    // released, by that purge (the swapped-out valve's source held it), by one iothub_task ran
+    // meanwhile, or by the 10 s all-clear, and no 24 h window may start with nothing to
+    // override (2.1.4 WP3 review).
+    valve_purge_if_owed();
+    if (g_override_state != OVERRIDE_STATE_ACTIVE && !g_leak_incident_active &&
+        !ble_valve_get_rmleak_state()) {
         xSemaphoreGive(g_mutex);
         ESP_LOGW(RULES_TAG, "override_enable: no active incident to override");
         return OVERRIDE_ENABLE_ERR_NO_INCIDENT;
