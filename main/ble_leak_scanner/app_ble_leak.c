@@ -1673,9 +1673,10 @@ void app_ble_leak_init(void)
         return;
     }
 
-    // NimBLE's own log at WARN (plan §4.7): NORMAL starts a scan every second, and NimBLE prints
-    // "GAP procedure initiated: extended discovery" at INFO for each, about 86,000 lines a day.
-    esp_log_level_set("NimBLE", ESP_LOG_WARN);
+    // NimBLE's own log is at WARN by sdkconfig (CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING, guarded in
+    // main.c; plan §4.7): NORMAL starts a scan every second, and NimBLE printed "GAP procedure
+    // initiated: extended discovery" at INFO for each, about 86,000 lines a day. Compiled out, it
+    // needs no esp_log_level_set() tag node on the heap (I10).
 
     // Priority 6 (was 4, plan §4.7): the executor's scan starts and claim grants land within
     // milliseconds. Its passes are short; whitelist reloads and log lines are as before. Stack

@@ -61,6 +61,9 @@
 #if CONFIG_DEFAULT_AP_CHANNEL != 11
 #error "I14: CONFIG_DEFAULT_AP_CHANNEL must be 11 (D7): the setup SoftAP clear of BLE advertising channels 37 and 38"
 #endif
+#if !defined(CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING)
+#error "I14: CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING must be set: NimBLE's log at WARN, compiled in (plan 4.7; replaces a run-time cap that kept a tag node on the heap, I10)"
+#endif
 
 /* ---------------------------------------------------------
  * Tags

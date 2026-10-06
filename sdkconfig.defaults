@@ -14,7 +14,7 @@ CONFIG_HTTPD_ERR_RESP_NO_DELAY=y
 # a button WiFi reset, and relieves the near-OOM heap floor on this memory-tight hub.
 CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
 
-# 2.1.4 radio/portal plan 4.9 (D12): the seven lines below are checked by #error guards in main/main.c (I14).
+# 2.1.4 radio/portal plan 4.9 (D12): the lines below are checked by #error guards in main/main.c (I14).
 # sdkconfig is untracked and an existing sdkconfig overrides this file: set each value there too.
 
 # TLS records of at most 2 KB out: the largest block one TLS write takes drops from 4,437 to 2,389 B.
@@ -37,3 +37,6 @@ CONFIG_DEFAULT_AP_MAX_CONNECTIONS=4
 
 # The setup SoftAP on channel 11 (was 1), clear of the BLE advertising channels 37 and 38 (D7).
 CONFIG_DEFAULT_AP_CHANNEL=11
+
+# NimBLE's own log at WARN, compiled in (plan 4.7): no INFO line at every scan start, no run-time tag node on the heap.
+CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING=y
