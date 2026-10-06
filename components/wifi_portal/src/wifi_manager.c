@@ -214,6 +214,23 @@ static TickType_t abort_tick = 0;			/* an esp_wifi_disconnect() of ours awaits i
 static uint8_t abort_reason = 0;			/* the reason that end reports for a user's attempt, 0 = the driver's */
 static bool user_due = false;				/* a waiting candidate may go on, after the message's callback */
 
+/* LOCAL PATCH (2.1.4 C13): Wi-Fi parameters the component owns (plan 4.5, 6.2 C13).
+ * - The SoftAP announces a channel switch (CSA) WIFI_MANAGER_AP_CSA_COUNT beacons ahead, where it
+ *   left csa_count 0 (B6): when the STA joins a router on another channel, the SoftAP follows it,
+ *   and a phone on it follows the announcement instead of dropping. PROVISIONAL: G0 reads the
+ *   driver's "csa_count" line and decides 3 or 5 (plan 2.4).
+ * - DTIM period 1 (it was left 0), set explicitly.
+ * - Station scans dwell WIFI_MANAGER_SCAN_ACTIVE_MAX_MS at most on each channel (the default is
+ *   120 ms) and go back to the home channel for WIFI_MANAGER_SCAN_HOME_DWELL_MS between channels
+ *   (30 ms), so the SoftAP and its phone keep air time during a scan; set once after
+ *   esp_wifi_start() (the driver takes them only with the station started).
+ * - At each IP the router's channel goes into the network in use's config (RAM only, never saved:
+ *   NVS keeps the SSID and password blobs only), so a later attempt scans it first. */
+#define WIFI_MANAGER_AP_CSA_COUNT			3
+#define WIFI_MANAGER_AP_DTIM_PERIOD			1
+#define WIFI_MANAGER_SCAN_ACTIVE_MAX_MS		60
+#define WIFI_MANAGER_SCAN_HOME_DWELL_MS		100
+
 #define WIFI_MANAGER_USER_WAIT_MS		8000	/* a Connect waits this long for a running attempt (plan C8) */
 #define WIFI_MANAGER_USER_ATTEMPT_MS	25000	/* a user's attempt with no IP this long is ended (the page waits 30 s) */
 #define WIFI_MANAGER_ABORT_WAIT_MS		2000	/* our esp_wifi_disconnect()'s STA_DISCONNECTED, awaited this long */
@@ -1900,6 +1917,18 @@ static __attribute__((noinline)) void wifi_manager_commit_driver_config(){
 	wifi_manager_wipe(drv.sta.password, sizeof(drv.sta.password));
 }
 
+/**
+ * @brief LOCAL PATCH (2.1.4 C13): at an IP, the router's primary channel into the network in use's
+ * config (RAM only: NVS keeps the SSID and password blobs), so a later attempt scans it first. In
+ * a frame of its own (the AP record, about 0.1 KB).
+ */
+static __attribute__((noinline)) void wifi_manager_channel_hint(){
+	wifi_ap_record_t ap;
+	if(esp_wifi_sta_get_ap_info(&ap) == ESP_OK && ap.primary >= 1 && ap.primary <= 14){
+		wifi_manager_config_sta->sta.channel = ap.primary;
+	}
+}
+
 void wifi_manager( void * pvParameters ){
 
 
@@ -1939,6 +1968,8 @@ void wifi_manager( void * pvParameters ){
 			.ssid_hidden = wifi_settings.ap_ssid_hidden,
 			.max_connection = DEFAULT_AP_MAX_CONNECTIONS,
 			.beacon_interval = DEFAULT_AP_BEACON_INTERVAL,
+			.csa_count = WIFI_MANAGER_AP_CSA_COUNT,			/* LOCAL PATCH (2.1.4 C13) */
+			.dtim_period = WIFI_MANAGER_AP_DTIM_PERIOD,		/* LOCAL PATCH (2.1.4 C13) */
 		},
 	};
 	memcpy(ap_config.ap.ssid, wifi_settings.ap_ssid , sizeof(wifi_settings.ap_ssid));
@@ -1974,6 +2005,19 @@ void wifi_manager( void * pvParameters ){
 	/* by default the mode is STA because wifi_manager will not start the access point unless it has to! */
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	ESP_ERROR_CHECK(esp_wifi_start());
+
+	/* LOCAL PATCH (2.1.4 C13): the scan dwell, once the station has started (logged, not checked:
+	 * the driver's defaults stay if it refuses) */
+	wifi_scan_default_params_t scan_params;
+	memset(&scan_params, 0x00, sizeof(scan_params));
+	scan_params.scan_time.active.min = 0;
+	scan_params.scan_time.active.max = WIFI_MANAGER_SCAN_ACTIVE_MAX_MS;
+	scan_params.scan_time.passive = 0;		/* 0: the default (360 ms) */
+	scan_params.home_chan_dwell_time = WIFI_MANAGER_SCAN_HOME_DWELL_MS;
+	esp_err_t scan_params_err = esp_wifi_set_scan_parameters(&scan_params);
+	if(scan_params_err != ESP_OK){
+		ESP_LOGW(TAG, "esp_wifi_set_scan_parameters failed (%s) - the driver's scan times stay", esp_err_to_name(scan_params_err));
+	}
 
 	/* LOCAL PATCH (2.1.4 C3, plan D3): no HTTP server here. It runs only while the AP is up, from
 	 * START_AP to STOP_AP: with the STA alone it answered the home LAN, where DELETE and POST
@@ -2281,6 +2325,9 @@ void wifi_manager( void * pvParameters ){
 				 * on, saved if it is new (a user's candidate): before, every IP but the boot
 				 * restore's saved the RAM config, which a Connect had already overwritten */
 				wifi_manager_commit_driver_config();
+
+				/* LOCAL PATCH (2.1.4 C13): the router's channel, as the next attempt's hint (RAM only) */
+				wifi_manager_channel_hint();
 
 				/* reset number of retries */
 				retries = 0;

@@ -44,9 +44,11 @@ config DEFAULT_AP_PASSWORD
 
 config DEFAULT_AP_CHANNEL
     int "Access Point WiFi Channel"
-    default 1
+    default 11
     help
 	Be careful you might not see the access point if you use a channel not allowed in your country.
+	2.1.4 (plan D7): 11, clear of the BLE advertising channels 37 and 38; main.c refuses to build
+	with another value, and sdkconfig.defaults sets it for a new sdkconfig.
 
 config DEFAULT_AP_IP
     string "Access Point IP Address"

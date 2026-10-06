@@ -582,13 +582,15 @@ static void cb_ap_started(void *pvParameter)
     else if (!s_portal_priority)
         ESP_LOGI(WIFI_TAG, "SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on");
 
-    // The channels (see above).
+    // The channels (see above). The SoftAP is configured with DEFAULT_AP_CHANNEL (11 since 2.1.4,
+    // D7) when wifi_manager starts; wifi_settings.ap_channel is overwritten afterwards by the
+    // settings blob of NVS, which on a hub set up before keeps the old value and configures nothing.
     if (s_router_channel != 0)
         ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router last seen on %u%s",
-                 radio_channel(), (unsigned)wifi_settings.ap_channel, (unsigned)s_router_channel, scan_note());
+                 radio_channel(), (unsigned)DEFAULT_AP_CHANNEL, (unsigned)s_router_channel, scan_note());
     else
         ESP_LOGI(WIFI_TAG, "Wi-Fi channel at AP start: radio %u (SoftAP configured %u), router not joined since boot%s",
-                 radio_channel(), (unsigned)wifi_settings.ap_channel, scan_note());
+                 radio_channel(), (unsigned)DEFAULT_AP_CHANNEL, scan_note());
 }
 
 // WM_ORDER_STOP_AP (wifi_manager task). wifi_manager runs it only with the STA connected, once
