@@ -616,12 +616,10 @@ At least one field is required. Each present array does a **full replace** of th
   "schema": "eflostop.cmd", "ver": 1, "id": "prov-004", "cmd": "provision",
   "payload": {
     "valve_id": "00:80:E1:27:F7:BB",
-    "ble_leak_sensors": ["00:80:e1:2a:2b:a5", "00:80:e1:2a:cb:b6","00:80:e1:2a:b6:8e", "00:80:e1:2a:29:fc"],
+    "ble_leak_sensors": ["00:80:e1:2a:cb:b6", "00:80:e1:2a:43:4f"],
     "sensor_meta": [
-      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:2b:a5", "location_code": "bathroom", "label": "Ensuite" },
       { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:cb:b6", "location_code": "bathroom", "label": "Main Bathroom" },
-      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:b6:8e", "location_code": "kitchen", "label": "dishwasher" },
-      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:29:fc", "location_code": "laundry", "label": "under washer" }
+      { "sensor_type": "ble_leak_sensor", "sensor_id": "00:80:e1:2a:43:4f", "location_code": "kitchen", "label": "dishwasher" }
 ],
     "auto_close_enabled": true
   }
