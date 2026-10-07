@@ -2,8 +2,10 @@
 
 **For:** the hub firmware lead, alone at the bench. Claude reads the captures after each block and answers with a verdict per test.
 **Firmware under test:** CP7 = commit **`b651701`** (`b651701a908af6e20760a5fd4aef350e4319f0a3`, 2026-10-07 06:37:11 +1100) on `fix/2.1.4`: phases 1-3 of the 2.1.4 radio/portal plan (WP3-WP8, M4) on top of CP6's `545b8f2`. Version string `2.1.4`. A bench image (`APP_BENCH_DIAG=y`). Every commit after `b651701` is docs only (4.2 checks it).
-**Hub:** `GW-7C4FADAE69C8` on COM30. Spare hub: optional (later days).
+**Hub:** `GW-7C4FADAE69C8` on COM30. **Spare hub:** the second hub (`<GW2>`, 3.2): every destructive step runs on it and never on the main hub (7.7).
 **Written:** 2026-10-07, read-only, from the untracked CP6 plan (`CP6_FULL_TEST_PLAN.md`, never run: CP7 replaces it) and its gatherers' notes, `HANDOFF.md` §15q-§15x (the CP7 procedure in §15t; the bench-watch lists of §15q, §15r, §15s, §15u, §15w; G1 in §15v; the decisions in §15x), `WP9_GM_PROCEDURE.md`, `MANUAL_TEST_PLAN.md` as re-baselined by WP10, and the code at `b651701`. **Every quoted firmware line was checked against the code at `b651701`** (a script over all 1,088 `ESP_LOGx` formats; lines from ESP-IDF or the Wi-Fi driver are marked **(ESP-IDF)**).
+
+**Tailored on 2026-10-07 to the bench answers** (section 0, questions 3-7 and 12). The bench has two working BLE leak sensors whose PHY B0 reads (the PHY case, 3.2) and no LoRa sensor, so every LoRa test is N/A. The hub's Wi-Fi is a phone hotspot (3.3), the laptop has Python 3 (A.4), the spare hub takes every destructive step (7.7), and G0 is folded in (1.5). The new and changed quoted lines were checked against the code at `b651701` as well.
 
 **No bench data exists for anything built since CP6.** The radio policy, the pulses, the reset portal that keeps scanning (D2), the paced Connect (M4), WP4's portal and WP3's `sdkconfig` lines run on hardware for the first time today.
 
@@ -11,18 +13,42 @@
 
 ## 0. Open questions for you (answer before B0 if you can; the plan's default is in brackets)
 
-1. **Start time and day length.** [B0 at 10:30, a long day 1 to about 20:40. To stop at about 19:00, cut in 5.3's order: S1, half of the day's power cycles and three contract checks move to day 2.]
+**Answered on 2026-10-07:** questions 3, 4, 6, 7 and 12, and part of 5. The plan below follows those answers. Questions 13-15 are new and follow from them.
+
+1. **Start time and day length.** [B0 at 10:30, a long day 1 to about 20:45. To stop at about 19:00, cut in 5.3's order: G8 (the smoke trio and S1), half of the day's power cycles, three contract checks and the G0 add-ons move to day 2.] Every minute B0 starts after 10:30 moves the end by as much: 5.3's first three cuts save about 74 min.
 2. **The power-cycle gate (HANDOFF 15x item 2, 15u B2).** The model's quantity is **power-on → `BLE_VALVE: ║ GAP CONNECT EVENT` with `[CONNECT] status=0`** (its "link" is the first advert the initiator hears, with no valve boot time). `SETUP COMPLETE` comes 10-20 s after CONNECT on every link (the full GATT discovery, CCCD writes and reads; 14.9 s on 2.1.3's one recorded relink), so a gate on power-on → `SETUP COMPLETE` fails by construction. "Every relink ≤ 10 s" cannot be met with certainty either (model, N_HUNT 0.45 s: 0.07 % / 1.7 % / 9.9 % of cycles over 10 s, P(all 100 ≤ 10 s) = 0.93 / 0.18 / 0.00 at valve p_loss 0.1 / 0.3 / 0.5). [Judge CP7 against **at most 2 of 100 over 10 s from power-on to CONNECT** (the reviewers' proposal). Its operating characteristic: with the firmware exactly as modelled it passes with probability 1.00 / 0.76 / 0.002 at p_loss 0.1 / 0.3 / 0.5, so it measures the bench's RF as much as the firmware; p_loss is therefore estimated apart from the gated data and the decision rule is fixed in advance (6.6). CONNECT → `SETUP COMPLETE` is recorded per cycle as a separate check. G6's "power-on → linked ≤ 5 s" uses the same CONNECT endpoint, judged per mode once there are 20 (6.6, 7.2); every relink under a leak response (CP7-L8, L8b, L9, D5, then G6) also records the safety span power-on → `Applying pending RMLEAK command=1` → `[DATA] Valve State=0 (CLOSED)`, each ≤ 30 s (E-09's ceiling). Record the full distributions either way.] Also: N_HUNT's 1M slot is 0.45 s in CP7; trying 0.3 s needs a firmware change and another build [record only; decide on the numbers].
-3. **The 1M sensor.** With a sensor known on 1M in the device list, NORMAL always scans N_MIXED and never N_HUNT, and every AP mode runs AP_K1M (code: `radio_policy_exec_row()`). B2's power-cycle model and G-CNA's "every PHY Coded" S2 runs assume no 1M sensor. [Leave the 1M sensor (`…CB:B6`, expected) out of the list from B1's middle to the end of day 1 (`SS-VC`, 3.2), run the 1M cases on day 2, and put it back for the overnight soak.]
-4. **The bench AP.** The reset portal's SoftAP is now on **channel 11** (D7), so the bench AP must be on **channel 1 or 6** (P-8's channel switch needs a different channel; CP6's "6 or 11" no longer holds). Which 3.3 option can you set up (A, A2, B, C)? Does it take the two DROP rules and a static lease, with flow offloading off?
-5. **Phones and laptop.** Day 1 needs the iPhone and one Android. G-CNA and G1 need four phone classes (iPhone; Pixel, Android 15/16; Samsung, One UI 6/7; an Android 10-11 phone) on later days: which do you have? Is a Windows laptop with `curl.exe` and Python 3 at hand (P-13, P-14, the idle and connecting forget, G-FAULT)? A second ESP32 (G-FAULT F-2)? An RF shield (T3-11)?
-6. **LoRa.** A LoRa leak sensor with the bench key, heard by this hub? [No: the LoRa tests are `N/A (no LoRa HW)` under the EC-2 waiver.]
-7. **Spare hub, `decommission` `all`, `erase-flash`.** HANDOFF 15k allows `erase-flash` and `decommission` `all` only on a spare hub. Is there one? If not, may the main hub take a `decommission` `all` on a later day (it then re-registers with DPS)? [`erase-flash` stays spare-hub only.]
-8. **Overnight soak tonight** on the main hub, until the SAS renewal (about 18 h after the day's last boot)? [Yes, 5.4.]
+3. **The 1M sensor. Answered (2026-10-07): exactly two working BLE leak sensors, PHY not known.** B0's first boot reads each sensor's PHY from the `phy=` field of its burst lines (`BLE_LEAK: eleak <MAC> burst: n=<n> in <s> s, dT <a>-<b> ms, phy=<phy>`) and from its `PHY learned` line. That sets the **PHY case** (3.2):
+   - **`2C`, both on Coded:** one device set all day, and every two-sensor step runs as written.
+   - **`1M1C`, one on 1M:** that sensor is `<BLE2>`, and it is out of the list from CP7-L6 to the end of B6, except during B5 (the old default of this question). `SS-VC` then has one sensor, and the second-sensor steps of CP7-L8 and CP7-D4 move to day 2.
+   - **`2M`, both on 1M:** send B0 and B1 and wait for Claude's re-cut of the day.
+
+   Why the 1M sensor stays out: with a sensor known on 1M in the device list, NORMAL always scans N_MIXED and never N_HUNT, and every AP mode runs AP_K1M (code: `radio_policy_exec_row()`). B2's power-cycle model and G-CNA's "every PHY Coded" S2 runs assume no 1M sensor. The leak-response rows (NORMAL_LR, LR_AP) are the same with or without one.
+4. **The bench AP. Answered (2026-10-07): the phone hotspots, with the routers as the alternative.** 3.3 option C is now the default:
+   - The Android's 2.4 GHz WPA2 hotspot is the hub's network while the iPhone runs the portal tests, and the iPhone's (Maximize Compatibility on) while the Android does.
+   - "Router down" is the hotspot off and "router back" is the hotspot on. The WAN black-hole is the Android's mobile data off with its hotspot still on.
+
+   The consequences, worked out in 3.3:
+   - The phone picks the hotspot's channel, which the hub's channel lines show. P-8's switch needs the hotspot on channel 1 or 6, because the setup SoftAP is on 11 (D7).
+   - The mobile network must pass MQTT on port 8883. B0 checks this once per hotspot.
+   - Each hotspot has another DHCP subnet. That is fine, and the DROP rules and the static lease are not needed.
+   - A phone that is the hotspot is never the portal phone at the same time.
+
+   **Still open:** question 15, in case a hotspot cannot make the silent black-hole or never lands on channel 1 or 6.
+5. **Phones and laptop. Partly answered (2026-10-07): a laptop with Python 3, `dig` not known.** P-13, P-14 (both halves), the forgets and G-FAULT F-3 … F-5 now have Python-only commands (A.1 `dns_check.py`, A.4 `portal_check.py`). Where a step still names `curl.exe`, it is an alternative only. **Still open:**
+   - G-CNA and G1 need four phone classes on later days (iPhone; Pixel, Android 15/16; Samsung, One UI 6/7; an Android 10-11 phone). Which do you have?
+   - A second ESP32, for G-FAULT F-2?
+   - An RF shield, for T3-11?
+   - Is the laptop the capture PC? If so, it needs Ethernet for `az` while its Wi-Fi joins the SoftAP or a hotspot. Is it the "E2" laptop that remembers `WiFi-Hub-69C8`? If so, delete that profile first (3.1 E13).
+6. **LoRa. Answered (2026-10-07): no LoRa sensor.** Every LoRa test is `N/A (no LoRa HW)` under the EC-2 waiver: CP7-L5, LS-1 run 1's LoRa wet and 3.8's LoRa line. The hub's own LoRa radio still starts (`APP_LORA: Initializing LoRa Driver...`), and the `d` marker still prints its `APP_LORA: Stats: …` line.
+7. **Spare hub, `decommission` `all`, `erase-flash`. Answered (2026-10-07): the second hub is the spare.** Every destructive step runs on it only, in 7.7's lane: `erase-flash`, `decommission` `all`, upgrade and rollback (7.5), and the tests built on them (T4-06, T6-02, VAL-13 with T6-07 and T6-08, T6-10, G-FAULT F-6, the `decommission` `all` runs of the bench-only images and of WP9's variants: 7.6, 7.8), and any factory-like reset. The main hub takes none of them. RC-4b runs on the spare. It has its own flash, captures and identity notes (3.2, 7.7). [On day 1 the spare stays off.] **Still to fill in:** its COM port and gateway ID.
+8. **Overnight soak tonight** on the main hub, until the SAS renewal (about 18 h after the day's last boot)? [Yes, 5.4.] **And on which network?** [The Android's hotspot, on its charger all night with its auto-off disabled; read its data counter in the morning. Or the office Wi-Fi, if the hub may join it (WPA2-Personal, 2.4 GHz): that takes a 10 s reset and a phone at the end of day 1, outside 5.2's ledger.]
 9. **The valve's Low and Critical PSU voltages:** on record? [Needed only for T2 on a later day.]
 10. **COM port.** `HANDOFF.md` 15v (G1) and `WP9_GM_PROCEDURE.md` use `COM5`; this plan and `MANUAL_TEST_PLAN.md` use `COM30`. [COM30.]
 11. **A code observation carried from CP6 (still true at `b651701`, `rules_engine.c:1597-1622`):** `override_enable` waits up to 10 s for an unreachable valve and only then checks that there is a leak to override; a leak latched during the wait passes the check, so a valve that links inside the wait would start a 24 h override for a leak that began after the request. (The wait runs on the esp-mqtt task; `iothub_task` latches the leak meanwhile.) Day 1 avoids it (no `override_enable` with the valve unreachable). Fix it in the next firmware commit? RC-11 needs it fixed or accepted in writing; 7.2's T5-15b shows it on the bench.
-12. **Captures since CP5.** No CP6 bench happened (CP7 replaces it). Send any G0 or CP5 capture made since 2026-10-01; G0's open measurements are folded into CP7 (HANDOFF 15t item 9: Claude extracts Ta and the burst counts from every day-1 capture; Ta has a pass rule, CP7-B0-Ta in 4.5).
+12. **Captures since CP5. Answered (2026-10-07): G0 was "not quite" done on CP5.** No CP6 bench happened (CP7 replaces it). **Please send any partial CP5 G0 capture:** the UART and IoT Hub files, the phone notes, and which runs (A, B, C or D, valve U or L) and phones they cover. They are the only pre-WP8 baseline that CP7's figures can be compared with (HANDOFF 15d). The rest of G0 is folded into CP7's blocks (1.5; HANDOFF 15t item 9). Claude extracts Ta and the burst counts from every day-1 capture, and Ta has a pass rule, CP7-B0-Ta in 4.5.
+13. **The two sensors' MACs.** Which two work: `…29:FC` "Sink", `…B6:8E` "Washer", `…CB:B6` "Ensuite" or the replacement? Fill them in as `<BLE1>` and `<BLE2>` in 3.2 and in both payload files (4.1). [B0's first boot may swap them: 3.2's naming rule.]
+14. **PHY case `2C`, with no 1M sensor at the bench.** Several 1M items need a sensor on 1M: CP7-L2 in N_MIXED, day 2's D2-2, G2's N_MIXED row, and G-CNA's S2 with a sensor known on 1M (AP_K1M). Will you borrow one, or waive them in writing? [The unknown-PHY variant runs either way: a sensor just re-added runs N_MIXED and AP_K1M for up to 10 min.]
+15. **A router, in case the hotspots cannot do two things.** If CP7-C1 finds the Android's black-hole fast, or its hotspot turns off with its mobile data, LS-1 (CP7-C2, C3) needs 3.3's option A or A2. If neither hotspot ever lands on channel 1 or 6, P-8 needs a router too. Is a travel router at hand? [Without one, those steps are `Blocked` on day 1 and move to the first day with a router. LS-1 is P1, so day 1 is then not "GO pending".]
 
 Decisions that wait for the bench data (15x A, B): B1-B5, the SUBMIT rule and M4's 45 s pacing (judged on S2's Connect success rate and time to `Connected! IP`), PH-2's tail (decided after S2: P-6, P-8 and P-9 are blocking there), D4 (only if a leak → CLOSE exceeds 200 ms), the list-scan pulses (G1). 10 lists which test feeds which.
 
@@ -35,7 +61,7 @@ Decisions that wait for the bench data (15x A, B): B1-B5, the SUBMIT rule and M4
 - **Log lines** are quoted as `TAG: text`. `<…>` is a value the hub prints; `…` stands for text left out. printf fields are rendered where the value is fixed. Match the fixed text, not the values. Some lines use an em dash (`—`), others a hyphen (`-`), exactly as the code has them: search for a distinctive part.
 - **Timing.** Measure every interval from the ESP's own `(N)` milliseconds at the start of each line. `cloud_tx` prints the `TELEMETRY_V2: Pub …`, `Offline — buffering …`, `OFFLINE_BUF: …` and `IOTHUB: Twin reported …` lines: they can print before or after the line that caused them. Take the order of messages from the IoT Hub capture. **Never fail a step on UART line order alone.**
 - **Results:** `Pass`, `Fail`, `Blocked`, `N/A`, `Known-limit` (test plan 0.17). A Blocked P1 test is reported like a Fail.
-- **Words.** **VA:** valve A (provisioned, on the bench PSU, batteries out). **VB:** valve B (powered, never provisioned). **U:** valve unpowered (PSU output off, still provisioned). **L:** valve linked. **Bench AP:** the access point of the day (3.3). **Reset:** the 10 s Wi-Fi reset (hold the button 10 s). **Wet / dry:** a wet paper towel on the probe pads / removed and the pads wiped. **First wet:** the first wet report of an incident (only it prints `AUTO-CLOSE + RMLEAK triggered`, 8 item 1).
+- **Words.** **VA:** valve A (provisioned, on the bench PSU, batteries out). **VB:** valve B (powered, never provisioned). **U:** valve unpowered (PSU output off, still provisioned). **L:** valve linked. **Bench AP:** the hub's network of the moment: a phone hotspot by default (`<HS-A>` the Android's, `<HS-I>` the iPhone's; 3.3), or a router. "Bench AP off / on" is that hotspot's switch. **PHY case:** `2C`, `1M1C` or `2M`, read at B0 (3.2). **Reset:** the 10 s Wi-Fi reset (hold the button 10 s). **Wet / dry:** a wet paper towel on the probe pads / removed and the pads wiped. **First wet:** the first wet report of an incident (only it prints `AUTO-CLOSE + RMLEAK triggered`, 8 item 1).
 
 ---
 
@@ -48,19 +74,20 @@ CP7 is the first image with the whole 2.1.4 radio/portal plan built together: WP
 ### 1.2 What day 1 proves
 
 1. **The build is exactly CP7** (15t: the `sdkconfig` regeneration, the four known warnings, DIRAM `.text` 113,387 B, the map searches, phase 3's strings) and its first boots show 15t's lines.
-2. **Leak safety on the new radio:** every source (BLE Coded, BLE 1M, the valve's own probe, LoRa if at hand) gives `LEAK INCIDENT latched` → RMLEAK → CLOSE with the valve linked; with the valve unpowered the close is pended, the leak response scans (NORMAL_LR), the 600 s cap holds, and the relink writes RMLEAK before CLOSE; P11 (a leak across a boot) and P14 (a valve missing at boot, RED at about 180 s); the interlock and override regressions (T5-04, T5-05, T5-06).
+2. **Leak safety on the new radio:** every source at hand (BLE Coded, BLE 1M in PHY case `1M1C`, the valve's own probe; no LoRa sensor) gives `LEAK INCIDENT latched` → RMLEAK → CLOSE with the valve linked; with the valve unpowered the close is pended, the leak response scans (NORMAL_LR), the 600 s cap holds, and the relink writes RMLEAK before CLOSE; P11 (a leak across a boot) and P14 (a valve missing at boot, RED at about 180 s); the interlock and override regressions (T5-04, T5-05, T5-06).
 3. **D2:** leak protection keeps running in the reset portal: a leak with no phone (AP_IDLE), a leak while a phone uses the setup page (SERVE), a leak with the valve unpowered (LR_AP), and the events delivered after setup.
-4. **The phones:** G-CNA's smoke pass (3 runs per phone) in S2 with **P-6, P-8 and P-9 blocking** (PH-2), P-6 both ways (the paced and the first Connect, M4), Finish, Forget, S3 with a wrong password that keeps the saved network, and S1.
-5. **Router outage:** a RETRY pulse 30-35 s after each failed attempt ends (6.4), the page's deferral, the rejoin within about 40 s, cloud admission only after the SoftAP stops.
-6. **The cloud:** TLS and MQTT with 2 KB records and no kept peer certificate; the contract (acks, error texts, twin); **LS-1** (a leak closes within 200 ms during a WAN black-hole) and **the D4 measurement** (leak → CLOSE against 200 ms).
+4. **The phones:** G-CNA's smoke pass (3 runs per phone) in S2 with **P-6, P-8 and P-9 blocking** (PH-2; P-8 where the hotspot is on channel 1 or 6), P-6 both ways (the paced and the first Connect, M4), Finish, Forget, S3 with a wrong password that keeps the saved network, and S1. Each phone sets up the other phone's hotspot (3.3).
+5. **Router outage** (the Android's hotspot off, then on): a RETRY pulse 30-35 s after each failed attempt ends (6.4), the page's deferral, the rejoin within about 40 s, cloud admission only after the SoftAP stops.
+6. **The cloud:** TLS and MQTT with 2 KB records and no kept peer certificate; the contract (acks, error texts, twin); **LS-1** (a leak closes within 200 ms during a WAN black-hole: the Android's mobile data off) and **the D4 measurement** (leak → CLOSE against 200 ms).
 7. **The valve power cycles** against the statistical gate (B2; question 2): cycles 1-60 on day 1, 61-100 on day 2.
 
 ### 1.3 What day 1 cannot prove
 
 - **The release.** CP7 is a development checkpoint with `APP_BENCH_DIAG` on. The release candidate (2.6) is a later build.
-- **G1's rung choice, G2-G7 in full, G-M, the soaks, upgrade and rollback, the spare-hub items, the bench-only images:** later days (7). **Without a spare hub, and without question 7's OK for a `decommission` `all` on the main hub, RC-4b (a DPS registration on the new TLS settings and a full hub's snapshot) cannot run, and it blocks the RC.**
-- **The 1M sensor in the AP modes (AP_K1M) and in G-CNA's second S2 set:** day 2 (question 3).
-- **LoRa,** unless question 6 is yes.
+- **G1's rung choice, G2-G7 in full, G-M, the soaks, upgrade and rollback, the spare-hub items, the bench-only images:** later days (7). RC-4b (a DPS registration on the new TLS settings and a full hub's snapshot) runs on the spare hub, in 7.7's lane (question 7).
+- **The 1M sensor in the AP modes (AP_K1M) and in G-CNA's second S2 set:** on day 2 in PHY case `1M1C`. In `2C` they need a borrowed 1M sensor or your waiver (question 14).
+- **LoRa:** there is no LoRa sensor (question 6), so the LoRa tests are N/A under EC-2's waiver.
+- **P-8 and LS-1, if the hotspots cannot carry them:** P-8 needs a hotspot on channel 1 or 6, and LS-1 a silent black-hole (3.3). Either may need a router day (question 15).
 
 ### 1.4 Status at CP7
 
@@ -68,11 +95,30 @@ CP7 is the first image with the whole 2.1.4 radio/portal plan built together: WP
 |---|---|
 | 2.1.4 field fixes (phases A-G, `d9fa9c8`) and the plan's WP-V … WP8 + phase 3 | **Done in code**, each reviewed and voted SHIP (HANDOFF 15h-15w). **Bench: open.** No P0 test has a full Pass on any image. |
 | CP6 (`545b8f2`) | Built nowhere, benched nowhere: CP7 replaces it. |
-| G0 baselines | Open: folded into CP7's captures (question 12). The model re-run WP8 owes waits for them (15x item 28). |
+| G0 baselines | Not finished on CP5 (partial logs may exist: question 12). The rest is folded into CP7's blocks (1.5). The model re-run WP8 owes waits for them (15x item 28). |
 | WP7 (G1 lab image), WP9 (G-M lines, staged off by default) | Built: their bench procedures are 15v and `WP9_GM_PROCEDURE.md` (later days, 7.3, 7.6). |
 | WP10 | Done (docs). Release steps still open: `APP_BENCH_DIAG` default n, `C2D_COMMANDS.md` (WB-CLOUD-1), the `sdkconfig.wp9/` corrections, the `app_ble_leak.c:870-875` comment (15x D). |
 | Open findings after the reviews (none blocks CP7) | WB-CONC-1 (a failed claim's blind span up to about 3.4 s: an `I2:` line can print), LEAK-WB-1 (a valve swap during a live incident), LEAK-WB-2 (no-BLE-sensor hubs: a pended CLOSE's claim waits 6-7 s), WB-CRASH-3 and the 49.7-day `ticks_ms()` wrap, WB-CLOUD-1 (cmd_ack order when MQTT refuses it). 15x item 21-22. |
 | Pre-push clean-up | Redact `6b84ae3`'s Wi-Fi password (EC-12); the over-long subjects and wrong types (15x E). |
+
+### 1.5 G0, folded into CP7 (question 12; HANDOFF 15d, 15t item 9)
+
+G0 was not finished on CP5. Its runs and quantities come from CP7's blocks as below. Only three bench actions are new, all in CP7-G7 and P2: the 3 min untouched join, the fallback wetting, and one plain run with the valve unpowered. The valve-unpowered S2 runs need only a PSU switch. G0 has no pass figure of its own; CP7-B0-Ta does. Claude then fills HANDOFF 15d's table from CP7's captures, and from any CP5 capture you send. Then Claude re-runs the leak model with the measured Ta and p_loss (15x item 28).
+
+| G0 (HANDOFF 15d) | On CP7 | Who |
+|---|---|---|
+| Ta per sensor (all runs) | CP7-B0-Ta (4.5): every listed sensor's shortest burst `dT` | Claude, from B0-B1 |
+| Adverts per burst, per mode (with Ta: the sensors' p_loss) | the `burst:` lines of every capture: NORMAL (B0, B1); the reset portal's AP_IDLE and SERVE (B2); the fallback SoftAP with no phone (CP7-R1, R3), with a phone and with the page in use (CP7-G7); the tail after a rejoin (G7 step 3, CP7-R2); the edge, wet and dry bursts of every wetting | Claude |
+| Run A, the E4 replay (a router outage with a phone), valve U then L | CP7-G7's two plain runs. The iPhone's has the valve linked and, at step 2, the phone left 3 min untouched first (E1's question: does a lease come, and when? 15d asks 5 min: the full 5 if no lease has come by 3). The Android's has the valve unpowered (6.3) | you (B3), Claude |
+| Run B, the 10 s reset and a phone (S2), valve U then L | every S2 run (CP7-G1 … G6) is a run B with the valve linked; runs 2 and 5 (CP7-G4) run with the valve unpowered from before the reset to `IOTHUB: cloud admitted …` | you (B3), Claude |
+| Run C, first setup on an empty hub (S1, BLE idle) | the spare hub's first commissioning (7.7: 15k-8(a) = G0-C); and CP7-G8's S1 runs on the emptied main hub | later day; B3 |
+| Run D, a wet sensor (burst statistics): connected, and on the fallback SoftAP with the page in use | connected: every B1 wetting; fallback with the page in use: CP7-G7's iPhone plain run, step 2 (`<BLE1>` wet about 1 min) | you, Claude |
+| Tap → join, join → lease, lease → DNS → 302 → page, the sign-in window | P-1 … P-4 of every phone run (your notes and the UART) | you, Claude |
+| The AP-start heap dip | the first `MONITOR: idma: …` line after each `APP_WIFI: Wi-Fi channel at AP start: …` line (every reset, every fallback) | Claude |
+| CSA (`csa_count` 3 or 5, C13) | P-8's driver line at each Connect, and whether the phone left | Claude |
+| The fallback SoftAP's channel; the AP and STA channels | the three `APP_WIFI: Wi-Fi channel at …` lines. On the hotspots each start can pick a new channel (3.3) | Claude |
+| LIST's DMA floor, the list scan under coexistence (15t item 9) | P-5 of every phone run: the `idma:` lines around each list scan, `RADIO: LIST pulse over after <ms> ms (…)`, the not-granted lines and the driver's scan lines **(ESP-IDF)** | Claude |
+| Internal-DMA minima, failed allocations | every `idma:` line (`min`, `min_largest`, `allocfail`; P-15) | Claude |
 
 ---
 
@@ -86,9 +132,9 @@ Claude gives the verdict from the captures at the end of each day.
 |---|---|---|
 | G1 | **Build.** 4.3's B1-B14 all pass: the `sdkconfig` hash `9E13270C…AAE0412D`, the 25-line `Compare-Object`, exactly the four known warnings, DIRAM `.text` exactly 113,387 B, the map searches (13 lines, then none), both phase-3 strings `True`. The first boots show 4.4's lines; the self-test passed. **CP7-B0-Ta** (4.5): every listed sensor's shortest burst `dT` ≤ 448 ms (the premise of I1 and of every leak-latency figure). | CP7-B0 |
 | G2 | **No unplanned reboot, panic, stack overflow, watchdog or `abort()` all day** (each reset's own reboot excepted), and **none of 3.8's "report at once" lines** on a normal run. | every block |
-| G3 | **Leak safety.** Every first wet from a listed source, with the valve linked: RMLEAK written before CLOSE; `leak=1` → `AUTO-CLOSE + RMLEAK triggered` ≤ 200 ms; `leak=1` → `BLE_VALVE: [CMD] Writing Valve=0` ≤ 1 s. **Detection:** every wetting of a listed BLE sensor → its first `BLE_LEAK: eleak <MAC> — leak=1` ≤ 20 s in NORMAL (any row) and in NORMAL_LR (≤ 60 s for CP7-L8's second sensor), by the notes' time or the `d` marker (a wet at a boot banner, L9 and L10, counts from `BLE_LEAK: Extended passive scan started (1M + Coded PHY)`); none over 60 s in any mode (2.3). Pended closes (valve unpowered) applied RMLEAK first at the relink. The 600 s cap ends on time; claims go on after it. P11 (L and U), P14 and CP7-L8b (the valve power-cycled in a live incident) pass. T5-04, T5-05, T5-06 pass. No false override; the valve never opens by itself. | CP7-L1 … L13 |
-| G4 | **D2.** In the reset portal: a wet heard within 20 s in AP_IDLE and within 35 s in SERVE and in LR_AP (CP7-D4's second sensor), each closing the linked valve (RMLEAK first); with the valve unpowered, `RADIO: Mode LR_AP …`, then the relink with RMLEAK first; every event still in the offline ring (16 entries) delivered after setup, before the lifecycle, and every overwrite classified (CP7-D6); no `device_offline` for a live listed sensor from D1 to D6 (the valve's only during D4/D5). No line of the deleted window or holds. | CP7-D1 … D8 |
-| G5 | **Phones (smoke pass).** 3 runs per phone in S2 (CP7-G1 … G6), 2 in S3 (CP7-G7): every run ends with the hub on Wi-Fi, 0 reboots; **P-6, P-8 and P-9 pass in every S2 run** (else PH-2's tail decision, 15x item 9); Finish stops the SoftAP by max(IP + 5 s, tap + 3 s) (designed: tap + 2 s; 1 s of tolerance); Forget erases; a wrong password keeps the saved network. Every pulse ≤ 2,800 ms (paced ≤ 1,500 ms); every `[SUMMARY]` `(0 over 2900 ms)` and `at most Y s in 60 s` with Y ≤ 12.0. | CP7-G1 … G8 |
+| G3 | **Leak safety.** Every first wet from a listed source, with the valve linked: RMLEAK written before CLOSE; `leak=1` → `AUTO-CLOSE + RMLEAK triggered` ≤ 200 ms; `leak=1` → `BLE_VALVE: [CMD] Writing Valve=0` ≤ 1 s. **Detection:** every wetting of a listed BLE sensor → its first `BLE_LEAK: eleak <MAC> — leak=1` ≤ 20 s in NORMAL (any row) and in NORMAL_LR (≤ 60 s for CP7-L8's second sensor; in PHY case `1M1C` on day 2), by the notes' time or the `d` marker (a wet at a boot banner, L9 and L10, counts from `BLE_LEAK: Extended passive scan started (1M + Coded PHY)`); none over 60 s in any mode (2.3). Pended closes (valve unpowered) applied RMLEAK first at the relink. The 600 s cap ends on time; claims go on after it. P11 (L and U), P14 and CP7-L8b (the valve power-cycled in a live incident) pass. T5-04, T5-05, T5-06 pass. No false override; the valve never opens by itself. | CP7-L1 … L13 |
+| G4 | **D2.** In the reset portal: a wet heard within 20 s in AP_IDLE and within 35 s in SERVE and in LR_AP (CP7-D4's second sensor; in `1M1C` on day 2), each closing the linked valve (RMLEAK first); with the valve unpowered, `RADIO: Mode LR_AP …`, then the relink with RMLEAK first; every event still in the offline ring (16 entries) delivered after setup, before the lifecycle, and every overwrite classified (CP7-D6); no `device_offline` for a live listed sensor from D1 to D6 (the valve's only during D4/D5). No line of the deleted window or holds. | CP7-D1 … D8 |
+| G5 | **Phones (smoke pass).** 3 runs per phone in S2 (CP7-G1 … G6), 2 in S3 (CP7-G7): every run ends with the hub on Wi-Fi, 0 reboots; **P-6, P-8 and P-9 pass in every S2 run** (P-8 in every run whose hotspot is on channel 1 or 6, at least 2 per phone: 3.3; else PH-2's tail decision, 15x item 9); Finish stops the SoftAP by max(IP + 5 s, tap + 3 s) (designed: tap + 2 s; 1 s of tolerance); Forget erases; a wrong password keeps the saved network. Every pulse ≤ 2,800 ms (paced ≤ 1,500 ms); every `[SUMMARY]` `(0 over 2900 ms)` and `at most Y s in 60 s` with Y ≤ 12.0. | CP7-G1 … G8 |
 | G6 | **Router.** RETRY: 30-35 s from each `APP_WIFI: WiFi Disconnected. Reason: 201` (the previous attempt's end) to the next `RADIO: RETRY pulse: BLE off for up to 1500 ms`; 38 s still passes (wifi_task's 1 s pass and the ≤ 2 s grant wait); start to start about 33-39 s, recorded, not judged. `Connected! IP` ≤ 40 s after the SSID returns (45 s still passes); with no station, the SoftAP stops 0.5 s after the IP and MQTT is up ≤ 5 s after it; nothing cloud before `cloud admitted`; `allocfail` 0. | CP7-R1 … R6 |
 | G7 | **Cloud.** TLS and MQTT up with no `esp-tls` or mbedTLS error; the contract checks as listed; **LS-1:** in all 3 runs the first wet's `leak=1` → `AUTO-CLOSE + RMLEAK triggered` ≤ 200 ms and `leak=1` → `Writing Valve=0` within the L-spread (2.4), with at least 2 first wets inside a stalled write; every event missing at IoT Hub classified (R5 or a ring overflow); the validator 0 FAIL once duplicates are classified. | CP7-C1 … C10 |
 | G8 | **Valve power cycles** (the cycles run that day, 60 planned): 0 `[SCAN] ble_gap_connect rc=2` or `rc=6`, 0 `[SCAN] Already connected`, 0 host resets; power-on → CONNECT within 6.6's interim rule for the cycles run so far (question 2's gate at 100); CONNECT → `SETUP COMPLETE` ≤ 25 s in every cycle. | CP7-V1 |
@@ -124,7 +170,7 @@ Claude gives the verdict from the captures at the end of each day.
 ### 2.4 Definitions used above
 
 - **L-spread:** the largest `leak=1` → `BLE_VALVE: [CMD] Writing Valve=0` of CP7-L1 … L3 (valve linked, normal link), plus 100 ms, **and never more than 300 ms**. LS-1 (CP7-C2, C3) and CP7-R4 are judged against it; CP7-D2 and D3 record against it. If L1-L3's largest is over 200 ms, D4 has triggered (2.2) and LS-1, R4 and C3 are judged against 300 ms; a first wet with Δc over 300 ms in C2, C3 or R4 is then a D4 finding to decide before the RC (RC-3), not a pass by a looser spread.
-- **Δw** (per wetting, Claude): the notes' wet time (or the `d` marker) → that sensor's first `leak=1`. Recorded per row as G2's day-1 preview: N_MIXED (L1-L3), N_CODED (L12, L13, R4, C2, C3), N_HUNT (L9, from the scan start), NORMAL_LR (L8's second sensor), AP_IDLE (D2, R3), SERVE (D3), LR_AP (D4's second sensor).
+- **Δw** (per wetting, Claude): the notes' wet time (or the `d` marker) → that sensor's first `leak=1`. Recorded per row as G2's day-1 preview: N_MIXED (L1-L3), N_CODED (L12, L13, R4, C2, C3), N_HUNT (L9, from the scan start), NORMAL_LR (L8's second sensor), AP_IDLE (D2, R3), SERVE (D3, and G7's fallback wetting), LR_AP (D4's second sensor). The row follows the device set (3.2). In PHY case `2C`, L1-L3 are N_CODED. In `1M1C`, L1-L3, L12, L13, C2 and C3 are N_MIXED (`<BLE2>` listed), and L8's and D4's second sensors move to day 2.
 - **The D4 figures, per first wet** (Claude extracts them; you only write the wet's time in the notes): Δa = `leak=1` → `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by …`; Δp = `leak=1` → `BLE_VALVE: [TASK] CMD: SET_RMLEAK` (the valve task has the post); Δr = → `BLE_VALVE: [CMD] Writing RMLEAK=1`; Δc = → `BLE_VALVE: [CMD] Writing Valve=0`; Δs = → `BLE_VALVE: [DATA] Valve State=0 (CLOSED)`. D4 is about Δp (the stdout and NVS terms on `iothub_task` before the posts, 15n R2/R3); Δc − Δr is the RMLEAK write's own round trip, which D4 does not change. **D4 triggers** when a first wet has Δc > 200 ms and Δp carries the excess; next to it Claude lists the `TELEMETRY_V2: Pub snapshot: …` and `OFFLINE_BUF: Stored event [ob_<nn>] (<n> bytes), <n> buffered` lines between the `leak=1` line and the posts.
 
 ### 2.5 CP7 accepted as the base (after the later days)
@@ -141,9 +187,9 @@ The release candidate (RC) is **not** CP7. It is the build after G1's production
 | RC-2 | **Every P0 and fix test passes** (test plan EC-2) on CP7 or the RC, with the RC's smoke subset passing on the RC itself. LoRa: the EC-2 waiver if no LoRa hardware. *EC-2's T4-10 LoRa-waiver paragraph describes the deleted portal window: T4-10 as rewritten for CP7 has no LoRa steps.* | results sheet |
 | RC-3 | **Leak safety:** G3 and G4 of 2.1 on the RC; LS-1 ×3 on the RC; D4 decided (built or not needed); the hold image (2.5, 7.8) passed at `b651701` or on the RC's code; no NO-GO item open. | RC captures |
 | RC-4 | **Radio gates:** G1 decided and its change built; G-CNA S1, S2, S3 full on the RC's settings (10 runs per device per state, four phone classes); G2 (7.2: per row, at least 19 of 20 drips within the row's bound and none over 60 s: N_CODED (`SS-VC`, valve linked) ≤ 5 s, N_MIXED (1M sensor listed) and N_HUNT (valve unlinked) within their model p99, AP_IDLE ≤ 20 s, SERVE ≤ 35 s; and with the valve unpowered and one sensor wet, 10 drips each, NORMAL_LR ≤ 60 s and LR_AP ≤ 35 s); G5; G6 and G6b; G7; the 100 power cycles within the gate (power-on → CONNECT); G-FAULT; G8 and G8x. | 7.1-7.4 |
-| RC-4b | **First-time paths of WP3's TLS and snapshot changes:** a DPS registration on the RC's TLS settings succeeds (`DPS: Assigned hub=<host> device=<id>`, then `IOTHUB: Connected to Azure IoT Hub!`, no esp-tls or mbedTLS error), on the spare hub, or on the main hub after `decommission` `all` with your OK (question 7); and the full hub's snapshot (A.3, `ascii` and `quote`) builds and publishes with no `TELEMETRY_V2: Snapshot not built - out of memory`. Without a spare hub and without question 7's OK, this row blocks the RC. | 7.7 |
-| RC-5 | **Memory:** G-M per landed line and G4b if the floor is claimed; VAL-13 (heap like-for-like ≥ 2.1.3, test plan EC-4); T6-11 margins (every task ≥ 512 B free, `iothub_task` ≥ 2 KB, `cloud_tx` ≥ 1 KB). | 7.6, 7.8 |
-| RC-6 | **Soaks:** VAL-14 ≥ 19 h with a SAS renewal and 0 reboots (EC-6); T6-12 (sensors-only, spare hub); G4 (24 h NORMAL) and the AP_IDLE soak (router off, 3 dry sensors, valve unpowered): 0 false offlines, no `Duty watchdog`, flat heap. | 7.4 |
+| RC-4b | **First-time paths of WP3's TLS and snapshot changes:** a DPS registration on the RC's TLS settings succeeds (`DPS: Assigned hub=<host> device=<id>`, then `IOTHUB: Connected to Azure IoT Hub!`, no esp-tls or mbedTLS error), on the spare hub (question 7: the main hub never takes `decommission` `all`); and the full hub's snapshot (A.3, `ascii` and `quote`) builds and publishes with no `TELEMETRY_V2: Snapshot not built - out of memory`, also on the spare. | 7.7 |
+| RC-5 | **Memory:** G-M per landed line and G4b if the floor is claimed; VAL-13 (heap like-for-like ≥ 2.1.3, test plan EC-4; on the spare hub, 7.7: it flashes 2.1.3 and runs `decommission` `all`); T6-11 margins (every task ≥ 512 B free, `iothub_task` ≥ 2 KB, `cloud_tx` ≥ 1 KB). | 7.6, 7.8 |
+| RC-6 | **Soaks:** VAL-14 ≥ 19 h with a SAS renewal and 0 reboots (EC-6); T6-12 (sensors-only, spare hub); G4 (24 h NORMAL) and the AP_IDLE soak (the router or hotspot off, every listed sensor dry, valve unpowered): 0 false offlines, no `Duty watchdog`, flat heap. | 7.4 |
 | RC-7 | **Upgrade and rollback:** VAL-02 (runs A-D, the PHY table) and VAL-03 (EC-7), with the 2.1.3 baseline built from `..\sdkconfig.pre_cp7` (UPG-1). | 7.5 |
 | RC-8 | **Contract:** VAL-15 0 FAIL (EC-5); WB-CLOUD-1 resolved (`C2D_COMMANDS.md` §3.5 corrected, or the cmd_ack routed through `cloud_tx`); the V5 delta applied to the app document (15x items 22, 24, 25). | VAL-15 |
 | RC-9 | **App:** VAL-04 … VAL-12 both halves (EC-8; field rollout waits for an app-half fix, the tag does not). | VAL-04 … 12 |
@@ -159,22 +205,22 @@ The release candidate (RC) is **not** CP7. It is the build after G1's production
 
 | # | Item | Needed for | Notes |
 |---|---|---|---|
-| E1 | Hub `GW-7C4FADAE69C8`, USB to the capture PC (COM30) | everything | **Never `erase-flash` this hub.** |
+| E1 | Hub `GW-7C4FADAE69C8`, USB to the capture PC (COM30) | everything | **None of these on this hub:** `erase-flash`, `decommission` `all`, an upgrade or rollback flash, an NVS fill, a factory-like reset. Each one runs on the spare (E14, 7.7). |
 | E2 | Valve A, FW 2.2.0, **batteries out, on the bench PSU** at 6.00 V | every valve test | With batteries in, switching the PSU off does not unpower it. Its output button is the valve's power switch (U). |
 | E3 | Bench PSU, 10 mV steps, current limit above the motor stroke | U runs, B6 | Never below 5.0 V. |
 | E4 | Valve B, powered, within 2 m, never provisioned | S-8 (smoke) | |
-| E5 | 4 working BLE leak sensors, FW 1.1.0 | `SS-V4` | `…2B:A5` is dead: bring its replacement (`<BLE4>`). `…CB:B6` is expected on 1M (3.2). |
-| E6 | **Bench AP** on the desk, 2.4 GHz on **channel 1 or 6** (3.3) | every outage, S3, LS-1, P-8 | |
-| E7 | iPhone and one Android phone, mobile data on, charged; both forget `WiFi-Hub-69C8` and turn auto-join off for it | B2, B3 | Record model and OS of each. |
+| E5 | **2 working BLE leak sensors**, FW 1.1.0, PHY not known | `SS-V2` | `<BLE1>`, `<BLE2>` (3.2, question 13). B0's first boot reads each one's PHY (4.4 item 8). `…2B:A5` is dead. |
+| E6 | **Bench AP: the phone hotspots** (3.3 option C). The Android's (`<HS-A>`) is on while the iPhone runs the portal; the iPhone's (`<HS-I>`) while the Android does. 2.4 GHz, on a channel the phone picks | every outage, S2, S3, LS-1, P-8 | Set up in 4.1. The router options (3.3 A, A2, B) are the alternative (question 15). |
+| E7 | iPhone and one Android phone, mobile data on, charged, **each on its charger at the bench** (each is a hotspot for hours); both forget `WiFi-Hub-69C8` and turn auto-join off for it | B2, B3, the hotspots | Record model and OS of each. **A phone that is the hotspot is never the portal phone at the same time.** |
 | E8 | **nRF Connect** on one of the phones (or a third device): **required for B6** | B6 | Logs the valve's advert interval and its power-on → first advert once (6.6): the p_loss estimate and the model comparison need both. |
 | E9 | RF shield (a metal box or an unplugged microwave) | T3-11 (CP7-L11) | Without it, T3-11 moves to day 2. |
 | E10 | Cup of water, paper towels, a dry cloth | wetting | Keep water away from the PSU leads and the hub's USB. |
 | E11 | Capture PC: ESP-IDF 5.5.1 PowerShell; Git Bash with `az` and the `azure-iot` extension (`az login` done); Python 3 | everything | If `az` is missing: `winget install -e --id Microsoft.AzureCLI`, then `az extension add --name azure-iot` and `az login` (CP6 plan N1). |
 | E12 | Day folder `C:\Work\Projects\EfloStop 2\Firmware\Production\2.1.4_bench\2026-10-07_cp7\` | all captures | Outside the repo. |
-| E13 | *Wanted:* a Windows laptop with `curl.exe` and Python 3 (and `dns_check.py`, Appendix A.1) | P-13, P-14 SoftAP half, the idle forget | Without it these move to day 2. Delete its `WiFi-Hub-69C8` profile after use (`netsh wlan delete profile name="WiFi-Hub-69C8"`) and switch its Wi-Fi off: CP7-R2 needs 0 stations on the SoftAP. |
-| E14 | *Optional:* a spare hub, its own COM port and gateway ID | 7.7 | |
-| E15 | *Optional:* a LoRa leak sensor with the bench key (question 6) | CP7-L5 | |
-| — | **Keep switched off:** the Windows laptop that remembers `WiFi-Hub-69C8` ("E2") | — | It auto-joins the fallback SoftAP and floods it (2026-09-29). |
+| E13 | **A laptop with Python 3** (`dig` not known; `curl.exe` optional), with `dns_check.py` (A.1) and `portal_check.py` (A.4) in one folder | CP7-G3 (P-14's LAN half, on `<HS-A>`); day 2: P-13, P-14's SoftAP half, the idle and connecting forget, G-FAULT F-3 … F-5 | If it is the capture PC, it needs Ethernet for `az` while its Wi-Fi joins a hotspot or the SoftAP. If it is the "E2" laptop (below), delete its profile first. Delete its `WiFi-Hub-69C8` profile after use (`netsh wlan delete profile name="WiFi-Hub-69C8"` on Windows) and keep it off the SoftAP: CP7-R2 needs 0 stations there. |
+| E14 | **The spare hub** (`<GW2>`, its own USB port `<COMS>`): the destructive lane | 7.7 | Off on day 1. It has its own flash, captures and identity notes (3.2, 7.7). |
+| E15 | LoRa leak sensor: **none** (question 6) | CP7-L5 `N/A (no LoRa HW)` | |
+| — | **Keep switched off:** the Windows laptop that remembers `WiFi-Hub-69C8` ("E2") | — | It auto-joins the fallback SoftAP and floods it (2026-09-29). If it is E13's laptop, delete its profile before it joins anything. |
 
 ### 3.2 Identities and the two device sets
 
@@ -186,29 +232,85 @@ Confirm the MACs against the boot's `PROVISIONING: …` lines before the first s
 | `<GW>` | `GW-7C4FADAE69C8` (COM30); setup SoftAP `WiFi-Hub-69C8`, portal `http://10.10.0.1/` |
 | `<VALVE>` (VA) | `00:80:E1:27:F7:BB` |
 | `<VALVE_B>` | `00:80:E1:27:7E:C5` |
-| `<BLE1>` "Sink" | `00:80:E1:2A:29:FC` |
-| `<BLE2>` "Washer" | `00:80:E1:2A:B6:8E` |
-| `<BLE3>` "Ensuite" | `00:80:E1:2A:CB:B6`, expected on **1M** |
-| `<BLE4>` "Main" | the replacement sensor: fill in |
-| `<BLE1M>` | the sensor CP7-B0's first boot learns on 1M (`BLE_LEAK: eleak <MAC> PHY learned: 1M (was unknown)`): expected `<BLE3>`. If none is on 1M, `SS-VC` = `SS-V4` and no switch is needed. If more than one is, leave all of them out of `SS-VC`. |
-| `<LORA1>` | fill in if question 6 is yes |
+| `<BLE1>` "Sink" | one of the two working sensors, **the one on Coded** if only one is: fill in (question 13). The known MACs: `00:80:E1:2A:29:FC`, `00:80:E1:2A:B6:8E`, `00:80:E1:2A:CB:B6` (expected on 1M at CP6), the replacement |
+| `<BLE2>` "Washer" | the other working sensor: **the one on 1M** in PHY case `1M1C`. Fill it in |
+| `<BLE1M>` | the sensor on 1M, if any: `<BLE2>` in `1M1C`; none in `2C` |
+| `<BLE3>`, `<BLE4>` | none at this bench: every step that used them now uses `<BLE1>` or `<BLE2>` |
+| `<LORA1>` | none (question 6) |
+| `<HS-A>` | the Android's hotspot: an ASCII SSID (for example `CP7-Android`), 2.4 GHz, WPA2-Personal (3.3). Its channel can change at every start |
+| `<HS-I>` | the iPhone's hotspot. Its SSID is the iPhone's name (Settings → General → About → Name): give it an ASCII name such as `CP7-iPhone`, because the default name's curly apostrophe is P-7's territory. Maximize Compatibility on |
+| `<GW2>` | **the spare hub:** `GW-` and its STA MAC without colons, from its boot's `HUB_IDENT: Gateway ID : <GW2>`; its USB port `<COMS>`; its setup SoftAP from `APP_WIFI: AP SSID: <ssid>`. Fill all three in at its first boot (7.7) |
+
+**The naming rule (B0 decides).** Read each sensor's `phy=` over its first few `BLE_LEAK: eleak <MAC> burst: n=<n> in <s> s, dT <a>-<b> ms, phy=<phy>` lines (or the short form `BLE_LEAK: eleak <MAC> burst: n=1, phy=<phy>`). Also read its `BLE_LEAK: eleak <MAC> PHY learned: <Coded|1M> (was unknown)` line.
+- `phy=Coded` means Coded and `phy=1M` means 1M.
+- `phy=1M+Coded` means the sensor was heard on both, and its last `PHY learned` line decides. (A known PHY changes only after 4 adverts in a row on the other one: a `PHY learned: <PHY> (was <PHY>)` line, rate-limited, and `PHY changes <n>` in `[SUMMARY]` counts each. Send such a sensor's lines to Claude before naming it.)
+- Only listed sensors print these lines (4.4).
+- If exactly one sensor is on 1M, it is `<BLE2>`. Swap the two MACs here and in both payload files if they are the other way round, before CP7-L1.
+
+**The PHY case** (write it in `B0_notes.md` and on the results sheet):
+- **`2C`, both on Coded** (likely if the two are `…29:FC` and `…B6:8E`):
+  - `SS-VC` = `SS-V2`, one device set all day. CP7-L6 only records that no switch is needed, and every two-sensor step runs as written.
+  - L1-L3 run in N_CODED.
+  - With no sensor on 1M at all, see question 14.
+- **`1M1C`, `<BLE2>` on 1M:**
+  - `SS-VC` = VA + `<BLE1>`, one sensor, from CP7-L6 to the end of B6. B5 is the exception: it re-adds `<BLE2>` at its start and removes it at its end (6.5).
+  - L1-L4, L12 and L13 run before L6, with `SS-V2` (N_MIXED).
+  - In `SS-VC` every wet is `<BLE1>`, each only after its last `leak=0` (6's one rule).
+  - The second-sensor steps of CP7-L8 and CP7-D4 are `N/A (one Coded sensor)` on day 1 and run on day 2 (7.1 D2-2).
+- **`2M`, both on 1M:**
+  - No Coded sensor can be listed. N_CODED, N_HUNT with sensors, AP_IDLE and SERVE never run, so B2, B3's S2 rows and B6's model lose their premise.
+  - Run B1's L1-L4, L12 and L13, where the rows do not matter. Send B0 and B1, and wait for Claude's re-cut of the day.
+  - A valve-only list still hunts the valve (N_HUNT while it is unlinked), so B6 could run that way.
 
 **Device sets.**
-- **`SS-V4`:** VA + `<BLE1>` … `<BLE4>`, labelled (`ss-v4m-…`), all heard and dry, valve open, battery Good, mask 7, no incident, no override, LED GREEN, twin interval 60 s. With `<BLE1M>` listed, NORMAL scans `N_MIXED` and the AP modes `AP_K1M` for good.
-- **`SS-VC`:** `SS-V4` less `<BLE1M>` (removed with `dec-1m-…`, 3.6). Every listed PHY Coded: NORMAL scans `N_CODED` (valve linked) or `N_HUNT` (valve unlinked), the AP modes `AP_IDLE` / `SERVE`. Day 1 uses `SS-VC` from CP7-L6 to the end of B6.
+- **`SS-V2`** (the test plan's `SS-V4`, with the two working sensors): VA + `<BLE1>` + `<BLE2>`, labelled (`ss-v2-…`), all heard and dry, valve open, battery Good, mask 7, no incident, no override, LED GREEN, twin interval 60 s. With `<BLE1M>` listed, NORMAL scans `N_MIXED` and the AP modes `AP_K1M` for good.
+- **`SS-VC`:** `SS-V2` less `<BLE1M>` (removed with `dec-1m-…`, 3.6). Every listed PHY Coded: NORMAL scans `N_CODED` (valve linked) or `N_HUNT` (valve unlinked), the AP modes `AP_IDLE` / `SERVE`. Day 1 uses `SS-VC` from CP7-L6 to the end of B6 (in `1M1C`, B5 excepted). In `2C`, `SS-VC` is `SS-V2`.
 
-### 3.3 Making outages without the physical router
+### 3.3 Making outages: the phone hotspots (the default), or a router
 
-Two kinds: **Wi-Fi gone** (the hub's network disappears) and **WAN black-hole with Wi-Fi up** (the internet silently cut). The capture PC must stay online through both.
+Two kinds: **Wi-Fi gone** (the hub's network disappears) and **WAN black-hole with Wi-Fi up** (the internet silently cut). The capture PC must stay online through both: **it is never on a hotspot** (the office network or Ethernet).
 
 | Option | Wi-Fi gone | WAN black-hole | Notes |
 |---|---|---|---|
-| **A (best):** a travel or spare router on the desk, ideally OpenWrt, WAN by Ethernet to the home router, 2.4 GHz on **channel 1 or 6**, its own SSID | its Wi-Fi toggle or power switch | the two DROP rules below, or pull its WAN cable | The PC is not on this AP's LAN: P-14's LAN half runs with the hub on the home router (CP7-G3). |
+| **C (the default since 2026-10-07): the phone hotspots**, each on its charger | the hotspot off ("router down"), then on ("router back") | the Android's hotspot on, its **mobile data off** (then on) | Below. The phone that is the hotspot is never the portal phone at the same time. For the soak: question 8. |
+| **A:** a travel or spare router on the desk, ideally OpenWrt, WAN by Ethernet to the home router, 2.4 GHz on **channel 1 or 6**, its own SSID | its Wi-Fi toggle or power switch | the two DROP rules below, or pull its WAN cable | The alternative (question 15). The PC is not on this AP's LAN: P-14's LAN half runs with the hub on the home router (CP7-G3). |
 | **A2:** a travel router (OpenWrt) as a Wi-Fi repeater (uplink on the home router's 5 GHz) | `wifi down radio0` / `wifi up radio0` (check the 2.4 GHz radio with `uci show wireless`) | the two DROP rules | Run the black-hole check before LS-1. |
 | B: the home router's admin page | turn off its 2.4 GHz radio only (PC on Ethernet or 5 GHz) | a per-device "block internet", if it DROPs | **Every household 2.4 GHz device goes offline: warn the others.** |
-| C: the Android phone's hotspot, 2.4 GHz, on its charger | hotspot off | mobile data off, hotspot on | The Android cannot be a portal phone meanwhile. Not for the soak. |
 
-**OpenWrt DROP rules (22.03 or later), always both** (one rule lets Azure's packets on the open session through):
+**The hotspots (option C), set up once in 4.1.**
+- **The Android (`<HS-A>`):**
+  - band 2.4 GHz; security WPA2-Personal (WPA2-PSK; not WPA3, not WPA2/WPA3); an ASCII SSID and password;
+  - "turn off hotspot automatically" off; "hidden network" off;
+  - **its own Wi-Fi off**, and any "Wi-Fi sharing" off, so that its uplink is mobile data only. With the phone's Wi-Fi on, some phones share that Wi-Fi instead, and then mobile data off would cut nothing.
+- **The iPhone (`<HS-I>`):**
+  - Settings → Personal Hotspot → Allow Others to Join on, **Maximize Compatibility on** (2.4 GHz); the SSID is its ASCII name (3.2).
+  - Keep it unlocked on that Settings screen whenever the hub must find it (a Connect, a rejoin): iOS can stop showing an idle hotspot. Set Display & Brightness → Auto-Lock to Never while it is the hotspot.
+  - Mobile data off turns an iPhone's hotspot off, so **the black-hole is the Android's only.**
+  - Its "off" is Allow Others to Join off. If the hub stays joined (no `APP_WIFI: WiFi Disconnected. Reason: <n>` within 10 s), use Cellular Data off instead, and for "on" Cellular Data on, then Allow Others to Join on.
+- **The Android when it is the portal phone:** its own Wi-Fi is on (to join `WiFi-Hub-69C8`). Each time it becomes the hotspot again, turn its Wi-Fi off first (B5's black-hole needs mobile data as its only uplink).
+- **Which one is on:**
+  - The Android's while the iPhone runs the portal: B0, B1, B2 (D6 sets it up), B3's runs 1-3 and the iPhone's S3 runs, B4, B5, B6.
+  - The iPhone's while the Android runs it: B3's runs 4-6, G2's set-up, the Android's S3 runs and its S1 runs.
+  - 6.3 says when to swap.
+- **"Router down" and "router back"** are the hotspot's switch. Write the tap time. The SSID returns a few seconds after "on", and R2's 40 s counts from the tap (record the phone's start-up if it is close).
+
+**What the hotspots change** (6 says where each one applies):
+1. **The phone picks the channel,** and each hotspot start can pick another 2.4 GHz one. Read it from the hub: `APP_WIFI: Wi-Fi channel at IP: radio <r>, router <r>`, `APP_WIFI: Wi-Fi channel at link loss: radio <r>, router was on <r>`, and `APP_WIFI: Wi-Fi channel at AP start: radio <r> (SoftAP configured 11), router last seen on <c>` (the fallback SoftAP follows it). Before a run, `netsh wlan show networks mode=bssid` on any Windows PC with Wi-Fi shows it too. Write it in the notes at every start.
+2. **P-8's channel switch needs the hotspot on channel 1 or 6,** because the setup SoftAP is on 11.
+   - An S2 run whose Connect lands on 11 has no switch: record P-8 as `N/A (hotspot on 11)` for that run.
+   - On any other channel but 1 or 6 the switch still happens: record its lines as data, and P-8 as `N/A (hotspot on <c>)`, not judged.
+   - In both cases toggle that hotspot off and on before the next run, and check the channel again: the hub falls back and rejoins on its own, and its `APP_WIFI: Wi-Fi channel at IP: radio <r>, router <r>` gives the new channel. Press the next reset only after that rejoin (5.2's state: connected). If the phone's hotspot settings offer a channel, set 1 or 6.
+   - P-8 needs at least 2 runs per phone on 1 or 6. If either phone falls short on day 1, its P-8 moves to a later day or to a router (question 15).
+3. **MQTT must pass the mobile network** on port 8883 to Azure. Check it once per hotspot: the first `IOTHUB: Connected to Azure IoT Hub!` over `<HS-A>` (B0), and the first over `<HS-I>` (B3 run 4).
+   - A hub that gets `APP_WIFI: Connected! IP: <IP>` but never `Connected to Azure IoT Hub!` on one hotspot only is on a network that blocks 8883.
+   - Then run the cloud blocks on the other hotspot, and tell Claude.
+4. **Another DHCP subnet** on each hotspot. The Android's is often `192.168.<x>.0/24` with `<x>` random, and the iPhone's `172.20.10.0/28`. This is fine: the hub's IP changes with the hotspot.
+   - Nothing on day 1 needs a fixed IP on a hotspot. The static lease, the DROP rules and the `flow_offloading` check below are options A and A2 only.
+5. **The cellular uplink** adds the mobile network's latency to every cloud time (`IOTHUB: Pub <kind> took <s> s (msg_id=<id>)`, CP7-C7's ack → `$lastUpdated`). Claude reads them as such (8 item 18).
+6. **Data:** the hub's traffic is small. Note the hotspot phone's data counter at the start and the end of the day (and of the soak).
+7. **P-14's LAN half** needs a host on the hub's own network: the laptop joins `<HS-A>` (CP7-G3).
+
+**Option A and A2 only: OpenWrt DROP rules (22.03 or later), always both** (one rule lets Azure's packets on the open session through):
 ```sh
 nft insert rule inet fw4 forward ip saddr <hub IP> tcp dport 8883 drop
 nft insert rule inet fw4 forward ip daddr <hub IP> tcp sport 8883 drop
@@ -219,7 +321,11 @@ Older OpenWrt: `iptables -I FORWARD -s <hub IP> -p tcp --dport 8883 -j DROP` and
 
 **Make the rules hit the hub:** a static lease (`uci add dhcp host; uci set dhcp.@host[-1].mac='<hub STA MAC>'; uci set dhcp.@host[-1].ip='<IP>'; uci commit dhcp; /etc/init.d/dnsmasq restart`); `uci get firewall.@defaults[0].flow_offloading` prints `0` or nothing; before every DROP compare `<hub IP>` with the last `APP_WIFI: Connected! IP: <IP>` line and list the chain. **Remove both rules** before the hub needs the internet again, and confirm with `nft -a list chain inet fw4 forward`.
 
-**Black-hole check (3 min, the start of B5):** with the hub connected 2 min, start the DROP and press `d` in the monitor (a marker). A silent drop keeps the session until esp-mqtt gives up: `IOTHUB: Disconnected.` about 10-90 s later, often after `IOTHUB: Pub <kind> took <s> s (msg_id=<id>)`. `IOTHUB: Disconnected.` within about 5 s means the method answers (REJECT or a reset): fix it before LS-1. The outage is real only if no hub message reaches IoT Hub after T0 + 5 s.
+**Black-hole check (3 min, the start of B5):** with the hub connected 2 min on `<HS-A>`, turn the Android's mobile data off with its hotspot left on (option A: start the DROP), and press `d` in the monitor (a marker).
+- **Silent:** a silent drop keeps the session until esp-mqtt gives up: `IOTHUB: Disconnected.` about 10-90 s later, often after `IOTHUB: Pub <kind> took <s> s (msg_id=<id>)`.
+- **Fast:** `IOTHUB: Disconnected.` within about 5 s means the method answers (REJECT or a reset): fix it before LS-1.
+- **The hotspot dropped:** an `APP_WIFI: WiFi Disconnected. Reason: <n>` at the switch means the phone turned its hotspot off with its data. That phone cannot make the black-hole (question 15).
+- The outage is real only if no hub message reaches IoT Hub after T0 + 5 s.
 
 ### 3.4 Terminals and captures
 
@@ -254,8 +360,10 @@ az iot hub monitor-events -n resi-apex-iot-dev -g resi-apex-rg-dev -d GW-7C4FADA
 **Notes template** (one per block; **never write a Wi-Fi password into a notes file**):
 ```text
 # B<n> <scope> - 2026-10-07 (CP7 b651701)
-ELF SHA256 first 9 hex: ________   PC clock offset: ____ s   Device set: SS-V4 | SS-VC | empty
-Bench AP: SSID ______, channel __, outage method ______ (black-hole check: silent / fast)
+ELF SHA256 first 9 hex: ________   PC clock offset: ____ s   Device set: SS-V2 | SS-VC | empty
+PHY case: 2C | 1M1C    <BLE1> = __:__:__:__:__:__  <BLE2> = __:__:__:__:__:__
+Bench AP: <HS-A> | <HS-I> | router ______, channel __ (the hub's "Wi-Fi channel at IP" line),
+          outage method: hotspot off | mobile data off | DROP (black-hole check: silent / fast)
 Valve: L | U (PSU off) | shielded;  PSU __.__ V
 HH:MM:SS  action or observation  (one line per wet, dry, AP off/on, WAN out/in, PSU change,
           reset press, valve-button press, phone tap, what the phone showed, LED colour)
@@ -305,11 +413,11 @@ Expect `IOTHUB: Twin desired patch: <json>` and `IOTHUB: Twin: snapshot_interval
 - **Never put a legacy keyword** (`VALVE_OPEN`, `VALVE_CLOSE`, `LEAK_RESET`, `OVERRIDE_CANCEL`, `DECOMMISSION…`) in an `id`, label or name: use `vo-1`, not `valve_open-1`.
 - Make every `id` unique: add `-2`, `-3` … when you send a line again.
 
-**`payloads.txt`** (fill in `<BLE4>` and the hub's name; one line each):
+**`payloads.txt`** (fill in `<BLE1>`, `<BLE2>` and the hub's name; one line each):
 ```text
-{"schema":"eflostop.cmd","ver":1,"id":"ss-v4m-1","cmd":"provision","payload":{"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:E1:2A:29:FC","00:80:E1:2A:B6:8E","00:80:E1:2A:CB:B6","<BLE4>"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:E1:2A:29:FC","location_code":"kitchen","label":"Sink"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:E1:2A:B6:8E","location_code":"laundry","label":"Washer"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:E1:2A:CB:B6","location_code":"bathroom","label":"Ensuite"},{"sensor_type":"ble_leak_sensor","sensor_id":"<BLE4>","location_code":"bathroom","label":"Main"}],"auto_close_enabled":true}}
-{"schema":"eflostop.cmd","ver":1,"id":"ss-vc-1","cmd":"provision","payload":{"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["00:80:E1:2A:29:FC","00:80:E1:2A:B6:8E","<BLE4>"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:E1:2A:29:FC","location_code":"kitchen","label":"Sink"},{"sensor_type":"ble_leak_sensor","sensor_id":"00:80:E1:2A:B6:8E","location_code":"laundry","label":"Washer"},{"sensor_type":"ble_leak_sensor","sensor_id":"<BLE4>","location_code":"bathroom","label":"Main"}],"auto_close_enabled":true}}
-{"schema":"eflostop.cmd","ver":1,"id":"dec-1m-1","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"00:80:E1:2A:CB:B6"}}
+{"schema":"eflostop.cmd","ver":1,"id":"ss-v2-1","cmd":"provision","payload":{"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["<BLE1>","<BLE2>"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"<BLE1>","location_code":"kitchen","label":"Sink"},{"sensor_type":"ble_leak_sensor","sensor_id":"<BLE2>","location_code":"laundry","label":"Washer"}],"auto_close_enabled":true}}
+{"schema":"eflostop.cmd","ver":1,"id":"ss-vc-1","cmd":"provision","payload":{"valve_id":"00:80:E1:27:F7:BB","ble_leak_sensors":["<BLE1>"],"sensor_meta":[{"sensor_type":"ble_leak_sensor","sensor_id":"<BLE1>","location_code":"kitchen","label":"Sink"}],"auto_close_enabled":true}}
+{"schema":"eflostop.cmd","ver":1,"id":"dec-1m-1","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"<BLE2>"}}
 {"schema":"eflostop.cmd","ver":1,"id":"rc-def-1","cmd":"rules_config","payload":{"auto_close_enabled":true,"trigger_mask":7}}
 {"schema":"eflostop.cmd","ver":1,"id":"vo-1","cmd":"valve_open"}
 {"schema":"eflostop.cmd","ver":1,"id":"lr-1","cmd":"leak_reset"}
@@ -317,21 +425,20 @@ Expect `IOTHUB: Twin desired patch: <json>` and `IOTHUB: Twin: snapshot_interval
 {"schema":"eflostop.cmd","ver":1,"id":"oc-1","cmd":"override_cancel"}
 {"schema":"eflostop.cmd","ver":1,"id":"name-1","cmd":"set_hub_name","payload":{"name":"<original hub name>"}}
 ```
-`dec-1m-…` and `ss-vc-…` assume `<BLE1M>` = `<BLE3>`: change the MAC if CP7-B0 finds another. `ss-vc-…` is for an empty hub (CP7-G8); on `SS-V4`, use `dec-1m-…`.
+`ss-vc-…` and `dec-1m-…` are for PHY case `1M1C` only: `<BLE2>` is the 1M sensor (3.2). In `2C`, `SS-VC` is `SS-V2`, so the empty hub is re-provisioned with `ss-v2-…` (CP7-G8). `ss-vc-…` is for an empty hub; on `SS-V2`, use `dec-1m-…`. A provision replaces the whole list: `ss-v2-…` on `SS-VC` re-adds `<BLE2>` (B5, the soak).
 
-**`payloads_destructive.txt`** (opened only for CP7-G8's smoke trio; every MAC filled in; the trio's own lines from the test plan are rewritten for `SS-VC` in 6.3):
+**`payloads_destructive.txt`** (opened only for CP7-G8's smoke trio; every MAC filled in; the trio's own lines from the test plan are rewritten for two sensors in 6.3). These decommission the main hub's devices one by one, and G8 re-provisions them at its end. Nothing here erases identity, Wi-Fi or DPS, so none of it is a spare-lane step.
 ```text
-{"schema":"eflostop.cmd","ver":1,"id":"smoke-6","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"<BLE4>"}}
+{"schema":"eflostop.cmd","ver":1,"id":"smoke-6","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"<BLE2>"}}
 {"schema":"eflostop.cmd","ver":1,"id":"smoke-8","cmd":"decommission","payload":{"target":"valve"}}
 {"schema":"eflostop.cmd","ver":1,"id":"smoke-8-vo","cmd":"valve_open"}
 {"schema":"eflostop.cmd","ver":1,"id":"dec-11-s1","cmd":"rules_config","payload":{"auto_close_enabled":true,"trigger_mask":3}}
-{"schema":"eflostop.cmd","ver":1,"id":"smoke-9a","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"00:80:E1:2A:29:FC"}}
-{"schema":"eflostop.cmd","ver":1,"id":"smoke-9c","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"00:80:E1:2A:B6:8E"}}
+{"schema":"eflostop.cmd","ver":1,"id":"smoke-9c","cmd":"decommission","payload":{"target":"ble_leak_sensor","sensor_id":"<BLE1>"}}
 ```
 
 ### 3.7 State check at the start and end of every block (2 min)
 
-From the last snapshot (`TELEMETRY_V2: Pub snapshot: {…}` or the IoT Hub capture): valve linked and open, `rmleak` false, no override; `"rules":{"auto_close_enabled":true,"trigger_mask":7}`; `system_health.reason` "All devices healthy"; the last `FLEET_LED: rating=<r> color=GREEN effect=SOLID`. Also: every sensor dry, PSU at 6.00 V, VB powered, interval 60 s, the hub on the right network, no phone or laptop on `WiFi-Hub-69C8`, and the device set the block expects (3.2).
+From the last snapshot (`TELEMETRY_V2: Pub snapshot: {…}` or the IoT Hub capture): valve linked and open, `rmleak` false, no override; `"rules":{"auto_close_enabled":true,"trigger_mask":7}`; `system_health.reason` "All devices healthy"; the last `FLEET_LED: rating=<r> color=GREEN effect=SOLID`. Also: every sensor dry, PSU at 6.00 V, VB powered, interval 60 s, the hub on the block's hotspot (3.3) with its channel in the notes, no phone or laptop on `WiFi-Hub-69C8`, and the device set the block expects (3.2).
 
 To restore: valve closed → `vo-…` (refused while latched: wait for the auto-clear, or `lr-…` once every sensor is dry); an override → `oc-…`; after any mask change → `rc-def-…`, then `RULES_ENGINE: Config updated: auto_close=enabled triggers=0x07`; interval not 60 s (the overnight soak sets 300 s) → `desired '{"snapshot_interval_s":60}'`, then `TELEMETRY_V2: Snapshot interval set to 60s (persisted)`.
 
@@ -358,19 +465,21 @@ To restore: valve closed → `vo-…` (refused while latched: wait for the auto-
   - any `NimBLE:` INFO line other than `ogf=0x…, ocf=0x…, hci_err=0x…` (and each of those is a finding in itself); `GAP procedure initiated` must be gone;
   - `APP_WIFI: Wi-Fi list scan not started: internal DMA free <N> B (needs 24576) - the page asks again later` with only one phone on the SoftAP;
   - **a line of the deleted window or holds:** `portal priority`, `Scan paused - Wi-Fi setup portal has the radio`, `Scan resumed - Wi-Fi setup portal closed`, `Valve scan held`, `[PORTAL]`, `Wi-Fi radio hold`, `HEALTH_ENGINE: BLE scanning paused`.
-- **Cloud, never on a normal run:** `TELEMETRY_V2: TX queue full (<n>) - <kind> not sent`; `called on iothub_task - refused`; `TELEMETRY_V2: Pub <kind> not confirmed (msg_id=<id>) - not kept`; `IOTHUB: cloud_tx: creation failed - rebooting`; `IOTHUB: SNAP result outstanding for <s> s - cloud_tx busy`; `MONITOR: LOW HEAP WARNING: <n> bytes free (watermark=8192)`; `IOTHUB: SAS: esp_mqtt_set_config failed (<err>) — client destroyed, rebooting`; `TELEMETRY_V2: Snapshot not built - out of memory` (except within 5 s of a first `set_hub_name`); `TELEMETRY_V2: Snapshot is <N> B, over the …` on this 4-sensor hub; two `boot` or `fast` snapshots on one connect; an `esp-tls` write error, mbedTLS −0x7200 or −0x7780, or a failed handshake **(ESP-IDF)**; `IOTHUB: cloud admitted … whatever the heap …` or `… below the heap gate …`; `IOTHUB: MQTT stop refused <n> times (<why>) - taken as stopped, no client task seen` followed later by esp-mqtt's `Client has started` **(ESP-IDF)**. (A lone esp-mqtt `Client asked to stop, but was not started` followed by `IOTHUB: MQTT stop refused 1 time(s) - the client had just started` is expected, 15q.)
+- **Cloud, never on a normal run:** `TELEMETRY_V2: TX queue full (<n>) - <kind> not sent`; `called on iothub_task - refused`; `TELEMETRY_V2: Pub <kind> not confirmed (msg_id=<id>) - not kept`; `IOTHUB: cloud_tx: creation failed - rebooting`; `IOTHUB: SNAP result outstanding for <s> s - cloud_tx busy`; `MONITOR: LOW HEAP WARNING: <n> bytes free (watermark=8192)`; `IOTHUB: SAS: esp_mqtt_set_config failed (<err>) — client destroyed, rebooting`; `TELEMETRY_V2: Snapshot not built - out of memory` (except within 5 s of a first `set_hub_name`); `TELEMETRY_V2: Snapshot is <N> B, over the …` on this 2-sensor hub; two `boot` or `fast` snapshots on one connect; an `esp-tls` write error, mbedTLS −0x7200 or −0x7780, or a failed handshake **(ESP-IDF)**; `IOTHUB: cloud admitted … whatever the heap …` or `… below the heap gate …`; `IOTHUB: MQTT stop refused <n> times (<why>) - taken as stopped, no client task seen` followed later by esp-mqtt's `Client has started` **(ESP-IDF)**. (A lone esp-mqtt `Client asked to stop, but was not started` followed by `IOTHUB: MQTT stop refused 1 time(s) - the client had just started` is expected, 15q.)
 - **Busy locks (WP2d, WP3), never on a normal run:** `RULES_ENGINE: Rules lock busy for 1 s - …`, `RULES_ENGINE: Provisioning busy for 1 s - leak from …`, `RULES_ENGINE: Rules lock busy - <n> leak reports already kept, the <kind> one from <type> sensor <id> is lost`, `IOTHUB: Boot: rules engine missed the device list or rules - reading them again in the loop`, `PROVISIONING: Failed to take mutex in get_rules_config`.
 - **Twin order (WP2e):** a session whose last `IOTHUB: Twin reported (<n>): {…}` misses a change applied in that session, with the session still up about 7 s later.
-- **LoRa** (only with a LoRa sensor): `APP_LORA: Rx Queue Full! Packet dropped.`
+- **LoRa** (only with a LoRa sensor; none at this bench, question 6): `APP_LORA: Rx Queue Full! Packet dropped.`
 
 ---
 
-## 4. B0: build, flash and boot (P1, 50 min)
+## 4. B0: build, flash and boot (P1, 55 min)
 
-### 4.1 Before the build (5 min)
+### 4.1 Before the build (10 min)
 
 - PC: `powercfg /change standby-timeout-ac 0`; note the PC clock offset (`w32tm /stripchart /computer:time.windows.com /samples:1`).
-- Create the day folder and both payload files (3.6), with `<BLE4>` filled in.
+- Create the day folder and both payload files (3.6), with `<BLE1>` and `<BLE2>` filled in (question 13). B0 may swap the two (3.2's naming rule).
+- **Set up both hotspots** (3.3 option C), and write their SSIDs (never their passwords) and both phones' model and OS in `B0_notes.md`. `<HS-A>`, the Android's, is the bench AP from here to D1, and again from D6.
+- **Put the hub on `<HS-A>` before the flash** if it is saved on another network. Do it on the image the hub runs now: a 10 s reset, then the iPhone's portal (choose `<HS-A>`, Connect, Finish). That takes about 5 min and is outside 5.2's ledger. CP7's flash (4.4) keeps NVS, so CP7's first boot then joins `<HS-A>`. *(Optional: if the hub still runs CP5, capture this reset's UART and the tap times: it is one more CP5 G0 run B, valve linked, for question 12's comparison.)*
 - `..\sdkconfig.pre_cp7` (the 2.1.3 baseline's `sdkconfig`, UPG-1) is created by the build block below if it does not exist yet.
 
 ### 4.2 The build (HANDOFF 15t's block, with a `cd` and the log's copy added; ESP-IDF 5.5.1 PowerShell, project folder)
@@ -443,19 +552,21 @@ If `sdkconfig`'s hash already is `9E13270C4A2D05B0781A88841318160C588683CE06D157
 ```powershell
 cd build; python -m esptool --chip esp32s3 -p COM30 -b 460800 --before default_reset --after no_reset write_flash '@flash_args'; cd ..
 ```
-Then start a fresh IoT Hub capture, the monitor with `--no-reset`, its log (Ctrl+T Ctrl+L), and press Ctrl+T Ctrl+R: that is the first app boot. **Never `erase-flash`.** *If `idf.py -p COM30 flash` was used anyway:* the captured boot is the second. If it prints `BLE_LEAK: PHY table loaded: <k> of 4 …`, the uncaptured boot saved k PHYs: item 7 reads that line instead of "no `PHY table loaded` line", item 8 counts 4 − k `PHY learned` lines, the first NVS write on `ble_leak_scan` was not captured (4.5's save is then the first one watched), and item 10's `lifecycle` can show twice at IoT Hub.
+Then start a fresh IoT Hub capture, the monitor with `--no-reset`, its log (Ctrl+T Ctrl+L), and press Ctrl+T Ctrl+R: that is the first app boot. **Never `erase-flash`.** *If `idf.py -p COM30 flash` was used anyway:* the captured boot is the second. If it prints `BLE_LEAK: PHY table loaded: <k> of 2 …`, the uncaptured boot saved k PHYs: item 7 reads that line instead of "no `PHY table loaded` line", item 8 counts 2 − k `PHY learned` lines (the burst lines' `phy=` still give every sensor's PHY), the first NVS write on `ble_leak_scan` was not captured (4.5's save is then the first one watched), and item 10's `lifecycle` can show twice at IoT Hub.
 
-**Expect, in boot order** (the hub has `SS-V4` provisioned, Wi-Fi saved on the bench AP). If the boot's `PROVISIONING: …` lines show another device set (the dead `…2B:A5` still listed, for example), send `ss-v4m-1` once the cloud is up and read items 7-9 from its `BLE_LEAK: Whitelist reloaded: 4 sensor(s)` on; if the hub is not on the bench AP yet, set it up with a reset and a phone first (that reset is not in 5.2's ledger).
+**Expect, in boot order** (the hub has `SS-V2` provisioned and Wi-Fi saved on `<HS-A>`, 4.1).
+- **Another device set at boot:** the boot's `PROVISIONING: …` lines may show another set, for example the dead `…2B:A5` or a sensor that does not work still listed. Then send `ss-v2-1` once the cloud is up, and read items 7-9 from its `BLE_LEAK: Whitelist reloaded: 2 sensor(s)` on. Only listed sensors print burst and PHY lines, so a working sensor missing from the list shows nothing until then.
+- **The hub not on `<HS-A>`:** set it up first with a reset and the iPhone (that reset is not in 5.2's ledger).
 1. `app_init: App version:      2.1.4` and `app_init: ELF file SHA256:` with the first 9 hex of B14's hash **(ESP-IDF)**.
 2. `HUB_IDENT: Firmware version: v2.1.4`, `HUB_IDENT: Gateway ID : GW-7C4FADAE69C8`, `HUB_IDENT: WiFi STA MAC: 7C:4F:AD:AE:69:C8`, `APP_WIFI: AP SSID: WiFi-Hub-69C8`.
-3. `PROVISIONING: Loaded existing config from NVS`, `PROVISIONING: State: PROVISIONED`, `PROVISIONING: BLE leak sensors: 4`.
+3. `PROVISIONING: Loaded existing config from NVS`, `PROVISIONING: State: PROVISIONED`, `PROVISIONING: BLE leak sensors: 2`.
 4. `APP_WIFI: bench build (APP_BENCH_DIAG): Wi-Fi driver log at INFO - not for release` (W).
-5. `IOTHUB: cloud_tx started (stack 5120 B, priority 3)`, once, before `APP_WIFI: Connected! IP: <IP>`; `IOTHUB: Starting BLE (valve=00:80:E1:27:F7:BB, BLE sensors=4)`.
+5. `IOTHUB: cloud_tx started (stack 5120 B, priority 3)`, once, before `APP_WIFI: Connected! IP: <IP>`; `IOTHUB: Starting BLE (valve=00:80:E1:27:F7:BB, BLE sensors=2)`.
 6. `BLE_VALVE: [HOST] NimBLE host task started`, `BLE_VALVE: [SM] Fixed Passkey: configured (not logged)`, `APP_LORA: Initializing LoRa Driver...`.
-7. BLE, in this order: `BLE_LEAK: NimBLE ready, initializing scanner`; **`RADIO: Profile self-test passed: 14 rows hold I1, I2, I8 and the period rule (SERVE rung SERVE-A)`**; `BLE_LEAK: Whitelist reloaded: 4 sensor(s)`; **no** `PHY table loaded` line (CP7's first boot has no PHY table); `RADIO: Mode NORMAL (SoftAP down, or STA connected)`; `BLE_LEAK: Extended passive scan started (1M + Coded PHY)`; `BLE_LEAK: Scan mode N_MIXED (a sensor on 1M, or a sensor's PHY not known yet): 1 s on 1M and 1 s on Coded in turn, each next after 0-100 ms`.
-8. One `BLE_LEAK: eleak <MAC> PHY learned: <Coded|1M> (was unknown)` per sensor, then `BLE_LEAK: PHY table saved: <N> sensor(s) known, <M> on 1M` (**the first NVS write on `ble_leak_scan`: watch for a stack-canary panic**). **Write down which sensor learned `1M`: that is `<BLE1M>`.**
+7. BLE, in this order: `BLE_LEAK: NimBLE ready, initializing scanner`; **`RADIO: Profile self-test passed: 14 rows hold I1, I2, I8 and the period rule (SERVE rung SERVE-A)`**; `BLE_LEAK: Whitelist reloaded: 2 sensor(s)`; **no** `PHY table loaded` line (CP7's first boot has no PHY table); `RADIO: Mode NORMAL (SoftAP down, or STA connected)`; `BLE_LEAK: Extended passive scan started (1M + Coded PHY)`; `BLE_LEAK: Scan mode N_MIXED (a sensor on 1M, or a sensor's PHY not known yet): 1 s on 1M and 1 s on Coded in turn, each next after 0-100 ms`.
+8. One `BLE_LEAK: eleak <MAC> PHY learned: <Coded|1M> (was unknown)` per sensor, then `BLE_LEAK: PHY table saved: <N> sensor(s) known, <M> on 1M` (**the first NVS write on `ble_leak_scan`: watch for a stack-canary panic**). **Read each sensor's PHY** from the `phy=` field of its `BLE_LEAK: eleak <MAC> burst: n=<n> in <s> s, dT <a>-<b> ms, phy=<phy>` lines and from its `PHY learned` line. Write the **PHY case** (`2C`, `1M1C` or `2M`) and which MAC is `<BLE1>` in the notes (3.2's naming rule): that sets `SS-VC` and the sensor of every later step. **Send the PHY case with the B0 files.**
 9. The valve: `BLE_VALVE: [SCAN] Target MAC matched - connecting to provisioned valve: 00:80:E1:27:F7:BB`, `BLE_VALVE: [CLAIM] Connecting to the valve: pulse up to <N> ms` (N 1500-2500), the `GAP CONNECT EVENT` and `SETUP COMPLETE - READY FOR GATT` banners.
-10. Cloud: `APP_WIFI: Connected! IP: <IP>`, then `IOTHUB: cloud admitted <s> s after the IP (internal DMA free <X> B, largest <Y> B)` with X about 50-53 KB, then `IOTHUB: Connected to Azure IoT Hub!`. No SoftAP at this boot. IoT Hub: the `lifecycle` once, the twin, one `boot` or `fast` snapshot.
+10. Cloud: `APP_WIFI: Connected! IP: <IP>`, then `IOTHUB: cloud admitted <s> s after the IP (internal DMA free <X> B, largest <Y> B)` with X about 50-53 KB, then `IOTHUB: Connected to Azure IoT Hub!`. No SoftAP at this boot. IoT Hub: the `lifecycle` once, the twin, one `boot` or `fast` snapshot. This first `Connected to Azure IoT Hub!` over `<HS-A>` is also 3.3's port-8883 check for the Android's network. Write `<HS-A>`'s channel from `APP_WIFI: Wi-Fi channel at IP: radio <r>, router <r>` in the notes.
 11. Every 60 s, the two `RADIO: [SUMMARY]` lines: `RADIO: [SUMMARY] modes NORMAL <s> s, NORMAL_LR 0 s, …; BLE scanning <a> of <b> s (<Z> %); LR overlay 0 s; PHY changes <n>; adverts <id>=<n><C|M|?> …` with Z ≥ 90, and `RADIO: [SUMMARY] pulses JOIN 0, SUBMIT 0, … longest Coded gap <N> ms (0 over 2900 ms); …`.
 
 **The bench keys:** `d` → `APP_LORA: Stats: RX=<n>, ACKs=<n>, LastRSSI=<n>` within about 0.1 s. (Leave `a`, `s`, `r` alone.)
@@ -464,8 +575,8 @@ Then start a fresh IoT Hub capture, the monitor with `--no-reset`, its log (Ctrl
 
 ### 4.5 The second boot and the heap baseline (10 min)
 
-1. Wait until every sensor has its `PHY learned` line **and** a `BLE_LEAK: PHY table saved: 4 sensor(s) known, <M> on 1M` line has printed after the last of them (saves are at most one a minute). Then Ctrl+T Ctrl+R.
-2. Expect `BLE_LEAK: PHY table loaded: 4 of 4 sensor(s) known, <M> on 1M`, and with M ≥ 1 the N_MIXED line again (it stays while a sensor is known on 1M); with M = 0, `BLE_LEAK: Scan mode N_CODED: 1M 20 % + Coded 80 %, 1 s scans, each next after 0-100 ms`.
+1. Wait until every sensor has its `PHY learned` line **and** a `BLE_LEAK: PHY table saved: 2 sensor(s) known, <M> on 1M` line has printed after the last of them (saves are at most one a minute). Then Ctrl+T Ctrl+R.
+2. Expect `BLE_LEAK: PHY table loaded: 2 of 2 sensor(s) known, <M> on 1M`, and with M ≥ 1 the N_MIXED line again (it stays while a sensor is known on 1M: `1M1C`, until CP7-L6); with M = 0 (`2C`), `BLE_LEAK: Scan mode N_CODED: 1M 20 % + Coded 80 %, 1 s scans, each next after 0-100 ms`.
 3. **Heap at rest** (connected, SoftAP down, 5 min untouched): record the median `free` of `MONITOR: heap: free=<n> min_ever=<n> largest_blk=<n> uptime=<s>s` and the `idma:` line's `free`, `largest`, `min_ever` and `allocfail` (`MONITOR: idma: free=<n> min=<n> largest=<n> min_largest=<n> allocfail=0 min_ever=<n>`). `allocfail` must stay 0 all day. Claude compares with CP5's (15t expects `free` about 8.6-11.6 KB above CP5's in the same state). This is WP9's M-heap baseline too.
 4. **CP7-B0-Ta (Claude, from B0 and B1; G0's Ta check).** Per sensor, over at least 5 of its `BLE_LEAK: eleak <MAC> burst: n=<n> in <s> s, dT <a>-<b> ms, phy=<phy>` lines (only the first 4 tracked sensors log bursts), the smallest `<a>` must be **≤ 448 ms** (`RP_ADV_SMAX_MS`: FW 1.1.0's Ta of at most 437.5 ms plus advDelay 10 ms, `SENSOR_FW_1_1_0_TIMINGS.md` T1). Claude records Ta per sensor and n per burst per mode (G0's burst counts). A smallest `dT` over 448 ms on a sensor whose bursts show n ≥ 4 is **NO-GO** (2.3); with fewer adverts per burst (a weak sensor that may miss every other advert) Claude collects more bursts before judging. The results sheet has its row.
 5. The 3.7 state check. **Send the B0 files.**
@@ -480,48 +591,52 @@ The times assume B0 at 10:30; shift them all if it starts later. Each block's le
 
 | Block | Time | Length | Runs [minutes] | Set, valve, network | Send at the end |
 |---|---|---|---|---|---|
-| **B0** Build and boot | 10:30-11:20 | 50 | 4.1 [5], 4.2 build [25], 4.3, 4.4 [10], 4.5 [10] | `SS-V4`, L, bench AP | build files, `B0_*`. **Wait for the build verdict.** |
-| hand-off | 11:20-11:25 | 5 | 3.5, 3.7 | | |
-| **B1** Leak-safety core | 11:25-13:15 | 110 | 6.1: L1-L4 [26], L5 LoRa [10, or N/A], L6 switch to `SS-VC` [4], L7 P14 [12], L8 leak response and the 600 s cap [14], L8b the valve power-cycled in the incident ×3 [6], L9 P11-U [8], L10 P11-L [6], L11 T3-11 [5], L12 T5-04 + T5-05 [10], L13 T5-06 [9] = 110 | `SS-V4` → `SS-VC`; L, U | `B1_*` |
-| Lunch | 13:15-13:45 | 30 | Claude reads B0-B1. Leave the hub untouched (heap at rest again). | | — |
-| **B2** D2 in the reset portal | 13:45-14:30 | 45 | 6.2: D1 reset #1 [4], D2 [5], D3 + D3b [10], D4 with a second sensor [7], D5 [4], D6 [9], D7 [3], D8 the starvation guard, inside D1-D3 [1] = 43 | `SS-VC`; L, then U, then L | `B2_*`, phone notes |
-| hand-off | 14:30-14:35 | 5 | | | |
-| **B3** Phones | 14:35-16:35 | 120 | 6.3: G1-G6 S2 runs ×6 (resets #2-#7; G4 first Connect, G5 wrong-then-right, G6 Forget, G3 P-14 LAN half, G2 two phones) [50], G7 S3 ×4 incl. the wrong password [30], G8 smoke trio + S1 ×4 (resets #8-#11) + `ss-vc-…` [36] = 116 | `SS-VC` → empty → `SS-VC`; L | `B3_*`, phone notes, screenshots |
-| hand-off | 16:35-16:40 | 5 | | | |
-| **B4** Router outage | 16:40-17:30 | 50 | 6.4: R1 S-2 [7], R2 S-3 + rejoin [6], R3 fallback leak + RETRY [10], R4 leak at the pull [8], R5 G3-lite ×2 [12], R6 reset #12 idle [6] = 49 | `SS-VC`; L; bench AP off/on | `B4_*` |
-| hand-off | 17:30-17:35 | 5 | | | |
-| **B5** Cloud and WAN black-hole | 17:35-19:15 | 100 | 6.5: C1 black-hole check [3], C2 LS-1 ×3 [45], C3 quiet hub [5], C4-C9 contract [45], C10 Claude = 98 | `SS-VC`; L; DROP rules | `B5_*`, T0 of each run, `twin_*.json` |
-| hand-off | 19:15-19:20 | 5 | | | |
-| **B6** Valve power cycles | 19:20-20:25 | 65 | 6.6: set-up with nRF Connect [8], V1 cycles 1-60 × 55 s [55] = 63 (61-100 on day 2) | `SS-VC`; PSU on/off | `B6_*`, `B6_cycles_pc.csv` |
-| End of day | 20:25-20:40 | 15 | T4-14's grep [5]; `ss-v4m-…` back; soak start (5.4) [10] | `SS-V4` | grep hit counts; the soak's first 10 min |
+| **B0** Build and boot | 10:30-11:25 | 55 | 4.1 [10: the hotspots; the hub onto `<HS-A>` if needed], 4.2 build [25], 4.3, 4.4 [10], 4.5 [10] | `SS-V2`, L, `<HS-A>` | build files, `B0_*`, **the PHY case**. **Wait for the build verdict.** |
+| hand-off | 11:25-11:30 | 5 | 3.5, 3.7 | | |
+| **B1** Leak-safety core | 11:30-13:10 | 100 | 6.1, in this order: L1-L4 [26], L5 `N/A` [0], L12 T5-04 + T5-05 [10], L13 T5-06 [9], L6 switch to `SS-VC` [1 in `2C`, 4 in `1M1C`], L7 P14 [12], L8 leak response and the 600 s cap [14], L8b the valve power-cycled in the incident ×3 [6], L9 P11-U [8], L10 P11-L [6], L11 T3-11 [5] = 97-100 | `SS-V2` → `SS-VC`; L, U; `<HS-A>` | `B1_*` |
+| Lunch | 13:10-13:40 | 30 | Claude reads B0-B1. Leave the hub untouched (heap at rest again). | | — |
+| **B2** D2 in the reset portal | 13:40-14:25 | 45 | 6.2: D1 reset #1 [4], D2 [5], D3 + D3b [10], D4 (a second sensor in `2C`) [7], D5 [4], D6 [9], D7 [3], D8 the starvation guard [1 inside D1-D3; `1M1C`: +8 after D3b] = 43 | `SS-VC`; L, then U, then L; the iPhone's portal sets `<HS-A>` up | `B2_*`, phone notes |
+| hand-off | 14:25-14:30 | 5 | | | |
+| **B3** Phones | 14:30-16:40 | 130 | 6.3: S2 runs 1-3, iPhone, on `<HS-A>` (resets #2-#4: G1 + G3 with the laptop, G4 with the valve unpowered, G5) [24]; G7 iPhone ×2 on `<HS-A>` (G0-A and G0-D in run 1) [22]; S2 runs 4-6, Android, on `<HS-I>` (resets #5-#7, the swap in #5's reboot: G1, G4 with the valve unpowered, G5 + G6) [24]; G2 two phones, then the Android sets `<HS-I>` up [6]; G7 Android ×2 on `<HS-I>` (run 1 with the valve unpowered) [16]; G8 smoke trio + S1 ×4 (resets #8-#11, the swap in #10's reboot) + re-provision [37] = 129 | `SS-VC` → empty → `SS-VC`; L (U where stated); ends on `<HS-A>` | `B3_*`, phone notes, screenshots, each hotspot's channel per run |
+| hand-off | 16:40-16:45 | 5 | | | |
+| **B4** Router outage | 16:45-17:35 | 50 | 6.4: R1 S-2 [7], R2 S-3 + rejoin [6], R3 fallback leak + RETRY [10], R4 leak at the pull [8], R5 G3-lite ×2 [12], R6 reset #12 idle [6] = 49 | `SS-VC`; L; `<HS-A>` off/on | `B4_*` |
+| hand-off | 17:35-17:40 | 5 | | | |
+| **B5** Cloud and WAN black-hole | 17:40-19:20 | 100 | 6.5: (`1M1C`: `<BLE2>` back [2]) C1 black-hole check [3], C2 LS-1 ×3 [45], C3 quiet hub [5], C4-C9 contract [45], C10 Claude, (`1M1C`: `<BLE2>` out [2]) = 98-102 | `SS-VC` (`1M1C`: `SS-V2`); L; the Android's mobile data off/on | `B5_*`, T0 of each run, `twin_*.json` |
+| hand-off | 19:20-19:25 | 5 | | | |
+| **B6** Valve power cycles | 19:25-20:30 | 65 | 6.6: set-up with nRF Connect [8], V1 cycles 1-60 × 55 s [55] = 63 (61-100 on day 2) | `SS-VC`; PSU on/off | `B6_*`, `B6_cycles_pc.csv` |
+| End of day | 20:30-20:45 | 15 | T4-14's grep [5]; `ss-v2-…` back (`1M1C` only); soak start (5.4) [10] | `SS-V2` | grep hit counts; the soak's first 10 min; the hotspot's data counter |
 
 ### 5.2 Reset ledger (the 10 s reset ×10 gate, T4-10 Part H; HANDOFF 15k item 2)
 
-| # | Block | STA state at the press | Phone, network set up | Also |
+| # | Block | STA state at the press | Portal phone → the network it sets up | Also |
 |---|---|---|---|---|
-| 1 | B2 D1 | connected | iPhone, bench AP (in D6) | D2 |
-| 2-7 | B3 G1-G6 | connected | iPhone ×3, Android ×3; **#5 (Android) sets up the home router** (P-14's LAN half), #6 back to the bench AP | G-CNA S2 |
-| 8-11 | B3 G8 | connected (empty hub) | iPhone ×2, Android ×2 | G-CNA S1 |
-| 12 | B4 R6 | **idle** (router-fallback SoftAP, between two retries) | iPhone, bench AP | X-5 idle |
+| 1 | B2 D1 | connected (`<HS-A>`) | iPhone → `<HS-A>` (in D6) | D2 |
+| 2-4 | B3 runs 1-3 | connected (`<HS-A>`) | iPhone ×3 → `<HS-A>`; #3 with the valve unpowered (G0-B) | G-CNA S2; G3 (the laptop) in #2 |
+| 5-7 | B3 runs 4-6 | connected (#5 on `<HS-A>`, swapped in its reboot; #6, #7 on `<HS-I>`) | Android ×3 → `<HS-I>`; #6 with the valve unpowered (G0-B) | G-CNA S2 |
+| 8-11 | B3 G8 | connected (empty hub) | Android ×2 → `<HS-I>`; then, swapped in #10's reboot, iPhone ×2 → `<HS-A>` | G-CNA S1 |
+| 12 | B4 R6 | **idle** (router-fallback SoftAP, between two retries) | iPhone → `<HS-A>` | X-5 idle |
 | 13-14 | day 2 | idle | | |
 | 15-17 | day 2 | **connecting** (inside a router retry: start the hold 21-22 s after the last `APP_WIFI: WiFi Disconnected. Reason: <n>`) | | X-5 connecting |
 
 **Every run passes** when: `RESET_BTN: Button pressed — starting 10000 ms hold timer`, `RESET_BTN: 10-second hold confirmed — executing WiFi reset`, `RESET_BTN: === LONG PRESS CONFIRMED — CLEARING WIFI CREDENTIALS ===`, `RESET_BTN: Erasing WiFi credentials, then rebooting into AP (commissioning preserved in nvs_prov)...`, `RESET_BTN: Wi-Fi credentials erased from NVS` about 2 s later, `RESET_BTN: Rebooting into AP mode...`; one reboot; then `APP_WIFI: SoftAP up with no saved Wi-Fi credentials (setup portal) - BLE scanning, if any, stays on beside it`; never `RESET_BTN: Wi-Fi NVS lock busy for 3 s - erasing without it` or `RESET_BTN: Wi-Fi credential erase failed (<err>) - rebooting anyway`. With the STA connected, `APP_WIFI: WiFi Disconnected. Reason: 8` prints before the erase line.
 
+**If G8 is cut** (5.3), the hub is still on `<HS-I>` after G7's Android runs. One more reset (#8: the iPhone's hotspot off, the Android's Wi-Fi off and its hotspot on, then the iPhone sets `<HS-A>` up, 6 min) puts it back on `<HS-A>` for B4 and B5, and it counts in this ledger.
+
 ### 5.3 If the day runs late: cut in this order (the first first)
 
-1. **B3 G8** (the smoke trio and S1) → day 2's first block [saves 36 min].
+1. **B3 G8** (the smoke trio and S1) → day 2's first block [saves 31 min: its 37 less the extra reset of 5.2].
 2. **B6:** stop after cycle 30 (6.6's interim rule at 30); cycles 31-100 → day 2 (same set-up, same script with `-Start 31`) [about 28 min].
 3. **B5 C4, C6, C9** (envelope rules, no-ack and size, mask traps) → day 2 [15 min].
 4. **B4 R5's second pull and R6** → day 2 [12 min].
-5. **B3 G2** (two phones) [5 min].
-6. **B2 D3b** (a wet during a Connect) and **D8** (the starvation guard) [6 min].
+5. **B3 G2** (two phones) [6 min]: after G6's reboot the Android sets `<HS-I>` up at once.
+6. **B2 D3b** (a wet during a Connect) and **D8** (the starvation guard) [6 min; `1M1C`: 14].
+7. **B3 G7's G0 add-ons** (the 3 min untouched join and the fallback wetting, 1.5) [7 min].
 
 **Never cut:** B0; B1 L1-L4 and L6-L10 (with L8b), L12, L13; B2 D1-D6; B3 G1, G3-G7; B4 R1-R4; B5 C1-C3 (LS-1 ×3 and the D4 figures), C5, C7, C8; B6's first 30 cycles.
 
 ### 5.4 Overnight soak (P2, from the end of day 1)
 
-1. `SS-V4` back: send `ss-v4m-2` (re-adds `<BLE1M>`; its PHY is unknown again until heard: N_MIXED). Wait for every sensor and the 3.7 check.
+1. `SS-V2` back, in PHY case `1M1C` only: send `ss-v2-…` (its next id) to re-add `<BLE2>`, the 1M sensor. Its PHY is unknown until heard, so the scan is N_MIXED meanwhile. In `2C` the set already is `SS-V2`. Wait for every sensor and the 3.7 check. **The soak's network** (question 8): `<HS-A>` on its charger with its auto-off disabled (note its data counter), or the office Wi-Fi.
 2. `desired '{"snapshot_interval_s":300}'`; expect `TELEMETRY_V2: Snapshot interval set to 300s (persisted)`.
 3. New UART log with `--no-reset`; new `az` monitor with `--timeout 0`. One activity round: wet and dry `<BLE2>` (auto-close, auto-clear), `lr-…`, `vo-…`.
 4. Leave the PC awake, nothing on COM30 but the monitor, no phone on `WiFi-Hub-69C8`, PSU at 6.00 V. **Write the time of the day's last boot** (R6's reboot, reset #12; if R6 was cut, R1's Ctrl+T Ctrl+R; any later reboot, planned or not, counts instead): the SAS renewal comes about 18 h after that boot's first token (`IOTHUB: SAS: within 6 h of expiry — renewing`, then `IOTHUB: SAS: token renewed (valid 24 h, expires ts=<ts>)`). After R1's EN reset the clock is lost, so its first token comes at R2's rejoin (`IOTHUB: SAS: clock valid (ts=<ts>) — minting first token, starting MQTT`): count from that line.
@@ -533,19 +648,20 @@ The next morning Claude checks: no reboot; `heap:` and `idma:` flat; one heartbe
 | Day | Block | Content |
 |---|---|---|
 | Day 2 | D2-1 | The soak's end (after the SAS renewal); then `desired '{"snapshot_interval_s":60}'` (the soak left 300 s; 3.7); anything cut from day 1 (5.3); T2-01 (the smoke's S-7, needs the valve's Critical voltage) |
-| | D2-2 | **The 1M cases:** `SS-V4`; G-CNA S2 with a sensor on 1M (AP_K1M); a wet of `<BLE1M>` in AP_K1M and in SERVE |
-| | D2-3 | **G-CNA full** (10 runs per device per state, S1/S2/S3, every phone class at hand), the wrong-then-right ×10 per phone, the second phone within 45 s; G8x X-1 … X-7; P-13 and P-14 with the laptop; resets #13-#17 |
+| | D2-2 | **The 1M cases** (`1M1C`: `SS-V2`; `2C`: only with a borrowed 1M sensor, question 14): G-CNA S2 with a sensor on 1M (AP_K1M); a wet of `<BLE1M>` in AP_K1M and in SERVE. **In `1M1C`, the day-1 steps a one-sensor `SS-VC` could not run:** CP7-L8's and CP7-D4's second sensor |
+| | D2-3 | **G-CNA full** (10 runs per device per state, S1/S2/S3, every phone class at hand; the hotspot is a phone not under test), the wrong-then-right ×10 per phone, the second phone within 45 s; G8x X-1 … X-7; P-13, P-14 and G-FAULT F-3 … F-5 with the laptop (Python, A.4); resets #13-#17 |
+| Spare | — | **The spare hub's lane** (7.7), on the soak's morning or any day: its flash, identity and first commissioning with DPS (G0-C, RC-4b), the full hub's snapshot, `decommission` `all`, then upgrade and rollback (7.5) |
 | | D2-4 | **Valve and radio gates:** G6b ×20; G6 (a dead valve during a leak with a phone on the portal, router off then on, with the starvation guard's leak-response variant); the remaining power cycles (61-100); CP7-L8b ×3 more and its dry variant; T3-15, T3-17 Part A, CP6-24-style `override_enable` with the valve away (T5-15) and T5-15b (question 11), T5-07; T6-15 (flapping); T3-06 (valve swap during a live incident: LEAK-WB-1); D4b (optional) |
 | | D2-5 | **G3b** (30 router power cycles), G5 (forget/rejoin loop with a wet sensor), G7 (list completeness, channel change, hidden SSID, blips ×10), G2 (20 drips per state) |
 | Day 3 | D3-1 | **G1 on the lab image** (7.3): build, boot, the ladder's smoke pass (steps 0-5, 3 runs per phone) |
 | Day 4-5 | D4 | G1 full (four phone classes, 10 runs per step); the bench-only images (7.8: T6-11 first); **WP9 G-M** (7.6: the pool baseline, W4, W3, W2, W1, W5; W8 after T6-11; never W6) |
-| Later | — | Upgrade and rollback (7.5), the spare-hub lane (7.7), the 24 h soaks (7.4), the DEC subset and the T2/T3/T4 rest (7.9), then the RC (2.6) |
+| Later | — | Upgrade and rollback (7.5, on the spare hub), the rest of the spare-hub lane (7.7), the 24 h soaks (7.4), the DEC subset and the T2/T3/T4 rest (7.9), then the RC (2.6) |
 
 ---
 
 ## 6. Day 1 blocks
 
-**One rule for every block:** inside one incident only the first wet prints `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by <type> sensor <id>` (a later wet, while the valve reads closed with RMLEAK=1 or within 10 s of the last AUTO-CLOSE, returns at DEBUG). Never re-wet a sensor that has not yet reported `leak=0` (a dry report can take 110 s): use another sensor. **At every wetting, in every block, press `d` and write the time in the notes** (Claude's Δw, 2.4; the detection bound of G3/G4).
+**One rule for every block:** inside one incident only the first wet prints `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by <type> sensor <id>` (a later wet, while the valve reads closed with RMLEAK=1 or within 10 s of the last AUTO-CLOSE, returns at DEBUG). Never re-wet a sensor that has not yet reported `leak=0` (a dry report can take 110 s): use the other sensor, or, with one sensor listed (`SS-VC` in `1M1C`), wait for its `leak=0`. Wipe its pads dry before a re-wet. **At every wetting, in every block, press `d` and write the time in the notes** (Claude's Δw, 2.4; the detection bound of G3/G4).
 
 **The leak lines** (L1's list; later tests say "the leak sequence"):
 - `BLE_LEAK: eleak <MAC> — leak=1 batt=<b>% rssi=<r> fw=<fw>`, at most 20 s after the wetting (NORMAL);
@@ -559,15 +675,15 @@ The next morning Claude checks: no reboot; `heap:` and `idma:` flat; one heartbe
 
 **The clear lines** (after drying): `leak=0` within 110 s; `RULES_ENGINE: All sensors clear — auto-clear timer started (10s)`; 10-12 s later `RULES_ENGINE: AUTO-CLEAR: all sensors clear for 10s — clearing RMLEAK`, `BLE_VALVE: [TASK] CMD: CLEAR_RMLEAK`, `BLE_VALVE: [CMD] Writing RMLEAK=0`, `BLE_VALVE: [DATA] RMLEAK=0 (CLEAR)`; **D1:** about 5 s later `IOTHUB: SNAP trigger=event:rmleak` and a snapshot with `"rmleak":false`; IoT Hub `leak_cleared`, then `rmleak_auto_cleared` (`clear_after_seconds` 10); LED RED → YELLOW → GREEN. The valve stays closed. **Restore:** `vo-…` → ack `ok`, `BLE_VALVE: [TASK] CMD: OPEN_VALVE`, `BLE_VALVE: [CMD] Writing Valve=1`, `BLE_VALVE: [DATA] Valve State=1 (OPEN)`.
 
-### 6.1 B1: the leak-safety core (P1, 110 min)
+### 6.1 B1: the leak-safety core (P1, 100 min)
 
-**Start:** `SS-V4`, VA linked, NORMAL in N_MIXED (4.5). One UART file and one IoT Hub capture for the block. Press `d` and write the time in the notes at every wetting.
+**Start:** `SS-V2`, VA linked, the hub on `<HS-A>`, NORMAL in N_CODED (`2C`) or N_MIXED (`1M1C`) (4.5). One UART file and one IoT Hub capture for the block. Press `d` and write the time in the notes at every wetting. **The order:** L1-L4, (L5 N/A), L12, L13, then L6-L11. L12 and L13 run before the switch, so that in `1M1C` both sensors are listed for L13's second leak.
 
-#### CP7-L1 … L3: a BLE leak, valve linked, three sensors (P1, 3 × 6 min; = T5-03, 15k-6; the L-spread)
+#### CP7-L1 … L3: a BLE leak, valve linked, three runs on two sensors (P1, 3 × 6 min; = T5-03, 15k-6; the L-spread)
 
-Run L1 with `<BLE1>` (Coded), L2 with `<BLE1M>` (1M), L3 with `<BLE2>` (Coded). Each: wet → the leak sequence → dry → the clear lines → `vo-…`.
+Run L1 with `<BLE1>`, L2 with `<BLE2>` (the 1M one in `1M1C`), L3 with `<BLE1>` again (its L1 `leak=0` is long past). Each: wet → the leak sequence → dry → the clear lines → `vo-…`.
 
-**Pass (each run):** Δa ≤ 200 ms; Δc ≤ 1 s; RMLEAK written before CLOSE; IoT Hub order `leak_detected` → `auto_close` → snapshot; D1's snapshot; `valve_open` acked `ok` and the valve opens. **Record** (Claude): Δa, Δp, Δr, Δc, Δs (2.4) per run; the L-spread. **Also in L2:** the 1M sensor heard in N_MIXED (`leak=1` ≤ 20 s).
+**Pass (each run):** Δa ≤ 200 ms; Δc ≤ 1 s; RMLEAK written before CLOSE; IoT Hub order `leak_detected` → `auto_close` → snapshot; D1's snapshot; `valve_open` acked `ok` and the valve opens. **Record** (Claude): Δa, Δp, Δr, Δc, Δs (2.4) per run; the L-spread. **Also in L2 (`1M1C`):** the 1M sensor heard in N_MIXED (`leak=1` ≤ 20 s). In `2C`, L2 is the second Coded sensor in N_CODED.
 
 #### CP7-L4: the valve's own flood probe (P1, 8 min; CP6-23a)
 
@@ -578,68 +694,9 @@ Lay the valve's probe on a wet cloth (keep the battery compartment and PSU leads
 
 **Pass:** as listed.
 
-#### CP7-L5: a LoRa leak (P1 if question 6 is yes, else `N/A (no LoRa HW)`; 10 min; T5-13)
+#### CP7-L5: a LoRa leak (**`N/A (no LoRa HW)`**: question 6, EC-2's waiver; 0 min; T5-13)
 
-Wet `<LORA1>`: `APP_LORA: Verified: ID=0x<id>, Batt=<b>%, Leak=0x<l>, Sent=<n>, Ack=<n>`, `IOTHUB: Event: LoRa Packet from 0x<id>`, `RULES_ENGINE: LEAK INCIDENT latched by lora sensor <id>`, the rest of the leak sequence. No `APP_LORA: Rx Queue Full! Packet dropped.`. Dry; clear; `vo-…`.
-
-#### CP7-L6: switch to `SS-VC` (P1, 4 min)
-
-`c2d` the `dec-1m-1` line. Expect `IOTHUB: !!! DECOMMISSION_BLE: <BLE1M> !!!`, `PROVISIONING: BLE leak sensor <BLE1M> removed successfully`, `HEALTH_ENGINE: Device table loaded: 4 device(s) (+0 added, -1 removed)`, `BLE_LEAK: Whitelist reloaded: 3 sensor(s)` within about 10 s, then `BLE_LEAK: Scan mode N_CODED: 1M 20 % + Coded 80 %, 1 s scans, each next after 0-100 ms` and, within a minute, `BLE_LEAK: PHY table saved: 3 sensor(s) known, 0 on 1M`. Snapshot: 3 sensors, survivors unchanged (BUG-2). From here to the end of B6 the set is `SS-VC`.
-
-#### CP7-L7: P14, a valve missing at boot (P1, 12 min)
-
-1. PSU off (U); all sensors dry. Ctrl+T Ctrl+R; write the time.
-2. **Expect:** `BLE_LEAK: Scan mode N_CODED with a valve hunt (valve not linked): 1 s of 1M 20 % + Coded 80 %, then 0.45 s on 1M, each next after 0-100 ms`; LED WHITE after boot (syncing), **RED at about 180 s** (`FLEET_LED: rating=critical color=RED effect=SOLID`), not at 600 s; a snapshot `critical` with "Valve offline" in its reason at about 180 s; the LED never WHITE or GREEN for the whole run after that.
-3. **Keep the valve off past 10 min after the boot:** `RADIO: Discovery backed off: its reasons are 10 min old (a PHY unknown, the valve unlinked)` and `BLE_LEAK: Scan mode N_CODED with a valve hunt, backed off (valve unlinked 10 min or more): 1 s of 1M 20 % + Coded 80 %, and every 6 periods 0.45 s more on 1M, each next after 0-100 ms`.
-
-**Pass:** RED and the `critical` snapshot at about 180 s (180-215 s); the backed-off hunt line after 10 min. Go straight to L8 with the valve still off.
-
-**Use the wait** (about 7 min between RED and the back-off line, nothing to do): save `dns_check.py` (A.1) and `pc_cycles.ps1` (A.2) in the day folder, and make CP7-C6's two files (6.5).
-
-#### CP7-L8: a leak with the valve unpowered: the leak response and its 600 s cap (P1, 14 min)
-
-1. Valve still U (L7's end). Wet `<BLE1>` with a folded, soaked towel (it must stay wet 11 min or more); write the time. **Expect:**
-   - `leak=1`, `RULES_ENGINE: LEAK INCIDENT latched by ble_leak_sensor sensor <BLE1>`, `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by ble_leak_sensor sensor <BLE1>` (Δa ≤ 200 ms);
-   - `RULES_ENGINE: AUTO-CLOSE: valve not connected — scanning; close deferred to reconnect reconciliation`;
-   - `BLE_VALVE: [CMD] RMLEAK write not ready. Queuing val=1`, then `BLE_VALVE: [CMD] Valve write not ready. Queuing val=0`;
-   - `BLE_VALVE: [LR] Leak response pending, valve not linked (RMLEAK/CLOSE pended) - leak-response scanning, at most 600 s for this incident`;
-   - `RADIO: Mode NORMAL_LR (a leak response, the valve not linked)` and `BLE_LEAK: Scan mode NORMAL_LR (leak response, valve not linked): 1 s on 1M and 0.6 s on Coded in turn, each next after 0-100 ms`;
-   - IoT Hub: `leak_detected`, `auto_close` with `"rmleak_asserted":false`.
-2. **Keep `<BLE1>` wet and the valve off for 11 min.** At about 5 and 9 min add a few drops of water to the towel without lifting it. If `<BLE1>` reports `leak=0` before the PSU goes on, L8 is Blocked: redo it (a dry report cancels the pended pair and ends the leak response early, `(leak response written or withdrawn)`).
-   - **A second sensor in NORMAL_LR:** about 60 s after `RADIO: Mode NORMAL_LR …`, wet `<BLE2>`; press `d`. Expect its `leak=1` **≤ 60 s** (the row's model p99.9) and `IOTHUB: Event: BLE Leak <BLE2> leak=1 batt=<b>`; no new `LEAK INCIDENT latched`; with the valve unreachable a second `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by ble_leak_sensor sensor <BLE2>` and `auto_close` are expected (8 item 1: count them). Dry `<BLE2>` (its `leak=0` well before the cap); `<BLE1>` stays wet, and no `All leaks resolved — pending auto-close cancelled`.
-   - Exactly 600 s after the `[LR] Leak response pending` line: `BLE_VALVE: [LR] Leak-response scanning ended after 600 s (the cap per incident - normal scanning, claims go on)`, then `RADIO: Mode NORMAL (SoftAP down, or STA connected)`, `RADIO: Discovery at its full rate again` (L7 left it backed off) and `BLE_LEAK: Scan mode N_CODED with a valve hunt (valve not linked): …` (**not** the backed-off form: an incident is latched).
-   - About 5 min after the wet, the sensor's 5 min heartbeat may give a second `AUTO-CLOSE + RMLEAK triggered` and a second `auto_close` (audit finding 2): **count them** (`Known-limit`).
-   - Use the wait (B5's router preparation, 3.3): the static lease, the `flow_offloading` check, and the two DROP rules typed with the hub's IP (not inserted).
-3. PSU on. **Expect:** `BLE_VALVE: [SCAN] Target MAC matched - connecting to provisioned valve: 00:80:E1:27:F7:BB`; `BLE_VALVE: [CLAIM] Connecting to the valve: pulse up to 2500 ms (leak response pending)`; the `GAP CONNECT EVENT` banner; `RULES_ENGINE: Valve reconnected with 1 active leak(s) — executing auto-close` (or `RULES_ENGINE: Reconnected with 1 active leak(s) — valve already closed + RMLEAK asserted, nothing to do` if the valve closed itself); **`BLE_VALVE: [CMD] Applying pending RMLEAK command=1` before `BLE_VALVE: [CMD] Applying pending valve command=0`** (or the `Replaying pending …` pair, RMLEAK first); `BLE_VALVE: [DATA] RMLEAK=1 (ACTIVE)`, `BLE_VALVE: [DATA] Valve State=0 (CLOSED)`; IoT Hub `device_recovered`, `auto_close` with `"cause":"reconnect"`.
-4. Run CP7-L8b now (`<BLE1>` still wet). Then dry `<BLE1>`; the clear lines; `vo-…`.
-
-**Pass:** the LR lines; `<BLE2>`'s `leak=1` ≤ 60 s; the cap line 600 s (±2 s) after the LR line; claims go on after the cap; RMLEAK before CLOSE at the relink; power-on → `Applying pending RMLEAK command=1` and → `[DATA] Valve State=0 (CLOSED)` each ≤ 30 s (E-09's ceiling). **Record:** power-on → `Target MAC matched` → CONNECT (`GAP CONNECT EVENT`, the gated quantity: question 2; past the cap, record only) → `SETUP COMPLETE`; the `Writing` lines at the relink (the pended pair once, plus at most the reconnect's own pair).
-
-#### CP7-L8b: the valve power-cycled during a live incident, after it confirmed the interlock (P1, 6 min; 3 runs)
-
-**Why:** the valve browning out at a motor stroke on a weak battery, or a battery swap during a leak: it comes back with RMLEAK=0 (BKP0R lost) while the hub still holds the incident and its interlock confirmation. Three rules paths meet there (rules_engine.c: the reconnect's Priority 1 and 2, the tick's Check 2), and each could start a false 24 h override. No other test reaches this state (L8, L9, D4 unpower the valve before the incident; G6b cuts power before the confirmation).
-
-Right after L8 step 3, with `<BLE1>` still wet and `BLE_VALVE: [LR] The valve confirms the interlock for this incident (RMLEAK=1, CLOSED)` printed. Three times, each started 60 s or more after the last `SETUP COMPLETE`: PSU off 10 s, then on (write both times).
-- **Expect, in order:** `BLE_VALVE: [DISCONNECT] reason=0x208`; the relink (`Target MAC matched`, the claim, the `GAP CONNECT EVENT` banner); the setup's `BLE_VALVE: [DATA] RMLEAK=<v>` and `BLE_VALVE: [DATA] Valve State=<s>` (record both: the valve's state after a cold boot; RMLEAK 0 expected); then RMLEAK asserted before any close: `RULES_ENGINE: Valve reconnected with 1 active leak(s) — executing auto-close`, and/or `BLE_VALVE: [CMD] Applying pending RMLEAK command=1` before `Applying pending valve command=0` (only if the hub's 5 min re-report of the wet sensor fell in the outage and pended the pair: 8 item 1); every `Writing RMLEAK=1` (or applied RMLEAK) before any `Writing Valve=0`; `BLE_VALVE: [DATA] RMLEAK=1 (ACTIVE)` and `BLE_VALVE: [DATA] Valve State=0 (CLOSED)` within 5 s of `SETUP COMPLETE`. Record any `[LR] …` line (the incident's cap is used up).
-- **For 60 s after `SETUP COMPLETE`, never:** `RULES_ENGINE: RMLEAK cleared externally (valve override) — starting 24h override window`, `RULES_ENGINE: Reconnected: hub incident + valve open + RMLEAK clear — inferring physical override, starting 24h window`, an IoT Hub `water_access_override_enabled` (each NO-GO, 2.3).
-- If the cold-booted valve reads OPEN (`[DATA] Valve State=1 (OPEN)` in its setup), record it and raise it with the valve firmware owner: with a sensor wet, Priority 1 still closes it, but the override inference needs only every sensor dry (7.2's dry variant).
-
-**Pass:** each run as listed. **Record:** power-on → CONNECT → `SETUP COMPLETE` → the `RMLEAK=1` read-back. Then L8 step 4.
-
-#### CP7-L9: P11-U, a leak across a boot with the valve unpowered (P1, 8 min)
-
-1. PSU off and wait for `BLE_VALVE: [DISCONNECT] reason=0x208`; all dry; the valve was last open. Ctrl+T Ctrl+R; write the reset time; **as soon as the boot banner prints, wet `<BLE2>`** (within the boot's first minute, while the LED is still WHITE; wetting before the reset would latch the incident before the boot).
-2. **Expect:** `<BLE2>`'s first `leak=1` → `LEAK INCIDENT latched` → `AUTO-CLOSE + RMLEAK triggered` (Δa ≤ 200 ms) → the pended pair and `[LR] Leak response pending …` (as L8); LED RED once `leak=1` is heard, never back to WHITE while wet; **no** `IOTHUB: Boot: rules engine missed the device list or rules - reading them again in the loop`.
-3. After about 2 min, PSU on: the 2500 ms claim, `Applying pending RMLEAK command=1` before `Applying pending valve command=0`, the valve closed; power-on → `Applying pending RMLEAK command=1` and → `[DATA] Valve State=0 (CLOSED)` each ≤ 30 s. **Record** power-on → CONNECT (`GAP CONNECT EVENT`; NORMAL_LR: G6's 5 s, judged statistically once there are 20, question 2, 7.2) and CONNECT → `SETUP COMPLETE`.
-4. Dry, clear, `vo-…`.
-
-#### CP7-L10: P11-L, a leak across a boot with the valve linked (P1, 6 min)
-
-As L9 (reset, then wet `<BLE2>` at the boot banner) with the valve powered and open: after the boot, either live (after `SETUP COMPLETE - READY FOR GATT`: `Writing RMLEAK=1`, then `Writing Valve=0`) or pended (the L8 lines, then `Applying pending …` RMLEAK first at the setup). Record which. `BLE_VALVE: [DATA] Valve State=0 (CLOSED)` and `BLE_VALVE: [DATA] RMLEAK=1 (ACTIVE)` within 5 s of `SETUP COMPLETE`. IoT Hub `leak_detected`, `auto_close`, a `critical` snapshot naming "Washer" (or the wetted sensor's label). Dry, clear, `vo-…`.
-
-#### CP7-L11: T3-11, the hub's own clear pended while the valve is out of range (P1 with the RF shield, else day 2; 5 min; smoke S-5)
-
-Test plan T3-11, one run: shield the valve (powered), not power it off. **Pass:** the clear is applied at the relink and never read as a press: no `RULES_ENGINE: RMLEAK cleared externally (valve override) — starting 24h override window`, no `water_access_override_enabled`.
+Kept for a bench with a LoRa sensor. Wet `<LORA1>`: `APP_LORA: Verified: ID=0x<id>, Batt=<b>%, Leak=0x<l>, Sent=<n>, Ack=<n>`, `IOTHUB: Event: LoRa Packet from 0x<id>`, `RULES_ENGINE: LEAK INCIDENT latched by lora sensor <id>`, the rest of the leak sequence. No `APP_LORA: Rx Queue Full! Packet dropped.`. Dry; clear; `vo-…`.
 
 #### CP7-L12: T5-04 (re-wet at the clear) and T5-05 (the interlock) (P1, 10 min; smoke S-4)
 
@@ -665,11 +722,81 @@ Test plan T3-11, one run: shield the valve (powered), not power it off. **Pass:*
 5. `oc-…` with both wet: `IOTHUB: Command: OVERRIDE_CANCEL`, `RULES_ENGINE: OVERRIDE WINDOW CANCELLED (remaining_s=<s>)`, `RULES_ENGINE: Override cancelled with 2 active leak(s) — executing auto-close`, `Writing RMLEAK=1` **before** `Writing Valve=0`; IoT Hub ack `ok`, `auto_close_reenabled` (`reason` `c2d_command`), `valve_state_changed` closed with `rmleak` true; the valve closed within 3 s of the ack.
 6. Dry both, clear, `vo-…`.
 
+#### CP7-L6: switch to `SS-VC` (P1; 1 min in `2C`, 4 min in `1M1C`)
+
+- **`2C`:** nothing to send. Record that `BLE_LEAK: Scan mode N_CODED: 1M 20 % + Coded 80 %, 1 s scans, each next after 0-100 ms` is in force, and go on: `SS-VC` is `SS-V2`.
+- **`1M1C`:** `c2d` the `dec-1m-1` line.
+  - Expect `IOTHUB: !!! DECOMMISSION_BLE: <BLE2> !!!`, `PROVISIONING: BLE leak sensor <BLE2> removed successfully`, `HEALTH_ENGINE: Device table loaded: 2 device(s) (+0 added, -1 removed)` and, within about 10 s, `BLE_LEAK: Whitelist reloaded: 1 sensor(s)`.
+  - Then `BLE_LEAK: Scan mode N_CODED: 1M 20 % + Coded 80 %, 1 s scans, each next after 0-100 ms` and, within a minute, `BLE_LEAK: PHY table saved: 1 sensor(s) known, 0 on 1M`.
+  - Snapshot: 1 sensor, the survivor unchanged (BUG-2).
+  - **This removal is also smoke S-6** (DEC-03 steps 1, 2, 3, 5: the snapshot equals the one before minus `<BLE2>`; the survivor keeps `battery`, `rssi`, `fw_version`, `rating`; no `HEALTH_ENGINE: Boot sync: timeout …`, no pulse; the twin's `ble_leak_sensor_count` 1). CP7-G8 then skips S-6.
+- From here to the end of B6 the set is `SS-VC` (in `1M1C`, B5 excepted).
+
+#### CP7-L7: P14, a valve missing at boot (P1, 12 min)
+
+1. PSU off (U); all sensors dry. Ctrl+T Ctrl+R; write the time.
+2. **Expect:** `BLE_LEAK: Scan mode N_CODED with a valve hunt (valve not linked): 1 s of 1M 20 % + Coded 80 %, then 0.45 s on 1M, each next after 0-100 ms`; LED WHITE after boot (syncing), **RED at about 180 s** (`FLEET_LED: rating=critical color=RED effect=SOLID`), not at 600 s; a snapshot `critical` with "Valve offline" in its reason at about 180 s; the LED never WHITE or GREEN for the whole run after that.
+3. **Keep the valve off past 10 min after the boot:** `RADIO: Discovery backed off: its reasons are 10 min old (a PHY unknown, the valve unlinked)` and `BLE_LEAK: Scan mode N_CODED with a valve hunt, backed off (valve unlinked 10 min or more): 1 s of 1M 20 % + Coded 80 %, and every 6 periods 0.45 s more on 1M, each next after 0-100 ms`.
+
+**Pass:** RED and the `critical` snapshot at about 180 s (180-215 s); the backed-off hunt line after 10 min. Go straight to L8 with the valve still off.
+
+**Use the wait** (about 7 min between RED and the back-off line, nothing to do): save `dns_check.py` (A.1), `pc_cycles.ps1` (A.2) and `portal_check.py` (A.4) in the day folder, copy `dns_check.py` and `portal_check.py` into one folder on the laptop, and make CP7-C6's two files (6.5).
+
+#### CP7-L8: a leak with the valve unpowered: the leak response and its 600 s cap (P1, 14 min)
+
+1. Valve still U (L7's end). Wet `<BLE1>` with a folded, soaked towel (it must stay wet 11 min or more); write the time. **Expect:**
+   - `leak=1`, `RULES_ENGINE: LEAK INCIDENT latched by ble_leak_sensor sensor <BLE1>`, `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by ble_leak_sensor sensor <BLE1>` (Δa ≤ 200 ms);
+   - `RULES_ENGINE: AUTO-CLOSE: valve not connected — scanning; close deferred to reconnect reconciliation`;
+   - `BLE_VALVE: [CMD] RMLEAK write not ready. Queuing val=1`, then `BLE_VALVE: [CMD] Valve write not ready. Queuing val=0`;
+   - `BLE_VALVE: [LR] Leak response pending, valve not linked (RMLEAK/CLOSE pended) - leak-response scanning, at most 600 s for this incident`;
+   - `RADIO: Mode NORMAL_LR (a leak response, the valve not linked)` and `BLE_LEAK: Scan mode NORMAL_LR (leak response, valve not linked): 1 s on 1M and 0.6 s on Coded in turn, each next after 0-100 ms`;
+   - IoT Hub: `leak_detected`, `auto_close` with `"rmleak_asserted":false`.
+2. **Keep `<BLE1>` wet and the valve off for 11 min.** At about 5 and 9 min add a few drops of water to the towel without lifting it. If `<BLE1>` reports `leak=0` before the PSU goes on, L8 is Blocked: redo it (a dry report cancels the pended pair and ends the leak response early, `(leak response written or withdrawn)`).
+   - **A second sensor in NORMAL_LR** (`2C` only; in `1M1C` it is `N/A (one Coded sensor)` here and runs on day 2, 7.1 D2-2): about 60 s after `RADIO: Mode NORMAL_LR …`, wet `<BLE2>`; press `d`. Expect its `leak=1` **≤ 60 s** (the row's model p99.9) and `IOTHUB: Event: BLE Leak <BLE2> leak=1 batt=<b>`; no new `LEAK INCIDENT latched`; with the valve unreachable a second `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by ble_leak_sensor sensor <BLE2>` and `auto_close` are expected (8 item 1: count them). Dry `<BLE2>` (its `leak=0` well before the cap); `<BLE1>` stays wet, and no `All leaks resolved — pending auto-close cancelled`.
+   - Exactly 600 s after the `[LR] Leak response pending` line: `BLE_VALVE: [LR] Leak-response scanning ended after 600 s (the cap per incident - normal scanning, claims go on)`, then `RADIO: Mode NORMAL (SoftAP down, or STA connected)`, `RADIO: Discovery at its full rate again` (L7 left it backed off) and `BLE_LEAK: Scan mode N_CODED with a valve hunt (valve not linked): …` (**not** the backed-off form: an incident is latched).
+   - About 5 min after the wet, the sensor's 5 min heartbeat may give a second `AUTO-CLOSE + RMLEAK triggered` and a second `auto_close` (audit finding 2): **count them** (`Known-limit`).
+   - Use the wait (B5's preparation, 3.3). On the Android: its own Wi-Fi off, the hotspot's settings as 3.3 lists them, and the mobile-data switch at hand in its quick settings. With option A instead: the static lease, the `flow_offloading` check, and the two DROP rules typed with the hub's IP (not inserted).
+3. PSU on. **Expect:** `BLE_VALVE: [SCAN] Target MAC matched - connecting to provisioned valve: 00:80:E1:27:F7:BB`; `BLE_VALVE: [CLAIM] Connecting to the valve: pulse up to 2500 ms (leak response pending)`; the `GAP CONNECT EVENT` banner; `RULES_ENGINE: Valve reconnected with 1 active leak(s) — executing auto-close` (or `RULES_ENGINE: Reconnected with 1 active leak(s) — valve already closed + RMLEAK asserted, nothing to do` if the valve closed itself); **`BLE_VALVE: [CMD] Applying pending RMLEAK command=1` before `BLE_VALVE: [CMD] Applying pending valve command=0`** (or the `Replaying pending …` pair, RMLEAK first); `BLE_VALVE: [DATA] RMLEAK=1 (ACTIVE)`, `BLE_VALVE: [DATA] Valve State=0 (CLOSED)`; IoT Hub `device_recovered`, `auto_close` with `"cause":"reconnect"`.
+4. Run CP7-L8b now (`<BLE1>` still wet). Then dry `<BLE1>`; the clear lines; `vo-…`.
+
+**Pass:** the LR lines; `<BLE2>`'s `leak=1` ≤ 60 s; the cap line 600 s (±2 s) after the LR line; claims go on after the cap; RMLEAK before CLOSE at the relink; power-on → `Applying pending RMLEAK command=1` and → `[DATA] Valve State=0 (CLOSED)` each ≤ 30 s (E-09's ceiling). **Record:** power-on → `Target MAC matched` → CONNECT (`GAP CONNECT EVENT`, the gated quantity: question 2; past the cap, record only) → `SETUP COMPLETE`; the `Writing` lines at the relink (the pended pair once, plus at most the reconnect's own pair).
+
+#### CP7-L8b: the valve power-cycled during a live incident, after it confirmed the interlock (P1, 6 min; 3 runs)
+
+**Why:** the valve browning out at a motor stroke on a weak battery, or a battery swap during a leak: it comes back with RMLEAK=0 (BKP0R lost) while the hub still holds the incident and its interlock confirmation. Three rules paths meet there (rules_engine.c: the reconnect's Priority 1 and 2, the tick's Check 2), and each could start a false 24 h override. No other test reaches this state (L8, L9, D4 unpower the valve before the incident; G6b cuts power before the confirmation).
+
+Right after L8 step 3, with `<BLE1>` still wet and `BLE_VALVE: [LR] The valve confirms the interlock for this incident (RMLEAK=1, CLOSED)` printed. Three times, each started 60 s or more after the last `SETUP COMPLETE`: PSU off 10 s, then on (write both times).
+- **Expect, in order:** `BLE_VALVE: [DISCONNECT] reason=0x208`; the relink (`Target MAC matched`, the claim, the `GAP CONNECT EVENT` banner); the setup's `BLE_VALVE: [DATA] RMLEAK=<v>` and `BLE_VALVE: [DATA] Valve State=<s>` (record both: the valve's state after a cold boot; RMLEAK 0 expected); then RMLEAK asserted before any close: `RULES_ENGINE: Valve reconnected with 1 active leak(s) — executing auto-close`, and/or `BLE_VALVE: [CMD] Applying pending RMLEAK command=1` before `Applying pending valve command=0` (only if the hub's 5 min re-report of the wet sensor fell in the outage and pended the pair: 8 item 1); every `Writing RMLEAK=1` (or applied RMLEAK) before any `Writing Valve=0`; `BLE_VALVE: [DATA] RMLEAK=1 (ACTIVE)` and `BLE_VALVE: [DATA] Valve State=0 (CLOSED)` within 5 s of `SETUP COMPLETE`. Record any `[LR] …` line (the incident's cap is used up).
+- **For 60 s after `SETUP COMPLETE`, never:** `RULES_ENGINE: RMLEAK cleared externally (valve override) — starting 24h override window`, `RULES_ENGINE: Reconnected: hub incident + valve open + RMLEAK clear — inferring physical override, starting 24h window`, an IoT Hub `water_access_override_enabled` (each NO-GO, 2.3).
+- If the cold-booted valve reads OPEN (`[DATA] Valve State=1 (OPEN)` in its setup), record it and raise it with the valve firmware owner: with a sensor wet, Priority 1 still closes it, but the override inference needs only every sensor dry (7.2's dry variant).
+
+**Pass:** each run as listed. **Record:** power-on → CONNECT → `SETUP COMPLETE` → the `RMLEAK=1` read-back. Then L8 step 4.
+
+#### CP7-L9: P11-U, a leak across a boot with the valve unpowered (P1, 8 min)
+
+*(In `1M1C` read `<BLE1>` for `<BLE2>` in L9 and L10: `SS-VC` has one sensor, and its L8 `leak=0` came at L8 step 4.)*
+
+1. PSU off and wait for `BLE_VALVE: [DISCONNECT] reason=0x208`; all dry; the valve was last open. Ctrl+T Ctrl+R; write the reset time; **as soon as the boot banner prints, wet `<BLE2>`** (within the boot's first minute, while the LED is still WHITE; wetting before the reset would latch the incident before the boot).
+2. **Expect:** `<BLE2>`'s first `leak=1` → `LEAK INCIDENT latched` → `AUTO-CLOSE + RMLEAK triggered` (Δa ≤ 200 ms) → the pended pair and `[LR] Leak response pending …` (as L8); LED RED once `leak=1` is heard, never back to WHITE while wet; **no** `IOTHUB: Boot: rules engine missed the device list or rules - reading them again in the loop`.
+3. After about 2 min, PSU on: the 2500 ms claim, `Applying pending RMLEAK command=1` before `Applying pending valve command=0`, the valve closed; power-on → `Applying pending RMLEAK command=1` and → `[DATA] Valve State=0 (CLOSED)` each ≤ 30 s. **Record** power-on → CONNECT (`GAP CONNECT EVENT`; NORMAL_LR: G6's 5 s, judged statistically once there are 20, question 2, 7.2) and CONNECT → `SETUP COMPLETE`.
+4. Dry, clear, `vo-…`.
+
+#### CP7-L10: P11-L, a leak across a boot with the valve linked (P1, 6 min)
+
+As L9 (reset, then wet `<BLE2>` at the boot banner) with the valve powered and open: after the boot, either live (after `SETUP COMPLETE - READY FOR GATT`: `Writing RMLEAK=1`, then `Writing Valve=0`) or pended (the L8 lines, then `Applying pending …` RMLEAK first at the setup). Record which. `BLE_VALVE: [DATA] Valve State=0 (CLOSED)` and `BLE_VALVE: [DATA] RMLEAK=1 (ACTIVE)` within 5 s of `SETUP COMPLETE`. IoT Hub `leak_detected`, `auto_close`, a `critical` snapshot naming "Washer" (or the wetted sensor's label). Dry, clear, `vo-…`.
+
+#### CP7-L11: T3-11, the hub's own clear pended while the valve is out of range (P1 with the RF shield, else day 2; 5 min; smoke S-5)
+
+Test plan T3-11, one run: shield the valve (powered), not power it off. **Pass:** the clear is applied at the relink and never read as a press: no `RULES_ENGINE: RMLEAK cleared externally (valve override) — starting 24h override window`, no `water_access_override_enabled`.
+
 **Send:** `B1_*`. Claude's B1 verdict is read before B2's reset.
 
 ### 6.2 B2: D2, leak protection in the reset portal (P1, 45 min; T4-10 Part B)
 
-**Why:** WP8's main leak-safety gain, never benched: the reset portal keeps scanning (AP_IDLE, SERVE, LR_AP). **Start:** `SS-VC`, VA linked, all dry, the iPhone on its home Wi-Fi with `WiFi-Hub-69C8` forgotten.
+**Why:** WP8's main leak-safety gain, never benched: the reset portal keeps scanning (AP_IDLE, SERVE, LR_AP). **Start:** `SS-VC`, VA linked, all dry, the hub on `<HS-A>`, the iPhone off any hotspot (on its own network or mobile data) with `WiFi-Hub-69C8` forgotten. **In `1M1C`** `SS-VC` has one sensor:
+- every wet below is `<BLE1>`, each only after its last `leak=0`;
+- D4's second sensor is N/A (day 2);
+- run D8 between D3b and D4 (about 8 min more), or cut it (5.3).
 
 #### CP7-D1: reset #1 and the portal's boot (P1, 4 min)
 
@@ -688,27 +815,27 @@ Wet `<BLE1>`; write the time. **Expect:** `leak=1` **≤ 20 s** after the wettin
 #### CP7-D3: a leak while a phone uses the setup page (P1, 6 min) and D3b, a leak during a Connect (P2, 4 min)
 
 1. The iPhone joins `WiFi-Hub-69C8` from Settings (tap time in the notes). Expect `APP_WIFI: SoftAP: station <MAC> joined, AID=<n>`, `RADIO: JOIN pulse for station <MAC>: BLE off for up to <N> ms` (N ≤ 2800), `APP_WIFI: SoftAP: station <MAC> got 10.10.0.<x>, <ms> ms after joining`, `RADIO: Mode SERVE (SoftAP up, STA not connected; a setup page in use, a Connect or a new lease): Coded 0.6 s / Wi-Fi 0.6 s (rung SERVE-A), discovery every 3 periods`, `RADIO: JOIN pulse over after <ms> ms (<why>)`.
-2. Keep the page in use: tap Rescan every 20-30 s. Wet `<BLE2>` (with D8 running: only after `RADIO: Sensor-starvation guard over`, since the guard's row is not SERVE's). **Expect** `leak=1` **≤ 35 s** (SERVE), `LEAK INCIDENT latched` (a new incident: D2's dried and cleared), the leak sequence. Dry `<BLE2>`; the clear lines.
+2. Keep the page in use: tap Rescan every 20-30 s. Wet `<BLE2>` (with D8 running: only after `RADIO: Sensor-starvation guard over`, since the guard's row is not SERVE's, and after `<BLE2>`'s battery is back and it is heard again: D8 takes it from `<BLE2>`). **Expect** `leak=1` **≤ 35 s** (SERVE), `LEAK INCIDENT latched` (a new incident: D2's dried and cleared), the leak sequence. Dry `<BLE2>`; the clear lines.
 3. *(D3b, P2)* Choose a network on the page and type a **wrong** password first; then wet `<BLE1>` and tap Connect within 2 s: `APP_WIFI: Wi-Fi setup page: Connect - attempt started` and a SUBMIT line (`RADIO: SUBMIT pulse: BLE off for up to <N> ms`, paced or not, or `RADIO: SUBMIT pulse not granted before its Connect ended (asked <ms> ms before) - the attempt ran beside BLE`). `leak=1` ≤ 35 s and the close as above. Dry, clear.
 
 #### CP7-D4: a leak in the portal with the valve unpowered: LR_AP (P1, 7 min)
 
 PSU off; wait for `BLE_VALVE: [DISCONNECT] reason=0x208` (a supervision timeout: HCI 0x08 plus NimBLE's 0x200) and 1 min more; keep the iPhone on the page. Wet `<BLE1>` with a folded, soaked towel (keep it wet until D6: add a few drops without lifting it every 4 min; a `leak=0` before D5's relink makes D4-D5 Blocked). **Expect:** `leak=1`, `AUTO-CLOSE + RMLEAK triggered`, the pended pair; `BLE_VALVE: [LR] Leak response pending, valve not linked (RMLEAK/CLOSE pended) - leak-response scanning, at most 600 s for this incident`; `RADIO: Mode LR_AP (a leak response, the valve not linked; SoftAP up, STA not connected): 1M 1.2 s / Coded 0.6 s in the first 30 s, then 1M 0.6 / Wi-Fi 0.3 / Coded 0.6 / Wi-Fi 0.3 s` (W). In its first 30 s a page Rescan or a join gives `RADIO: <KIND> pulse not granted (a leak response's first 30 s) - Wi-Fi goes on beside BLE` (at most one per 10 s): tap Rescan once about 10 s after the `RADIO: Mode LR_AP …` line to provoke it. LED RED.
-- **A second sensor in LR_AP:** about 40 s after the `RADIO: Mode LR_AP …` line (its first 30 s over), wet `<BLE2>` the same way; press `d`. Expect its `leak=1` **≤ 35 s** and `IOTHUB: Event: BLE Leak <BLE2> leak=1 batt=<b>`; no new `LEAK INCIDENT latched`; with the valve unreachable a second `AUTO-CLOSE + RMLEAK triggered` (8 item 1). Keep both wet through D5.
+- **A second sensor in LR_AP** (`2C` only; in `1M1C` it is `N/A (one Coded sensor)` here and runs on day 2, 7.1 D2-2): about 40 s after the `RADIO: Mode LR_AP …` line (its first 30 s over), wet `<BLE2>` the same way; press `d`. Expect its `leak=1` **≤ 35 s** and `IOTHUB: Event: BLE Leak <BLE2> leak=1 batt=<b>`; no new `LEAK INCIDENT latched`; with the valve unreachable a second `AUTO-CLOSE + RMLEAK triggered` (8 item 1). Keep both wet through D5.
 
 #### CP7-D5: the valve back (P1, 4 min)
 
-PSU on (keep `<BLE1>` and `<BLE2>` wet). **Expect:** `[SCAN] Target MAC matched`; `BLE_VALVE: [CLAIM] Connecting to the valve: pulse up to 2500 ms (leak response pending)`; the `GAP CONNECT EVENT` banner; `BLE_VALVE: [LR] Leak-response scanning ended after <s> s (valve linked)`; **`Applying pending RMLEAK command=1` before `Applying pending valve command=0`**; the valve closed; power-on → `Applying pending RMLEAK command=1` and → `[DATA] Valve State=0 (CLOSED)` each ≤ 30 s. **Record** power-on → CONNECT (LR_AP: recorded, not judged, 7.2) and CONNECT → `SETUP COMPLETE`. **Any CLOSE before RMLEAK is a stop-ship.**
+PSU on (keep the wet sensors wet). **Expect:** `[SCAN] Target MAC matched`; `BLE_VALVE: [CLAIM] Connecting to the valve: pulse up to 2500 ms (leak response pending)`; the `GAP CONNECT EVENT` banner; `BLE_VALVE: [LR] Leak-response scanning ended after <s> s (valve linked)`; **`Applying pending RMLEAK command=1` before `Applying pending valve command=0`**; the valve closed; power-on → `Applying pending RMLEAK command=1` and → `[DATA] Valve State=0 (CLOSED)` each ≤ 30 s. **Record** power-on → CONNECT (LR_AP: recorded, not judged, 7.2) and CONNECT → `SETUP COMPLETE`. **Any CLOSE before RMLEAK is a stop-ship.**
 
 #### CP7-D6: setup finishes; the events arrive (P1, 9 min)
 
-Dry `<BLE1>` and `<BLE2>`; the clear lines. Then on the iPhone: choose the bench AP, type its password, Connect; then tap **Finish**.
+Dry the wet sensors; the clear lines. Then on the iPhone: choose `<HS-A>` (the Android's hotspot, on), type its password, Connect; then tap **Finish**. Write `<HS-A>`'s channel from the `Wi-Fi channel at IP` line below.
 - `APP_WIFI: Wi-Fi setup page: Connect - attempt started`; the SUBMIT line; `wifi_manager: user connect: the candidate got its IP - it is the network in use now, saved` (W); `APP_WIFI: Connected! IP: <IP>`; `APP_WIFI: Wi-Fi channel at IP: radio <r>, router <r>`; `RADIO: Mode NORMAL (SoftAP down, or STA connected)`; `APP_WIFI: SoftAP tail after a setup-page Connect (stations on it: 1) - it stops 60 s after the IP, or 15 s after the last station leaves (not before 15 s)`; `IOTHUB: cloud admission deferred: SoftAP up - no TLS or DPS until it stops`.
 - Finish: `APP_WIFI: Wi-Fi setup page: Finish - the SoftAP stops <s> s after the IP` (≥ 5.0); `APP_WIFI: SoftAP tail: Finish on the setup page - it stops <s> s after the IP`; `APP_WIFI: SoftAP stopped (its servers too) <s> s after the IP`; `IOTHUB: cloud admitted <s> s after the IP (internal DMA free <X> B, largest <Y> B)`; `IOTHUB: Connected to Azure IoT Hub!`.
-- IoT Hub, before the `lifecycle`, oldest first, each with a real `ts` (none below 1704067200): **the events still in the offline ring** (`leak_detected`, `auto_close`, `leak_cleared`, `rmleak_auto_cleared`, `valve_state_changed`, the health events); then the `lifecycle` (`"reset_reason":"software"`) and a snapshot. A byte-identical duplicate is allowed. Send `vo-…`. **The ring holds 16 events and B2 raises about 21-25** (D1 0-1, D2 5, D3 4, D3b 4, D4 4-5 with the second sensor, plus `device_offline` once the valve is off 180 s, D5 1-3, D6 3), so expect several `OFFLINE_BUF: Buffer full, oldest event overwritten` lines, with D2's and D3's events among the lost (their proof is the UART: their `Stored event` lines).
+- IoT Hub, before the `lifecycle`, oldest first, each with a real `ts` (none below 1704067200): **the events still in the offline ring** (`leak_detected`, `auto_close`, `leak_cleared`, `rmleak_auto_cleared`, `valve_state_changed`, the health events); then the `lifecycle` (`"reset_reason":"software"`) and a snapshot. A byte-identical duplicate is allowed. Send `vo-…`. **The ring holds 16 events and B2 raises about 21-25** (D1 0-1, D2 5, D3 4, D3b 4, D4 4-5 with the second sensor (`1M1C`: about 1-2 fewer), plus `device_offline` once the valve is off 180 s, D5 1-3, D6 3), so expect several `OFFLINE_BUF: Buffer full, oldest event overwritten` lines, with D2's and D3's events among the lost (their proof is the UART: their `Stored event` lines).
 - **The delivery rule (Claude):** count the `OFFLINE_BUF: Stored event [ob_<nn>] (<n> bytes), <n> buffered` lines from D2 to the IP. If 16 or fewer: every stored event delivered once, in order, before the `lifecycle`. If more: exactly (count − 16) `Buffer full, oldest event overwritten` lines, the oldest that many events missing (`Known-limit`, 8 item 17), the rest delivered in order before the `lifecycle`. Every UART `Stored event` is matched either to IoT Hub or to an overwrite.
 
-**Pass:** as listed; the phone back on its own Wi-Fi ≤ 15 s after Finish; the sign-in window closes by itself (record).
+**Pass:** as listed; the phone off the SoftAP and back on its own network (the office Wi-Fi or mobile data) ≤ 15 s after Finish; the sign-in window closes by itself (record).
 
 #### CP7-D7: the capture check (P1, 3 min, Claude)
 
@@ -717,24 +844,30 @@ From D1 on: exactly one boot banner per reset; none of 3.8; every `JOIN`, `SUBMI
 #### CP7-D8: the sensor-starvation guard (P2, inside D1-D3; 1 min of handling)
 
 **Why:** WP8's guard (a listed sensor unheard 250 s or more, in AP_IDLE or SERVE, gets AP_IDLE density with discovery suspended for 110 s, at most once per 600 s) has no other test.
-1. As soon as D1 passes (every sensor heard, LED GREEN), take `<BLE4>`'s battery out; write the time.
-2. **Expect,** 250 s after `<BLE4>`'s last heard advert (its last `burst:` line; about 150-250 s after the removal), in AP_IDLE or SERVE: `RADIO: Sensor-starvation guard: a sensor unheard 250 s or more (on Coded) - AP_IDLE density, no discovery for 110 s`; 110 s later `RADIO: Sensor-starvation guard over`; every `[SUMMARY]` `(0 over 2900 ms)` meanwhile. (`AP_K1M` in the line means `<BLE4>`'s PHY was not known: record it.)
-3. Refit the battery 7 min after the removal (before 10 min unheard gives its `device_offline`): `<BLE4>` heard again.
+1. As soon as D1 passes (every sensor heard, LED GREEN), take `<BLE2>`'s battery out; write the time. (`1M1C`: `<BLE1>`'s, between D3b and D4, once its `leak=0` is in; D4 waits until it is heard again.)
+2. **Expect,** 250 s after the sensor's last heard advert (its last `burst:` line; about 150-250 s after the removal), in AP_IDLE or SERVE: `RADIO: Sensor-starvation guard: a sensor unheard 250 s or more (on Coded) - AP_IDLE density, no discovery for 110 s`; 110 s later `RADIO: Sensor-starvation guard over`; every `[SUMMARY]` `(0 over 2900 ms)` meanwhile. (`AP_K1M` in the line means the sensor's PHY was not known: record it.)
+3. Refit the battery 7 min after the removal (before 10 min unheard gives its `device_offline`): the sensor heard again.
 
-**Pass:** as listed; no `device_offline` for `<BLE4>`. **Record:** the guard's start after the last heard advert, its kind and row.
+**Pass:** as listed; no `device_offline` for the sensor. **Record:** the guard's start after the last heard advert, its kind and row.
 
 **Send:** `B2_*`, the phone notes.
 
-### 6.3 B3: the phones (P1, 120 min; G-CNA's smoke pass, `MANUAL_TEST_PLAN.md` 7.1)
+### 6.3 B3: the phones (P1, 130 min; G-CNA's smoke pass, `MANUAL_TEST_PLAN.md` 7.1)
 
-**Start:** `SS-VC`, VA linked, the hub on the bench AP (**channel 1 or 6**), both phones on their home Wi-Fi, `WiFi-Hub-69C8` forgotten on both. Before the first run record the boot's `BLE_LEAK: PHY table loaded: 3 of 3 sensor(s) known, 0 on 1M` (every PHY Coded: AP_IDLE, not AP_K1M).
+**Start:** `SS-VC`, VA linked, the hub on `<HS-A>` (from D6; its channel in the notes, 3.3 item 1), the iPhone off any hotspot, `WiFi-Hub-69C8` forgotten on both phones. Before the first run, record the boot's `BLE_LEAK: PHY table loaded: 2 of 2 sensor(s) known, 0 on 1M` (`1M1C`: `1 of 1`). Every PHY is Coded, so the row is AP_IDLE, not AP_K1M. **The laptop joins `<HS-A>` now** (CP7-G3, run 1).
 
-**One run (P-1 … P-9)** (from the reset to the phone back home; about 6 min):
+**The hotspots in B3** (3.3): each phone's portal runs set up **the other phone's hotspot**. The order is:
+- the iPhone's S2 runs 1-3 and its two S3 runs, on `<HS-A>`;
+- **the swap** in run 4's reboot;
+- the Android's S2 runs 4-6, G2 and its two S3 runs, on `<HS-I>`;
+- G8, whose S1 runs end on `<HS-A>` for B4.
+
+**One run (P-1 … P-9)** (from the reset to the phone back on its own network; about 6 min):
 1. Reset (5.2's lines). Wait for the setup-portal line and `RADIO: Mode AP_IDLE …`, and 60 s with no phone on the SoftAP.
 2. Settings → Wi-Fi → tap `WiFi-Hub-69C8`; start a stopwatch (or a screen recording beside the monitor) at the tap.
 3. Record: joined (s), any "Unable to join"; the sign-in window opening by itself (s after the join); the page rendered (s after the sign-in opened); the network list non-empty (s), or "No networks found" at 8 s.
-4. Choose the bench AP, type its password, Connect; keep the page in front. Record the result (s after the tap) and what the phone showed.
-5. Tap **Finish**. Record when the phone is back on its home Wi-Fi.
+4. Choose the hotspot that is on: the other phone's, `<HS-A>` in the iPhone's runs and `<HS-I>` in the Android's (the iPhone unlocked on its Personal Hotspot screen). Type its password, Connect, and keep the page in front. Record the result (s after the tap) and what the phone showed. Then write the hotspot's channel from `APP_WIFI: Wi-Fi channel at IP: radio <r>, router <r>`.
+5. Tap **Finish**. Record when the phone is back on its own network (the office Wi-Fi or mobile data).
 6. Forget `WiFi-Hub-69C8` on the phone.
 
 **Expect per run (UART):**
@@ -746,43 +879,76 @@ From D1 on: exactly one boot banner per reset; none of 3.8; every `JOIN`, `SUBMI
   - (b) first Connect: `RADIO: SUBMIT pulse: BLE off for up to <N> ms` at once (N ≤ 2800, no `paced`);
   - (c) `RADIO: SUBMIT pulse not granted before its Connect ended (asked <ms> ms before) - the attempt ran beside BLE`.
   Then `RADIO: SUBMIT pulse over after <ms> ms (the Connect's outcome)` (or `(its deadline)`); `wifi_manager: user connect: the candidate got its IP - it is the network in use now, saved`; `APP_WIFI: Connected! IP: <IP>`; `RADIO: Mode NORMAL (SoftAP down, or STA connected)`; the tail line (60 / 15 / 15). **Result ≤ 10 s; 0 reboots.**
-- P-8: the driver's channel switch **(ESP-IDF)**: a `wifi:` line with `csa` and `csa_count:3` when the SoftAP (11) follows the router (1 or 6). Pass: either no `APP_WIFI: SoftAP: station <MAC> left, AID=<n>, reason=<r>` between the Connect and the IP, or the re-opened sign-in shows **success** ≤ 10 s after the re-join.
-- P-9: `APP_WIFI: Wi-Fi setup page: Finish - the SoftAP stops <s> s after the IP`; `APP_WIFI: SoftAP stopped (its servers too) <s> s after the IP` by max(IP + 5 s, tap + 3 s) (designed: tap + 2 s, `AP_TAIL_FINISH_MS`; 1 s of tolerance); the phone on home Wi-Fi ≤ 15 s; the sign-in window closes by itself; then `IOTHUB: cloud admitted …` (≤ 5 s after the stop) and `IOTHUB: Connected to Azure IoT Hub!`.
+- P-8: the driver's channel switch **(ESP-IDF)**: a `wifi:` line with `csa` and `csa_count:3` when the SoftAP (11) follows the router (1 or 6). Pass: either no `APP_WIFI: SoftAP: station <MAC> left, AID=<n>, reason=<r>` between the Connect and the IP, or the re-opened sign-in shows **success** ≤ 10 s after the re-join. **On a hotspot (3.3 item 2):** judged only when the hotspot is on 1 or 6. On 11 there is no switch: record `N/A (hotspot on 11)`; on another channel record the switch, not judged (`N/A (hotspot on <c>)`). Either way toggle that hotspot off and on before the next run, and check its channel after the rejoin. At least 2 judged runs per phone.
+- P-9: `APP_WIFI: Wi-Fi setup page: Finish - the SoftAP stops <s> s after the IP`; `APP_WIFI: SoftAP stopped (its servers too) <s> s after the IP` by max(IP + 5 s, tap + 3 s) (designed: tap + 2 s, `AP_TAIL_FINISH_MS`; 1 s of tolerance); the phone off the SoftAP and back on its own network ≤ 15 s; the sign-in window closes by itself; then `IOTHUB: cloud admitted …` (≤ 5 s after the stop) and `IOTHUB: Connected to Azure IoT Hub!`.
 - P-15 (read by Claude): `idma` `min` ≥ 8 KB, `allocfail` 0; the two `[SUMMARY]` lines of each minute within I2 and I2b.
 
 **Pass thresholds (plan 7.5):** joined ≤ 5 s, 0 "Unable to join"; lease ≤ 3 s; first DNS ≤ 3 s after the lease; sign-in opens by itself (iPhone ≤ 8 s after the join; Pixel/Samsung ≤ 10 s; Android 10-11 notification ≤ 15 s); page ≤ 3 s; list ≤ 5 s (or "No networks found" at 8 s); result ≤ 10 s. **P-6, P-8, P-9 are blocking in S2** (PH-2): a failure there goes to the tail decision (15x item 9).
 
-#### CP7-G1 … G6: S2, three runs per phone (P1, 50 min; resets #2-#7)
+#### CP7-G1 … G6: S2, three runs per phone (P1, 54 min with G2 and the swap; resets #2-#7)
 
-| Run | Reset | Phone | Variant (each run is the one-run procedure above, with its P-steps recorded) |
-|---|---|---|---|
-| 1 | #2 | iPhone | **G1**, the usual flow: the Connect 10-45 s after the phone's own JOIN pulse, P-6 (a) |
-| 2 | #3 | iPhone | **G4**, the first-Connect path, P-6 (b) |
-| 3 | #4 | iPhone | **G5**, wrong, then right |
-| 4 | #5 | Android | **G1** and **G3**: the usual flow, setting up the **home router** (P-14's LAN half) |
-| 5 | #6 | Android | **G4**, back to the bench AP |
-| 6 | #7 | Android | **G5**, then **G6** (Forget) before Finish; then **G2** (two phones) for the set-up again |
+| Run | Reset | Portal phone | The hub's network (it sets up) | Variant (each run is the one-run procedure above, with its P-steps recorded) |
+|---|---|---|---|---|
+| 1 | #2 | iPhone | `<HS-A>` | **G1** and **G3**: the usual flow, the Connect 10-45 s after the phone's own JOIN pulse, P-6 (a); the laptop on `<HS-A>` runs P-14's LAN half |
+| 2 | #3 | iPhone | `<HS-A>` | **G4**, the first-Connect path, P-6 (b); **the valve unpowered** (G0-B, below) |
+| 3 | #4 | iPhone | `<HS-A>` | **G5**, wrong, then right |
+| — | — | — | — | **CP7-G7's two iPhone runs** (S3 on `<HS-A>`), then run 4 |
+| 4 | #5 | Android | `<HS-I>` | **G1**, the usual flow; **the swap** in its reboot (below); the first cloud connect over `<HS-I>` is its port-8883 check (3.3 item 3) |
+| 5 | #6 | Android | `<HS-I>` | **G4**; **the valve unpowered** (G0-B) |
+| 6 | #7 | Android | `<HS-I>` | **G5**, then **G6** (Forget) before Finish; then **G2** (two phones), whose set-up puts the hub on `<HS-I>` |
+| — | — | — | — | **CP7-G7's two Android runs** (S3 on `<HS-I>`), then CP7-G8 |
 
-**CP7-G3: P-14's LAN half (run 4).** The capture PC is on the home LAN. Before the run, **pre-type this one line** in a PowerShell window in the day folder, all but the IP (the SoftAP and its servers can stop 15 s after the Android leaves, as at P-8's channel switch, so there is no time to type it after the IP):
-```powershell
-$hub = '<IP>'; curl.exe -s -o NUL -w "%{http_code} exit=%{exitcode}\n" "http://$hub/"; curl.exe -s -o NUL -w "%{http_code} exit=%{exitcode}\n" -X DELETE "http://$hub/connect.json"; python dns_check.py $hub
+**The swap (run 4):**
+1. Press reset #5 with the hub still on `<HS-A>`.
+2. While it reboots, turn the Android's hotspot off and the iPhone's on (Settings → Personal Hotspot, kept on screen).
+3. Then the Android turns its own Wi-Fi on and joins `WiFi-Hub-69C8`.
+
+**CP7-G3: P-14's LAN half (run 1).** The laptop is on `<HS-A>`, the hub's own network (3.3 item 7); the capture PC is not on it. Before the run, **pre-type this line** on the laptop, in the folder with `dns_check.py` and `portal_check.py` (A.1, A.4), all but the IP. The SoftAP and its servers can stop 15 s after the iPhone leaves, as at P-8's channel switch, so there is no time to type it after the IP.
+```text
+python portal_check.py lan <IP>
 ```
-**The moment `APP_WIFI: Connected! IP: <IP>` prints**, with the Android still on the SoftAP and its page open (do not tap Finish yet), type that IP into `$hub` and run the line. Expect `000` with a non-zero exit (the LAN connection shut at accept: no 403 body, no hang; typically exit 52 or 56) and one W `httpd_txrx: httpd_sock_err: error in recv : 128` **(ESP-IDF)** per request; `dns_check.py`: `no reply (timed out)` for all six queries; **no** `APP_WIFI: WiFi Disconnected. Reason: 8` (the DELETE did not make the hub forget). **It counts only if both `curl.exe` calls finished, and `dns_check.py` started, before `APP_WIFI: SoftAP stopped (its servers too) …`**; a set after it (`000` with no `httpd_txrx` line, typically exit 7) is void: redo it in a later run (day 2's P-14). Then tap Finish; after `APP_WIFI: SoftAP stopped (its servers too) …` the same `curl.exe` calls print `000` (connection refused, exit 7). **A `200` to the DELETE is a Fail.**
+(On a Windows laptop with `curl.exe`, the older line still works: `$hub = '<IP>'; curl.exe -s -o NUL -w "%{http_code} exit=%{exitcode}\n" "http://$hub/"; curl.exe -s -o NUL -w "%{http_code} exit=%{exitcode}\n" -X DELETE "http://$hub/connect.json"; python dns_check.py $hub`. There `000` stands for each Python outcome below, with curl's exit code.)
+
+**The moment `APP_WIFI: Connected! IP: <IP>` prints,** with the iPhone still on the SoftAP and its page open (do not tap Finish yet), type that IP and run it.
+- **Expect** for the GET, the DELETE and the POST: `closed with no reply (curl exit 52)` or `reset (curl exit 56)`. That is the LAN connection shut at accept: no 403 body, no hang. Expect one W `httpd_txrx: httpd_sock_err: error in recv : 128` **(ESP-IDF)** per request.
+- Then `dns_check.py`: `no reply (timed out)` for all six queries.
+- **No** `APP_WIFI: WiFi Disconnected. Reason: 8` (the DELETE did not make the hub forget).
+- **It counts only if the three requests finished, and `dns_check.py` started, before `APP_WIFI: SoftAP stopped (its servers too) …`** (their `httpd_txrx` lines show it). A set after it (`refused (curl exit 7)`, no `httpd_txrx` line) is void: redo it in a later run (run 4, or day 2's P-14).
+- `timed out (curl exit 28)` on all three with no `httpd_txrx` line means the hotspot keeps its clients apart: redo it in run 4 with the laptop on `<HS-I>`, or on a router.
+- Then tap Finish. After `APP_WIFI: SoftAP stopped (its servers too) …`, run the line again: `refused (curl exit 7)` for each.
+- **A `200` to the DELETE or the POST is a Fail.**
+- Afterwards the laptop leaves `<HS-A>` and forgets it: on the hotspot it spends the phone's mobile data. (A redo in run 4 joins `<HS-I>` the same way.)
 
 **CP7-G4: the first-Connect path (runs 2 and 5; P-6 (b)).** The Connect **45 s or more after any SUBMIT or JOIN pulse**: wait on the page, without touching it, 45 s after the `JOIN pulse over` line (a Rescan's LIST pulse does not count). Expect (b): `RADIO: SUBMIT pulse: BLE off for up to <N> ms`, no `paced`, N ≤ 2800. Record the time to `Connected! IP` and the result; Claude compares them with the (a) runs (15x item 6's evidence).
+- **G0-B with the valve unpowered (runs 2 and 5; 1.5).** PSU off before the reset, and wait for `BLE_VALVE: [DISCONNECT] reason=0x208`. Then switch the PSU on after `IOTHUB: cloud admitted …`.
+  - Meanwhile the AP modes carry the valve hunt's discovery rows, the LED is RED about 180 s after the boot (as P14), and the valve's `device_offline` arrives after setup: all expected.
+  - Record power-on → CONNECT (NORMAL) and the relink.
+  - Claude compares the run's join, lease and page times with the linked runs: G0's U-then-L pair.
 
 **CP7-G5: wrong, then right (runs 3 and 6; UX-REPEAT-PW, UX-M4-1; ×10 per phone on day 2).** Connect with a **wrong** password: record the page's verdict and its time ("Wrong password" ≤ 20 s); no `wifi_manager: user connect: the candidate got its IP …`; the SoftAP stays up. Then **within 45 s** Connect with the right one: the second SUBMIT is paced, or not granted; record which, the time to `Connected! IP` and the result.
 
 **CP7-G6: Forget with the STA connected (run 6; G8x X-5's connected case; D9).** After the successful Connect, **before Finish**: tap the "Connected to" banner → Connection Details → **Disconnect** → confirm.
 - Expect `APP_WIFI: WiFi Disconnected. Reason: 8`; the page goes back to the network list; `RADIO: Mode AP_IDLE …` (or SERVE) again; no `APP_WIFI: router fallback: retrying the configured network (attempt <n>)` afterwards (nothing saved).
 - **Prove the erase:** first forget `WiFi-Hub-69C8` on the Android (still on the SoftAP, it would rejoin the open setup portal at once after the reboot and swap G2's join order); then Ctrl+T Ctrl+R. The boot shows `APP_WIFI: SoftAP up with no saved Wi-Fi credentials (setup portal) - BLE scanning, if any, stays on beside it`.
-- **Pass:** erased; 0 reboots other than yours. *(The idle and connecting forgets have no page button (the Disconnect is on the Connection Details view, shown only while connected): the laptop's `curl.exe -X DELETE http://10.10.0.1/connect.json` on the fallback portal, day 2, G8x X-5.)*
+- **Pass:** erased; 0 reboots other than yours. *(The idle and connecting forgets have no page button (the Disconnect is on the Connection Details view, shown only while connected): the laptop's `python portal_check.py forget` (A.4), or `curl.exe -X DELETE http://10.10.0.1/connect.json`, on the fallback portal, day 2, G8x X-5.)*
 
-**CP7-G2: two phones within 45 s (P2, after G6's reboot).** The iPhone joins; within 45 s the Android joins too. The second JOIN is paced (`… up to 1500 ms (paced: a SUBMIT or JOIN pulse began less than 45 s before)`), owed until the first assist ends, or `RADIO: JOIN pulse not granted (not granted within 10 s) - Wi-Fi goes on beside BLE`; both phones reach P-5. Record join → lease for each. Then the iPhone sets the bench AP up (Connect, Finish).
+**CP7-G2: two phones within 45 s (P2, after G6's reboot).**
+1. Neither phone may be a hotspot meanwhile: the iPhone turns its hotspot off first.
+2. The iPhone joins; within 45 s the Android joins too. The second JOIN is paced (`… up to 1500 ms (paced: a SUBMIT or JOIN pulse began less than 45 s before)`), owed until the first assist ends, or `RADIO: JOIN pulse not granted (not granted within 10 s) - Wi-Fi goes on beside BLE`. Both phones reach P-5. Record join → lease for each.
+3. The iPhone leaves: it forgets `WiFi-Hub-69C8` and turns its hotspot back on, kept on its Settings screen.
+4. The **Android** sets `<HS-I>` up (Connect, Finish), so the hub is on `<HS-I>` for G7's Android runs.
 
-#### CP7-G7: S3, the router-fallback portal, and a wrong password that keeps the saved network (P1, 30 min)
+If G2 is cut, the Android sets `<HS-I>` up straight after G6's reboot.
 
-Four runs: iPhone run 1 and Android run 1 plain (steps 1-4 below); iPhone run 2 and Android run 2 with the wrong password (steps W1-W4).
+#### CP7-G7: S3, the router-fallback portal, and a wrong password that keeps the saved network (P1, 38 min with the G0 add-ons)
+
+Four runs, two per phone, each with the other phone's hotspot as the bench AP. "Bench AP off / on" is that hotspot's switch (3.3); for the iPhone's, Allow Others to Join off and on, kept on its Settings screen (or Cellular Data, if the hub stays joined: 3.3).
+- **The iPhone's two, on `<HS-A>`** (after S2 run 3): run 1 plain (steps 1-4 below), with G0-A's untouched join and G0-D's fallback wetting (P2, 1.5); run 2 with the wrong password (steps W1-W4).
+- **The Android's two, on `<HS-I>`** (after G2): run 1 plain with **the valve unpowered** (G0-A's U half, P2); run 2 with the wrong password.
+- **The G0 add-ons (P2; cut 7 in 5.3):**
+  - *iPhone run 1, step 2:* after the join, leave the phone 3 min untouched (5 min if no `APP_WIFI: SoftAP: station <MAC> got 10.10.0.<x>, <ms> ms after joining` has printed by then, as 15d asks). The sign-in window may open by itself: do not tap in it. This is E1's question: does a lease come, and when?
+  - Then use the page 2-3 min. Meanwhile wet `<BLE1>` for about 1 min, then dry it, pressing `d` and writing both times. Expect the leak sequence with the valve linked, with its events `TELEMETRY_V2: Offline — buffering <kind> event`, and its `leak=0` and the clear lines before step 3. Send `vo-…` after the rejoin.
+  - *Android run 1:* PSU off before step 1 (wait for `BLE_VALVE: [DISCONNECT] reason=0x208`), on after step 3's `IOTHUB: cloud admitted …`. Record power-on → CONNECT. LED RED and the valve's `device_offline` (delivered after the rejoin) are expected.
 
 1. Bench AP Wi-Fi off. Expect `APP_WIFI: WiFi Disconnected. Reason: <n>`, `IOTHUB: cloud admission withdrawn (WiFi down)`, `IOTHUB: WiFi down — stopping MQTT client (free TLS heap for AP/captive portal)`, `TELEMETRY_V2: MQTT connected = false`, `IOTHUB: MQTT client stopped on wifi_task in <s> s`, then the Wi-Fi manager's own retries, then `APP_WIFI: SoftAP up with saved Wi-Fi credentials (router fallback) - BLE scanning stays on` and `RADIO: Mode AP_IDLE …`; 30-35 s after each `APP_WIFI: WiFi Disconnected. Reason: 201` (the previous attempt's end; 38 s still passes) `RADIO: RETRY pulse: BLE off for up to 1500 ms`, `APP_WIFI: router fallback: retrying the configured network (attempt <n>)`, `RADIO: RETRY pulse over after 1500 ms (its deadline)` (start to start about 33-39 s: recorded, not judged).
 2. The phone joins `WiFi-Hub-69C8` and uses the page (P-1 … P-5, as S2; the SoftAP is on the router's last channel). While it is used: `APP_WIFI: router fallback: retry deferred - the Wi-Fi setup page is open`, and no RETRY.
@@ -791,27 +957,32 @@ Four runs: iPhone run 1 and Android run 1 plain (steps 1-4 below); iPhone run 2 
 
 **The wrong password (G8x X-3, T4-10 D5):**
 - W1. Bench AP off; wait for the fallback SoftAP; the phone joins and opens the page.
-- W2. Choose **another network that is on** (the home router), type a **wrong** password, Connect. Expect `APP_WIFI: Wi-Fi setup page: Connect - attempt started`, its SUBMIT line, `APP_WIFI: WiFi Disconnected. Reason: <n>`, the page's "Wrong password" (or its reason) ≤ 20 s, **no** `wifi_manager: user connect: the candidate got its IP …`. While the page stays in use (its list polls go on for 60 s after the last touch) `APP_WIFI: router fallback: retry deferred - the Wi-Fi setup page is open`; once the page has been left untouched for 60 s, the next `APP_WIFI: router fallback: retrying the configured network (attempt <n>)` is for the **bench AP** (the saved network, not the typed one).
+- W2. Choose **another network that is on** (the office Wi-Fi, or any network in the list but the hotspot that is off), type a **wrong** password, Connect. Expect `APP_WIFI: Wi-Fi setup page: Connect - attempt started`, its SUBMIT line, `APP_WIFI: WiFi Disconnected. Reason: <n>`, the page's "Wrong password" (or its reason) ≤ 20 s, **no** `wifi_manager: user connect: the candidate got its IP …`. While the page stays in use (its list polls go on for 60 s after the last touch) `APP_WIFI: router fallback: retry deferred - the Wi-Fi setup page is open`; once the page has been left untouched for 60 s, the next `APP_WIFI: router fallback: retrying the configured network (attempt <n>)` is for the **bench AP** (the saved network, not the typed one).
 - W3. Put the phone down (no touch, as step 3). Bench AP on: `APP_WIFI: Connected! IP: <IP>` on the bench AP ≤ 40 s after the later of the SSID's return and the page's last request (its polls stop 60 s after the last touch).
-- W4. Ctrl+T Ctrl+R: the hub rejoins the bench AP at boot (the saved network kept; NVS unchanged).
+- W4. Ctrl+T Ctrl+R: the hub rejoins the bench AP (the hotspot of these runs) at boot (the saved network kept; NVS unchanged).
 - **Pass:** the saved network kept and rejoined; 0 reboots.
 
-#### CP7-G8: the smoke trio, then S1 on the empty hub (P1 if time; 36 min; resets #8-#11)
+#### CP7-G8: the smoke trio, then S1 on the empty hub (P1 if time; 37 min; resets #8-#11)
 
-**The trio empties the hub** (smoke S-6, S-8, S-9 of the test plan section S, rewritten for `SS-VC`; `payloads_destructive.txt`). Before S-6, wait 5 min after the last provision (DEC-03's sync window).
-- **S-6 (DEC-03 steps 1, 2, 3, 5; step 4 cut to 60 s):** `smoke-6` removes `<BLE4>`. The snapshot after it equals the one before minus `<BLE4>`; survivors keep `battery`, `rssi`, `fw_version`, `rating`; no `HEALTH_ENGINE: Boot sync: timeout …`, no pulse; the twin's `ble_leak_sensor_count` 2.
+**The trio empties the hub** (smoke S-6, S-8, S-9 of the test plan section S, rewritten for two sensors; `payloads_destructive.txt`). It removes the main hub's devices one by one and re-provisions them at the end: not a spare-lane step. Before S-6, wait 5 min after the last provision (DEC-03's sync window).
+- **S-6 (DEC-03 steps 1, 2, 3, 5; step 4 cut to 60 s):**
+  - **`2C`:** `smoke-6` removes `<BLE2>`. The snapshot after it equals the one before minus `<BLE2>`. The survivor keeps `battery`, `rssi`, `fw_version`, `rating`. No `HEALTH_ENGINE: Boot sync: timeout …`, no pulse. The twin's `ble_leak_sensor_count` is 1.
+  - **`1M1C`:** CP7-L6 was S-6: skip it here.
 - **S-8 (T3-01 steps 1-4 and 9):** `smoke-8` removes the valve (VB powered within 2 m): `IOTHUB: !!! DECOMMISSION_VALVE !!!`, `PROVISIONING: Valve removed successfully`; snapshot `"valve":{}`; for 1 min no `BLE_VALVE: [SCAN] Target MAC matched …` and no `BLE_VALVE: [CONNECT] MAC=<mac>, handle=<h>` (VB is never linked). Wet `<BLE1>`: `leak_detected` and **no** `auto_close`; `RULES_ENGINE: AUTO-CLOSE: no provisioned valve - auto_close event not published`; `RULES_ENGINE: AUTO-CLOSE: no provisioned valve - nothing to close`. `smoke-8-vo`: `IOTHUB: VALVE_OPEN refused — No valve is set up for this hub.`. Dry `<BLE1>`; `rmleak_auto_cleared` without `valve_id`.
-- **S-9 (DEC-11 short form):** `dec-11-s1` (`triggers=0x03`); `smoke-9a` removes `<BLE1>`; wet `<BLE2>`; `smoke-9c` removes `<BLE2>` while wet. Expect, within about 10 s (the whitelist reload), `RADIO: Mode BLE_IDLE (no BLE leak sensor listed; no valve, or its link is up) - no BLE scan`; one `event` snapshot of the empty shape with `"rules":{"auto_close_enabled":true,"trigger_mask":7}` and no "Leak interlock latched"; `FLEET_LED: rating=unprovisioned color=WHITE effect=SOLID`; `IOTHUB: Hub is now EMPTY - no devices provisioned; heartbeat-only snapshots`; a heartbeat 60 s later (−1/+3 s). Dry `<BLE2>`.
+- **S-9 (DEC-11 short form, two sensors):** `dec-11-s1` (`triggers=0x03`); wet `<BLE1>`, after its S-8 `leak=0`; `smoke-9c` removes `<BLE1>` while wet. `<BLE1>` is the hub's last sensor: DEC-11's dry removals (`smoke-9a`, `smoke-9b`) have no sensor left here, and S-6 removed a dry one. Expect, within about 10 s (the whitelist reload), `RADIO: Mode BLE_IDLE (no BLE leak sensor listed; no valve, or its link is up) - no BLE scan`; one `event` snapshot of the empty shape with `"rules":{"auto_close_enabled":true,"trigger_mask":7}` and no "Leak interlock latched"; `FLEET_LED: rating=unprovisioned color=WHITE effect=SOLID`; `IOTHUB: Hub is now EMPTY - no devices provisioned; heartbeat-only snapshots`; a heartbeat 60 s later (−1/+3 s). Dry `<BLE1>`.
 
-**S1 (×2 per phone, resets #8-#11):** the one-run procedure on the empty hub. After each reboot: the setup-portal line; **no `RADIO:` line at all** (no BLE starts on an empty hub; no `IOTHUB: Starting BLE …`), so no JOIN, LIST or SUBMIT pulse lines; P-1 … P-9 as in S2, the same thresholds.
+**S1 (×2 per phone, resets #8-#11):** the one-run procedure on the empty hub. After each reboot: the setup-portal line; **no `RADIO:` line at all** (no BLE starts on an empty hub; no `IOTHUB: Starting BLE …`), so no JOIN, LIST or SUBMIT pulse lines; P-1 … P-9 as in S2, the same thresholds. **The order:**
+1. The Android's two first (#8, #9), each setting up `<HS-I>`.
+2. **The swap** in #10's reboot: the iPhone's hotspot off; the Android's own Wi-Fi off, then its hotspot on (3.3).
+3. The iPhone's two (#10, #11), each setting up `<HS-A>`. The hub ends on `<HS-A>` for B4 and B5.
 
-**Then re-provision `SS-VC`:** `c2d` the `ss-vc-1` line (id `ss-vc-2` if sent before). Expect `IOTHUB: Starting BLE (valve=00:80:E1:27:F7:BB, BLE sensors=3)`, `BLE_VALVE: [INIT] Signal received. Starting BLE stack...`, the RADIO self-test line, the PHY lines, the valve linked; the 3.7 check (send `rc-def-…` if the mask is not 7; `vo-…`).
+**Then re-provision `SS-VC`:** `c2d` the `ss-v2-…` line in `2C`, or the `ss-vc-1` line in `1M1C` (the next id if sent before). Expect `IOTHUB: Starting BLE (valve=00:80:E1:27:F7:BB, BLE sensors=2)` (`1M1C`: `BLE sensors=1`), `BLE_VALVE: [INIT] Signal received. Starting BLE stack...`, the RADIO self-test line, the PHY lines, the valve linked; the 3.7 check (send `rc-def-…` if the mask is not 7; `vo-…`).
 
 **Send:** `B3_*`, the phone notes and screenshots (one per P-step failure, and the success page of each run).
 
 ### 6.4 B4: router outage and rejoin (P1, 50 min)
 
-**Start:** `SS-VC`, VA linked, the hub on the bench AP, no phone on the SoftAP, the cloud up 2 min or more.
+**Start:** `SS-VC`, VA linked, the hub on `<HS-A>` (the Android's hotspot is the router of this block: "bench AP off / on" is its switch, 3.3), no phone on the SoftAP, the cloud up 2 min or more. Write the hotspot's channel at every return: it may change, and the fallback SoftAP follows it. In `1M1C` every wet is `<BLE1>`, each after its last `leak=0`.
 
 #### CP7-R1: S-2 = T4-02 rows 1-4, protection with no Wi-Fi and no clock (P1, 7 min)
 
@@ -819,11 +990,11 @@ Bench AP Wi-Fi off; Ctrl+T Ctrl+R (an EN reset: the clock is lost, as at a power
 
 #### CP7-R2: S-3 = T4-03 rows 1-3, the rejoin (P1, 6 min)
 
-Bench AP on. **Expect:** `RADIO: RETRY pulse: BLE off for up to 1500 ms`, `APP_WIFI: router fallback: retrying the configured network (attempt <n>)`, `APP_WIFI: Connected! IP: <IP>` **≤ 40 s after the SSID reappears** (45 s still passes); `APP_WIFI: SoftAP tail after an automatic rejoin (no station on it) - it stops 0.5 s after the IP`; `IOTHUB: cloud admission deferred: SoftAP up - no TLS or DPS until it stops`; the driver's `wifi:mode : sta (<MAC>)` **(ESP-IDF)** at about 0.5-0.7 s; `APP_WIFI: SoftAP stopped (its servers too) <s> s after the IP` (about 0.6-1.3 s); `IOTHUB: cloud admitted <s> s after the IP (internal DMA free <X> B, largest <Y> B)` (about 1.5-3 s); `IOTHUB: Connected to Azure IoT Hub!` (≤ 5 s after the IP); `TELEMETRY_V2: Draining <n> offline event(s) before lifecycle...`, then the `lifecycle`. IoT Hub: R1's held events with real `ts` (≥ 1704067200), in order, before the `lifecycle`. Then `vo-…`.
+Bench AP on. **Expect:** `RADIO: RETRY pulse: BLE off for up to 1500 ms`, `APP_WIFI: router fallback: retrying the configured network (attempt <n>)`, `APP_WIFI: Connected! IP: <IP>` **≤ 40 s after the SSID reappears** (45 s still passes; on the hotspot, counted from the tap that turns it on, 3.3); `APP_WIFI: SoftAP tail after an automatic rejoin (no station on it) - it stops 0.5 s after the IP`; `IOTHUB: cloud admission deferred: SoftAP up - no TLS or DPS until it stops`; the driver's `wifi:mode : sta (<MAC>)` **(ESP-IDF)** at about 0.5-0.7 s; `APP_WIFI: SoftAP stopped (its servers too) <s> s after the IP` (about 0.6-1.3 s); `IOTHUB: cloud admitted <s> s after the IP (internal DMA free <X> B, largest <Y> B)` (about 1.5-3 s); `IOTHUB: Connected to Azure IoT Hub!` (≤ 5 s after the IP); `TELEMETRY_V2: Draining <n> offline event(s) before lifecycle...`, then the `lifecycle`. IoT Hub: R1's held events with real `ts` (≥ 1704067200), in order, before the `lifecycle`. Then `vo-…`.
 
 #### CP7-R3: a leak on the fallback SoftAP, and the RETRY cadence (P1, 10 min; T4-10 D1-D2)
 
-Bench AP off; wait 2 min. Wet `<BLE2>` (AP_IDLE): `leak=1` ≤ 20 s, the leak sequence, `TELEMETRY_V2: Offline — buffering <kind> event` and `OFFLINE_BUF: Stored event [ob_<nn>] (<n> bytes), <n> buffered`. Dry, clear. **Record** the RETRY spacing and each `APP_WIFI: WiFi Disconnected. Reason: 201`. **RETRY:** 30-35 s from each `APP_WIFI: WiFi Disconnected. Reason: 201` (the previous attempt's end: the retry counts from it, `app_wifi.c`) to the next `RADIO: RETRY pulse: BLE off for up to 1500 ms`; 38 s still passes (wifi_task's 1 s pass and the ≤ 2 s grant wait); start to start about 33-39 s (each attempt scans 2-3 s before its 201), recorded, not judged. A `APP_WIFI: router fallback: retry without a BLE pulse (<why>) - its connect runs beside BLE scanning` on every retry is a finding (once after a host reset is expected). Bench AP on; the R2 rejoin lines; the replay (`OFFLINE_BUF: Replayed [ob_<nn>] (<n> bytes)` in order, then `TELEMETRY_V2: Offline drain complete: <n> event(s) replayed`). `vo-…`.
+Bench AP off; wait 2 min. Wet `<BLE2>` (`1M1C`: `<BLE1>`) (AP_IDLE): `leak=1` ≤ 20 s, the leak sequence, `TELEMETRY_V2: Offline — buffering <kind> event` and `OFFLINE_BUF: Stored event [ob_<nn>] (<n> bytes), <n> buffered`. Dry, clear. **Record** the RETRY spacing and each `APP_WIFI: WiFi Disconnected. Reason: 201`. **RETRY:** 30-35 s from each `APP_WIFI: WiFi Disconnected. Reason: 201` (the previous attempt's end: the retry counts from it, `app_wifi.c`) to the next `RADIO: RETRY pulse: BLE off for up to 1500 ms`; 38 s still passes (wifi_task's 1 s pass and the ≤ 2 s grant wait); start to start about 33-39 s (each attempt scans 2-3 s before its 201), recorded, not judged. A `APP_WIFI: router fallback: retry without a BLE pulse (<why>) - its connect runs beside BLE scanning` on every retry is a finding (once after a host reset is expected). Bench AP on; the R2 rejoin lines; the replay (`OFFLINE_BUF: Replayed [ob_<nn>] (<n> bytes)` in order, then `TELEMETRY_V2: Offline drain complete: <n> event(s) replayed`). `vo-…`.
 
 #### CP7-R4: a leak at the pull: the leak task never waits for the MQTT stop (P1, 8 min; WP2b, 15k-10)
 
@@ -835,29 +1006,31 @@ Twice: bench AP off 2 min (no phone), then on. **Pass (each):** `allocfail` unch
 
 #### CP7-R6: reset #12 with the STA idle (P2, 6 min; X-5 idle, T4-10 D6)
 
-Bench AP off; wait for the fallback SoftAP; start the 10 s hold within 5 s after an `APP_WIFI: WiFi Disconnected. Reason: <n>` line (the confirm lands between two retries). Expect 5.2's reset lines; after the reboot **the setup portal** (`SoftAP up with no saved Wi-Fi credentials …`), not the fallback. Bench AP on; set Wi-Fi up from the iPhone (Connect, Finish). Write the boot time (the soak's SAS renewal counts from the day's last boot).
+Bench AP off; wait for the fallback SoftAP; start the 10 s hold within 5 s after an `APP_WIFI: WiFi Disconnected. Reason: <n>` line (the confirm lands between two retries). Expect 5.2's reset lines; after the reboot **the setup portal** (`SoftAP up with no saved Wi-Fi credentials …`), not the fallback. Bench AP on; set `<HS-A>` up from the iPhone (Connect, Finish). Write the boot time (the soak's SAS renewal counts from the day's last boot).
 
 **Send:** `B4_*`.
 
 ### 6.5 B5: the cloud and the WAN black-hole (P1, 100 min)
 
-**Start:** `SS-VC`, VA linked, the hub on the bench AP with its static lease, the cloud up 2 min or more, both DROP rules ready (3.3).
+**Start:** VA linked, the hub on `<HS-A>`, the cloud up 2 min or more. The Android's mobile-data switch is at hand, its own Wi-Fi off (3.3). With option A instead: the hub on the router with its static lease, both DROP rules ready.
+- **`2C`:** `SS-VC` (= `SS-V2`).
+- **`1M1C`:** first send `ss-v2-…` (its next id) to re-add `<BLE2>`, and wait for its `BLE_LEAK: eleak <BLE2> PHY learned: 1M (was unknown)` line and the 3.7 check. B5 then runs on `SS-V2` (N_MIXED: 2.4). At B5's end send `dec-1m-…` (its next id), the L6 lines again, so that B6 starts on `SS-VC`.
 
 #### CP7-C1: the black-hole check (P1, 3 min)
 
-3.3's check. Record: silent or fast; `<hub IP>` matched the last `APP_WIFI: Connected! IP: <IP>`; both rules listed.
+3.3's check. Record: silent or fast; the hotspot stayed on (no `APP_WIFI: WiFi Disconnected. Reason: <n>` at the switch); with option A, `<hub IP>` matched the last `APP_WIFI: Connected! IP: <IP>` and both rules were listed. **Fast, or the hotspot dropped:** LS-1 cannot run on this hotspot. Mark CP7-C2 and C3 `Blocked (no silent black-hole)`, go on with C4-C10 (mobile data on), and see question 15.
 
 #### CP7-C2: LS-1, a leak closes the valve within 200 ms during a WAN black-hole with Wi-Fi up; the D4 measurement (P1, 3 × 15 min; 15k-12, T6-21)
 
-**Set-up:** both DROP rules (or the WAN cable pulled), Wi-Fi up. T0 = the moment the outage starts (write it; press `d`).
+**Set-up:** the Android's mobile data off, its hotspot on (option A: both DROP rules, or the WAN cable pulled), Wi-Fi up. T0 = the moment the outage starts: the tap (write it; press `d`).
 
-1. **Wets:**
-   - **Run 1 (classification):** `<BLE1>` at T0 + 1 s, `<BLE2>` at T0 + 5 s, `<BLE4>` at T0 + 15 s (`<LORA1>` instead with a LoRa sensor). *(P2, CP7-C2b:* only after `IOTHUB: Disconnected.` and at least 90 s after T0, send `c2d '{"schema":"eflostop.cmd","ver":1,"id":"cp7-c2-late","cmd":"rules_config","payload":{"auto_close_enabled":true}}'` and `c2d '{"schema":"eflostop.cmd","ver":1,"id":"cp7-c2-exp","cmd":"valve_close"}' --expiry $(( ($(date +%s) + 30) * 1000 ))` (first check the flag with `az iot device c2d-message send --help`): the first is acked after the reconnect, the second never delivered (no `IOTHUB: C2D cmd='valve_close' ver=1 id='cp7-c2-exp'`). Send both at once after `IOTHUB: Disconnected.` (and ≥ 90 s after T0), and **keep the outage at least 60 s after the second send**, whatever step 2 allows; write the send time in the notes.)*
-   - **Runs 2 and 3 (in-stall):** wet nothing before T0 + 20 s; the first wet is `<BLE1>`, within 1 s after the first `IOTHUB: SNAP trigger=<t>` line at or after T0 + 20 s; then `<BLE2>` 5 s later and `<BLE4>` 15 s later. Run 2: press `d` once during the stall (it answers at once). **Run 3:** only after `IOTHUB: Disconnected.` and at least 90 s after T0, `desired '{"hub_name":"CP7 TW1"}'` (TW-1, 15k-14(g)(1)).
+1. **Wets** (two sensors, no LoRa: two wets a run, where CP6 planned three):
+   - **Run 1 (classification):** `<BLE1>` at T0 + 1 s, `<BLE2>` at T0 + 5 s. *(P2, CP7-C2b:* only after `IOTHUB: Disconnected.` and at least 90 s after T0, send `c2d '{"schema":"eflostop.cmd","ver":1,"id":"cp7-c2-late","cmd":"rules_config","payload":{"auto_close_enabled":true}}'` and `c2d '{"schema":"eflostop.cmd","ver":1,"id":"cp7-c2-exp","cmd":"valve_close"}' --expiry $(( ($(date +%s) + 30) * 1000 ))` (first check the flag with `az iot device c2d-message send --help`): the first is acked after the reconnect, the second never delivered (no `IOTHUB: C2D cmd='valve_close' ver=1 id='cp7-c2-exp'`). Send both at once after `IOTHUB: Disconnected.` (and ≥ 90 s after T0), and **keep the outage at least 60 s after the second send**, whatever step 2 allows; write the send time in the notes.)*
+   - **Runs 2 and 3 (in-stall):** wet nothing before T0 + 20 s; the first wet is `<BLE1>`, within 1 s after the first `IOTHUB: SNAP trigger=<t>` line at or after T0 + 20 s; then `<BLE2>` 5 s later. Run 2: press `d` once during the stall (it answers at once). **Run 3:** only after `IOTHUB: Disconnected.` and at least 90 s after T0, `desired '{"hub_name":"CP7 TW1"}'` (TW-1, 15k-14(g)(1)).
 2. Hold the outage at least 2 min after the last wet (run 1: until T0 + 150 s or later).
 3. **Expect, the first wet:** `leak=1`; `RULES_ENGINE: LEAK INCIDENT latched by …`; `RULES_ENGINE: AUTO-CLOSE + RMLEAK triggered by …`; `Writing RMLEAK=1`, then `Writing Valve=0`. **Each later wet:** `leak=1` and `IOTHUB: Event: BLE Leak <MAC> leak=1 batt=<b>` only.
 4. From `cloud_tx`, when its stalled write times out: `IOTHUB: Disconnected.` and `TELEMETRY_V2: MQTT connected = false`; `IOTHUB: Pub <kind> took <s> s (msg_id=<id>)`; `TELEMETRY_V2: Pub <kind> failed (msg_id=<id>)`; `TELEMETRY_V2: Pub <kind> not confirmed (msg_id=<id>) - kept for replay, a duplicate is possible`; for the items still queued `TELEMETRY_V2: Offline — buffering <kind> event` and `OFFLINE_BUF: Stored event [ob_<nn>] (<n> bytes), <n> buffered`.
-5. Remove both rules (or re-plug the WAN) and confirm. Expect the reconnect; `TELEMETRY_V2: Draining <n> offline event(s) before lifecycle...` and `OFFLINE_BUF: Replayed [ob_<nn>] (<n> bytes)` in order; `TELEMETRY_V2: Pub lifecycle: {…}`; `IOTHUB: Twin reported (<n>): {…}`; the live events; a second `Twin reported` after the twin GET; exactly one `boot` or `fast` snapshot. **Run 3 (TW-1):** `IOTHUB: Twin GET requested (rid=<n>)`, `IOTHUB: Twin GET: applying desired properties from full document`, `IOTHUB: Twin: hub_name = 'CP7 TW1'`, a `Twin reported` with the new name; then `twin tw1`. **Pass:** the last `Twin reported` and Azure's reported twin show "CP7 TW1". Put the name back (`desired '{"hub_name":"<original or empty>"}'`).
+5. The Android's mobile data on (option A: remove both rules, or re-plug the WAN, and confirm). Expect the reconnect; `TELEMETRY_V2: Draining <n> offline event(s) before lifecycle...` and `OFFLINE_BUF: Replayed [ob_<nn>] (<n> bytes)` in order; `TELEMETRY_V2: Pub lifecycle: {…}`; `IOTHUB: Twin reported (<n>): {…}`; the live events; a second `Twin reported` after the twin GET; exactly one `boot` or `fast` snapshot. **Run 3 (TW-1):** `IOTHUB: Twin GET requested (rid=<n>)`, `IOTHUB: Twin GET: applying desired properties from full document`, `IOTHUB: Twin: hub_name = 'CP7 TW1'`, a `Twin reported` with the new name; then `twin tw1`. **Pass:** the last `Twin reported` and Azure's reported twin show "CP7 TW1". Put the name back (`desired '{"hub_name":"<original or empty>"}'`).
 6. Dry everything, clear, `vo-…`, wait 2 min. Next run.
 
 **Pass during the outage:** the first wet: Δa **≤ 200 ms**, Δc within the L-spread; each later wet: `leak=1` → `IOTHUB: Event: BLE Leak …` ≤ 200 ms; no rules line held until a `Pub … took` line; no `TELEMETRY_V2: TX queue full …`. **In-stall:** a first wet counts as in-stall only if a `Pub … took` line's span (its ESP time minus the time it gives) covers its `leak=1`; at least 2 in-stall first wets among runs 2, 3 and C3 (else Claude names a 12 min repeat run). **After the restore:** the first copy of each event the UART shows published or stored arrives in the UART's build order; each sensor's last event matches the UART's last; byte-identical duplicates allowed (keep the first). **Classify a missing event** before calling it a failure: `OFFLINE_BUF: Buffer full, oldest event overwritten` first (the ring holds 16); a `Pub event:` line before `Disconnected.` with no `not confirmed` or `Stored event` line for it is R5 (the PUBACK-window loss; run 1's T0 + 1 s and + 5 s wets are likely that); in outages under 30 s first copies can swap (R6).
@@ -866,7 +1039,7 @@ Bench AP off; wait for the fallback SoftAP; start the 10 s hold within 5 s after
 
 #### CP7-C3: a quiet hub in a black-hole (P1, 5 min; 15k-14(a))
 
-Both rules, no other traffic; wet `<BLE1>` at T0 + 45 s: Δa ≤ 200 ms, Δc within the L-spread; esp-mqtt ends the session by itself within about 30-90 s (`IOTHUB: Disconnected.`). Restore, dry, clear, `vo-…`. It counts as an in-stall sample when a `Pub … took` line spans the wet.
+The Android's mobile data off (or both rules), no other traffic; wet `<BLE1>` at T0 + 45 s: Δa ≤ 200 ms, Δc within the L-spread; esp-mqtt ends the session by itself within about 30-90 s (`IOTHUB: Disconnected.`). Restore, dry, clear, `vo-…`. It counts as an in-stall sample when a `Pub … took` line spans the wet.
 
 #### The contract checks (CP7-C4 … C9; send nothing wet meanwhile)
 
@@ -980,7 +1153,7 @@ Send step 5's three messages last and step 6 straight after them (between them t
 
 On every IoT Hub capture: `python docs\telemetry\validate_capture.py <capture>` (VAL-15 step 1) and Claude's contract checker with the UART and `sent_*.tsv`: duplicates byte-identical; every UART `Pub event` found at IoT Hub or classified; at most one `boot`/`fast` snapshot per connect; every ack matched to its command with byte-exact texts; the `data.rules` and `gateway.name` timelines; **T5-10** (every `Writing RMLEAK=<v>` followed by its `[DATA] RMLEAK=<v>` read-back); the twin-order items of 3.8. **Pass:** 0 FAIL after classification.
 
-**Send:** `B5_*`, the T0 of each run, every `twin_*.json`.
+**Send:** `B5_*`, the T0 of each run, every `twin_*.json`. (`1M1C`: then `dec-1m-…` for B6, 6.5's start.)
 
 ### 6.6 B6: the valve power cycles against the statistical gate (P1, 65 min; test plan 7.6; HANDOFF 15u B2)
 
@@ -1006,7 +1179,7 @@ On every IoT Hub capture: `python docs\telemetry\validate_capture.py <capture>` 
 
 ### 6.7 End of day (15 min)
 
-1. **T4-14's grep** (5 min): in PowerShell in the day folder, for the bench AP's and the home router's passwords (both went through the portal), typed at the prompt, never written to a file; report only the counts:
+1. **T4-14's grep** (5 min): in PowerShell in the day folder, for both hotspots' passwords and every wrong password typed on the page (D3b, G5, G7: all went through the portal), each typed at the prompt, never written to a file; report only the counts:
    ```powershell
    $s = Read-Host -AsSecureString "password"
    $p = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))
@@ -1026,23 +1199,35 @@ Every later block starts with 3.7's check and ends with 3.5's hand-off. Procedur
 ### 7.1 Day 2: carry-over, the 1M cases, G-CNA in full
 
 - **D2-1:** the soak's end; anything cut from day 1; **T2-01** (smoke S-7; the valve's Critical voltage, question 9).
-- **D2-2, the 1M sensor (`SS-V4`):** after a boot, record `PHY table loaded: 4 of 4 sensor(s) known, 1 on 1M`. G-CNA S2 ×3 per phone (AP_K1M throughout: it has no mode line of its own, and the `RADIO: Mode AP_IDLE …` and `Mode SERVE …` lines still print with their own geometry, but the row is AP_K1M; `[SUMMARY]` shows `<BLE1M>`'s adverts with `M`); wet `<BLE1M>` once in AP_IDLE and once in SERVE (≤ 20 s / ≤ 35 s); one S2 run with a sensor whose PHY is unknown (just re-added: AP_K1M for 10 min, B3).
-- **D2-3, G-CNA full** (test plan 7.1): 10 runs per device per state for S1, S2 (with P-6/P-8/P-9 blocking), S3, on every phone class at hand; P-6 both ways per device; the wrong-then-right ×10 per phone; the second phone within 45 s; P-7 (open network, `Café 5`, an emoji SSID, a trailing-space password, 8/63/64-hex passwords, a 32-character SSID, a wrong password, Latin-1 neighbours); P-10, P-12; resets #13-#17 (idle ×2, connecting ×3). **S1 also picks the httpd socket cap** (4, 5 or 7: needs builds; record page loads with 5).
-- **D2-3, the laptop:** P-13 (`dig @10.10.0.1 …` or `python dns_check.py`), P-14's SoftAP half (`curl -I`, `--compressed`, identity → 406, foreign `Host` → 302 with `Connection: close`, 20 parallel connections), the idle and connecting Forget (`curl.exe -X DELETE http://10.10.0.1/connect.json`; idle: `wifi_manager: ORDER_DISCONNECT_STA: the STA is not connected - the saved network is erased now`), G8x X-1 … X-7 (X-1: G8 ×10, Submit with the router off; X-2: a Connect during a router retry ×10; X-4: a switch in the tail and back), G-FAULT F-3 … F-5 (DNS fuzz, header fuzz, the `%` fuzz), F-2 with a second ESP32. Afterwards delete the laptop's `WiFi-Hub-69C8` profile.
+- **D2-2, the 1M sensor** (`1M1C`: `SS-V2`; in `2C` only with a borrowed 1M sensor, question 14). **First, in `1M1C`, the day-1 steps a one-sensor `SS-VC` could not run:**
+  - CP7-L8's second sensor: `<BLE2>` heard in NORMAL_LR ≤ 60 s, with the valve unpowered and `<BLE1>` wet.
+  - CP7-D4's second sensor: `<BLE2>` in LR_AP ≤ 35 s.
+  - The leak-response rows ignore a 1M sensor (`radio_policy_exec_row()`), so these are the day-1 checks. The scan lines outside the leak response read N_MIXED and AP_K1M instead.
+
+  Then, after a boot, record `PHY table loaded: 2 of 2 sensor(s) known, 1 on 1M`. G-CNA S2 ×3 per phone (AP_K1M throughout: it has no mode line of its own, and the `RADIO: Mode AP_IDLE …` and `Mode SERVE …` lines still print with their own geometry, but the row is AP_K1M; `[SUMMARY]` shows `<BLE1M>`'s adverts with `M`); wet `<BLE1M>` once in AP_IDLE and once in SERVE (≤ 20 s / ≤ 35 s); one S2 run with a sensor whose PHY is unknown (just re-added: AP_K1M for 10 min, B3).
+- **D2-3, G-CNA full** (test plan 7.1): 10 runs per device per state for S1, S2 (with P-6/P-8/P-9 blocking; P-8 on a hotspot on channel 1 or 6, 3.3), S3, on every phone class at hand (the hotspot is a phone not under test); P-6 both ways per device; the wrong-then-right ×10 per phone; the second phone within 45 s; P-7 (open network, `Café 5`, an emoji SSID, a trailing-space password, 8/63/64-hex passwords, a 32-character SSID, a wrong password, Latin-1 neighbours); P-10, P-12; resets #13-#17 (idle ×2, connecting ×3). **S1 also picks the httpd socket cap** (4, 5 or 7: needs builds; record page loads with 5).
+- **D2-3, the laptop** (joined to `WiFi-Hub-69C8`; Python only, A.1 and A.4; `dig` and `curl` only if at hand):
+  - **P-13:** `python dns_check.py` (the six queries), then `python portal_check.py p13odd` (the 1, 11 and 600 B datagrams, then a live check). Or `dig @10.10.0.1 …`.
+  - **P-14's SoftAP half:** `python portal_check.py p14`, which covers HEAD, gzip, identity → 406, foreign `Host` → 302 with `Connection: close`, the assets and 20 parallel connections. Or `curl -I`, `--compressed`, ….
+  - **The idle and connecting Forget:** `python portal_check.py forget`, or `curl.exe -X DELETE http://10.10.0.1/connect.json`. Idle: `wifi_manager: ORDER_DISCONNECT_STA: the STA is not connected - the saved network is erased now`.
+  - **G8x X-1 … X-7:** X-1 is G8 ×10, a Submit with the bench AP off; X-2 a Connect during a router retry ×10; X-4 a switch in the tail and back; X-7 is `python portal_check.py f5`.
+  - **G-FAULT F-3 … F-5:** `python portal_check.py f3` (about 70 s), `f4`, `f5`. Add `--connect` once for the cases the hub accepts: each starts a connect attempt to `cp7-no-such-net`, which fails (A.4).
+  - **F-2** with a second ESP32 (question 5).
+  - Afterwards delete the laptop's `WiFi-Hub-69C8` profile.
 
 ### 7.2 Day 2: valve and radio gates
 
 - **G6b ×20** (test plan 7.4): cut the valve's power within about 0.2 s of `[CLAIM] Connecting to the valve: pulse up to <N> ms`, on again after 2 s; the relink is power-on → CONNECT (`GAP CONNECT EVENT` with `[CONNECT] status=0`; 6.6), ≤ 10 s with at most 1 of 20 over (p_loss estimated as in 6.6); CONNECT → `SETUP COMPLETE` ≤ 25 s; 0 `[SCAN] Already connected`; with a CLOSE pended, RMLEAK first and power-on → `[DATA] Valve State=0 (CLOSED)` ≤ 30 s; the exempt `I2:` hits counted (2.2).
-- **G6** (test plan 7.6): a dead valve during a leak with a phone on the portal, the router off then on: LR_AP, a phone's lease ≤ 33 s after the incident, the cloud alert after the router returns, the 600 s cap, then the relink, RMLEAK first. **"Linked ≤ 5 s" is power-on → CONNECT, judged per mode once there are 20 relinks of that mode** (with L9's and G6b's): NORMAL_LR at most 2 of 20 over 5 s; LR_AP and past the cap recorded, not judged (the model's chance of ≤ 2 of 20 at p_loss 0.3 is 0.91 in NORMAL_LR, 0.35 in LR_AP, 0.18 past the cap). Every one: power-on → `Applying pending RMLEAK command=1` → `[DATA] Valve State=0 (CLOSED)` ≤ 30 s (E-09's ceiling). **The starvation guard under a leak response (LEAK-2, `1fd5579`):** after the cap, with the valve off and a third sensor's battery out 250 s or more (AP_IDLE or SERVE): `RADIO: Sensor-starvation guard: a sensor unheard 250 s or more (on Coded) - AP_K1M (a leak response: the valve's 1M slot stays) for 110 s`, and the claim at power-on not held off by the guard; refit the battery within 9 min.
+- **G6** (test plan 7.6): a dead valve during a leak with a phone on the portal, the router (the hotspot) off then on: LR_AP, a phone's lease ≤ 33 s after the incident, the cloud alert after the router returns, the 600 s cap, then the relink, RMLEAK first. **"Linked ≤ 5 s" is power-on → CONNECT, judged per mode once there are 20 relinks of that mode** (with L9's and G6b's): NORMAL_LR at most 2 of 20 over 5 s; LR_AP and past the cap recorded, not judged (the model's chance of ≤ 2 of 20 at p_loss 0.3 is 0.91 in NORMAL_LR, 0.35 in LR_AP, 0.18 past the cap). Every one: power-on → `Applying pending RMLEAK command=1` → `[DATA] Valve State=0 (CLOSED)` ≤ 30 s (E-09's ceiling). **The starvation guard under a leak response (LEAK-2, `1fd5579`):** after the cap, with the valve off, `<BLE1>` wet (the leak response) and `<BLE2>`'s battery out 250 s or more (AP_IDLE or SERVE): `RADIO: Sensor-starvation guard: a sensor unheard 250 s or more (on Coded) - AP_K1M (a leak response: the valve's 1M slot stays) for 110 s`, and the claim at power-on not held off by the guard; refit the battery within 9 min.
 - **The remaining power cycles** (`pc_cycles.ps1 -Start 61`, or `-Start 31` after a cut), same set-up and rules as 6.6.
 - **CP7-L8b ×3 more, and its dry variant:** as L8b; then dry `<BLE1>` and power-cycle the valve (PSU off 10 s) right after `RULES_ENGINE: All sensors clear — auto-clear timer started (10s)`. Expect the AUTO-CLEAR with its clear pended, then at the relink the owed clear (`RULES_ENGINE: RMLEAK clear read back - the hub's own clear, not a valve override`, or `RULES_ENGINE: Reconnected: valve RMLEAK active, hub incident clear - RMLEAK clear owed by the hub, not re-latching`), or, if the latch is still held at the relink, `RULES_ENGINE: Reconnected: hub incident active, valve closed + RMLEAK clear — re-asserting`; **never** an override line. A cold-booted valve that reads OPEN goes to the valve firmware owner.
 - **Rules regressions not run on day 1:** T3-15 (a genuine valve-button press still starts the window; write each press time), T3-17 Part A (the valve shielded), T5-15 / T6-18 (`override_enable` with the valve unpowered, then a leak within 2 s: Δa ≤ 200 ms; keep the PSU off until `RULES_ENGINE: override_enable: valve unreachable after reconnect window`, question 11), T5-07, T6-15 (a sensor flapping every 15-20 s for 15 min), **T3-06 with the old valve wet during a live incident** (LEAK-WB-1: the new valve gets no leak-response treatment until a source reports again; it is still closed at its first link while a sensor is wet).
 - **T5-15b, question 11's hazard** (run once before its fix to record it, then on the fix): the valve unpowered, nothing wet, no incident. Power the valve on; about 5 s after its `GAP CONNECT EVENT` (its GATT setup takes 10-20 s more) send `{"schema":"eflostop.cmd","ver":1,"id":"t5-15b-1","cmd":"override_enable"}`; as soon as `RULES_ENGINE: override_enable: valve not ready — reconnecting (<=10000ms)` prints, wet `<BLE1>` (press `d`); `<BLE1>`'s `leak=1`, then `SETUP COMPLETE`, must both land inside the 10 s wait (record them; else redo). **Before the fix** (the hazard): `LEAK INCIDENT latched`, then `RULES_ENGINE: OVERRIDE WINDOW STARTED …`, `Writing RMLEAK=0`, `Writing Valve=1` with `<BLE1>` wet: record, then `oc-…` at once. **After the fix:** `RULES_ENGINE: override_enable: no active incident to override` (ack "No active leak to override. Use the normal Open Valve control."), no `OVERRIDE WINDOW STARTED`, and the valve closed with `Writing RMLEAK=1` before `Writing Valve=0`.
 - **D4b (optional, P3; LR-CLAIM-GAP, 15w):** in LR_AP with the valve heard but kept unlinkable (shielded, or powered at the edge of range), the iPhone taps Connect with a wrong password every 8-15 s for 3 min. Record the first claim after `[LR] Leak response pending …` (≤ about 3 s), the claim-to-claim gaps (≤ about 45 s), and RMLEAK before CLOSE at the link.
-- **G3b** (test plan 7.5): 30 router power cycles, half with a phone on the fallback SoftAP at the return: no downward heap trend over 1 KB, 0 escape lines, admission ≤ 5 s after the SoftAP stops.
-- **G2** (RC-4): 20 drips at random times per row, each row named, the valve linked unless stated: N_CODED (`SS-VC`) ≤ 5 s, N_MIXED (a 1M sensor listed) and N_HUNT (valve unlinked) within their model p99 (Claude gives the figures), AP_IDLE ≤ 20 s, SERVE ≤ 35 s; **pass per row: at least 19 of 20 within the bound, none over 60 s**; CLOSE within 2 s of `leak=1` where the valve is linked. **And with the valve unpowered and one sensor wet** (a second sensor dripped), 10 drips each: NORMAL_LR ≤ 60 s, LR_AP ≤ 35 s.
+- **G3b** (test plan 7.5): 30 router power cycles (the hotspot off and on, or a router), half with a phone on the fallback SoftAP at the return: no downward heap trend over 1 KB, 0 escape lines, admission ≤ 5 s after the SoftAP stops.
+- **G2** (RC-4): 20 drips at random times per row, each row named, the valve linked unless stated: N_CODED (`SS-VC`) ≤ 5 s, N_MIXED (a 1M sensor listed: `1M1C`, or question 14) and N_HUNT (valve unlinked) within their model p99 (Claude gives the figures), AP_IDLE ≤ 20 s, SERVE ≤ 35 s; **pass per row: at least 19 of 20 within the bound, none over 60 s**; CLOSE within 2 s of `leak=1` where the valve is linked. **And with the valve unpowered and one sensor wet** (`<BLE1>` wet, `<BLE2>` dripped; in `1M1C` on `SS-V2`, since the leak-response rows ignore a 1M sensor), 10 drips each: NORMAL_LR ≤ 60 s, LR_AP ≤ 35 s.
 - **G5:** a phone forget/rejoin loop for 5 min while a sensor is wet: ≤ 2 assists per 60 s per phone, every pulse ≤ 2.8 s with its recovery, the rejoin ≤ 40 s.
-- **G7:** list completeness (P-5 data), a router channel change (rejoin ≤ 75 s), a hidden SSID, a 10 s router blip ×10 (rejoin ≥ 95 % per attempt).
+- **G7:** list completeness (P-5 data), a router channel change (rejoin ≤ 75 s), a hidden SSID, a 10 s router blip ×10 (rejoin ≥ 95 % per attempt). On the hotspots, a channel change is a hotspot restart that lands on another channel, and a hidden SSID is the Android's "hidden network" option. A router does both more surely.
 
 ### 7.3 Day 3-5: G1 on the lab image (WP7; HANDOFF 15v; test plan 7.7)
 
@@ -1057,14 +1242,17 @@ Every later block starts with 3.7's check and ends with 3.5's hand-off. Procedur
 
 | Soak | Image, set | Pass |
 |---|---|---|
-| Overnight day 1 (5.4) | CP7, `SS-V4`, 300 s | no reboot, flat heap, the SAS renewal reconnects, `[SUMMARY]` within bounds |
-| G4 NORMAL 24 h | CP7 (or the W3+W4 variant, 7.6), `SS-V4` | 0 false offlines; `[SUMMARY]` Z ≥ 90; no `Duty watchdog`; flat heap; decides `RP_JITTER_MS` with 1 s scans (or the 3 s fallback) |
-| AP_IDLE 24 h | CP7, router off, 3 dry sensors, the valve unpowered | 0 false offlines; `[SUMMARY]` within I2 and I2b; no `Duty watchdog`; flat heap |
+| Overnight day 1 (5.4) | CP7, `SS-V2`, 300 s, on the soak's network (question 8) | no reboot, flat heap, the SAS renewal reconnects, `[SUMMARY]` within bounds |
+| G4 NORMAL 24 h | CP7 (or the W3+W4 variant, 7.6), `SS-V2` | 0 false offlines; `[SUMMARY]` Z ≥ 90; no `Duty watchdog`; flat heap; decides `RP_JITTER_MS` with 1 s scans (or the 3 s fallback) |
+| AP_IDLE 24 h | CP7, its network off (the hotspot off, or saved on a network that is not there), both sensors dry, the valve unpowered | 0 false offlines; `[SUMMARY]` within I2 and I2b; no `Duty watchdog`; flat heap |
 | VAL-14 ≥ 19 h | the RC | EC-6 |
 | T6-12 ≥ 19 h | the RC, sensors-only, spare hub | EC-6 |
 
-### 7.5 Upgrade and rollback (VAL-02, VAL-03; 1.5 h)
+### 7.5 Upgrade and rollback (VAL-02, VAL-03; 1.5 h): **on the spare hub only** (question 7)
 
+- **The spare, set up for it** (7.7): every flash below uses `-p <COMS>`, and every capture is the spare's.
+  - Its device set for runs A-D is `<BLE1>`, `<BLE2>` and **VB** (`<VALVE_B>`), provisioned with `DEV=<GW2> c2d …`. VA stays the main hub's.
+  - The main hub hears the same two sensors. Every wet there also closes VA, so run 7.5 while the main hub's tests are idle.
 - **The 2.1.3 image:** a worktree at `ae4d59a` built with **`..\sdkconfig.pre_cp7`** (UPG-1; never the project's regenerated `sdkconfig`), test plan 0.4: `.bss` 36,120 B, `.data` 21,556 B, `.bin` 1,502,240 B. Flash with `app-flash` only; **never `erase-flash`**.
 - **VAL-02:** T6-03 run A (devices, metadata, name, interval, opt-out, an override), run B (a latched incident), run C (a button override with a real expiry), **run D (the PHY table, UPG-2):** the first CP7 boot over 2.1.3 has no `PHY table loaded` line, runs N_MIXED, learns each PHY and prints `PHY table saved: …`; a reboot prints `PHY table loaded: N of N sensor(s) known, M on 1M`. Flash CP7 over 2.1.3 without the reset (4.4's esptool line with `--after no_reset`, here `write_flash 0x20000 eFloStop_WiFiHub_idf1.bin` for an app-only flash), so that run D's first boot is the captured one.
 - **VAL-03:** T6-04; after the rollback 2.1.3 boots with the `ble_phy` namespace present (`PROVISIONING: Loaded existing config from NVS`, same counts, no NVS error); after re-flashing CP7, `PHY table loaded: N of N …` (the table survived).
@@ -1075,11 +1263,46 @@ Every later block starts with 3.7's check and ends with 3.5's hand-off. Procedur
 
 - **Preconditions (section 2):** CP7 built, VAL-01 passed, `sdkconfig` `9E13270C…`; **CP7's baselines from days 1-2:** M-heap (4.5), `idf.py size`, G-CNA S1/S2 p90 per step and phone, TLS and DPS times (boot, 10 router power cycles, a first commissioning with DPS on the spare hub, a SAS renewal, a full snapshot), LS-1, 30 min of `[SUMMARY]` adverts per sensor, T6-11 (`cloud_tx` at 5,120 B).
 - **Order:** the pool-diagnostic baseline (5.0; worktree + `gm_nimble_pool_diag.patch`: `MONITOR: WP9 nimble pools, lowest free/blocks: …`), then W4 and W3 (BLE bench: G6b ×20, P11, P14, VAL-01, adverts ±5 %, a shared 24 h G4 soak), W2 and W1 (phones: G-CNA p90 within +20 %; W1 moves DIRAM `.text` to about 95,800 B), W5 (with the 100 power cycles, 0 `rc=6`), W8 only after T6-11 shows ≥ 1,536 B free. **W6 never** (it removes the hub's receipt of every valve notification, WP9-ADV-1); **W7 skip** (frees 0 B).
+- **Which hub:** every variant runs on the main hub (an app flash, NVS kept), except its first commissioning with DPS (the cache cleared) and its full hub's snapshot: those run on the spare, with the same variant flashed there (`$port = '<COMS>'`, 7.7).
 - **Every variant:** the recipe of section 4 with `$port = 'COM30'`; the variant `sdkconfig` hash of its table; M-build, M-size, M-boot, M-heap; "pays" = the median `idma: free` rises by at least half the estimate (your call, 15x item 13); landing per line only with your approval (section 7).
 
-### 7.7 The spare-hub lane (or the main hub with your OK, question 7)
+### 7.7 The spare-hub lane (question 7: the second hub; never the main hub)
 
-**Two items here are RC gates (RC-4b):** a DPS registration on the new TLS settings (2 KB records, no kept peer certificate: a combination no IDF 5.5.1 CI configuration runs, 15q; DPS runs at every new install and every `decommission` `all`) and the full hub's snapshot (its 27 KB cJSON tree and 8.6 KB print block). **Without a spare hub, and without question 7's OK for a `decommission` `all` on the main hub (it then registers with DPS again), they cannot run and they block the RC.** The DPS pass: `DPS: Submitting registration for '<id>'...`, `DPS: Assigned hub=<host> device=<id>`, then `IOTHUB: Connected to Azure IoT Hub!`, with no esp-tls or mbedTLS error.
+**Every destructive step runs here and only here:** `erase-flash`, `decommission` `all`, upgrade and rollback (7.5), and the tests built on them:
+- T4-06 (it erases provisioning), T6-02, T6-10 (it starts and ends with `decommission` `all`);
+- VAL-13 and its T6-07 and T6-08 (2.1.3, then CP7, on the same hub; T6-08 starts each run with `decommission` `all`; RC-5): both images on the spare, with its own device set (VB in VA's place);
+- G-FAULT F-6 (an NVS fill);
+- the `decommission` `all` runs and large-hub provisions of the bench-only images (T6-11's, the fault image's run (e): 7.8) and every first commissioning with DPS of WP9's variants (7.6), each with that image flashed here;
+- any factory-like reset.
+
+**Two items here are RC gates (RC-4b):**
+- **A DPS registration on the new TLS settings:** 2 KB records and no kept peer certificate, a combination no IDF 5.5.1 CI configuration runs (15q). DPS runs at every new install and every `decommission` `all`.
+- **The full hub's snapshot:** its 27 KB cJSON tree and 8.6 KB print block.
+
+The DPS pass: `DPS: Submitting registration for '<id>'...`, `DPS: Assigned hub=<host> device=<id>`, then `IOTHUB: Connected to Azure IoT Hub!`, with no esp-tls or mbedTLS error.
+
+**The spare's flash and identity (its first session, about 30 min).**
+1. **Its own captures:**
+   - its USB port `<COMS>`; UART files `S<n>_<HHMM>_<scope>_uart.txt`;
+   - an IoT Hub monitor of its own (3.4's command with `-d <GW2>`, into `S<n>_<HHMM>_<scope>_iothub.txt`);
+   - `DEV=<GW2> c2d …` and `DEV=<GW2> twin …` (3.6), which log to `sent_<GW2>.tsv`.
+2. **Flash CP7 from the project's `build\`** (built in B0), for the first commissioning with DPS (15k-8(a) = G0-C). **`erase-flash` is allowed here only.** Plug the spare in only while the main hub's tests are idle, and erase it at once: its old image boots on USB power and may still list VA or `<BLE1>`/`<BLE2>`. In T1:
+   ```powershell
+   cd build; python -m esptool --chip esp32s3 -p <COMS> -b 460800 erase_flash; python -m esptool --chip esp32s3 -p <COMS> -b 460800 --before default_reset --after no_reset write_flash '@flash_args'; cd ..
+   ```
+   esptool prints the chip's `MAC:` (the STA MAC): `<GW2>` is `GW-` and that MAC in capitals without colons. Start the spare's IoT Hub monitor with it now (item 1), and confirm it at the boot (item 3). Then `idf.py -p <COMS> monitor --no-reset --timestamps --timestamp-format "%Y-%m-%d %H:%M:%S.%f"`, the log on (Ctrl+T Ctrl+L), and Ctrl+T Ctrl+R: its first boot.
+3. **Its identity, from that boot** (write them in `spare_identity.md` in the day folder, and `<GW2>` and `<COMS>` into 3.2):
+   - `app_init: App version:      2.1.4` and the ELF SHA256 **(ESP-IDF)**;
+   - `HUB_IDENT: Gateway ID : <GW2>` and `HUB_IDENT: WiFi STA MAC: <MAC>`;
+   - `APP_WIFI: AP SSID: <ssid>`;
+   - `APP_WIFI: SoftAP up with no saved Wi-Fi credentials (setup portal) - BLE scanning, if any, stays on beside it`, with no `RADIO:` line (nothing provisioned).
+4. **S1 and DPS:** a phone sets a hotspot up on its portal; the other phone is that hotspot. Expect `DPS: No cached assignment, performing DPS registration...`, then the DPS pass above. Record the time from the IP to `DPS: Assigned …` and on to `Connected to Azure IoT Hub!`: G-M's DPS baseline (7.6).
+   - **Also into `spare_identity.md`:** the `DPS: Assigned hub=<host> device=<id>` line. `<id>` is the spare's IoT Hub device ID (expected `<GW2>`) and `<host>` its hub (expected `resi-apex-iot-dev.azure-devices.net`, the `-n resi-apex-iot-dev` of 3.4). If either differs, every `-d`, `-n` and `DEV=` for the spare uses the assigned values: tell Claude.
+   - Then, once: `az iot device c2d-message purge -n "$HUB" -g "$RG" -d <GW2>` (anything queued for that ID from before).
+5. **Keep it apart from the main hub's bench:**
+   - VA is never provisioned on the spare.
+   - A sensor listed on both hubs makes every wet act on both, and the main hub closes VA.
+   - The spare stays off whenever it is not in use.
 
 | Item | What | CP7 change |
 |---|---|---|
@@ -1091,8 +1314,11 @@ Every later block starts with 3.7's check and ends with 3.5's hand-off. Procedur
 | T6-02 | a power cut during `decommission` `all` | destructive |
 | T6-12 | the sensors-only ≥ 19 h soak | on the RC |
 | G-FAULT F-6 | NVS full while the portal forgets a network, then the reset | destructive (fills the default `nvs` partition) |
+| VAL-02, VAL-03 (7.5) | upgrade from 2.1.3 and rollback to it | spare only (question 7); its device set `<BLE1>`, `<BLE2>`, VB |
 
 ### 7.8 Bench-only images (each in its own worktree at `b651701`, with CP7's `sdkconfig` copied in first, never shipped; flash CP7 back after each)
+
+**Which hub:** the main hub (`-p COM30`, an app flash, NVS kept), except every `decommission` `all` these images run and every large-hub provision (T6-11's T6-10 payloads and its decommission-all and re-provision, the fault image's run (e); 15k items 15-16): those run on the spare, with the same image flashed there (7.7).
 
 - **T6-11 first** (test plan T6-11, `2.1.4-hwm`): every task ≥ 512 B free, `iothub_task` ≥ 2 KB, **`cloud_tx` ≥ 1 KB** (below it raise to 6,144 B before release; ≥ 1,536 B lets W8 trim it), `ble_leak_scan` (3,072 B) after a JOIN or SUBMIT pulse, a claim, a `PHY table saved` and a `[SUMMARY]`; `wifi_manager`, `wifi_task`, `httpd`, `sys_evt`, the NimBLE host, the default event loop.
 - **The hold image** (15k-17 at CP7's commit; 15q; **a gate: 2.5 and RC-3**, not optional): the kept reports and the owed purge (flap the valve probe 4+ times inside a ≥ 1 s rules hold, then wet a sensor: `LEAK INCIDENT latched`, `Writing RMLEAK=1` before `Writing Valve=0`, no `RULES_ENGINE: Rules lock busy - … is lost`); a valve swap during a hold prints `RULES_ENGINE: Valve replaced: …` once and the new dry valve is not closed at its first link. It has no `MANUAL_TEST_PLAN.md` test ID yet (10.3), so EC-2 does not count it: this plan's rows do.
@@ -1124,6 +1350,11 @@ The P0 DEC subset (DEC-06, 07, 09, 11 in full, 12, 13, 14, 15, 16), T2 (T2-04, 0
 15. **One 1 s admission hold right after a SoftAP stop**, and a second STOP_AP with no second `SoftAP stopped` line, are expected.
 16. **Accepted by decision:** `ble_leak_scan` at priority 6; the 12 KB outbox limit; the 500 ms settle after an AP stop. **Pending your decision** (15x item 8; recommended: approve): the `ble_phy` NVS entry (about 30 B of heap, the I10 exception).
 17. **The offline ring holds 16 events** (`OFFLINE_BUF_MAX_ENTRIES`); a 17th stored event overwrites the oldest (`OFFLINE_BUF: Buffer full, oldest event overwritten`), which never reaches IoT Hub. B2's portal session raises about 21-25 events (CP7-D6), so the oldest of them (D2's, D3's) are lost by design; their proof is the UART. Claude matches every `Stored event [ob_<nn>]` line either to IoT Hub or to an overwrite (CP7-D6, C2).
+18. **The phone hotspots (3.3).** Record these; Claude separates them from the hub's own figures:
+    - a new 2.4 GHz channel can come at each start, and the fallback SoftAP and P-8 follow it;
+    - an iPhone hotspot can stop showing itself when idle (keep its Settings screen open);
+    - the mobile network's latency is in every cloud time (`Pub … took`, ack → `$lastUpdated`);
+    - the phone's own start-up of a few seconds falls inside R2's 40 s.
 
 ---
 
@@ -1134,17 +1365,17 @@ Fill one row per test as you go ("Log" = the block's UART file stem). Claude fil
 | ID | Pri | Block | Result | Time | Log | Notes (figures, counts, deviations) |
 |---|---|---|---|---|---|---|
 | CP7-B0 build B1-B14 (VAL-01 1-7) | P1 | B0 | | | `build_cp7.log` | hashes; `.bss`, `.data`, flash; ELF SHA256 |
-| CP7-B0 first boot (VAL-01 8; 4.4) | P1 | B0 | | | | `<BLE1M>` = ____; `cloud admitted` s, idma X/Y |
+| CP7-B0 first boot (VAL-01 8; 4.4) | P1 | B0 | | | | `phy=` per sensor ____ / ____; **PHY case** `2C` / `1M1C` / `2M`; `<BLE1>` = ____; `<HS-A>` channel ____; `cloud admitted` s, idma X/Y |
 | CP7-B0 second boot, heap at rest (4.5) | P1 | B0, lunch | | | | PHY table line; `heap free`, `idma free/largest` |
 | CP7-B0-Ta (4.5 item 4) | P1 | Claude (B0-B1) | | | | per sensor: shortest `dT` ms (≤ 448), bursts used; n per burst per mode |
 | CP7-L1 BLE1 linked | P1 | B1 | | | | Δa, Δp, Δr, Δc, Δs |
-| CP7-L2 BLE1M linked (N_MIXED) | P1 | B1 | | | | Δa … Δs |
-| CP7-L3 BLE2 linked | P1 | B1 | | | | Δa … Δs; **L-spread** = ____ ms |
+| CP7-L2 `<BLE2>` linked (N_MIXED in `1M1C`, N_CODED in `2C`) | P1 | B1 | | | | Δa … Δs |
+| CP7-L3 `<BLE1>` again, linked | P1 | B1 | | | | Δa … Δs; **L-spread** = ____ ms |
 | CP7-L4 valve probe | P1 | B1 | | | | self-closed before the hub's write? |
-| CP7-L5 LoRa | P1 / N/A | B1 | | | | |
-| CP7-L6 switch to `SS-VC` | P1 | B1 | | | | |
+| CP7-L5 LoRa | N/A | B1 | N/A (no LoRa HW) | | | question 6; EC-2's waiver |
+| CP7-L6 switch to `SS-VC` | P1 | B1 | | | | `2C`: no switch; `1M1C`: `dec-1m-1`, also smoke S-6 (DEC-03) |
 | CP7-L7 P14 (+ backed-off hunt) | P1 | B1 | | | | RED at ___ s; backed-off line at ___ s |
-| CP7-L8 leak response + 600 s cap | P1 | B1 | | | | cap at ___ s; `auto_close` count; `<BLE2>` Δw (NORMAL_LR); power-on → CONNECT → `Applying pending RMLEAK` → `Valve State=0` |
+| CP7-L8 leak response + 600 s cap | P1 | B1 | | | | cap at ___ s; `auto_close` count; `<BLE2>` Δw (NORMAL_LR; `2C`, else day 2); power-on → CONNECT → `Applying pending RMLEAK` → `Valve State=0` |
 | CP7-L8b valve power-cycled in the incident ×3 | P1 | B1 | | | | per run: the valve's RMLEAK / state after its cold boot; path taken; RMLEAK=1 read back s after `SETUP COMPLETE`; no override line |
 | CP7-L9 P11-U | P1 | B1 | | | | power-on → CONNECT (NORMAL_LR) → `Valve State=0` |
 | CP7-L10 P11-L | P1 | B1 | | | | live or pended |
@@ -1155,18 +1386,19 @@ Fill one row per test as you go ("Log" = the block's UART file stem). Claude fil
 | CP7-D2 leak in AP_IDLE | P1 | B2 | | | | wet → `leak=1` s; Δc |
 | CP7-D3 leak in SERVE | P1 | B2 | | | | wet → `leak=1` s |
 | CP7-D3b leak during a Connect | P2 | B2 | | | | SUBMIT kind |
-| CP7-D4 LR_AP | P1 | B2 | | | | not-granted lines; `<BLE2>` Δw (LR_AP) |
+| CP7-D4 LR_AP | P1 | B2 | | | | not-granted lines; `<BLE2>` Δw (LR_AP; `2C`, else day 2) |
 | CP7-D5 relink, RMLEAK first | P1 | B2 | | | | power-on → CONNECT (LR_AP) → `Valve State=0` |
 | CP7-D6 setup, events before lifecycle | P1 | B2 | | | | Finish → stop s; `Stored event` count, overwrites, delivered |
 | CP7-D7 capture check | P1 | Claude | | | | no `device_offline` for a live sensor? |
 | CP7-D8 starvation guard | P2 | B2 | | | | guard start after the last heard advert; kind, row; over after ___ s |
-| CP7-G1 S2 runs 1-6 (iPhone ×3, Android ×3) | P1 | B3 | | | | per run: P-1 … P-9 times; JOIN/LIST/SUBMIT kinds; list count; P-6/P-8/P-9 Pass? |
+| CP7-G1 S2 runs 1-6 (iPhone ×3 → `<HS-A>`, Android ×3 → `<HS-I>`) | P1 | B3 | | | | per run: the hotspot and its channel; P-1 … P-9 times; JOIN/LIST/SUBMIT kinds; list count; P-6/P-8/P-9 Pass? (P-8 `N/A (hotspot on 11)` where so; at least 2 judged per phone) |
 | CP7-G2 two phones within 45 s | P2 | B3 | | | | JOIN kinds; join → lease each |
-| CP7-G3 P-14 LAN half (run 4, reset #5) | P1 | B3 | | | | curl codes/exit; DNS |
-| CP7-G4 first-Connect path (runs 2, 5) | P1 | B3 | | | | (b) N ms; → IP s |
+| CP7-G3 P-14 LAN half (run 1, reset #2; the laptop on `<HS-A>`) | P1 | B3 | | | | GET/DELETE/POST outcomes (52/56; 7 after the stop); `httpd_txrx` lines before the stop?; DNS |
+| CP7-G4 first-Connect path (runs 2, 5), with the valve unpowered (G0-B) | P1 | B3 | | | | (b) N ms; → IP s; power-on → CONNECT after `cloud admitted` |
 | CP7-G5 wrong, then right (runs 3, 6) | P1 | B3 | | | | verdict s; second SUBMIT kind; → IP s |
 | CP7-G6 Forget, connected (run 6) | P1 | B3 | | | | erased after the reboot? |
-| CP7-G7 S3 ×2 per phone, incl. the wrong password | P1 | B3 | | | | rejoin s; saved network kept |
+| CP7-G7 S3 ×2 per phone, incl. the wrong password | P1 | B3 | | | | rejoin s; saved network kept; the hotspot's channel at each return |
+| CP7-G7 G0 add-ons: the untouched join, the fallback wet, the Android's run with the valve unpowered (1.5) | P2 | B3 | | | | join → lease after 3 min untouched; sign-in by itself?; `<BLE1>` Δw (SERVE, fallback); power-on → CONNECT |
 | CP7-G8 smoke trio (S-6, S-8, S-9) | P1 if time | B3 | | | | |
 | CP7-G8 S1 ×2 per phone | P1 if time | B3 | | | | |
 | CP7-R1 S-2 (T4-02) | P1 | B4 | | | | |
@@ -1175,7 +1407,7 @@ Fill one row per test as you go ("Log" = the block's UART file stem). Claude fil
 | CP7-R4 leak at the pull (WP2b) | P1 | B4 | | | | stop → `connected = false` ms; Δa, Δc |
 | CP7-R5 G3-lite ×2 | P1/P2 | B4 | | | | IP → AP down → stopped → admitted → MQTT |
 | CP7-R6 reset #12 idle | P2 | B4 | | | | last boot time ____ |
-| CP7-C1 black-hole check | P1 | B5 | | | | silent / fast |
+| CP7-C1 black-hole check | P1 | B5 | | | | silent / fast; the hotspot stayed on?; method (mobile data off / DROP) |
 | CP7-C2 LS-1 run 1 (+C2b) | P1 | B5 | | | | D4 figures; misses classified |
 | CP7-C2 LS-1 run 2 | P1 | B5 | | | | in-stall? D4 figures |
 | CP7-C2 LS-1 run 3 (+TW-1) | P1 | B5 | | | | in-stall? D4; last `Twin reported` and Azure |
@@ -1190,11 +1422,14 @@ Fill one row per test as you go ("Log" = the block's UART file stem). Claude fil
 | CP7-V1 power cycles 1-30 | P1 | B6 | | | | power-on → CONNECT p50, p90, over 10 s (interim rule); CONNECT → `SETUP COMPLETE` max, median; T_adv, boot time |
 | CP7-V1 power cycles 31-60 | P1 | B6 | | | | as above; interim rule at 60; p_loss estimate |
 | CP7-V1 power cycles 61-100 | P1 / day 2 | D2-4 | | | | as above; the gate at 100; empty claims; exempt `I2:` hits per 100 claims |
-| 10 s reset ledger (#1-#12) | P1 | B2-B4 | | | | per run state |
+| 10 s reset ledger (#1-#12) | P1 | B2-B4 | | | | per run: the state, the portal phone, the hotspot it set up |
 | T4-14 grep | P1 | end | | | all | counts only |
-| **Row coverage (15t item 4)** | P1 | all | | | | N_MIXED (B0), N_CODED (L6), N_HUNT (L7, V1), N_HUNT backed off (L7), NORMAL_LR (L8), RECOVERY (after any claim: `[SUMMARY]`'s `recovery` seconds; it has no scan-mode line), AP_IDLE (D1), SERVE (D3), LR_AP (D4), BLE_IDLE (G8, after S-9); no BLE at all (G8's S1 boots); the starvation guard's row (D8); AP_K1M: day 2 |
-| Overnight soak | P2 | 5.4 | | | | SAS renewal time; heap trend |
+| **Row coverage (15t item 4)** | P1 | all | | | | N_MIXED (B0; `1M1C`: also L1-L4, L12, L13, B5), N_CODED (L6; `2C`: also L1-L4, L12, L13), N_HUNT (L7, V1), N_HUNT backed off (L7), NORMAL_LR (L8), RECOVERY (after any claim: `[SUMMARY]`'s `recovery` seconds; it has no scan-mode line), AP_IDLE (D1), SERVE (D3), LR_AP (D4), BLE_IDLE (G8, after S-9); no BLE at all (G8's S1 boots); the starvation guard's row (D8); AP_K1M: day 2 |
+| Hotspots (3.3) | P1 | all | | | | each start's channel; port 8883 over `<HS-A>` (B0) and `<HS-I>` (B3 run 4); data used |
+| G0 fold (1.5) | P1 | Claude | | | all | HANDOFF 15d's table filled from CP7 (and CP5's partial logs, if sent) |
+| Overnight soak | P2 | 5.4 | | | | the soak's network; SAS renewal time; heap trend |
 | Day 2-5 items (7) | P3 | — | | | | |
+| The spare hub's lane (7.7): flash, identity, DPS (G0-C, RC-4b) | P3 | spare | | | | `<GW2>`, `<COMS>`; IP → `DPS: Assigned …` → `Connected to Azure IoT Hub!` s |
 
 ---
 
@@ -1230,7 +1465,7 @@ Day-1 tests are named `CP7-…`; plain `G1`, `G2` … in the "Later" column are 
 | 17, 18, 19 | claim room before a leak response, LEAK-6, the B1 interplay | CP7-L8, D4, D5, G6 |
 | 21 | WB-CONC-1 and the others | any `I2:` line after a claim (CP7-V1, G6b: the exempt hits per 100 claims); T3-06 (LEAK-WB-1, 7.2); the wrap image (WB-CRASH-3, the 49.7-day wrap, 7.8) |
 | 22 | WB-CLOUD-1 | CP7-C7 |
-| 28 | the model re-run with G0's Ta and p_loss | CP7-B0-Ta, CP7-V1's p_loss, every Δw |
+| 28 | the model re-run with G0's Ta and p_loss | CP7-B0-Ta, CP7-V1's p_loss, every Δw, the rest of G0 folded into CP7 (1.5) |
 | question 11 | `override_enable`'s late incident check | T5-15b (7.2), RC-11 |
 
 ### 10.3 Changes this plan owes `MANUAL_TEST_PLAN.md` (for its owner; WP10's register)
@@ -1241,6 +1476,8 @@ Until they are made there, this plan's text rules where the two differ:
 3. **A test ID for the hold image** (7.8 here; 15k item 17), so that EC-2 counts it.
 4. **A test for the valve power-cycled during a live incident** (CP7-L8b and its dry variant), and **T5-15b** (question 11).
 5. *No change, for the reader:* E-09's `SETUP COMPLETE` ≤ 30 s after power-on is the ceiling this plan uses for power-on → the pended RMLEAK and CLOSE under a leak response.
+6. **7.2, G-FAULT F-3's pass:** "replies only to well-formed queries" is not what the code does. `dns_server.c` at `b651701` answers every datagram of 17-299 B with QR clear: a header-only FORMERR for a broken question, NOTIMP for another OPCODE, at most 20 replies a second. It drops, with no reply, only datagrams under 17 B, of 300 B or more, or with QR set. A.4's F-3 counts it that way (0 replies where none is due; the controls answered; 0 reboots).
+7. **7.1 P-13, P-14 and 7.2 F-3 … F-5:** Python-only forms beside `dig` and `curl` (A.1 `dns_check.py`, A.4 `portal_check.py`), for a bench without them.
 
 ---
 
@@ -1248,7 +1485,7 @@ Until they are made there, this plan's text rules where the two differ:
 
 ### A.1 `dns_check.py` (P-13, and P-14's LAN check; standard library only)
 
-Save it in the day folder (and on the laptop). `python dns_check.py` sends the six P-13 queries to 10.10.0.1; `python dns_check.py <LAN IP>` runs the LAN check. Its parser was self-tested offline; it has not yet run against the hub.
+Save it in the day folder (and on the laptop). `python dns_check.py` sends the six P-13 queries to 10.10.0.1; `python dns_check.py <LAN IP>` runs the LAN check. A.4's `lan` runs it after its HTTP checks, so keep the two scripts in one folder. Its parser was self-tested offline; it has not yet run against the hub.
 
 ```python
 import socket, struct, sys
@@ -1381,7 +1618,7 @@ Write-Host "Done: cycles $Start-$Cycles. Send $Csv with the B6 UART file."
 
 ### A.3 `full_hub_gen.py`: the full-hub provisions (7.7; from CP6 plan A.3)
 
-It writes two C2D files, each under 8,192 B, each replacing one sensor array with 16 sensors and their labels: 15 fake BLE sensors plus the real one given as the second argument (wet it once to show leak handling on a full hub), and 16 fake LoRa sensors. Modes: `ascii` (realistic, a snapshot of about 7.5 KB), `quote` (31 `"` per label, the worst case, about 9.6 KB), `ctrl` (31 control characters per label: since WP3 they print as spaces, so the snapshot is no longer refused for ever). Run it on the spare hub (`DEV=<GW2> c2d @full_hub_ble.json`, then `@full_hub_lora.json`); clean up with `decommission` `all` (15k-14(b)).
+It writes two C2D files, each under 8,192 B, each replacing one sensor array with 16 sensors and their labels: 15 fake BLE sensors plus the real one given as the second argument (wet it once to show leak handling on a full hub), and 16 fake LoRa sensors. Modes: `ascii` (realistic, a snapshot of about 7.5 KB), `quote` (31 `"` per label, the worst case, about 9.6 KB), `ctrl` (31 control characters per label: since WP3 they print as spaces, so the snapshot is no longer refused for ever). Run it on the spare hub (`DEV=<GW2> c2d @full_hub_ble.json`, then `@full_hub_lora.json`); clean up with `decommission` `all` (15k-14(b)). The real sensor (the second argument, `<BLE1>` or `<BLE2>`) is also listed on the main hub, so its wet there closes VA too: run it while the main hub's tests are idle, or leave the argument out.
 
 ```python
 import json, sys
@@ -1409,3 +1646,275 @@ for name, txt in (("full_hub_ble.json", b), ("full_hub_lora.json", l)):
 ```
 
 Expect, per mode: `PROVISIONING: Provisioning completed successfully!`, `IOTHUB: Provision: applied 16 inline sensor_meta entry(ies)`, acks `ok`; record the byte length of the last `TELEMETRY_V2: Pub snapshot: {…}` line's JSON, the lowest `idma` `min_largest`, and any `TELEMETRY_V2: Snapshot is <N> B, over the …` line (W over 10,240 B, E over 12,288 B); the IoT Hub copy the same size as the UART line (never cut).
+
+### A.4 `portal_check.py`: the portal checks with Python only (P-13's odd datagrams, P-14, the forgets, G-FAULT F-3 … F-5)
+
+Save it beside `dns_check.py` (A.1), in the day folder and on the laptop. It uses the standard library only (Python 3.7 or later), so `curl` and `dig` are not needed.
+- **Where it runs:** every command except `lan` runs from the laptop joined to `WiFi-Hub-69C8`. `lan` runs from a host on the hub's own network (the hotspot), during the tail (CP7-G3).
+- **What it prints:** each line gives the laptop's time, what came back, and what the code at `b651701` gives (`http_app.c`, `dns_server.c`, `CONFIG_HTTPD_MAX_REQ_HDR_LEN` 1536).
+- **Failed connections** are named with curl's exit code for the same failure (7 refused, 28 timed out, 52 closed with no reply, 56 reset), so the older `curl.exe` expectations still read.
+- **`--connect`** (F-4, F-5) adds the two cases the hub accepts (200). Each starts a connect attempt to `cp7-no-such-net`, which fails, and the saved network stays.
+- **Tested:** offline against a mock of those rules, every command, three runs. It has not yet run against the hub.
+
+```python
+"""portal_check.py: CP7's portal checks with Python only (no curl, no dig). Standard library.
+  python portal_check.py p13odd         P-13: 1, 11 and 600 B datagrams to port 53, then one A query
+  python portal_check.py p14            P-14's SoftAP half (HEAD, gzip, identity, foreign Host, 20 at once)
+  python portal_check.py lan <IP>       P-14's LAN half: GET, DELETE, POST to the hub's STA IP, then dns_check.py
+  python portal_check.py forget         DELETE /connect.json (the idle or connecting Forget, G8x X-5)
+  python portal_check.py f3             G-FAULT F-3: 1,000 fuzzed datagrams to port 53 (about 70 s)
+  python portal_check.py f4|f5 [--connect]   G-FAULT F-4 (header fuzz), F-5 (the % fuzz)
+Every command but lan runs from a laptop joined to the hub's SoftAP. --connect adds the cases the
+hub accepts (200): each starts a connect attempt to the network 'cp7-no-such-net', which fails."""
+import gzip, os, random, socket, struct, subprocess, sys, threading, time
+
+AP, PORT, DNS_PORT = '10.10.0.1', 80, 53
+NOSUCH = 'cp7-no-such-net'
+
+def stamp():
+    t = time.time()
+    return time.strftime('%H:%M:%S', time.localtime(t)) + '.%03d' % (int(t * 1000) % 1000)
+
+def http(host, req, timeout=6.0):
+    """Sends one raw request; returns (status, headers, body, outcome). A failed connection's
+    outcome names curl's exit code for the same failure (7, 28, 52, 56)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    data, err = b'', None
+    try:
+        s.connect((host, PORT))
+        s.sendall(req)
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            head, sep, body = data.partition(b'\r\n\r\n')
+            if sep:
+                hl = head.lower()
+                i = hl.find(b'content-length:')
+                if req.startswith(b'HEAD') or (i >= 0 and len(body) >= int(hl[i + 15:].split(b'\r\n')[0])):
+                    break
+    except ConnectionRefusedError:
+        err = 'refused (curl exit 7)'
+    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+        err = 'reset (curl exit 56)'
+    except socket.timeout:
+        err = 'timed out (curl exit 28)'
+    except OSError as e:
+        err = 'error: %s' % e
+    finally:
+        s.close()
+    if not data:
+        return None, {}, b'', err or 'closed with no reply (curl exit 52)'
+    head, _, body = data.partition(b'\r\n\r\n')
+    lines = head.split(b'\r\n')
+    hdrs = {}
+    for line in lines[1:]:
+        k, _, v = line.partition(b':')
+        hdrs[k.strip().lower().decode('latin-1')] = v.strip().decode('latin-1')
+    return int(lines[0].split()[1]), hdrs, body, 'ok'
+
+def request(method, path='/', headers=(), host=None, body=b'', http10=False):
+    lines = ['%s %s HTTP/1.%d' % (method, path, 0 if http10 else 1)]
+    if host is not None:
+        lines.append('Host: ' + host)
+    lines += ['%s: %s' % h for h in headers]
+    if body:
+        lines.append('Content-Length: %d' % len(body))
+    return ('\r\n'.join(lines) + '\r\n\r\n').encode('latin-1') + body
+
+def show(label, result, expect):
+    st, h, body, outcome = result
+    got = outcome if st is None else '%d %s' % (st, body[:40].decode('latin-1') if st >= 300 else '')
+    print('%s  %-38s -> %-36s expect %s' % (stamp(), label, got.strip(), expect))
+    return result
+
+def p14():
+    gz = [('Accept-Encoding', 'gzip, deflate')]
+    st, h, b, o = show('HEAD /', http(AP, request('HEAD', '/', gz, AP)), '200, headers only')
+    if st:
+        print('    Content-Encoding=%s Vary=%s Cache-Control=%s Content-Length=%s body=%d B' % (
+            h.get('content-encoding'), h.get('vary'), h.get('cache-control'), h.get('content-length'), len(b)))
+    st, h, b, o = show('GET / (gzip)', http(AP, request('GET', '/', gz, AP)), '200, gzip')
+    if st == 200:
+        try:
+            page = gzip.decompress(b)
+            print('    %d B on the wire, %d B unzipped, html: %s' % (len(b), len(page), b'<html' in page.lower()))
+        except Exception as e:
+            print('    NOT gzip: %s' % e)
+    show('GET / (no Accept-Encoding)', http(AP, request('GET', '/', (), AP)), '200, gzip')
+    show('GET / (identity only)', http(AP, request('GET', '/', [('Accept-Encoding', 'identity')], AP)), '406')
+    st, h, b, o = show('GET / (Host: example.com)', http(AP, request('GET', '/', gz, 'example.com')),
+                       '302, Location http://10.10.0.1, Connection: close')
+    if st:
+        print('    Location=%s Connection=%s' % (h.get('location'), h.get('connection')))
+    for path in ('/code.js', '/style.css', '/ap.json', '/status.json'):
+        show('GET ' + path, http(AP, request('GET', path, gz, AP)), '200')
+    results = []
+    def one(n):
+        t0 = time.time()
+        r = http(AP, request('GET', '/', gz, AP), timeout=15)
+        results.append((n, r[0], r[3], time.time() - t0))
+    threads = [threading.Thread(target=one, args=(n,)) for n in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    ok = sum(1 for r in results if r[1] == 200)
+    print('%s  20 parallel GET /: %d x 200, slowest %.1f s' % (stamp(), ok, max(r[3] for r in results)))
+    for n, st, o, dt in sorted(results):
+        if st != 200:
+            print('    #%d: %s %s after %.1f s' % (n, st, o, dt))
+
+def lan(ip):
+    print('%s  LAN check of %s (the laptop on the hub\'s own network, not on the SoftAP)' % (stamp(), ip))
+    show('GET /', http(ip, request('GET', '/', (), ip), timeout=4), 'closed (52) or reset (56); 7 after the stop')
+    show('DELETE /connect.json', http(ip, request('DELETE', '/connect.json', (), ip), timeout=4), 'the same; never 200')
+    show('POST /connect.json', http(ip, request('POST', '/connect.json', (), ip), timeout=4), 'the same; never 200')
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'dns_check.py')
+    if os.path.exists(here):
+        print('%s  dns_check.py %s:' % (stamp(), ip), flush=True)
+        subprocess.run([sys.executable, here, ip])
+    else:
+        print('dns_check.py (A.1) is not beside this script: run it by hand')
+
+def forget():
+    show('DELETE /connect.json', http(AP, request('DELETE', '/connect.json', (), AP)), '200 (503: queue full, try again)')
+
+def post(label, headers, expect):
+    show(label, http(AP, request('POST', '/connect.json', headers, AP)), expect)
+
+def pct(s):
+    return ''.join('%%%02X' % c for c in s.encode('utf-8'))
+
+def f4(connect):
+    show('GET /, Host of 1,000 characters', http(AP, request('GET', '/', (), 'h' * 1000)), '302 (a Host over 63 characters reads as empty: redirected)')
+    show('GET /, 2,000 B of headers', http(AP, request('GET', '/', [('X-Pad', 'p' * 2000)], AP)), '431 (headers over 1,536 B)')
+    show('GET /, no Host (HTTP/1.0)', http(AP, request('GET', '/', [('Accept-Encoding', 'gzip')], None, http10=True)), '200')
+    show('GET /, a 32 B body', http(AP, request('GET', '/', [('Accept-Encoding', 'gzip')], AP, b'b' * 32)), '200')
+    post('POST, no X-Custom-ssid', [], '400 {"err":"ssid"}')
+    post('POST, X-Custom-ssid of 300 characters', [('X-Custom-ssid', 's' * 300)], '400 {"err":"ssid"}')
+    post('POST, X-Custom-ssid of 33 characters', [('X-Custom-ssid', 's' * 33)], '400 {"err":"ssid"}')
+    post('POST, X-Custom-pwd of 300 characters', [('X-Custom-ssid', NOSUCH), ('X-Custom-pwd', 'p' * 300)], '400 {"err":"pwd"}')
+    post('POST, X-Custom-pwd of 65 characters', [('X-Custom-ssid', NOSUCH), ('X-Custom-pwd', 'p' * 65)], '400 {"err":"pwd"}')
+    post('POST, 64 characters, not hex', [('X-Custom-ssid', NOSUCH), ('X-Custom-pwd', 'z' * 64)], '400 {"err":"pwd"}')
+    post('POST, X-Custom-enc: bogus', [('X-Custom-enc', 'bogus'), ('X-Custom-ssid', NOSUCH)], '400 {"err":"enc"}')
+    if connect:
+        post('POST, no X-Custom-pwd (open network)', [('X-Custom-ssid', NOSUCH)], '200: a connect attempt that fails')
+
+def f5(connect):
+    e = [('X-Custom-enc', 'pct')]
+    ok_ssid = ('X-Custom-ssid', pct(NOSUCH))
+    post('ssid "%"', e + [('X-Custom-ssid', '%')], '400 {"err":"enc"}')
+    post('ssid "%G1"', e + [('X-Custom-ssid', '%G1')], '400 {"err":"enc"}')
+    post('ssid "%00abc"', e + [('X-Custom-ssid', '%00abc')], '400 {"err":"ssid"}')
+    post('ssid "abc%" (a lone trailing %)', e + [('X-Custom-ssid', 'abc%')], '400 {"err":"enc"}')
+    post('ssid "abc%4"', e + [('X-Custom-ssid', 'abc%4')], '400 {"err":"enc"}')
+    post('ssid with %1F', e + [('X-Custom-ssid', 'ab%1Fcd')], '400 {"err":"ssid"}')
+    post('pwd "%"', e + [ok_ssid, ('X-Custom-pwd', '%')], '400 {"err":"enc"}')
+    post('pwd: 64 encoded, one not hex', e + [ok_ssid, ('X-Custom-pwd', pct('0123456789abcdef' * 3 + '0123456789abcdez'))], '400 {"err":"pwd"}')
+    post('pwd: 65 encoded bytes', e + [ok_ssid, ('X-Custom-pwd', pct('a' * 65))], '400 {"err":"pwd"}')
+    if connect:
+        post('pwd: 64 hex digits, encoded', e + [ok_ssid, ('X-Custom-pwd', pct('0123456789abcdef' * 4))], '200: accepted, an attempt that fails')
+
+def dns_socket():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(2)
+    return s
+
+def a_query(qid):
+    name = b''.join(bytes([len(p)]) + p for p in b'captive.apple.com'.split(b'.')) + b'\x00'
+    return struct.pack('>HHHHHH', qid, 0x0100, 1, 0, 0, 0) + name + struct.pack('>HH', 1, 1)
+
+def p13odd():
+    s = dns_socket()
+    for n in (1, 11, 600):
+        s.sendto(os.urandom(n), (AP, DNS_PORT))
+        try:
+            r = s.recv(2048)
+            print('%s  %3d B datagram -> a %d B reply   expect none' % (stamp(), n, len(r)))
+        except OSError:
+            print('%s  %3d B datagram -> no reply       expect none' % (stamp(), n))
+    s.sendto(a_query(0x5201), (AP, DNS_PORT))
+    try:
+        print('%s  A query after them -> a %d B reply   expect a reply (the server lives)' % (stamp(), len(s.recv(2048))))
+    except OSError:
+        print('%s  A query after them -> NO REPLY        expect a reply' % stamp())
+
+def broken_question(qid):
+    hdr = struct.pack('>HHHHHH', qid, 0x0100, 1, 0, 0, 0)
+    return hdr + random.choice([
+        b'\x40' + b'a' * 64 + b'\x00\x00\x01\x00\x01',      # a label of 64 bytes
+        b'\x07captive\x05apple',                             # the name runs past the end
+        b'\x07captive\x05apple\x03com\x00\x00',              # QTYPE and QCLASS cut short
+        b'\xc0\x0c\x00\x01\x00\x01',                         # a compression pointer
+        b'\x3f' + b'b' * 10,                                 # a label longer than the datagram
+        (b'\x3f' + b'c' * 63) * 4 + b'\x00\x00\x01\x00\x01', # a name over 255 bytes
+    ])
+
+def f3(count=1000, gap=0.06):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setblocking(False)
+    sent, replies = {}, {}
+    for i in range(count):
+        qid = struct.pack('>H', 0x8000 + i)   # each datagram's own ID: a reply copies it
+        if i % 100 == 99:
+            d, kind = a_query(0x8000 + i), 'control'
+        elif i % 2:
+            d, kind = broken_question(0x8000 + i), 'header+broken'
+        else:
+            d, kind = os.urandom(random.randint(0, 600)), 'random'
+            if len(d) >= 2:
+                d = qid + d[2:]
+        sent[qid if len(d) >= 2 else b'short%d' % i] = (kind, len(d), len(d) >= 3 and bool(d[2] & 0x80))
+        s.sendto(d, (AP, DNS_PORT))
+        end = time.time() + gap
+        while time.time() < end:
+            try:
+                r = s.recv(2048)
+                replies.setdefault(r[:2], []).append(r)
+            except BlockingIOError:
+                time.sleep(0.005)
+            except OSError:
+                time.sleep(0.005)
+    time.sleep(1)
+    try:
+        while True:
+            r = s.recv(2048)
+            replies.setdefault(r[:2], []).append(r)
+    except OSError:
+        pass
+    tally = {}
+    for qid, rs in replies.items():
+        kind, n, qr = sent.get(qid, ('unmatched', 0, False))
+        rule = 'MUST NOT REPLY' if (n < 17 or n >= 300 or qr) else '17-299 B, QR clear'
+        key = (kind, rule, rs[0][3] & 0x0F if len(rs[0]) > 3 else -1)
+        tally[key] = tally.get(key, 0) + len(rs)
+    asked = [q for q, (k, n, qr) in sent.items() if 17 <= n < 300 and not qr]
+    print('%s  F-3: %d datagrams sent; %d of them 17-299 B with QR clear (the only ones the code answers), '
+          '%d of those answered' % (stamp(), count, len(asked), sum(1 for q in asked if q in replies)))
+    for (kind, rule, rcode), n in sorted(tally.items()):
+        print('    replies: %-14s %-20s rcode %d: %d' % (kind, rule, rcode, n))
+    print('    expect: 0 replies under MUST NOT REPLY; the controls answered with rcode 0; 0 reboots')
+
+if __name__ == '__main__':
+    sys.stdout.reconfigure(line_buffering=True)
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ''
+    if cmd == 'lan' and len(sys.argv) > 2:
+        lan(sys.argv[2])
+    elif cmd in ('p13odd', 'p14', 'forget', 'f3'):
+        globals()[cmd]()
+    elif cmd in ('f4', 'f5'):
+        globals()[cmd]('--connect' in sys.argv)
+    else:
+        print(__doc__)
+```
+
+**On the UART beside it:**
+- `http_server: POST connect.json refused (400): <why>` for each refused POST;
+- `http_server: ssid: cp7-no-such-net, pwd_len: <n>, chan: 0` for an accepted one (no password is logged);
+- `http_server: DELETE /connect.json` for the forget;
+- for the LAN half, one `httpd_txrx: httpd_sock_err: error in recv : 128` **(ESP-IDF)** per request.
+
+Any reboot, panic or `allocfail` rise during F-3 … F-5 is a Fail (G-FAULT).
